@@ -97,7 +97,12 @@ func checkHealth(ctx context.Context, instance *types.Instance) *types.InstanceH
 
 	switch instance.Provider {
 	case "daytona":
-		p := daytona.New(nil)
+		p, pErr := daytona.New(nil)
+		if pErr != nil {
+			health.Status = types.StatusUnknown
+			health.Message = "failed to init daytona provider"
+			return health
+		}
 
 		// Try to run openclaw status inside the instance
 		result, err := p.Exec(ctx, instance.Name, []string{"openclaw", "status", "--json"})

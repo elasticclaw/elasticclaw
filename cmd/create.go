@@ -148,7 +148,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	switch provider {
 	case "daytona":
-		p := daytona.New(nil)
+		p, pErr := daytona.New(nil)
+		if pErr != nil {
+			store.Delete(createName)
+			return fmt.Errorf("failed to initialize daytona provider: %w", pErr)
+		}
 		providerInstance, err = p.Create(ctx, req)
 		if err != nil {
 			store.Delete(createName)

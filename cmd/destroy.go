@@ -109,8 +109,10 @@ func destroyInstance(ctx context.Context, store *state.Store, name string) error
 	// Destroy via provider
 	switch instance.Provider {
 	case "daytona":
-		p := daytona.New(nil)
-		if err := p.Destroy(ctx, instance.Name, destroyKeepState); err != nil {
+		p, pErr := daytona.New(nil)
+		if pErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to init daytona provider: %v\n", pErr)
+		} else if err := p.Destroy(ctx, instance.Name, destroyKeepState); err != nil {
 			// Log but continue - instance might already be gone
 			fmt.Fprintf(os.Stderr, "Warning: provider destroy: %v\n", err)
 		}

@@ -61,7 +61,10 @@ func runChat(cmd *cobra.Command, args []string) error {
 
 	switch instance.Provider {
 	case "daytona":
-		p := daytona.New(nil)
+		p, pErr := daytona.New(nil)
+		if pErr != nil {
+			return fmt.Errorf("failed to initialize daytona provider: %w", pErr)
+		}
 		execFn = func(ctx context.Context, cmdArgs []string) (string, error) {
 			result, err := p.Exec(ctx, instance.Name, cmdArgs)
 			if err != nil {

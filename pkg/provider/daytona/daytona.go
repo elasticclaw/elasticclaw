@@ -2,28 +2,59 @@ package daytona
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os/exec"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	daytonatypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-// Provider implements the Daytona provider
+// Provider implements the Daytona provider using the official SDK
 type Provider struct {
-	organization string
+	client *daytona.Client
+	apiKey string
 }
 
 // New creates a new Daytona provider
-func New(config map[string]interface{}) *Provider {
-	org := ""
+func New(config map[string]interface{}) (*Provider, error) {
+	apiKey := os.Getenv("DAYTONA_API_KEY")
 	if config != nil {
-		if o, ok := config["organization"].(string); ok {
-			org = o
+		if key, ok := config["api_key"].(string); ok && key != "" {
+			apiKey = key
 		}
 	}
-	return &Provider{organization: org}
+
+	if apiKey == "" {
+		return nil, fmt.Errorf("DAYTONA_API_KEY not set - get one at https://app.daytona.io/dashboard/keys")
+	}
+
+	// Create client with config
+	cfg := &daytonatypes.DaytonaConfig{
+		APIKey: apiKey,
+	}
+
+	// Check for custom API URL
+	if apiURL := os.Getenv("DAYTONA_API_URL"); apiURL != "" {
+		cfg.APIUrl = apiURL
+	}
+
+	// Check for target region
+	if target := os.Getenv("DAYTONA_TARGET"); target != "" {
+		cfg.Target = target
+	}
+
+	client, err := daytona.NewClientWithConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Daytona client: %w", err)
+	}
+
+	return &Provider{
+		client: client,
+		apiKey: apiKey,
+	}, nil
 }
 
 // Info returns provider metadata
@@ -35,107 +66,108 @@ func (p *Provider) Info() types.ProviderInfo {
 	}
 }
 
-// Create provisions a new instance
+// Create provisions a new sandbox
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
-	// Build daytona create command
-	args := []string{"create", "--name", req.Name}
-
-	if req.FromImage != "" {
-		args = append(args, "--image", req.FromImage)
+	// Create sandbox params - use SnapshotParams for default snapshot-based creation
+	params := daytonatypes.SnapshotParams{
+		SandboxBaseParams: daytonatypes.SandboxBaseParams{
+			Name:    req.Name,
+			EnvVars: req.Env,
+		},
 	}
 
-	// Execute daytona create
-	cmd := exec.CommandContext(ctx, "daytona", args...)
-	output, err := cmd.CombinedOutput()
+	// Create the sandbox
+	sandbox, err := p.client.Create(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("daytona create failed: %w\n%s", err, string(output))
+		return nil, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 
-	// Parse workspace ID from output
-	// For now, use the name as ID
-	workspaceID := req.Name
-
-	// Inject template files via exec
+	// Inject template files
 	for path, content := range req.TemplateFiles {
-		if err := p.writeFile(ctx, workspaceID, path, content); err != nil {
-			// Cleanup on failure
-			p.Destroy(ctx, workspaceID, false)
-			return nil, fmt.Errorf("failed to inject template file %s: %w", path, err)
+		// Ensure directory exists
+		dir := getDir(path)
+		if dir != "" && dir != "." {
+			sandbox.FileSystem.CreateFolder(ctx, dir)
 		}
-	}
-
-	// Set environment variables
-	for key, value := range req.Env {
-		if err := p.setEnv(ctx, workspaceID, key, value); err != nil {
-			p.Destroy(ctx, workspaceID, false)
-			return nil, fmt.Errorf("failed to set env %s: %w", key, err)
+		
+		// UploadFile accepts []byte or string (path) as source
+		err := sandbox.FileSystem.UploadFile(ctx, content, path)
+		if err != nil {
+			// Try to clean up on failure
+			sandbox.Delete(ctx)
+			return nil, fmt.Errorf("failed to write file %s: %w", path, err)
 		}
 	}
 
 	return &types.Instance{
-		Name:     req.Name,
-		ID:       workspaceID,
-		Provider: "daytona",
-		Status:   types.StatusRunning,
+		Name:      req.Name,
+		ID:        sandbox.ID,
+		Provider:  "daytona",
+		Status:    types.StatusRunning,
+		CreatedAt: time.Now().UTC(),
 		ProviderMeta: map[string]string{
-			"workspace_id": workspaceID,
+			"sandbox_id": sandbox.ID,
 		},
 	}, nil
 }
 
-// Status checks current instance state
+func getDir(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[:i]
+		}
+	}
+	return ""
+}
+
+// Status checks current sandbox state
 func (p *Provider) Status(ctx context.Context, instanceID string) (types.InstanceStatus, error) {
-	cmd := exec.CommandContext(ctx, "daytona", "info", instanceID, "--format", "json")
-	output, err := cmd.Output()
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
-		if strings.Contains(string(output), "not found") {
+		if strings.Contains(err.Error(), "not found") {
 			return types.StatusNotFound, nil
 		}
 		return types.StatusUnknown, err
 	}
 
-	var info struct {
-		State string `json:"state"`
-	}
-	if err := json.Unmarshal(output, &info); err != nil {
-		return types.StatusUnknown, err
-	}
-
-	switch info.State {
-	case "running":
+	switch sandbox.State {
+	case "started", "running":
 		return types.StatusRunning, nil
 	case "stopped":
 		return types.StatusStopped, nil
 	case "error":
 		return types.StatusError, nil
+	case "pending", "starting":
+		return types.StatusStarting, nil
 	default:
 		return types.StatusUnknown, nil
 	}
 }
 
-// Exec runs a command inside the instance
+// Exec runs a command inside the sandbox
 func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string) (*types.ExecResult, error) {
-	args := append([]string{"exec", instanceID, "--"}, cmdArgs...)
-	cmd := exec.CommandContext(ctx, "daytona", args...)
-	output, err := cmd.CombinedOutput()
-
-	result := &types.ExecResult{
-		Stdout: string(output),
-	}
-
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, err
-		}
+		return nil, fmt.Errorf("failed to find sandbox: %w", err)
 	}
 
-	return result, nil
+	// Join command args into a single command string
+	cmd := strings.Join(cmdArgs, " ")
+
+	response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute command: %w", err)
+	}
+
+	return &types.ExecResult{
+		ExitCode: response.ExitCode,
+		Stdout:   response.Result,
+	}, nil
 }
 
 // Connect returns connection info
 func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.ConnectInfo, error) {
+	// Daytona sandboxes are accessed via SDK/API
 	return &types.ConnectInfo{
 		Shell: &types.ShellConnect{
 			Command: "daytona",
@@ -144,67 +176,61 @@ func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.Conne
 	}, nil
 }
 
-// Stop pauses/hibernates the instance
+// Stop pauses the sandbox
 func (p *Provider) Stop(ctx context.Context, instanceID string) error {
-	cmd := exec.CommandContext(ctx, "daytona", "stop", instanceID)
-	output, err := cmd.CombinedOutput()
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
-		return fmt.Errorf("daytona stop failed: %w\n%s", err, string(output))
+		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
-	return nil
+
+	return sandbox.Stop(ctx)
 }
 
-// Start resumes a stopped instance
+// Start resumes a stopped sandbox
 func (p *Provider) Start(ctx context.Context, instanceID string) error {
-	cmd := exec.CommandContext(ctx, "daytona", "start", instanceID)
-	output, err := cmd.CombinedOutput()
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
-		return fmt.Errorf("daytona start failed: %w\n%s", err, string(output))
+		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
-	return nil
+
+	return sandbox.Start(ctx)
 }
 
-// Destroy tears down the instance
+// Destroy deletes the sandbox
 func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState bool) error {
-	args := []string{"delete", instanceID, "-y"}
-	cmd := exec.CommandContext(ctx, "daytona", args...)
-	output, err := cmd.CombinedOutput()
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
-		return fmt.Errorf("daytona delete failed: %w\n%s", err, string(output))
+		if strings.Contains(err.Error(), "not found") {
+			return nil // Already gone
+		}
+		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
-	return nil
+
+	return sandbox.Delete(ctx)
 }
 
-// List returns all instances managed by this provider
+// List returns all sandboxes
 func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
-	cmd := exec.CommandContext(ctx, "daytona", "list", "--format", "json")
-	output, err := cmd.Output()
+	result, err := p.client.List(ctx, nil, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("daytona list failed: %w", err)
-	}
-
-	var workspaces []struct {
-		Name  string `json:"name"`
-		ID    string `json:"id"`
-		State string `json:"state"`
-	}
-
-	if err := json.Unmarshal(output, &workspaces); err != nil {
-		return nil, fmt.Errorf("failed to parse daytona output: %w", err)
+		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 	}
 
 	var instances []*types.Instance
-	for _, ws := range workspaces {
+	for _, sandbox := range result.Items {
 		status := types.StatusUnknown
-		switch ws.State {
-		case "running":
+		switch sandbox.State {
+		case "started", "running":
 			status = types.StatusRunning
 		case "stopped":
 			status = types.StatusStopped
+		case "error":
+			status = types.StatusError
 		}
+
 		instances = append(instances, &types.Instance{
-			Name:     ws.Name,
-			ID:       ws.ID,
+			Name:     sandbox.ID,
+			ID:       sandbox.ID,
 			Provider: "daytona",
 			Status:   status,
 		})
@@ -213,19 +239,29 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 	return instances, nil
 }
 
-// Helper functions
+// InstallOpenClaw installs OpenClaw in a sandbox
+func (p *Provider) InstallOpenClaw(ctx context.Context, instanceID string) error {
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to find sandbox: %w", err)
+	}
 
-func (p *Provider) writeFile(ctx context.Context, instanceID, path string, content []byte) error {
-	// Use echo and base64 to write file content
-	encoded := string(content) // In production, use base64 encoding
-	cmd := fmt.Sprintf("echo '%s' > %s", strings.ReplaceAll(encoded, "'", "'\\''"), path)
-	_, err := p.Exec(ctx, instanceID, []string{"sh", "-c", cmd})
-	return err
-}
+	// Install Node.js and OpenClaw
+	commands := []string{
+		"curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+		"apt-get install -y nodejs",
+		"npm install -g openclaw",
+	}
 
-func (p *Provider) setEnv(ctx context.Context, instanceID, key, value string) error {
-	// Append to ~/.bashrc or similar
-	cmd := fmt.Sprintf("echo 'export %s=\"%s\"' >> ~/.bashrc", key, value)
-	_, err := p.Exec(ctx, instanceID, []string{"sh", "-c", cmd})
-	return err
+	for _, cmd := range commands {
+		response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+		if err != nil {
+			return fmt.Errorf("failed to run %q: %w", cmd, err)
+		}
+		if response.ExitCode != 0 {
+			return fmt.Errorf("command %q failed: %s", cmd, response.Result)
+		}
+	}
+
+	return nil
 }
