@@ -1,0 +1,18 @@
+# Binaries
+elasticclaw
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Test
+coverage.out
+
+# Local dev
+.elasticclaw/
