@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/spf13/cobra"
 )
@@ -61,6 +62,15 @@ func runChat(cmd *cobra.Command, args []string) error {
 	switch instance.Provider {
 	case "daytona":
 		p := daytona.New(nil)
+		execFn = func(ctx context.Context, cmdArgs []string) (string, error) {
+			result, err := p.Exec(ctx, instance.Name, cmdArgs)
+			if err != nil {
+				return "", err
+			}
+			return result.Stdout, nil
+		}
+	case "local":
+		p := local.New()
 		execFn = func(ctx context.Context, cmdArgs []string) (string, error) {
 			result, err := p.Exec(ctx, instance.Name, cmdArgs)
 			if err != nil {

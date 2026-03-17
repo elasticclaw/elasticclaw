@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/spf13/cobra"
 )
@@ -111,6 +112,11 @@ func destroyInstance(ctx context.Context, store *state.Store, name string) error
 		p := daytona.New(nil)
 		if err := p.Destroy(ctx, instance.Name, destroyKeepState); err != nil {
 			// Log but continue - instance might already be gone
+			fmt.Fprintf(os.Stderr, "Warning: provider destroy: %v\n", err)
+		}
+	case "local":
+		p := local.New()
+		if err := p.Destroy(ctx, instance.Name, destroyKeepState); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: provider destroy: %v\n", err)
 		}
 	}

@@ -36,6 +36,11 @@ func runProviderList(cmd *cobra.Command, args []string) error {
 			Capabilities: []string{"exec", "snapshot"},
 		},
 		{
+			Name:         "local",
+			Type:         types.ProviderTypeStateful,
+			Capabilities: []string{"exec"},
+		},
+		{
 			Name:         "sprites",
 			Type:         types.ProviderTypeStateful,
 			Capabilities: []string{"exec", "hibernate", "snapshot"},

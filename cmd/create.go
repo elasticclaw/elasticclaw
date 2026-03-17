@@ -9,6 +9,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
@@ -138,15 +139,23 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	var providerInstance *types.Instance
 
+	req := types.CreateRequest{
+		Name:          createName,
+		FromImage:     createImage,
+		TemplateFiles: templateFiles,
+		Env:           envs,
+	}
+
 	switch provider {
 	case "daytona":
 		p := daytona.New(nil)
-		req := types.CreateRequest{
-			Name:          createName,
-			FromImage:     createImage,
-			TemplateFiles: templateFiles,
-			Env:           envs,
+		providerInstance, err = p.Create(ctx, req)
+		if err != nil {
+			store.Delete(createName)
+			return fmt.Errorf("provider create failed: %w", err)
 		}
+	case "local":
+		p := local.New()
 		providerInstance, err = p.Create(ctx, req)
 		if err != nil {
 			store.Delete(createName)
@@ -180,7 +189,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Status:    %s\n", instance.Status)
 	fmt.Println()
 	fmt.Printf("  Chat:      elasticclaw chat %s\n", instance.Name)
-	fmt.Printf("  Connect:   daytona ssh %s\n", instance.Name)
+	if instance.Provider == "daytona" {
+		fmt.Printf("  Connect:   daytona ssh %s\n", instance.Name)
+	} else if instance.Provider == "local" {
+		if wsDir, ok := instance.ProviderMeta["workspace_dir"]; ok {
+			fmt.Printf("  Workspace: %s\n", wsDir)
+		}
+	}
 
 	return nil
 }
