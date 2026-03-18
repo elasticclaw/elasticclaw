@@ -158,6 +158,17 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			store.Delete(createName)
 			return fmt.Errorf("provider create failed: %w", err)
 		}
+
+		// Configure OpenClaw with environment variables (API keys, etc.)
+		if len(envs) > 0 {
+			if !quiet {
+				fmt.Println("Configuring OpenClaw...")
+			}
+			if err := p.ConfigureOpenClaw(ctx, providerInstance.ID, envs); err != nil {
+				// Non-fatal, but warn
+				fmt.Fprintf(os.Stderr, "Warning: failed to configure OpenClaw: %v\n", err)
+			}
+		}
 	case "local":
 		p := local.New()
 		providerInstance, err = p.Create(ctx, req)

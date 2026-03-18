@@ -120,21 +120,26 @@ func runChat(cmd *cobra.Command, args []string) error {
 }
 
 func sendMessage(ctx context.Context, execFn func(context.Context, []string) (string, error), message string) error {
-	// Use openclaw chat command inside the instance
-	// The message needs to be properly escaped for shell
-	escapedMessage := strings.ReplaceAll(message, "'", "'\\''")
-	cmdArgs := []string{"openclaw", "chat", "--message", escapedMessage}
+	// Use openclaw agent --local to run without a gateway
+	// Need to source env file for API keys and run from workspace directory
+	escapedMessage := strings.ReplaceAll(message, "'", "'\"'\"'")
+	
+	// Build command that:
+	// 1. Sources the env file (API keys)
+	// 2. Changes to workspace directory
+	// 3. Runs openclaw agent in local mode
+	cmd := fmt.Sprintf("cd /home/daytona && source ~/.openclaw/env 2>/dev/null; openclaw agent --local --message '%s'", escapedMessage)
+	cmdArgs := []string{"bash", "-c", cmd}
 
 	output, err := execFn(ctx, cmdArgs)
 	if err != nil {
-		// Try alternative: openclaw agent --message
-		cmdArgs = []string{"openclaw", "agent", "--message", escapedMessage}
-		output, err = execFn(ctx, cmdArgs)
-		if err != nil {
-			return fmt.Errorf("failed to send message: %w", err)
-		}
+		return fmt.Errorf("failed to send message: %w", err)
 	}
 
-	fmt.Print(output)
+	if output != "" {
+		fmt.Print(output)
+	} else {
+		fmt.Println("(no response - check that ANTHROPIC_API_KEY or other LLM key was provided via --env)")
+	}
 	return nil
 }
