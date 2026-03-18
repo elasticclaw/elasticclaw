@@ -84,14 +84,25 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 
 	// Inject template files
 	for path, content := range req.TemplateFiles {
+		// Skip empty files (like .gitkeep)
+		if len(content) == 0 {
+			continue
+		}
+		
+		// Use absolute paths
+		absPath := path
+		if !strings.HasPrefix(path, "/") {
+			absPath = "/home/daytona/" + path
+		}
+		
 		// Ensure directory exists
-		dir := getDir(path)
+		dir := getDir(absPath)
 		if dir != "" && dir != "." {
 			sandbox.FileSystem.CreateFolder(ctx, dir)
 		}
 		
 		// UploadFile accepts []byte or string (path) as source
-		err := sandbox.FileSystem.UploadFile(ctx, content, path)
+		err := sandbox.FileSystem.UploadFile(ctx, content, absPath)
 		if err != nil {
 			// Try to clean up on failure
 			sandbox.Delete(ctx)
@@ -151,10 +162,13 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 		return nil, fmt.Errorf("failed to find sandbox: %w", err)
 	}
 
-	// Join command args into a single command string
+	// Join command args and wrap in bash -c for proper shell handling
 	cmd := strings.Join(cmdArgs, " ")
+	// Escape single quotes in the command
+	escapedCmd := strings.ReplaceAll(cmd, "'", "'\"'\"'")
+	wrappedCmd := fmt.Sprintf("bash -c '%s'", escapedCmd)
 
-	response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	response, err := sandbox.Process.ExecuteCommand(ctx, wrappedCmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute command: %w", err)
 	}
@@ -239,28 +253,61 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 	return instances, nil
 }
 
-// InstallOpenClaw installs OpenClaw in a sandbox
-func (p *Provider) InstallOpenClaw(ctx context.Context, instanceID string) error {
+// ConfigureOpenClaw configures OpenClaw with necessary API keys and settings
+func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env map[string]string) error {
 	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
 
-	// Install Node.js and OpenClaw
-	commands := []string{
-		"curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
-		"apt-get install -y nodejs",
-		"npm install -g openclaw",
+	// Create openclaw config directory
+	response, err := sandbox.Process.ExecuteCommand(ctx, "bash -c 'mkdir -p ~/.openclaw'")
+	if err != nil {
+		return fmt.Errorf("failed to create config dir: %w", err)
 	}
 
-	for _, cmd := range commands {
-		response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	// Write environment to a file that gets sourced
+	if len(env) > 0 {
+		var envLines []string
+		for k, v := range env {
+			// Escape for shell
+			escapedV := strings.ReplaceAll(v, "'", "'\"'\"'")
+			envLines = append(envLines, fmt.Sprintf("export %s='%s'", k, escapedV))
+		}
+		envContent := strings.Join(envLines, "\n")
+		
+		// Write env file
+		err = sandbox.FileSystem.UploadFile(ctx, []byte(envContent), "/home/daytona/.openclaw/env")
 		if err != nil {
-			return fmt.Errorf("failed to run %q: %w", cmd, err)
+			return fmt.Errorf("failed to write env file: %w", err)
 		}
-		if response.ExitCode != 0 {
-			return fmt.Errorf("command %q failed: %s", cmd, response.Result)
+
+		// Source it from bashrc
+		response, err = sandbox.Process.ExecuteCommand(ctx, 
+			"bash -c 'grep -q openclaw/env ~/.bashrc || echo \"source ~/.openclaw/env\" >> ~/.bashrc'")
+		if err != nil || response.ExitCode != 0 {
+			// Non-fatal
 		}
+	}
+
+	return nil
+}
+
+// StartOpenClaw starts the OpenClaw gateway in the sandbox
+func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir string) error {
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to find sandbox: %w", err)
+	}
+
+	// Start gateway in background
+	cmd := fmt.Sprintf("bash -c 'cd %s && source ~/.openclaw/env 2>/dev/null; nohup openclaw gateway start > ~/.openclaw/gateway.log 2>&1 &'", workdir)
+	response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("failed to start gateway: %w", err)
+	}
+	if response.ExitCode != 0 {
+		return fmt.Errorf("gateway start failed: %s", response.Result)
 	}
 
 	return nil
