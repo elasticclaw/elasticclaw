@@ -33,33 +33,11 @@ type HubConfig struct {
 	// BridgeImage is the OCI artifact reference for the claw-bridge binary.
 	// Defaults to ghcr.io/elasticclaw/claw-bridge:latest if not set.
 	BridgeImage string `yaml:"bridge_image,omitempty"`
-	// Models contains API keys for LLM providers injected into every claw.
-	Models ModelConfig `yaml:"models,omitempty"`
-}
-
-// ModelConfig holds API keys for LLM providers and the global default model.
-type ModelConfig struct {
 	// DefaultModel is the model used by all claws unless overridden in the template.
-	// Format: provider/model, e.g. anthropic/claude-sonnet-4-6, openai/gpt-4o
-	DefaultModel string         `yaml:"default_model,omitempty"`
-	Anthropic    AnthropicConfig `yaml:"anthropic,omitempty"`
-	OpenAI       OpenAIConfig    `yaml:"openai,omitempty"`
-	Groq         GroqConfig      `yaml:"groq,omitempty"`
-}
-
-type AnthropicConfig struct {
-	APIKey       string `yaml:"api_key,omitempty"`
-	DefaultModel string `yaml:"default_model,omitempty"` // e.g. claude-sonnet-4-5
-}
-
-type OpenAIConfig struct {
-	APIKey       string `yaml:"api_key,omitempty"`
-	DefaultModel string `yaml:"default_model,omitempty"`
-}
-
-type GroqConfig struct {
-	APIKey       string `yaml:"api_key,omitempty"`
-	DefaultModel string `yaml:"default_model,omitempty"`
+	// Format: provider/model, e.g. anthropic/claude-sonnet-4-6
+	DefaultModel string            `yaml:"default_model,omitempty"`
+	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
+	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
 }
 
 type ProviderConfig struct {

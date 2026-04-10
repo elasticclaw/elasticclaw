@@ -768,7 +768,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
 	defaultModel := templateDefaultModel
 	if defaultModel == "" {
-		defaultModel = s.hubCfg.Models.DefaultModel
+		defaultModel = s.hubCfg.DefaultModel
 	}
 	bridgeImage := s.hubCfg.BridgeImage
 	if bridgeImage == "" {
@@ -810,20 +810,15 @@ nohup env \
   ELASTICCLAW_CLAW_ID="%s" \
   ELASTICCLAW_CLAW_TOKEN="%s" \
   ELASTICCLAW_CLAW_NAME="%s" \
-  ANTHROPIC_API_KEY="%s" \
-  OPENAI_API_KEY="%s" \
-  GROQ_API_KEY="%s" \
   OPENCLAW_DEFAULT_MODEL="%s" \
-  claw-bridge >> /var/log/claw-bridge.log 2>&1 &
+%s  claw-bridge >> /var/log/claw-bridge.log 2>&1 &
 
 echo "claw-bridge started (PID $!)"
 `,
 		bridgeImage, bridgeImage,
 		s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName,
-		s.hubCfg.Models.Anthropic.APIKey,
-		s.hubCfg.Models.OpenAI.APIKey,
-		s.hubCfg.Models.Groq.APIKey,
 		defaultModel,
+		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
 
 	if err := s.sshRun(sshUser, sshHost, script); err != nil {
@@ -834,6 +829,20 @@ echo "claw-bridge started (PID $!)"
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
+
+// buildLLMKeyEnv converts the llm_keys map to shell env var lines for the bootstrap script.
+// e.g. {"anthropic": "sk-ant-..."} -> "  ANTHROPIC_API_KEY=\"sk-ant-...\" \\\n"
+func buildLLMKeyEnv(keys map[string]string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for provider, key := range keys {
+		envVar := strings.ToUpper(provider) + "_API_KEY"
+		fmt.Fprintf(&b, "  %s=\"%s\" \\\n", envVar, key)
+	}
+	return b.String()
+}
 // sshRun connects to host via the hub's SSH identity and runs a script.
 func (s *Server) sshRun(user, host, script string) error {
 	sshCfg := &gossh.ClientConfig{
