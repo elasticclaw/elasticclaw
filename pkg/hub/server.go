@@ -787,9 +787,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		log.Printf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
 	}
-	sshUser := replicatedpkg.SSHUserForDistribution(vm.Distribution)
+	// Replicated uses the comment from the SSH public key as the Linux username.
+	// Our key comment is "elasticclaw@hub", so the username is "elasticclaw".
+	sshUser := replicatedpkg.SSHUserFromPublicKey(s.identity.PublicKey)
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
-	log.Printf("Bootstrap SSH: %s@%s (distribution: %s)", sshUser, sshHost, vm.Distribution)
+	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 
 	// Build the bootstrap script
 	script := fmt.Sprintf(`#!/bin/bash

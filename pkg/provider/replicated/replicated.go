@@ -26,18 +26,20 @@ const (
 	DefaultDiskGiB      = 50
 )
 
-// SSHUserForDistribution returns the default SSH username for a given Linux distribution.
-func SSHUserForDistribution(distribution string) string {
-	switch strings.ToLower(distribution) {
-	case "ubuntu":
-		return "ubuntu"
-	case "rhel", "centos", "amazon":
-		return "ec2-user"
-	case "debian":
-		return "admin"
-	default:
-		return "ubuntu"
+// SSHUserFromPublicKey extracts the username from an SSH public key comment.
+// Replicated CMX uses the key comment (e.g. "elasticclaw@hub") as the Linux username,
+// taking the part before the @ sign.
+// "ssh-ed25519 AAAA... elasticclaw@hub" → "elasticclaw"
+func SSHUserFromPublicKey(authorizedKey string) string {
+	parts := strings.Fields(strings.TrimSpace(authorizedKey))
+	if len(parts) >= 3 {
+		comment := parts[2]
+		if atIdx := strings.Index(comment, "@"); atIdx > 0 {
+			return comment[:atIdx]
+		}
+		return comment
 	}
+	return "ubuntu" // fallback
 }
 
 // Provider implements the Replicated CMX VM provider.
