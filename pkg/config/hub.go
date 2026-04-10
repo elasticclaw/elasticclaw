@@ -57,7 +57,10 @@ func hubConfigPaths() []string {
 	}
 	paths = append(paths, "/etc/elasticclaw/hub.yaml")
 	if home, err := os.UserHomeDir(); err == nil {
+		// hub.yaml is the dedicated server config file
 		paths = append(paths, filepath.Join(home, ".elasticclaw", "hub.yaml"))
+		// config.yaml is also checked — allows keeping everything in one file
+		paths = append(paths, filepath.Join(home, ".elasticclaw", "config.yaml"))
 	}
 	return paths
 }
