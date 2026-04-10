@@ -76,9 +76,7 @@ func LoadGlobalConfig() (*types.GlobalConfig, error) {
 		return nil, err
 	}
 
-	cfg := &types.GlobalConfig{
-		Catalogs: []string{"https://catalog.elasticclaw.dev/images.yaml"},
-	}
+	cfg := &types.GlobalConfig{}
 
 	data, err := os.ReadFile(paths.ConfigFile)
 	if err != nil {

@@ -14,8 +14,7 @@ type Profile struct {
 
 // GlobalConfig represents ~/.elasticclaw/config.yaml
 type GlobalConfig struct {
-	ActiveProfile string   `yaml:"active_profile,omitempty"`
-	Catalogs      []string `yaml:"catalogs,omitempty"`
+	ActiveProfile string     `yaml:"active_profile,omitempty"`
 	Hub           *HubConfig `yaml:"hub,omitempty"`
 }
 
