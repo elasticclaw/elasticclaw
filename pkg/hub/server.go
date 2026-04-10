@@ -822,8 +822,20 @@ echo "claw-bridge started (PID $!)"
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
 
-	if err := s.sshRun(sshUser, sshHost, script); err != nil {
-		log.Printf("bootstrap failed for claw %s: %v", clawID, err)
+	// Retry SSH up to 5 times with 10s delay — VM may report 'running' before SSH is ready
+	var sshErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		if attempt > 1 {
+			log.Printf("Bootstrap retry %d/5 for claw %s in 10s...", attempt, clawName)
+			time.Sleep(10 * time.Second)
+		}
+		if sshErr = s.sshRun(sshUser, sshHost, script); sshErr == nil {
+			break
+		}
+		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sshErr)
+	}
+	if sshErr != nil {
+		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sshErr)
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 		return
 	}

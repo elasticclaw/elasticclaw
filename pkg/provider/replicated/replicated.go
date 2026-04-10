@@ -128,7 +128,9 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 	}
 	// Always include the hub's generated key (base64-encoded full authorized_keys line)
 	if p.sshPublicKey != "" {
-		body.PublicKeys = append(body.PublicKeys, encodeSSHKey(p.sshPublicKey))
+		encoded := encodeSSHKey(p.sshPublicKey)
+		log.Printf("SSH key being sent to Replicated API (base64 of: %s)", strings.TrimSpace(p.sshPublicKey))
+		body.PublicKeys = append(body.PublicKeys, encoded)
 	}
 	// Append operator debug keys
 	for _, raw := range p.extraKeys {
