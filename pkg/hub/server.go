@@ -227,7 +227,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	// Build env to inject: hub connection info so the claw can register back
 	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":   s.hubCfg.HubURL,
+		"ELASTICCLAW_HUB_URL":   s.hubCfg.URL,
 		"ELASTICCLAW_CLAW_ID":   clawID,
 		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
 	}

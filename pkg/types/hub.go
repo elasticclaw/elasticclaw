@@ -37,8 +37,3 @@ type RegisterPayload struct {
 	Token    string `json:"token"` // hub claw token for auth
 }
 
-// HubConfig is embedded in Profile when a hub is configured.
-type HubConfig struct {
-	URL   string `yaml:"url"`
-	Token string `yaml:"token"`
-}
