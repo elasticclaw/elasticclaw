@@ -827,9 +827,19 @@ nohup env \
   ELASTICCLAW_CLAW_TOKEN="%s" \
   ELASTICCLAW_CLAW_NAME="%s" \
   OPENCLAW_DEFAULT_MODEL="%s" \
-%s  claw-bridge >> /var/log/claw-bridge.log 2>&1 &
+%s  claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
 
-echo "claw-bridge started (PID $!)"
+BRIDGE_PID=$!
+echo "claw-bridge started (PID $BRIDGE_PID)"
+sleep 2
+if kill -0 $BRIDGE_PID 2>/dev/null; then
+  echo "claw-bridge is running"
+  tail -5 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
+else
+  echo "ERROR: claw-bridge died immediately"
+  cat "$HOME/claw-bridge.log" 2>/dev/null
+  exit 1
+fi
 `,
 		bridgeImage, bridgeImage,
 		s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName,
