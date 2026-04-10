@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"log"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -224,20 +225,8 @@ func (p *Provider) ProvisionClaw(
 	if err != nil {
 		return "", err
 	}
-
-	// Wait up to 10 minutes for the VM to be running
-	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	if err := p.WaitForVM(waitCtx, vmID); err != nil {
-		return vmID, fmt.Errorf("VM %s never became ready: %w", vmID, err)
-	}
-
-	// Bootstrap is done via SSH: write template files + env, then start OpenClaw.
-	// The hub must have a private key corresponding to the ssh_public_key in config.
-	// Bootstrap is best-effort here — the claw will register when it starts.
-	// Full SSH bootstrap implementation requires the hub to hold a private key.
-	// For now we log the connection info; full bootstrap in a follow-up.
+	// Return immediately — the hub's poller monitors VM status and triggers bootstrap.
+	log.Printf("Replicated VM created: %s", vmID)
 	return vmID, nil
 }
 
