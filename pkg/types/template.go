@@ -30,6 +30,30 @@ type HubConfig struct {
 	// BridgeImage is the OCI artifact reference for the claw-bridge binary.
 	// Defaults to ghcr.io/elasticclaw/claw-bridge:latest if not set.
 	BridgeImage string `yaml:"bridge_image,omitempty"`
+	// Models contains API keys for LLM providers injected into every claw.
+	Models ModelConfig `yaml:"models,omitempty"`
+}
+
+// ModelConfig holds API keys for LLM providers.
+type ModelConfig struct {
+	Anthropic AnthropicConfig `yaml:"anthropic,omitempty"`
+	OpenAI    OpenAIConfig    `yaml:"openai,omitempty"`
+	Groq      GroqConfig      `yaml:"groq,omitempty"`
+}
+
+type AnthropicConfig struct {
+	APIKey       string `yaml:"api_key,omitempty"`
+	DefaultModel string `yaml:"default_model,omitempty"` // e.g. claude-sonnet-4-5
+}
+
+type OpenAIConfig struct {
+	APIKey       string `yaml:"api_key,omitempty"`
+	DefaultModel string `yaml:"default_model,omitempty"`
+}
+
+type GroqConfig struct {
+	APIKey       string `yaml:"api_key,omitempty"`
+	DefaultModel string `yaml:"default_model,omitempty"`
 }
 
 type ProviderConfig struct {

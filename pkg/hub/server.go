@@ -803,10 +803,21 @@ nohup env \
   ELASTICCLAW_CLAW_ID="%s" \
   ELASTICCLAW_CLAW_TOKEN="%s" \
   ELASTICCLAW_CLAW_NAME="%s" \
+  ANTHROPIC_API_KEY="%s" \
+  ANTHROPIC_DEFAULT_MODEL="%s" \
+  OPENAI_API_KEY="%s" \
+  GROQ_API_KEY="%s" \
   claw-bridge >> /var/log/claw-bridge.log 2>&1 &
 
 echo "claw-bridge started (PID $!)"
-`, bridgeImage, bridgeImage, s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName)
+`,
+		bridgeImage, bridgeImage,
+		s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName,
+		s.hubCfg.Models.Anthropic.APIKey,
+		s.hubCfg.Models.Anthropic.DefaultModel,
+		s.hubCfg.Models.OpenAI.APIKey,
+		s.hubCfg.Models.Groq.APIKey,
+	)
 
 	if err := s.sshRun(sshUser, sshHost, script); err != nil {
 		log.Printf("bootstrap failed for claw %s: %v", clawID, err)
