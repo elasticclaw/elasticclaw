@@ -59,7 +59,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load hub config: %w", err)
 	}
 
-	s, err := hub.NewServer(hubAddr, dbPath, hubCfg)
+	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}

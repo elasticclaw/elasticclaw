@@ -20,9 +20,10 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	db      *sql.DB
-	addr    string
-	hubCfg  *types.HubConfig
+	db       *sql.DB
+	addr     string
+	hubCfg   *types.HubConfig
+	identity *HubIdentity
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -41,7 +42,8 @@ type userConn struct {
 }
 
 // NewServer creates a hub server backed by a SQLite database at dbPath.
-func NewServer(addr, dbPath string, hubCfg *types.HubConfig) (*Server, error) {
+// identityDir is the directory where the hub's SSH keypair is stored (created if absent).
+func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Server, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
@@ -49,12 +51,18 @@ func NewServer(addr, dbPath string, hubCfg *types.HubConfig) (*Server, error) {
 	if hubCfg == nil {
 		hubCfg = &types.HubConfig{}
 	}
+	id, err := LoadOrCreateIdentity(identityDir)
+	if err != nil {
+		return nil, fmt.Errorf("hub identity: %w", err)
+	}
+	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	return &Server{
-		db:     db,
-		addr:   addr,
-		hubCfg: hubCfg,
-		claws:  make(map[string]*clawConn),
-		users:  make(map[string]*userConn),
+		db:       db,
+		addr:     addr,
+		hubCfg:   hubCfg,
+		identity: id,
+		claws:    make(map[string]*clawConn),
+		users:    make(map[string]*userConn),
 	}, nil
 }
 
@@ -603,6 +611,8 @@ func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.Cr
 }
 
 func (s *Server) provisionReplicated(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, env map[string]string) error {
+	// Inject the hub's own public key — it's generated on startup, not configured manually.
+	cfg.SSHPublicKey = s.identity.PublicKey
 	p, err := newReplicatedProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("replicated init: %w", err)

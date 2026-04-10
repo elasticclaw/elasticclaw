@@ -25,6 +25,6 @@ func newReplicatedProvider(cfg types.ProviderConfig) (*replicated.Provider, erro
 		APIURL:       cfg.APIURL,
 		DefaultTTL:   cfg.DefaultTTL,
 		DefaultType:  cfg.DefaultInstanceType,
-		SSHPublicKey: cfg.SSHPublicKey,
+		HubPublicKey: cfg.SSHPublicKey, // set by server at provision time from hub identity
 	})
 }

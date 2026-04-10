@@ -36,11 +36,12 @@ type Provider struct {
 
 // Config holds provider configuration from hub.yaml.
 type Config struct {
-	APIURL       string `yaml:"api_url,omitempty"`
-	Token        string `yaml:"token"`
-	DefaultTTL   string `yaml:"default_ttl,omitempty"`
-	DefaultType  string `yaml:"default_instance_type,omitempty"`
-	SSHPublicKey string `yaml:"ssh_public_key"` // hub's public key for VM access
+	APIURL      string `yaml:"api_url,omitempty"`
+	Token       string `yaml:"token"`
+	DefaultTTL  string `yaml:"default_ttl,omitempty"`
+	DefaultType string `yaml:"default_instance_type,omitempty"`
+	// HubPublicKey is set at runtime by the hub from its generated identity — not from config file.
+	HubPublicKey string `yaml:"-"`
 }
 
 // New creates a Replicated CMX provider from config.
@@ -65,7 +66,7 @@ func New(cfg Config) (*Provider, error) {
 		token:        cfg.Token,
 		defaultTTL:   ttl,
 		defaultType:  instanceType,
-		sshPublicKey: cfg.SSHPublicKey,
+		sshPublicKey: cfg.HubPublicKey,
 		http:         &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }

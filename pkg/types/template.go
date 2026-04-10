@@ -32,7 +32,8 @@ type ProviderConfig struct {
 	Token               string `yaml:"token,omitempty"`
 	DefaultTTL          string `yaml:"default_ttl,omitempty"`
 	DefaultInstanceType string `yaml:"default_instance_type,omitempty"`
-	SSHPublicKey        string `yaml:"ssh_public_key,omitempty"`
+	// SSHPublicKey is injected automatically from the hub's generated identity — do not configure manually.
+	SSHPublicKey string `yaml:"-"`
 
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`
