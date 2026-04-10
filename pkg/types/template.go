@@ -17,9 +17,12 @@ type TemplateResources struct {
 
 // HubConfig is ~/.elasticclaw/hub.yaml or /etc/elasticclaw/hub.yaml.
 type HubConfig struct {
-	HubURL    string                     `yaml:"hub_url"`
-	ClawToken string                     `yaml:"claw_token"`
-	Providers map[string]ProviderConfig  `yaml:"providers,omitempty"`
+	HubURL        string                    `yaml:"hub_url"`
+	ClawToken     string                    `yaml:"claw_token"`
+	Providers     map[string]ProviderConfig  `yaml:"providers,omitempty"`
+	// SSHPublicKeys are extra public keys (in authorized_keys format) added to
+	// every provisioned VM alongside the hub's generated key. Useful for manual debug access.
+	SSHPublicKeys []string                  `yaml:"ssh_public_keys,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -34,6 +37,8 @@ type ProviderConfig struct {
 	DefaultInstanceType string `yaml:"default_instance_type,omitempty"`
 	// SSHPublicKey is injected automatically from the hub's generated identity — do not configure manually.
 	SSHPublicKey string `yaml:"-"`
+	// ExtraSSHPublicKeys are additional keys from hub config's ssh_public_keys list.
+	ExtraSSHPublicKeys []string `yaml:"-"`
 
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`

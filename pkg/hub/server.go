@@ -611,8 +611,9 @@ func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.Cr
 }
 
 func (s *Server) provisionReplicated(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, env map[string]string) error {
-	// Inject the hub's own public key — it's generated on startup, not configured manually.
+	// Hub's generated key is always included; append any extra debug keys from hub config.
 	cfg.SSHPublicKey = s.identity.PublicKey
+	cfg.ExtraSSHPublicKeys = s.hubCfg.SSHPublicKeys
 	p, err := newReplicatedProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("replicated init: %w", err)

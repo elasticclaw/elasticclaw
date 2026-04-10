@@ -21,10 +21,11 @@ func newLocalProvider() *local.Provider {
 
 func newReplicatedProvider(cfg types.ProviderConfig) (*replicated.Provider, error) {
 	return replicated.New(replicated.Config{
-		Token:        cfg.Token,
-		APIURL:       cfg.APIURL,
-		DefaultTTL:   cfg.DefaultTTL,
-		DefaultType:  cfg.DefaultInstanceType,
-		HubPublicKey: cfg.SSHPublicKey, // set by server at provision time from hub identity
+		Token:             cfg.Token,
+		APIURL:            cfg.APIURL,
+		DefaultTTL:        cfg.DefaultTTL,
+		DefaultType:       cfg.DefaultInstanceType,
+		HubPublicKey:      cfg.SSHPublicKey,
+		ExtraPublicKeys:   cfg.ExtraSSHPublicKeys,
 	})
 }

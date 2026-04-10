@@ -30,7 +30,8 @@ type Provider struct {
 	token        string
 	defaultTTL   string
 	defaultType  string
-	sshPublicKey string // hub's public key, injected into every VM
+	sshPublicKey string   // hub's generated key, always injected
+	extraKeys    []string // operator debug keys from hub config
 	http         *http.Client
 }
 
@@ -40,8 +41,10 @@ type Config struct {
 	Token       string `yaml:"token"`
 	DefaultTTL  string `yaml:"default_ttl,omitempty"`
 	DefaultType string `yaml:"default_instance_type,omitempty"`
-	// HubPublicKey is set at runtime by the hub from its generated identity — not from config file.
+	// HubPublicKey is set at runtime from the hub's generated identity — not from config file.
 	HubPublicKey string `yaml:"-"`
+	// ExtraPublicKeys are additional keys from hub config (e.g. operator's personal key for debug access).
+	ExtraPublicKeys []string `yaml:"-"`
 }
 
 // New creates a Replicated CMX provider from config.
@@ -67,6 +70,7 @@ func New(cfg Config) (*Provider, error) {
 		defaultTTL:   ttl,
 		defaultType:  instanceType,
 		sshPublicKey: cfg.HubPublicKey,
+		extraKeys:    cfg.ExtraPublicKeys,
 		http:         &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
@@ -120,12 +124,12 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		TTL:          ttl,
 		Version:      DefaultVersion,
 	}
+	// Always include the hub's generated key
 	if p.sshPublicKey != "" {
-		body.PublicKeys = []string{p.sshPublicKey}
+		body.PublicKeys = append(body.PublicKeys, p.sshPublicKey)
 	}
-	if req.SSHPublicKey != "" {
-		body.PublicKeys = append(body.PublicKeys, req.SSHPublicKey)
-	}
+	// Append operator debug keys
+	body.PublicKeys = append(body.PublicKeys, p.extraKeys...)
 
 	data, err := p.post(ctx, "/vm", body)
 	if err != nil {
@@ -200,7 +204,6 @@ type VMCreateRequest struct {
 	Name         string
 	InstanceType string // e.g. r1.small, r1.large (overrides provider default)
 	TTL          string // e.g. 2h, 24h (overrides provider default, max 48h)
-	SSHPublicKey string // optional extra key beyond the hub's key
 }
 
 // ProvisionClaw creates a VM, waits for it to be running, then installs and
