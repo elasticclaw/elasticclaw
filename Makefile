@@ -9,7 +9,8 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 	-X github.com/elasticclaw/elasticclaw/cmd.BuildDate=$(BUILD_DATE)"
 
 build:
-	go build -buildvcs=false $(LDFLAGS) -o elasticclaw .
+	mkdir -p bin
+	go build -buildvcs=false $(LDFLAGS) -o bin/elasticclaw .
 
 install:
 	go install -buildvcs=false $(LDFLAGS) .
@@ -21,7 +22,7 @@ lint:
 	golangci-lint run
 
 clean:
-	rm -f elasticclaw
+	rm -rf bin/
 	rm -rf .elasticclaw/
 
 # Development helpers

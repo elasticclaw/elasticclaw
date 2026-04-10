@@ -1,4 +1,5 @@
 # Binaries
+bin/
 elasticclaw
 *.exe
 
