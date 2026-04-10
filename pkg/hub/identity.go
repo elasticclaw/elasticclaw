@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -48,13 +49,14 @@ func LoadOrCreateIdentity(dir string) (*HubIdentity, error) {
 		return nil, fmt.Errorf("write private key: %w", err)
 	}
 
-	// Marshal public key in authorized_keys format
+	// Marshal public key in authorized_keys format with a comment so providers can identify it
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
 		return nil, fmt.Errorf("marshal public key: %w", err)
 	}
-	pubBytes := ssh.MarshalAuthorizedKey(sshPub)
-	if err := os.WriteFile(pubPath, pubBytes, 0644); err != nil {
+	// MarshalAuthorizedKey produces "<type> <blob>\n"; append comment with username
+	pubLine := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(sshPub)), "\n") + " elasticclaw@hub\n"
+	if err := os.WriteFile(pubPath, []byte(pubLine), 0644); err != nil {
 		return nil, fmt.Errorf("write public key: %w", err)
 	}
 
