@@ -787,9 +787,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		log.Printf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
 	}
-	sshUser := "root"
+	sshUser := replicatedpkg.SSHUserForDistribution(vm.Distribution)
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
-	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
+	log.Printf("Bootstrap SSH: %s@%s (distribution: %s)", sshUser, sshHost, vm.Distribution)
 
 	// Build the bootstrap script
 	script := fmt.Sprintf(`#!/bin/bash

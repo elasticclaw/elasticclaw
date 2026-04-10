@@ -26,6 +26,20 @@ const (
 	DefaultDiskGiB      = 50
 )
 
+// SSHUserForDistribution returns the default SSH username for a given Linux distribution.
+func SSHUserForDistribution(distribution string) string {
+	switch strings.ToLower(distribution) {
+	case "ubuntu":
+		return "ubuntu"
+	case "rhel", "centos", "amazon":
+		return "ec2-user"
+	case "debian":
+		return "admin"
+	default:
+		return "ubuntu"
+	}
+}
+
 // Provider implements the Replicated CMX VM provider.
 type Provider struct {
 	apiURL       string
