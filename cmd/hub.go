@@ -80,8 +80,11 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("ElasticClaw Hub\n")
-	fmt.Printf("  Address:  %s\n", hubAddr)
-	fmt.Printf("  Database: %s\n", dbPath)
+	fmt.Printf("  Address:    %s\n", hubAddr)
+	fmt.Printf("  Database:   %s\n", dbPath)
+	fmt.Printf("  URL:        %s\n", hubCfg.URL)
+	fmt.Printf("  Public URL: %s\n", hubCfg.PublicURL)
+	fmt.Printf("  Claw token: %s\n", func() string { if hubCfg.ClawToken != "" { return "(set)" }; return "(not set)" }())
 	fmt.Println()
 
 	if len(hubCfg.Providers) == 0 {
