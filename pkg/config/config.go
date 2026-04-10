@@ -12,7 +12,7 @@ import (
 // Paths returns the standard config paths
 type Paths struct {
 	ConfigDir    string // ~/.elasticclaw
-	ConfigFile   string // ~/.elasticclaw/config.yaml
+	ConfigFile   string // ~/.elasticclaw/hub.yaml
 	ProfilesDir  string // ~/.elasticclaw/profiles
 	StateDir     string // ~/.elasticclaw/state
 	WorkDir      string // .elasticclaw (in current dir)
@@ -37,7 +37,7 @@ func GetPaths() (*Paths, error) {
 
 	return &Paths{
 		ConfigDir:    configDir,
-		ConfigFile:   filepath.Join(configDir, "config.yaml"),
+		ConfigFile:   filepath.Join(configDir, "hub.yaml"),
 		ProfilesDir:  filepath.Join(configDir, "profiles"),
 		StateDir:     filepath.Join(configDir, "state"),
 		WorkDir:      filepath.Join(cwd, ".elasticclaw"),

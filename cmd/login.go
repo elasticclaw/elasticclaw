@@ -54,6 +54,6 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✓ Logged in to %s (tenant: %s)\n", loginHub, tenantID)
-	fmt.Println("  Hub config saved to ~/.elasticclaw/config.yaml")
+	fmt.Println("  Hub config saved to ~/.elasticclaw/hub.yaml")
 	return nil
 }
