@@ -124,13 +124,15 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		TTL:          ttl,
 		Version:      DefaultVersion,
 	}
-	// Always include the hub's generated key (trimmed — no trailing newline)
+	// Always include the hub's generated key
 	if p.sshPublicKey != "" {
-		body.PublicKeys = append(body.PublicKeys, strings.TrimSpace(p.sshPublicKey))
+		if k := extractSSHKeyBlob(p.sshPublicKey); k != "" {
+			body.PublicKeys = append(body.PublicKeys, k)
+		}
 	}
-	// Append operator debug keys (trimmed)
-	for _, k := range p.extraKeys {
-		if k := strings.TrimSpace(k); k != "" {
+	// Append operator debug keys
+	for _, raw := range p.extraKeys {
+		if k := extractSSHKeyBlob(raw); k != "" {
 			body.PublicKeys = append(body.PublicKeys, k)
 		}
 	}
@@ -311,4 +313,19 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 // Destroy implements types.Provider — deletes the CMX VM.
 func (p *Provider) Destroy(ctx context.Context, instanceID string, _ bool) error {
 	return p.DeleteVM(ctx, instanceID)
+}
+
+// extractSSHKeyBlob extracts the base64 key blob from an authorized_keys format string.
+// "ssh-ed25519 AAAA...blob== comment" → "AAAA...blob=="
+// If the input is already just a blob, it's returned as-is.
+func extractSSHKeyBlob(authorizedKey string) string {
+	parts := strings.Fields(strings.TrimSpace(authorizedKey))
+	if len(parts) >= 2 {
+		// parts[0] = key type (ssh-ed25519, etc), parts[1] = base64 blob
+		return parts[1]
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return ""
 }
