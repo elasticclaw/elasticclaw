@@ -3,276 +3,106 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
-	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
-	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
-	"github.com/elasticclaw/elasticclaw/pkg/state"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/spf13/cobra"
 )
 
 var (
-	createName            string
-	createProvider        string
-	createIdentity        string
-	createIdentityProfile string
-	createState           string
-	createTTL             string
-	createVars            []string
-	createEnvs            []string
-	createImage           string
-	createDetach          bool
+	createName string
+	createEnvs []string
 )
 
 var createCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new instance",
-	Long: `Create a new ElasticClaw instance from the initialized template.
+	Short: "Create a new claw from a template",
+	Long: `Resolve a local template and provision a new claw via the hub.
 
-Requires 'elasticclaw init' to have been run first.
+The template is looked up in (in order):
+  ./.elasticclaw/templates/<name>/
+  ~/.elasticclaw/templates/<name>/
+
+The template directory must contain elasticclaw-config.yaml specifying the provider.
 
 Example:
-  elasticclaw create --name support-01 --provider daytona
-  elasticclaw create --name support-01 --var customer=acme`,
+  elasticclaw create --name support-01 --template support
+  elasticclaw create --name dev-01 --template dev --env GITHUB_TOKEN=xxx`,
 	RunE: runCreate,
 }
 
+var createTemplate string
+
 func init() {
 	rootCmd.AddCommand(createCmd)
-
-	createCmd.Flags().StringVarP(&createName, "name", "n", "", "instance name (required)")
+	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
 	createCmd.MarkFlagRequired("name")
-	createCmd.Flags().StringVarP(&createProvider, "provider", "p", "", "provider to use (default from profile)")
-	createCmd.Flags().StringVar(&createIdentity, "identity", "", "identity binding (e.g., creddy://acme/support)")
-	createCmd.Flags().StringVar(&createIdentityProfile, "identity-profile", "default", "identity profile from template")
-	createCmd.Flags().StringVar(&createState, "state", "", "state backend (default: local)")
-	createCmd.Flags().StringVar(&createTTL, "ttl", "", "instance time-to-live (e.g., 4h, 24h)")
-	createCmd.Flags().StringArrayVar(&createVars, "var", nil, "template variable (key=value)")
-	createCmd.Flags().StringArrayVar(&createEnvs, "env", nil, "environment variable (KEY=value)")
-	createCmd.Flags().StringVar(&createImage, "image", "", "base image to use")
-	createCmd.Flags().BoolVar(&createDetach, "detach", false, "don't wait for instance to be ready")
+	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
+	createCmd.MarkFlagRequired("template")
+	createCmd.Flags().StringArrayVar(&createEnvs, "env", nil, "extra env vars to inject (KEY=value)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
-	// Check if initialized
-	if !config.IsInitialized() {
-		return fmt.Errorf("not initialized - run 'elasticclaw init' first")
+	// Load CLI config → get hub connection
+	cfg, err := config.LoadGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Hub == nil || cfg.Hub.URL == "" {
+		return fmt.Errorf("no hub configured — run 'elasticclaw login' first")
 	}
 
-	// Load manifest
-	manifest, err := config.LoadManifest()
+	// Resolve template directory
+	templateDir, err := config.ResolveTemplate(createTemplate)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Using template: %s\n", templateDir)
+
+	// Load template config (provider, resources, etc.)
+	tmplCfg, err := config.LoadTemplateConfig(templateDir)
 	if err != nil {
 		return err
 	}
 
-	// Load profile for defaults
-	activeProfile, err := config.GetActiveProfile()
+	// Read template files
+	files, err := config.ReadTemplateFiles(templateDir)
 	if err != nil {
-		return fmt.Errorf("failed to get profile: %w", err)
+		return err
 	}
+	fmt.Printf("Template files: %d files, provider: %s\n", len(files), tmplCfg.Provider)
 
-	// Determine provider
-	provider := createProvider
-	if provider == "" {
-		provider = activeProfile.Provider
-	}
-	if provider == "" && len(manifest.Providers.Supported) > 0 {
-		provider = manifest.Providers.Supported[0]
-	}
-	if provider == "" {
-		provider = "daytona"
-	}
+	// Parse extra env vars
+	env := parseEnvVars(createEnvs)
 
-	// Parse variables
-	vars := make(map[string]string)
-	for _, v := range createVars {
-		parts := strings.SplitN(v, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid variable format: %s (expected key=value)", v)
-		}
-		vars[parts[0]] = parts[1]
-	}
-
-	// Parse environment variables
-	envs := make(map[string]string)
-	for _, e := range createEnvs {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid env format: %s (expected KEY=value)", e)
-		}
-		envs[parts[0]] = parts[1]
-	}
-
-	// Check required template variables
-	for _, required := range manifest.TemplateVars {
-		if _, ok := vars[required]; !ok {
-			return fmt.Errorf("missing required template variable: %s", required)
-		}
-	}
-
-	// Load template files
-	templateFiles, err := loadTemplateFiles()
+	// POST to hub
+	client := hub.NewClient(cfg.Hub.URL, cfg.Hub.Token)
+	claw, err := client.CreateClaw(context.Background(), createName, createTemplate, tmplCfg, files, env)
 	if err != nil {
-		return fmt.Errorf("failed to load template files: %w", err)
+		return fmt.Errorf("hub error: %w", err)
 	}
 
-	fmt.Printf("Creating instance %s on %s...\n", createName, provider)
-
-	// Create instance record
-	instance := state.CreateInstance(createName, provider, manifest.Name, manifest.Version, vars)
-
-	// Store initial state
-	store, err := state.NewStore()
-	if err != nil {
-		return fmt.Errorf("failed to initialize state store: %w", err)
-	}
-
-	if err := store.Save(instance); err != nil {
-		return fmt.Errorf("failed to save instance state: %w", err)
-	}
-
-	// Create via provider
-	ctx := context.Background()
-	var providerInstance *types.Instance
-
-	req := types.CreateRequest{
-		Name:          createName,
-		FromImage:     createImage,
-		TemplateFiles: templateFiles,
-		Env:           envs,
-	}
-
-	switch provider {
-	case "daytona":
-		p, pErr := daytona.New(nil)
-		if pErr != nil {
-			store.Delete(createName)
-			return fmt.Errorf("failed to initialize daytona provider: %w", pErr)
-		}
-		providerInstance, err = p.Create(ctx, req)
-		if err != nil {
-			store.Delete(createName)
-			return fmt.Errorf("provider create failed: %w", err)
-		}
-
-		// Configure OpenClaw with environment variables (API keys, etc.)
-		if len(envs) > 0 {
-			if !quiet {
-				fmt.Println("Configuring OpenClaw...")
-			}
-			if err := p.ConfigureOpenClaw(ctx, providerInstance.ID, envs); err != nil {
-				// Non-fatal, but warn
-				fmt.Fprintf(os.Stderr, "Warning: failed to configure OpenClaw: %v\n", err)
-			}
-		}
-	case "local":
-		p := local.New()
-		providerInstance, err = p.Create(ctx, req)
-		if err != nil {
-			store.Delete(createName)
-			return fmt.Errorf("provider create failed: %w", err)
-		}
-	default:
-		store.Delete(createName)
-		return fmt.Errorf("unsupported provider: %s", provider)
-	}
-
-	// Update instance with provider info
-	instance.Status = providerInstance.Status
-	instance.ProviderMeta = providerInstance.ProviderMeta
-	if err := store.Save(instance); err != nil {
-		return fmt.Errorf("failed to update instance state: %w", err)
-	}
-
-	// Print success output
 	fmt.Println()
-	fmt.Println("✓ Instance created")
+	fmt.Printf("✓ Claw provisioning started\n")
+	fmt.Printf("  ID:       %s\n", claw.ID)
+	fmt.Printf("  Name:     %s\n", claw.Name)
+	fmt.Printf("  Template: %s\n", claw.Template)
+	fmt.Printf("  Status:   %s\n", claw.Status)
 	fmt.Println()
-	fmt.Printf("  Name:      %s\n", instance.Name)
-	fmt.Printf("  Provider:  %s\n", instance.Provider)
-	if workspaceID, ok := instance.ProviderMeta["workspace_id"]; ok {
-		fmt.Printf("  Workspace: %s\n", workspaceID)
-	}
-	fmt.Printf("  Template:  %s@%s\n", instance.Template, instance.TemplateVersion)
-	if createIdentityProfile != "" {
-		fmt.Printf("  Identity:  %s\n", createIdentityProfile)
-	}
-	fmt.Printf("  Status:    %s\n", instance.Status)
-	fmt.Println()
-	fmt.Printf("  Chat:      elasticclaw chat %s\n", instance.Name)
-	if instance.Provider == "daytona" {
-		fmt.Printf("  Connect:   daytona ssh %s\n", instance.Name)
-	} else if instance.Provider == "local" {
-		if wsDir, ok := instance.ProviderMeta["workspace_dir"]; ok {
-			fmt.Printf("  Workspace: %s\n", wsDir)
-		}
-	}
-
+	fmt.Printf("  Watch:    elasticclaw list\n")
+	fmt.Printf("  Chat:     elasticclaw chat %s\n", claw.Name)
 	return nil
 }
 
-func loadTemplateFiles() (map[string][]byte, error) {
-	paths, err := config.GetPaths()
-	if err != nil {
-		return nil, err
-	}
-
-	files := make(map[string][]byte)
-
-	// OpenClaw workspace files to include
-	workspaceFiles := []string{
-		"AGENTS.md",
-		"SOUL.md",
-		"TOOLS.md",
-		"IDENTITY.md",
-		"USER.md",
-		"MEMORY.md",
-		"BOOTSTRAP.md",
-	}
-
-	// Look in template dir first, then current dir
-	baseDir := paths.TemplateDir
-	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
-		baseDir = "."
-	}
-
-	for _, filename := range workspaceFiles {
-		path := filepath.Join(baseDir, filename)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			// Try current dir
-			path = filename
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				continue // Skip missing optional files
+func parseEnvVars(envs []string) map[string]string {
+	result := make(map[string]string)
+	for _, e := range envs {
+		for i, c := range e {
+			if c == '=' {
+				result[e[:i]] = e[i+1:]
+				break
 			}
 		}
-
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read %s: %w", filename, err)
-		}
-		files[filename] = content
 	}
-
-	// Include memory directory if exists
-	memoryDir := filepath.Join(baseDir, "memory")
-	if _, err := os.Stat(memoryDir); err == nil {
-		filepath.Walk(memoryDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return nil
-			}
-			relPath, _ := filepath.Rel(baseDir, path)
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return nil
-			}
-			files[relPath] = content
-			return nil
-		})
-	}
-
-	return files, nil
+	return result
 }

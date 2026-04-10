@@ -99,6 +99,26 @@ func (c *Client) SendMessage(ctx context.Context, clawID, content string) (*type
 	return &msg, json.Unmarshal(data, &msg)
 }
 
+// CreateClaw provisions a new claw via the hub.
+func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmplCfg *types.TemplateConfig, files map[string]string, env map[string]string) (*types.Claw, error) {
+	req := types.CreateClawRequest{
+		Name:         name,
+		TemplateName: templateName,
+		Provider:     tmplCfg.Provider,
+		Resources:    tmplCfg.Resources,
+		Image:        tmplCfg.Image,
+		TTL:          tmplCfg.TTL,
+		Files:        files,
+		Env:          env,
+	}
+	data, err := c.do(ctx, http.MethodPost, "/api/claws", req)
+	if err != nil {
+		return nil, err
+	}
+	var claw types.Claw
+	return &claw, json.Unmarshal(data, &claw)
+}
+
 // Login verifies a token against the hub.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	data, err := c.do(ctx, http.MethodPost, "/api/login", map[string]string{"token": c.token})

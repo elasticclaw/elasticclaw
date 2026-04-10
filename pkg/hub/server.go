@@ -19,8 +19,9 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	db   *sql.DB
-	addr string
+	db      *sql.DB
+	addr    string
+	hubCfg  *types.HubConfig
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -39,16 +40,20 @@ type userConn struct {
 }
 
 // NewServer creates a hub server backed by a SQLite database at dbPath.
-func NewServer(addr, dbPath string) (*Server, error) {
+func NewServer(addr, dbPath string, hubCfg *types.HubConfig) (*Server, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
 	}
+	if hubCfg == nil {
+		hubCfg = &types.HubConfig{}
+	}
 	return &Server{
-		db:    db,
-		addr:  addr,
-		claws: make(map[string]*clawConn),
-		users: make(map[string]*userConn),
+		db:     db,
+		addr:   addr,
+		hubCfg: hubCfg,
+		claws:  make(map[string]*clawConn),
+		users:  make(map[string]*userConn),
 	}, nil
 }
 
@@ -142,6 +147,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
+
+	if r.Method == http.MethodPost {
+		s.handleCreateClaw(w, r, tenantID)
+		return
+	}
+
 	rows, err := s.db.Query(
 		`SELECT id, name, template, status, last_seen, created_at FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
 		tenantID,
@@ -163,7 +174,6 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		if lastSeen.Valid {
 			c.LastSeen = lastSeen.Time
 		}
-		// Override status from live connections
 		s.mu.RLock()
 		if _, online := s.claws[c.ID]; online {
 			c.Status = "connected"
@@ -175,6 +185,83 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		out = []types.Claw{}
 	}
 	jsonOK(w, out)
+}
+
+func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenantID string) {
+	var req types.CreateClawRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.Provider == "" {
+		http.Error(w, "name and provider are required", http.StatusBadRequest)
+		return
+	}
+
+	// Check provider is configured
+	provCfg, ok := s.hubCfg.Providers[req.Provider]
+	if !ok {
+		http.Error(w, fmt.Sprintf("provider %q is not configured on this hub", req.Provider), http.StatusUnprocessableEntity)
+		return
+	}
+
+	// Pre-register claw row so it exists before the workspace boots
+	clawID := uuid.New().String()
+	_, err := s.db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, req.Name, req.TemplateName, now(),
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	// Build env to inject: hub connection info so the claw can register back
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL":   s.hubCfg.HubURL,
+		"ELASTICCLAW_CLAW_ID":   clawID,
+		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+	}
+	for k, v := range req.Env {
+		env[k] = v
+	}
+
+	// Convert string files to bytes for the provider
+	templateFiles := make(map[string][]byte, len(req.Files))
+	for k, v := range req.Files {
+		templateFiles[k] = []byte(v)
+	}
+
+	// Provision asynchronously so the HTTP request returns quickly
+	go func() {
+		ctx := context.Background()
+		var provErr error
+
+		switch req.Provider {
+		case "daytona":
+			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, templateFiles, env)
+		case "local":
+			provErr = s.provisionLocal(ctx, clawID, req, templateFiles, env)
+		default:
+			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
+		}
+
+		if provErr != nil {
+			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+			s.broadcastToUsers(tenantID, types.WSMessage{
+				Type:    "claw_error",
+				Payload: map[string]string{"claw_id": clawID, "error": provErr.Error()},
+			})
+		}
+	}()
+
+	claw := types.Claw{
+		ID: clawID, TenantID: tenantID, Name: req.Name,
+		Template: req.TemplateName, Status: "provisioning", CreatedAt: now(),
+	}
+	w.WriteHeader(http.StatusAccepted)
+	jsonOK(w, claw)
 }
 
 func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
@@ -472,4 +559,42 @@ func (s *Server) Provision(token, clawToken string) (string, error) {
 		return existingID, nil
 	}
 	return id, nil
+}
+
+// ─── Provisioning ─────────────────────────────────────────────────────────────
+
+func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	p, err := newDaytonaProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("daytona init: %w", err)
+	}
+	createReq := types.CreateRequest{
+		Name:          req.Name,
+		FromImage:     req.Image,
+		TemplateFiles: files,
+		Env:           env,
+	}
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("daytona create: %w", err)
+	}
+	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
+	return nil
+}
+
+func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.CreateClawRequest, files map[string][]byte, env map[string]string) error {
+	p := newLocalProvider()
+	createReq := types.CreateRequest{
+		Name:          req.Name,
+		TemplateFiles: files,
+		Env:           env,
+	}
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("local create: %w", err)
+	}
+	log.Printf("local instance created: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
+	return nil
 }

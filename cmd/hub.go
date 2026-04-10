@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/spf13/cobra"
 )
@@ -53,7 +54,12 @@ func runHub(cmd *cobra.Command, args []string) error {
 		dbPath = filepath.Join(dir, "hub.db")
 	}
 
-	s, err := hub.NewServer(hubAddr, dbPath)
+	hubCfg, err := config.LoadHubConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load hub config: %w", err)
+	}
+
+	s, err := hub.NewServer(hubAddr, dbPath, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}
