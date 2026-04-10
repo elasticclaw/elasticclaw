@@ -777,7 +777,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	}
 
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
-	vm, err := p.GetVM(context.Background(), vmID)
+	cp, err := newReplicatedProvider(cfg)
+	if err != nil {
+		log.Printf("bootstrap: provider init error: %v", err)
+		return
+	}
+	vm, err := cp.GetVM(context.Background(), vmID)
 	if err != nil || vm.DirectSSHEndpoint == "" || vm.DirectSSHPort == 0 {
 		log.Printf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
