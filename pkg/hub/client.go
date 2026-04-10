@@ -109,6 +109,7 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 		InstanceType: tmplCfg.InstanceType,
 		Image:        tmplCfg.Image,
 		TTL:          tmplCfg.TTL,
+		DefaultModel: tmplCfg.DefaultModel,
 		Files:        files,
 		Env:          env,
 	}

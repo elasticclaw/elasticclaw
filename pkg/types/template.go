@@ -7,6 +7,9 @@ type TemplateConfig struct {
 	InstanceType string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
 	Image        string            `yaml:"image,omitempty"`
 	TTL          string            `yaml:"ttl,omitempty"`
+	// DefaultModel overrides the hub-level default model for this template.
+	// Format: provider/model, e.g. anthropic/claude-opus-4-5
+	DefaultModel string            `yaml:"default_model,omitempty"`
 }
 
 type TemplateResources struct {
@@ -34,11 +37,14 @@ type HubConfig struct {
 	Models ModelConfig `yaml:"models,omitempty"`
 }
 
-// ModelConfig holds API keys for LLM providers.
+// ModelConfig holds API keys for LLM providers and the global default model.
 type ModelConfig struct {
-	Anthropic AnthropicConfig `yaml:"anthropic,omitempty"`
-	OpenAI    OpenAIConfig    `yaml:"openai,omitempty"`
-	Groq      GroqConfig      `yaml:"groq,omitempty"`
+	// DefaultModel is the model used by all claws unless overridden in the template.
+	// Format: provider/model, e.g. anthropic/claude-sonnet-4-6, openai/gpt-4o
+	DefaultModel string         `yaml:"default_model,omitempty"`
+	Anthropic    AnthropicConfig `yaml:"anthropic,omitempty"`
+	OpenAI       OpenAIConfig    `yaml:"openai,omitempty"`
+	Groq         GroqConfig      `yaml:"groq,omitempty"`
 }
 
 type AnthropicConfig struct {
@@ -81,9 +87,11 @@ type CreateClawRequest struct {
 	TemplateName string            `json:"template_name"`
 	Provider     string            `json:"provider"`
 	Resources    TemplateResources `json:"resources,omitempty"`
-	InstanceType string            `json:"instance_type,omitempty"` // provider-specific, e.g. r1.large
+	InstanceType string            `json:"instance_type,omitempty"`
 	Image        string            `json:"image,omitempty"`
 	TTL          string            `json:"ttl,omitempty"`
-	Files        map[string]string `json:"files"` // filename -> base64 content
+	// DefaultModel overrides hub default model for this claw (from template config).
+	DefaultModel string            `json:"default_model,omitempty"`
+	Files        map[string]string `json:"files"`
 	Env          map[string]string `json:"env,omitempty"`
 }

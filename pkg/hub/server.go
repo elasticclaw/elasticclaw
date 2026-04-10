@@ -223,8 +223,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Pre-register claw row so it exists before the workspace boots
 	clawID := uuid.New().String()
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, status, created_at) VALUES(?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, now(),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, status, created_at) VALUES(?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -763,6 +763,13 @@ const defaultBridgeImage = "ghcr.io/elasticclaw/claw-bridge:latest"
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from OCI, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	// Resolve model: template override wins over hub default
+	var templateDefaultModel string
+	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
+	defaultModel := templateDefaultModel
+	if defaultModel == "" {
+		defaultModel = s.hubCfg.Models.DefaultModel
+	}
 	bridgeImage := s.hubCfg.BridgeImage
 	if bridgeImage == "" {
 		bridgeImage = defaultBridgeImage
@@ -804,9 +811,9 @@ nohup env \
   ELASTICCLAW_CLAW_TOKEN="%s" \
   ELASTICCLAW_CLAW_NAME="%s" \
   ANTHROPIC_API_KEY="%s" \
-  ANTHROPIC_DEFAULT_MODEL="%s" \
   OPENAI_API_KEY="%s" \
   GROQ_API_KEY="%s" \
+  OPENCLAW_DEFAULT_MODEL="%s" \
   claw-bridge >> /var/log/claw-bridge.log 2>&1 &
 
 echo "claw-bridge started (PID $!)"
@@ -814,9 +821,9 @@ echo "claw-bridge started (PID $!)"
 		bridgeImage, bridgeImage,
 		s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName,
 		s.hubCfg.Models.Anthropic.APIKey,
-		s.hubCfg.Models.Anthropic.DefaultModel,
 		s.hubCfg.Models.OpenAI.APIKey,
 		s.hubCfg.Models.Groq.APIKey,
+		defaultModel,
 	)
 
 	if err := s.sshRun(sshUser, sshHost, script); err != nil {

@@ -24,6 +24,7 @@ func migrate(db *sql.DB) error {
 	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so ignore errors.
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN default_model TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -35,15 +36,16 @@ func migrate(db *sql.DB) error {
 	);
 
 	CREATE TABLE IF NOT EXISTS claws (
-		id          TEXT PRIMARY KEY,
-		tenant_id   TEXT NOT NULL REFERENCES tenants(id),
-		name        TEXT NOT NULL,
-		template    TEXT NOT NULL DEFAULT '',
-		provider    TEXT NOT NULL DEFAULT '',
-		provider_id TEXT NOT NULL DEFAULT '',
-		status      TEXT NOT NULL DEFAULT 'offline',
-		last_seen   DATETIME,
-		created_at  DATETIME NOT NULL
+		id            TEXT PRIMARY KEY,
+		tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+		name          TEXT NOT NULL,
+		template      TEXT NOT NULL DEFAULT '',
+		provider      TEXT NOT NULL DEFAULT '',
+		provider_id   TEXT NOT NULL DEFAULT '',
+		default_model TEXT NOT NULL DEFAULT '',
+		status        TEXT NOT NULL DEFAULT 'offline',
+		last_seen     DATETIME,
+		created_at    DATETIME NOT NULL
 	);
 
 
