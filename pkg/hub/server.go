@@ -249,6 +249,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	// Provision asynchronously so the HTTP request returns quickly
 	go func() {
+		log.Printf("Provisioning claw %s (%s) via %s...", req.Name, clawID, req.Provider)
 		ctx := context.Background()
 		var provErr error
 
