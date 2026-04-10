@@ -183,6 +183,7 @@ func (p *Provider) WaitForVM(ctx context.Context, vmID string) error {
 // GetVM fetches the current status of a VM.
 func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 	data, err := p.get(ctx, "/vm/"+vmID)
+	log.Printf("GetVM raw response for %s: %s", vmID, string(data))
 	if err != nil {
 		return nil, err
 	}
