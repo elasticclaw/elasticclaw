@@ -79,6 +79,41 @@ func runHub(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	fmt.Printf("ElasticClaw Hub starting on %s (db: %s)\n", hubAddr, dbPath)
+	fmt.Printf("ElasticClaw Hub\n")
+	fmt.Printf("  Address:  %s\n", hubAddr)
+	fmt.Printf("  Database: %s\n", dbPath)
+	fmt.Println()
+
+	if len(hubCfg.Providers) == 0 {
+		fmt.Println("  Providers: none configured")
+	} else {
+		fmt.Printf("  Providers:\n")
+		for name, pcfg := range hubCfg.Providers {
+			switch name {
+			case "replicated":
+				instType := pcfg.DefaultInstanceType
+				if instType == "" {
+					instType = "r1.large (default)"
+				}
+				ttl := pcfg.DefaultTTL
+				if ttl == "" {
+					ttl = "48h (default)"
+				}
+				fmt.Printf("    replicated  instance-type=%s  ttl=%s\n", instType, ttl)
+			case "daytona":
+				apiURL := pcfg.APIURL
+				if apiURL == "" {
+					apiURL = "app.daytona.io (default)"
+				}
+				fmt.Printf("    daytona     api=%s\n", apiURL)
+			case "local":
+				fmt.Printf("    local\n")
+			default:
+				fmt.Printf("    %s\n", name)
+			}
+		}
+	}
+	fmt.Println()
+
 	return s.Run()
 }
