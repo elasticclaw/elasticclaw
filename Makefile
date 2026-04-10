@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux push-bridge test clean install lint tidy
+.PHONY: build build-bridge build-bridge-linux test clean install lint tidy
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -24,13 +24,6 @@ build-bridge-linux:
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
-BRIDGE_IMAGE ?= ttl.sh/elasticclaw/claw-bridge:1w
-
-push-bridge: build-bridge-linux
-	oras push $(BRIDGE_IMAGE) \
-		--artifact-type application/vnd.elasticclaw.bridge \
-		bin/claw-bridge-linux-amd64:application/octet-stream
-	@echo "Pushed: $(BRIDGE_IMAGE)"
 
 install:
 	go install -buildvcs=false $(LDFLAGS) .
