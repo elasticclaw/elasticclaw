@@ -10,7 +10,7 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 
 build:
 	mkdir -p bin
-	go build -buildvcs=false $(LDFLAGS) -o bin/elasticclaw .
+	go build $(LDFLAGS) -o bin/elasticclaw .
 
 install:
 	go install -buildvcs=false $(LDFLAGS) .
