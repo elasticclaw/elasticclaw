@@ -124,12 +124,16 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		TTL:          ttl,
 		Version:      DefaultVersion,
 	}
-	// Always include the hub's generated key
+	// Always include the hub's generated key (trimmed — no trailing newline)
 	if p.sshPublicKey != "" {
-		body.PublicKeys = append(body.PublicKeys, p.sshPublicKey)
+		body.PublicKeys = append(body.PublicKeys, strings.TrimSpace(p.sshPublicKey))
 	}
-	// Append operator debug keys
-	body.PublicKeys = append(body.PublicKeys, p.extraKeys...)
+	// Append operator debug keys (trimmed)
+	for _, k := range p.extraKeys {
+		if k := strings.TrimSpace(k); k != "" {
+			body.PublicKeys = append(body.PublicKeys, k)
+		}
+	}
 
 	data, err := p.post(ctx, "/vm", body)
 	if err != nil {
