@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
@@ -34,6 +37,13 @@ func init() {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
+	// Use hub if configured
+	cfg, _ := config.LoadGlobalConfig()
+	if cfg != nil && cfg.Hub != nil && cfg.Hub.URL != "" {
+		return runListHub(cfg.Hub)
+	}
+
+	// Fallback: local state
 	store, err := state.NewStore()
 	if err != nil {
 		return err
@@ -44,7 +54,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Filter by provider if specified
 	if listProvider != "" {
 		var filtered []*types.Instance
 		for _, inst := range instances {
@@ -54,8 +63,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 		instances = filtered
 	}
-
-	_ = types.Instance{} // ensure import is used
 
 	if len(instances) == 0 {
 		fmt.Println("No instances found.")
@@ -73,23 +80,45 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tPROVIDER\tSTATUS\tTEMPLATE\tAGE")
-
 	for _, inst := range instances {
 		age := formatAge(inst.CreatedAt)
 		template := inst.Template
 		if inst.TemplateVersion != "" {
 			template = fmt.Sprintf("%s@%s", inst.Template, inst.TemplateVersion)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			inst.Name,
-			inst.Provider,
-			inst.Status,
-			template,
-			age,
-		)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", inst.Name, inst.Provider, inst.Status, template, age)
 	}
 	w.Flush()
+	return nil
+}
 
+func runListHub(h *types.HubConfig) error {
+	client := hub.NewClient(h.URL, h.Token)
+	claws, err := client.ListClaws(context.Background())
+	if err != nil {
+		return fmt.Errorf("hub error: %w", err)
+	}
+
+	if len(claws) == 0 {
+		fmt.Println("No claws registered.")
+		fmt.Println()
+		fmt.Println("Claws register automatically when they start up.")
+		return nil
+	}
+
+	if jsonOut {
+		data, _ := json.MarshalIndent(claws, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tTEMPLATE\tSTATUS\tAGE")
+	for _, c := range claws {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			c.ID[:8], c.Name, c.Template, c.Status, formatAge(c.CreatedAt))
+	}
+	w.Flush()
 	return nil
 }
 
@@ -97,7 +126,6 @@ func formatAge(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-
 	d := time.Since(t)
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -110,5 +138,3 @@ func formatAge(t time.Time) string {
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
-
-

@@ -16,6 +16,7 @@ type Profile struct {
 type GlobalConfig struct {
 	ActiveProfile string   `yaml:"active_profile,omitempty"`
 	Catalogs      []string `yaml:"catalogs,omitempty"`
+	Hub           *HubConfig `yaml:"hub,omitempty"`
 }
 
 // LockFile represents .elasticclaw/lock.yaml
