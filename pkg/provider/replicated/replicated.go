@@ -184,9 +184,28 @@ func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Try wrapped {"vm": {...}} first, then bare object
+	var wrapped struct {
+		VM *vmDetail `json:"vm"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.VM != nil {
+		return wrapped.VM, nil
+	}
+	// Try array {"vms": [...]}
+	var arrWrapped struct {
+		VMs []vmDetail `json:"vms"`
+	}
+	if err := json.Unmarshal(data, &arrWrapped); err == nil && len(arrWrapped.VMs) > 0 {
+		return &arrWrapped.VMs[0], nil
+	}
+	// Bare object fallback (log raw for debugging)
 	var detail vmDetail
 	if err := json.Unmarshal(data, &detail); err != nil {
-		return nil, fmt.Errorf("parse VM detail: %w", err)
+		return nil, fmt.Errorf("parse VM detail (raw: %s): %w", string(data), err)
+	}
+	if detail.Status == "" {
+		// Log raw so we can see the actual shape
+		log.Printf("GetVM raw response for %s: %s", vmID, string(data))
 	}
 	return &detail, nil
 }
