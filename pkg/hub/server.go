@@ -233,7 +233,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	// Build env to inject: hub connection info so the claw can register back
 	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":   s.hubCfg.URL,
+		"ELASTICCLAW_HUB_URL":   s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":   clawID,
 		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
 	}
@@ -842,7 +842,7 @@ else
 fi
 `,
 		bridgeImage, bridgeImage,
-		s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName,
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
@@ -867,6 +867,15 @@ fi
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
+
+// clawHubURL returns the URL claws should use to connect back.
+// Uses public_url if set, otherwise falls back to url.
+func (s *Server) clawHubURL() string {
+	if s.hubCfg.PublicURL != "" {
+		return s.hubCfg.PublicURL
+	}
+	return s.hubCfg.URL
+}
 
 // buildLLMKeyEnv converts the llm_keys map to shell env var lines for the bootstrap script.
 // e.g. {"anthropic": "sk-ant-..."} -> "  ANTHROPIC_API_KEY=\"sk-ant-...\" \\\n"

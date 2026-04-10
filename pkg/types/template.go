@@ -26,6 +26,9 @@ type HubConfig struct {
 	Token string `yaml:"token"`
 
 	// Hub server fields
+	// PublicURL is the URL claws use to connect back to the hub from remote VMs.
+	// If not set, falls back to URL.
+	PublicURL string                   `yaml:"public_url,omitempty"`
 	ClawToken string                   `yaml:"claw_token,omitempty"`
 	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
