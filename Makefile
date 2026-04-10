@@ -1,4 +1,4 @@
-.PHONY: build test clean install lint
+.PHONY: build test clean install lint tidy
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
@@ -8,7 +8,10 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 	-X github.com/elasticclaw/elasticclaw/cmd.Commit=$(COMMIT) \
 	-X github.com/elasticclaw/elasticclaw/cmd.BuildDate=$(BUILD_DATE)"
 
-build:
+tidy:
+	go mod tidy
+
+build: tidy
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
 
