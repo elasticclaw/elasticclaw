@@ -2,10 +2,11 @@ package types
 
 // TemplateConfig is the elasticclaw-config.yaml inside a template directory.
 type TemplateConfig struct {
-	Provider  string             `yaml:"provider"`
-	Resources TemplateResources  `yaml:"resources,omitempty"`
-	Image     string             `yaml:"image,omitempty"`
-	TTL       string             `yaml:"ttl,omitempty"`
+	Provider     string            `yaml:"provider"`
+	Resources    TemplateResources `yaml:"resources,omitempty"`
+	InstanceType string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
+	Image        string            `yaml:"image,omitempty"`
+	TTL          string            `yaml:"ttl,omitempty"`
 }
 
 type TemplateResources struct {
@@ -22,9 +23,16 @@ type HubConfig struct {
 }
 
 type ProviderConfig struct {
+	// Daytona
 	APIURL string `yaml:"api_url,omitempty"`
 	APIKey string `yaml:"api_key,omitempty"`
 	Target string `yaml:"target,omitempty"`
+
+	// Replicated CMX
+	Token               string `yaml:"token,omitempty"`
+	DefaultTTL          string `yaml:"default_ttl,omitempty"`
+	DefaultInstanceType string `yaml:"default_instance_type,omitempty"`
+	SSHPublicKey        string `yaml:"ssh_public_key,omitempty"`
 
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`
@@ -36,6 +44,7 @@ type CreateClawRequest struct {
 	TemplateName string            `json:"template_name"`
 	Provider     string            `json:"provider"`
 	Resources    TemplateResources `json:"resources,omitempty"`
+	InstanceType string            `json:"instance_type,omitempty"` // provider-specific, e.g. r1.large
 	Image        string            `json:"image,omitempty"`
 	TTL          string            `json:"ttl,omitempty"`
 	Files        map[string]string `json:"files"` // filename -> base64 content

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -242,6 +243,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, templateFiles, env)
 		case "local":
 			provErr = s.provisionLocal(ctx, clawID, req, templateFiles, env)
+		case "replicated":
+			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -596,5 +599,26 @@ func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.Cr
 	}
 	log.Printf("local instance created: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
+	return nil
+}
+
+func (s *Server) provisionReplicated(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, env map[string]string) error {
+	p, err := newReplicatedProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("replicated init: %w", err)
+	}
+
+	vmID, err := p.ProvisionClaw(ctx, replicatedpkg.VMCreateRequest{
+		Name:         req.Name,
+		InstanceType: req.InstanceType,
+		TTL:          req.TTL,
+	}, nil, env)
+	if err != nil {
+		return fmt.Errorf("replicated provision: %w", err)
+	}
+	log.Printf("replicated VM created: %s (claw %s) — SSH: %s", vmID, clawID, replicatedpkg.VMHostname(vmID))
+	_, _ = s.db.Exec(
+		`UPDATE claws SET status='starting' WHERE id=?`, clawID,
+	)
 	return nil
 }

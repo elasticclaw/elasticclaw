@@ -31,7 +31,11 @@ Example:
 	RunE: runCreate,
 }
 
-var createTemplate string
+var (
+	createTemplate     string
+	createInstanceType string
+	createTTL          string
+)
 
 func init() {
 	rootCmd.AddCommand(createCmd)
@@ -40,6 +44,8 @@ func init() {
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
 	createCmd.MarkFlagRequired("template")
 	createCmd.Flags().StringArrayVar(&createEnvs, "env", nil, "extra env vars to inject (KEY=value)")
+	createCmd.Flags().StringVar(&createInstanceType, "instance-type", "", "override instance type (e.g. r1.small for Replicated)")
+	createCmd.Flags().StringVar(&createTTL, "ttl", "", "override TTL (e.g. 2h, 24h)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -74,6 +80,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	// Parse extra env vars
 	env := parseEnvVars(createEnvs)
+
+	// CLI flags override template config
+	if createInstanceType != "" {
+		tmplCfg.InstanceType = createInstanceType
+	}
+	if createTTL != "" {
+		tmplCfg.TTL = createTTL
+	}
 
 	// POST to hub
 	client := hub.NewClient(cfg.Hub.URL, cfg.Hub.Token)
