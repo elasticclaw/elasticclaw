@@ -776,14 +776,15 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		bridgeImage = defaultBridgeImage
 	}
 
-	host := replicatedpkg.VMHostname(vmID) // "<vmid>@replicatedvm.com"
-	// Split into user@host
-	parts := strings.SplitN(host, "@", 2)
-	if len(parts) != 2 {
-		log.Printf("bootstrap: invalid VM hostname %s", host)
+	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
+	vm, err := p.GetVM(context.Background(), vmID)
+	if err != nil || vm.DirectSSHEndpoint == "" || vm.DirectSSHPort == 0 {
+		log.Printf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
 	}
-	sshUser, sshHost := parts[0], parts[1]
+	sshUser := "root"
+	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
+	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 
 	// Build the bootstrap script
 	script := fmt.Sprintf(`#!/bin/bash
@@ -870,7 +871,12 @@ func (s *Server) sshRun(user, host, script string) error {
 		Timeout:         30 * time.Second,
 	}
 
-	client, err := gossh.Dial("tcp", host+":22", sshCfg)
+	// host may already include port ("ip:port") or be bare hostname
+	addr := host
+	if !strings.Contains(host, ":") {
+		addr = host + ":22"
+	}
+	client, err := gossh.Dial("tcp", addr, sshCfg)
 	if err != nil {
 		return fmt.Errorf("ssh dial %s: %w", host, err)
 	}

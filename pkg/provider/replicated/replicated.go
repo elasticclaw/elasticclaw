@@ -95,12 +95,14 @@ type vmResponse struct {
 }
 
 type vmDetail struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Status       string `json:"status"` // assigned, running, terminated
-	Distribution string `json:"distribution"`
-	InstanceType string `json:"instance_type"`
-	NetworkID    string `json:"network_id"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Status            string `json:"status"` // assigned, provisioning, preparing, running, terminated
+	Distribution      string `json:"distribution"`
+	InstanceType      string `json:"instance_type"`
+	NetworkID         string `json:"network_id"`
+	DirectSSHEndpoint string `json:"direct_ssh_endpoint"`
+	DirectSSHPort     int    `json:"direct_ssh_port"`
 }
 
 // ─── Provider methods ─────────────────────────────────────────────────────────
@@ -183,34 +185,20 @@ func (p *Provider) WaitForVM(ctx context.Context, vmID string) error {
 // GetVM fetches the current status of a VM.
 func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 	data, err := p.get(ctx, "/vm/"+vmID)
-	log.Printf("GetVM raw response for %s: %s", vmID, string(data))
 	if err != nil {
 		return nil, err
 	}
-	// Try wrapped {"vm": {...}} first, then bare object
+	// Response is {"vm": {...}}
 	var wrapped struct {
 		VM *vmDetail `json:"vm"`
 	}
-	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.VM != nil {
-		return wrapped.VM, nil
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return nil, fmt.Errorf("parse VM response: %w", err)
 	}
-	// Try array {"vms": [...]}
-	var arrWrapped struct {
-		VMs []vmDetail `json:"vms"`
+	if wrapped.VM == nil {
+		return nil, fmt.Errorf("no VM in response")
 	}
-	if err := json.Unmarshal(data, &arrWrapped); err == nil && len(arrWrapped.VMs) > 0 {
-		return &arrWrapped.VMs[0], nil
-	}
-	// Bare object fallback (log raw for debugging)
-	var detail vmDetail
-	if err := json.Unmarshal(data, &detail); err != nil {
-		return nil, fmt.Errorf("parse VM detail (raw: %s): %w", string(data), err)
-	}
-	if detail.Status == "" {
-		// Log raw so we can see the actual shape
-		log.Printf("GetVM raw response for %s: %s", vmID, string(data))
-	}
-	return &detail, nil
+	return wrapped.VM, nil
 }
 
 // DeleteVM terminates a CMX VM.
