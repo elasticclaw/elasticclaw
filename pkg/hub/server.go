@@ -667,7 +667,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 // pollProviderStatus runs forever, polling providers every 30s for VMs in
 // non-terminal states and updating claw status accordingly.
 func (s *Server) pollProviderStatus() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.syncReplicatedVMs()

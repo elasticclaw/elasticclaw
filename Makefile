@@ -1,4 +1,4 @@
-.PHONY: build test clean install lint tidy
+.PHONY: build build-bridge test clean install lint tidy
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -15,6 +15,14 @@ tidy:
 build:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
+
+build-bridge:
+	mkdir -p bin
+	CGO_ENABLED=0 go build -o bin/claw-bridge ./cmd/claw-bridge/
+
+build-bridge-linux:
+	mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
 install:
 	go install -buildvcs=false $(LDFLAGS) .
