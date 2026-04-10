@@ -56,14 +56,19 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		return nil, fmt.Errorf("hub identity: %w", err)
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
-	return &Server{
+	srv := &Server{
 		db:       db,
 		addr:     addr,
 		hubCfg:   hubCfg,
 		identity: id,
 		claws:    make(map[string]*clawConn),
 		users:    make(map[string]*userConn),
-	}, nil
+	}
+
+	// Start background poller to keep provider VM status fresh
+	go srv.pollProviderStatus()
+
+	return srv, nil
 }
 
 // Run starts the HTTP server (blocking).
@@ -217,8 +222,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Pre-register claw row so it exists before the workspace boots
 	clawID := uuid.New().String()
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, req.Name, req.TemplateName, now(),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, status, created_at) VALUES(?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -629,7 +634,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	}
 	// Store vm_id in the claw record for later operations (destroy, SSH, etc.)
 	_, _ = s.db.Exec(
-		`UPDATE claws SET status='starting' WHERE id=?`, clawID,
+		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=?`, vmID, clawID,
 	)
 
 	instanceType := req.InstanceType
@@ -655,4 +660,93 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	log.Printf("  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
 	log.Printf("  Status:        starting (waiting for claw to register)")
 	return nil
+}
+
+// ─── Provider status polling ──────────────────────────────────────────────────
+
+// pollProviderStatus runs forever, polling providers every 30s for VMs in
+// non-terminal states and updating claw status accordingly.
+func (s *Server) pollProviderStatus() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.syncReplicatedVMs()
+	}
+}
+
+func (s *Server) syncReplicatedVMs() {
+	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
+	if !ok || replicatedCfg.Token == "" {
+		return
+	}
+
+	// Find claws provisioned on Replicated that aren't in a terminal state
+	rows, err := s.db.Query(`
+		SELECT id, tenant_id, name, provider_id, status
+		FROM claws
+		WHERE provider = 'replicated'
+		  AND provider_id != ''
+		  AND status NOT IN ('connected', 'failed', 'error', 'offline')
+	`)
+	if err != nil {
+		log.Printf("pollProviderStatus: query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type clawRow struct {
+		id, tenantID, name, providerID, status string
+	}
+	var pending []clawRow
+	for rows.Next() {
+		var c clawRow
+		if err := rows.Scan(&c.id, &c.tenantID, &c.name, &c.providerID, &c.status); err != nil {
+			continue
+		}
+		pending = append(pending, c)
+	}
+	rows.Close()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	p, err := newReplicatedProvider(replicatedCfg)
+	if err != nil {
+		log.Printf("pollProviderStatus: provider init error: %v", err)
+		return
+	}
+
+	for _, c := range pending {
+		vm, err := p.GetVM(context.Background(), c.providerID)
+		if err != nil {
+			log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
+			continue
+		}
+
+		// Map Replicated VM status to claw status
+		var newStatus string
+		switch vm.Status {
+		case "running":
+			// VM is up but claw hasn't registered yet — stay 'starting'
+			// Once the claw connects via WebSocket it'll flip to 'connected'
+			newStatus = "starting"
+		case "terminated", "error":
+			newStatus = "error"
+			log.Printf("Replicated VM %s for claw %s (%s) entered state: %s", c.providerID, c.name, c.id, vm.Status)
+		default:
+			// assigned, pending, etc — still coming up
+			newStatus = "provisioning"
+		}
+
+		if newStatus != c.status {
+			_, _ = s.db.Exec(`UPDATE claws SET status=? WHERE id=?`, newStatus, c.id)
+			log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
+				c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
+			s.broadcastToUsers(c.tenantID, types.WSMessage{
+				Type:    "claw_status",
+				Payload: map[string]string{"claw_id": c.id, "status": newStatus},
+			})
+		}
+	}
 }
