@@ -13,7 +13,7 @@
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            go_1_24   # update to go_1_26 when nixpkgs unstable ships it
+            go_1_26
             gopls
             gotools
             golangci-lint
@@ -22,7 +22,7 @@
           ];
 
           shellHook = ''
-            echo "ElasticClaw dev — $(go version)"
+            echo "ElasticClaw dev — $(go version)"  # go 1.26.x required
           '';
         };
       });
