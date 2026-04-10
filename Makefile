@@ -9,10 +9,10 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 	-X github.com/elasticclaw/elasticclaw/cmd.BuildDate=$(BUILD_DATE)"
 
 build:
-	go build $(LDFLAGS) -o elasticclaw .
+	go build -buildvcs=false $(LDFLAGS) -o elasticclaw .
 
 install:
-	go install $(LDFLAGS) .
+	go install -buildvcs=false $(LDFLAGS) .
 
 test:
 	go test -v ./...
