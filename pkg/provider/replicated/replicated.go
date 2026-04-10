@@ -5,6 +5,7 @@ package replicated
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -124,16 +125,14 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		TTL:          ttl,
 		Version:      DefaultVersion,
 	}
-	// Always include the hub's generated key
+	// Always include the hub's generated key (base64-encoded full authorized_keys line)
 	if p.sshPublicKey != "" {
-		if k := extractSSHKeyBlob(p.sshPublicKey); k != "" {
-			body.PublicKeys = append(body.PublicKeys, k)
-		}
+		body.PublicKeys = append(body.PublicKeys, encodeSSHKey(p.sshPublicKey))
 	}
 	// Append operator debug keys
 	for _, raw := range p.extraKeys {
-		if k := extractSSHKeyBlob(raw); k != "" {
-			body.PublicKeys = append(body.PublicKeys, k)
+		if raw = strings.TrimSpace(raw); raw != "" {
+			body.PublicKeys = append(body.PublicKeys, encodeSSHKey(raw))
 		}
 	}
 
@@ -315,17 +314,7 @@ func (p *Provider) Destroy(ctx context.Context, instanceID string, _ bool) error
 	return p.DeleteVM(ctx, instanceID)
 }
 
-// extractSSHKeyBlob extracts the base64 key blob from an authorized_keys format string.
-// "ssh-ed25519 AAAA...blob== comment" → "AAAA...blob=="
-// If the input is already just a blob, it's returned as-is.
-func extractSSHKeyBlob(authorizedKey string) string {
-	parts := strings.Fields(strings.TrimSpace(authorizedKey))
-	if len(parts) >= 2 {
-		// parts[0] = key type (ssh-ed25519, etc), parts[1] = base64 blob
-		return parts[1]
-	}
-	if len(parts) == 1 {
-		return parts[0]
-	}
-	return ""
+// encodeSSHKey base64-encodes the full authorized_keys line for the Replicated API.
+func encodeSSHKey(authorizedKey string) string {
+	return base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(authorizedKey)))
 }
