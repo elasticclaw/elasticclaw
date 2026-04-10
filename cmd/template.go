@@ -4,16 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/elasticclaw/elasticclaw/pkg/config"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
-)
-
-var (
-	templateNewName     string
-	templateNewProvider string
 )
 
 var templateCmd = &cobra.Command{
@@ -21,317 +15,251 @@ var templateCmd = &cobra.Command{
 	Short: "Template management commands",
 }
 
-var templateNewCmd = &cobra.Command{
-	Use:   "new",
-	Short: "Scaffold a new template from scratch",
-	Long: `Create a new ElasticClaw template with all required files.
+var templateCreateCmd = &cobra.Command{
+	Use:   "create <name>",
+	Short: "Scaffold a new template in .elasticclaw/templates/<name>/",
+	Long: `Create a new ElasticClaw template in the current repo.
+
+The template is created at .elasticclaw/templates/<name>/ and contains:
+  - elasticclaw-config.yaml   provider, instance type, TTL
+  - AGENTS.md                 agent instructions and workspace config
+  - SOUL.md                   agent personality and values
+  - TOOLS.md                  environment-specific notes
+  - IDENTITY.md               agent name and metadata
+  - USER.md                   about the human
+  - MEMORY.md                 long-term memory (pre-seeded if desired)
 
 Example:
-  elasticclaw template new --name support-agent
-  elasticclaw template new --name support-agent --provider daytona`,
-	RunE: runTemplateNew,
+  elasticclaw template create support
+  elasticclaw template create dev --provider replicated --instance-type r1.small`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTemplateCreate,
 }
 
-var templateValidateCmd = &cobra.Command{
-	Use:   "validate [path]",
-	Short: "Validate a template",
-	Long: `Validate a template's structure and manifest.
-
-Checks:
-  - Required files exist
-  - Manifest schema is valid
-  - Identity profiles are valid
-  - Provider compatibility`,
-	RunE: runTemplateValidate,
+var templateListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List available templates",
+	RunE:  runTemplateList,
 }
+
+var (
+	templateCreateProvider     string
+	templateCreateInstanceType string
+	templateCreateTTL          string
+)
 
 func init() {
 	rootCmd.AddCommand(templateCmd)
-	templateCmd.AddCommand(templateNewCmd)
-	templateCmd.AddCommand(templateValidateCmd)
+	templateCmd.AddCommand(templateCreateCmd)
+	templateCmd.AddCommand(templateListCmd)
 
-	templateNewCmd.Flags().StringVarP(&templateNewName, "name", "n", "", "template name (required)")
-	templateNewCmd.MarkFlagRequired("name")
-	templateNewCmd.Flags().StringVar(&templateNewProvider, "provider", "daytona", "default provider")
+	templateCreateCmd.Flags().StringVar(&templateCreateProvider, "provider", "replicated", "provider to use (replicated, daytona, local)")
+	templateCreateCmd.Flags().StringVar(&templateCreateInstanceType, "instance-type", "r1.large", "instance type (e.g. r1.small, r1.large)")
+	templateCreateCmd.Flags().StringVar(&templateCreateTTL, "ttl", "48h", "time-to-live for the VM (e.g. 4h, 24h, 48h)")
 }
 
-func runTemplateNew(cmd *cobra.Command, args []string) error {
-	// Create directory structure
-	dirs := []string{"memory"}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
-	}
+func runTemplateCreate(cmd *cobra.Command, args []string) error {
+	name := args[0]
 
-	// Create manifest
-	manifest := &types.Manifest{
-		Name:        templateNewName,
-		Version:     "0.1.0",
-		Description: fmt.Sprintf("%s OpenClaw agent template", templateNewName),
-		OpenClaw: types.OpenClawConfig{
-			RequiredFiles: []string{
-				"AGENTS.md",
-				"SOUL.md",
-				"TOOLS.md",
-				"IDENTITY.md",
-				"USER.md",
-				"MEMORY.md",
-			},
-		},
-		Providers: types.ProvidersConfig{
-			Supported: []string{templateNewProvider},
-		},
-		Identity: types.IdentityConfig{
-			Profiles: map[string]types.IdentityProfile{
-				"default": {
-					Creddy: &types.CreddyConfig{
-						Bindings: []types.CredentialBinding{
-							{
-								Audience: "github",
-								Scopes:   []string{"repo:read"},
-								TTL:      "4h",
-							},
-						},
-					},
-				},
-			},
-		},
-		State: types.StateConfig{
-			Default: "local",
-			PromotableTargets: []string{
-				"MEMORY.md",
-				"TOOLS.md",
-			},
-		},
-	}
-
-	if err := config.SaveManifest(manifest); err != nil {
+	// Resolve destination: .elasticclaw/templates/<name>/
+	cwd, err := os.Getwd()
+	if err != nil {
 		return err
 	}
-	fmt.Println("✓ Created elasticclaw.yaml")
+	dest := filepath.Join(cwd, ".elasticclaw", "templates", name)
 
-	// Create OpenClaw files
+	if _, err := os.Stat(dest); err == nil {
+		return fmt.Errorf("template %q already exists at %s", name, dest)
+	}
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return fmt.Errorf("create template dir: %w", err)
+	}
+
+	title := strings.Title(strings.ReplaceAll(name, "-", " "))
+
 	files := map[string]string{
-		"AGENTS.md": fmt.Sprintf(`# AGENTS.md - %s
+		"elasticclaw-config.yaml": fmt.Sprintf(`# ElasticClaw template configuration
+provider: %s
+instance_type: %s
+ttl: %s
+`, templateCreateProvider, templateCreateInstanceType, templateCreateTTL),
 
-## Overview
+		"AGENTS.md": fmt.Sprintf(`# AGENTS.md - Your Workspace
 
-This is the %s agent workspace.
+## First Run
 
-## Instructions
+If BOOTSTRAP.md exists, follow it, then delete it.
 
-[Add agent operating instructions here]
+## Every Session
+
+1. Read SOUL.md
+2. Read USER.md
+3. Read memory/YYYY-MM-DD.md (today) for recent context
 
 ## Memory
 
 - Daily notes: memory/YYYY-MM-DD.md
 - Long-term: MEMORY.md
-`, templateNewName, templateNewName),
+
+## What You Are
+
+%s agent. [Describe the agent's purpose here.]
+
+## How to Work
+
+[Describe operating procedures, what tools to use, how to handle tasks.]
+`, title),
 
 		"SOUL.md": fmt.Sprintf(`# SOUL.md - Who You Are
 
-## Identity
+You are %s.
 
-You are %s, an AI assistant.
+## Core traits
 
-## Core Values
-
-- Be helpful and direct
-- Be honest about limitations
-- Respect privacy and security
+- [Describe personality]
+- [Describe values]
+- [Describe communication style]
 
 ## Boundaries
 
-- Don't share private information
-- Ask before taking external actions
-- When in doubt, ask
+- Don't share private data
+- Ask before external actions
+- When uncertain, ask
 
 ## Style
 
-- Be concise but thorough
-- Use clear language
-- Stay focused on the task
-`, templateNewName),
+[How should responses be formatted? What tone?]
+`, title),
 
-		"TOOLS.md": `# TOOLS.md - Local Notes
+		"TOOLS.md": `# TOOLS.md - Environment Notes
 
-This file contains environment-specific notes and tool configurations.
+## Setup
 
-## Environment
-
-[Add environment-specific notes here]
+[Document any environment-specific setup, credentials, tool locations]
 
 ## Tools
 
-[Document tool configurations and usage notes]
+[Notes on tools available in this environment]
 `,
 
 		"IDENTITY.md": fmt.Sprintf(`# IDENTITY.md - Who Am I?
 
 - **Name:** %s
-- **Role:** AI Assistant
+- **Role:** [describe role]
 - **Emoji:** 🤖
-`, templateNewName),
+`, title),
 
 		"USER.md": `# USER.md - About Your Human
 
-- **Name:** [User name]
-- **Timezone:** [Timezone]
-- **Notes:** [Preferences and context]
+- **Name:** [Name]
+- **Timezone:** [e.g. America/Chicago]
+- **Notes:** [Preferences, working style, context]
 `,
 
 		"MEMORY.md": `# MEMORY.md - Long-Term Memory
 
-## Key Information
-
-[Important context that persists across sessions]
-
-## Lessons Learned
-
-[Things discovered that should be remembered]
-`,
-
-		".elasticclawignore": `# ElasticClaw ignore file
-# Files matching these patterns won't be included in the template
-
-.git/
-.elasticclaw/
-*.log
-*.tmp
-.DS_Store
-`,
-
-		".gitignore": `# ElasticClaw
-.elasticclaw/
-
-# OS
-.DS_Store
-
-# Editor
-*.swp
-*.swo
-.idea/
-.vscode/
+[Pre-seed with important context the agent should always have]
 `,
 	}
 
 	for filename, content := range files {
-		if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
-			return fmt.Errorf("failed to create %s: %w", filename, err)
+		path := filepath.Join(dest, filename)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			return fmt.Errorf("write %s: %w", filename, err)
 		}
-		fmt.Printf("✓ Created %s\n", filename)
+		fmt.Printf("  ✓ %s\n", filename)
 	}
 
-	// Create empty memory/.gitkeep
-	if err := os.WriteFile("memory/.gitkeep", []byte(""), 0644); err != nil {
-		return fmt.Errorf("failed to create memory/.gitkeep: %w", err)
+	// Create empty memory/ dir
+	memDir := filepath.Join(dest, "memory")
+	if err := os.MkdirAll(memDir, 0755); err != nil {
+		return fmt.Errorf("create memory dir: %w", err)
 	}
-	fmt.Println("✓ Created memory/")
+	fmt.Println("  ✓ memory/")
 
 	fmt.Println()
-	fmt.Printf("Template %s created successfully!\n", templateNewName)
+	fmt.Printf("✓ Template %q created at .elasticclaw/templates/%s/\n", name, name)
 	fmt.Println()
 	fmt.Println("Next steps:")
-	fmt.Println("  1. Edit the template files to customize your agent")
-	fmt.Println("  2. Run: elasticclaw init")
-	fmt.Println("  3. Run: elasticclaw create --name <instance-name>")
+	fmt.Printf("  1. Edit .elasticclaw/templates/%s/SOUL.md and AGENTS.md\n", name)
+	fmt.Printf("  2. elasticclaw create --name my-claw --template %s\n", name)
 
 	return nil
 }
 
-func runTemplateValidate(cmd *cobra.Command, args []string) error {
-	path := "."
-	if len(args) > 0 {
-		path = args[0]
-	}
-
-	manifestPath := filepath.Join(path, "elasticclaw.yaml")
-
-	// Load manifest
-	data, err := os.ReadFile(manifestPath)
+func runTemplateList(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("elasticclaw.yaml not found in %s", path)
-		}
-		return fmt.Errorf("failed to read manifest: %w", err)
+		return err
 	}
 
-	var manifest types.Manifest
-	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("invalid manifest YAML: %w", err)
+	type templateEntry struct {
+		name     string
+		dir      string
+		provider string
 	}
 
-	fmt.Printf("Validating template: %s v%s\n", manifest.Name, manifest.Version)
-	fmt.Println()
+	var found []templateEntry
 
-	errors := []string{}
-	warnings := []string{}
-
-	// Check required fields
-	if manifest.Name == "" {
-		errors = append(errors, "manifest missing 'name' field")
-	}
-	if manifest.Version == "" {
-		warnings = append(warnings, "manifest missing 'version' field")
-	}
-
-	// Check required files
-	requiredFiles := manifest.OpenClaw.RequiredFiles
-	if len(requiredFiles) == 0 {
-		requiredFiles = []string{"AGENTS.md", "SOUL.md"}
-	}
-
-	for _, file := range requiredFiles {
-		filePath := filepath.Join(path, file)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			errors = append(errors, fmt.Sprintf("missing required file: %s", file))
+	// Check repo-local templates
+	localDir := filepath.Join(cwd, ".elasticclaw", "templates")
+	if entries, err := os.ReadDir(localDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			provider := providerFromConfig(filepath.Join(localDir, e.Name()))
+			found = append(found, templateEntry{
+				name:     e.Name(),
+				dir:      ".elasticclaw/templates/" + e.Name(),
+				provider: provider,
+			})
 		}
 	}
 
-	// Check identity profiles
-	for name, profile := range manifest.Identity.Profiles {
-		if profile.Creddy == nil && profile.Raw == nil {
-			warnings = append(warnings, fmt.Sprintf("identity profile %q has no creddy or raw config", name))
-		}
-		if profile.Creddy != nil {
-			for i, binding := range profile.Creddy.Bindings {
-				if binding.Audience == "" {
-					errors = append(errors, fmt.Sprintf("identity profile %q binding %d missing audience", name, i))
+	// Check global templates
+	if home, err := os.UserHomeDir(); err == nil {
+		globalDir := filepath.Join(home, ".elasticclaw", "templates")
+		if entries, err := os.ReadDir(globalDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
 				}
+				provider := providerFromConfig(filepath.Join(globalDir, e.Name()))
+				found = append(found, templateEntry{
+					name:     e.Name(),
+					dir:      "~/.elasticclaw/templates/" + e.Name(),
+					provider: provider,
+				})
 			}
 		}
 	}
 
-	// Check providers
-	if len(manifest.Providers.Supported) == 0 {
-		warnings = append(warnings, "no supported providers specified")
-	}
-
-	// Print results
-	if len(errors) > 0 {
-		fmt.Println("Errors:")
-		for _, e := range errors {
-			fmt.Printf("  ✗ %s\n", e)
-		}
+	if len(found) == 0 {
+		fmt.Println("No templates found.")
 		fmt.Println()
-	}
-
-	if len(warnings) > 0 {
-		fmt.Println("Warnings:")
-		for _, w := range warnings {
-			fmt.Printf("  ⚠ %s\n", w)
-		}
-		fmt.Println()
-	}
-
-	if len(errors) == 0 {
-		fmt.Println("✓ Template is valid")
-		if len(warnings) > 0 {
-			fmt.Printf("  (%d warnings)\n", len(warnings))
-		}
+		fmt.Println("Create one with:")
+		fmt.Println("  elasticclaw template create <name>")
 		return nil
 	}
 
-	return fmt.Errorf("validation failed with %d errors", len(errors))
+	fmt.Printf("%-20s  %-12s  %s\n", "NAME", "PROVIDER", "LOCATION")
+	for _, t := range found {
+		fmt.Printf("%-20s  %-12s  %s\n", t.name, t.provider, t.dir)
+	}
+	return nil
+}
+
+func providerFromConfig(templateDir string) string {
+	data, err := os.ReadFile(filepath.Join(templateDir, "elasticclaw-config.yaml"))
+	if err != nil {
+		return "unknown"
+	}
+	var cfg struct {
+		Provider string `yaml:"provider"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil || cfg.Provider == "" {
+		return "unknown"
+	}
+	return cfg.Provider
 }
