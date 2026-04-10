@@ -17,8 +17,6 @@
             gopls
             gotools
             golangci-lint
-            sqlite
-            gcc       # required for go-sqlite3 (cgo)
             git       # required for go VCS stamping during build
           ];
 

@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/daytonaio/daytona/libs/sdk-go v0.152.0
 	github.com/google/uuid v1.6.0
-	github.com/mattn/go-sqlite3 v1.14.42
+	modernc.org/sqlite v1.37.0
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
 	gopkg.in/yaml.v3 v3.0.1
