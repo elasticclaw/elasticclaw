@@ -858,10 +858,15 @@ func buildLLMKeyEnv(keys map[string]string) string {
 }
 // sshRun connects to host via the hub's SSH identity and runs a script.
 func (s *Server) sshRun(user, host, script string) error {
+	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
+	pubKeyFP := gossh.FingerprintSHA256(s.identity.PrivateKey.PublicKey())
+	log.Printf("SSH attempting: user=%s host=%s:22 key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
+	log.Printf("SSH public key being used:\n%s", s.identity.PublicKey)
+
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(), // TODO: use known_hosts
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}
 
