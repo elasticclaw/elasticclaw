@@ -809,8 +809,15 @@ echo "Pulling claw-bridge from %s..."
 mkdir -p /tmp/claw-bridge-dl
 cd /tmp/claw-bridge-dl
 oras pull %s
-chmod +x claw-bridge-linux-amd64
-sudo mv claw-bridge-linux-amd64 /usr/local/bin/claw-bridge
+# oras preserves the annotated path (bin/claw-bridge-linux-amd64), find and install it
+BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge-linux-amd64' -type f | head -1)
+if [ -z "$BINARY" ]; then
+  echo "ERROR: claw-bridge binary not found after oras pull"
+  ls -la /tmp/claw-bridge-dl/
+  exit 1
+fi
+chmod +x "$BINARY"
+sudo mv "$BINARY" /usr/local/bin/claw-bridge
 
 # Start claw-bridge as a background service
 echo "Starting claw-bridge..."
@@ -868,7 +875,7 @@ func buildLLMKeyEnv(keys map[string]string) string {
 func (s *Server) sshRun(user, host, script string) error {
 	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
 	pubKeyFP := gossh.FingerprintSHA256(s.identity.PrivateKey.PublicKey())
-	log.Printf("SSH attempting: user=%s host=%s:22 key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
+	log.Printf("SSH attempting: user=%s host=%s key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
 	log.Printf("SSH public key being used:\n%s", s.identity.PublicKey)
 
 	sshCfg := &gossh.ClientConfig{
@@ -878,12 +885,7 @@ func (s *Server) sshRun(user, host, script string) error {
 		Timeout:         30 * time.Second,
 	}
 
-	// host may already include port ("ip:port") or be bare hostname
-	addr := host
-	if !strings.Contains(host, ":") {
-		addr = host + ":22"
-	}
-	client, err := gossh.Dial("tcp", addr, sshCfg)
+	client, err := gossh.Dial("tcp", host, sshCfg)
 	if err != nil {
 		return fmt.Errorf("ssh dial %s: %w", host, err)
 	}
