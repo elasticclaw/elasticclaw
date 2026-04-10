@@ -819,15 +819,15 @@ fi
 chmod +x "$BINARY"
 sudo mv "$BINARY" /usr/local/bin/claw-bridge
 
-# Start claw-bridge as a background service
-echo "Starting claw-bridge..."
-nohup env \
-  ELASTICCLAW_HUB_URL="%s" \
-  ELASTICCLAW_CLAW_ID="%s" \
-  ELASTICCLAW_CLAW_TOKEN="%s" \
-  ELASTICCLAW_CLAW_NAME="%s" \
-  OPENCLAW_DEFAULT_MODEL="%s" \
-%s  claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
+# Export env vars then start claw-bridge
+export ELASTICCLAW_HUB_URL="%s"
+export ELASTICCLAW_CLAW_ID="%s"
+export ELASTICCLAW_CLAW_TOKEN="%s"
+export ELASTICCLAW_CLAW_NAME="%s"
+export OPENCLAW_DEFAULT_MODEL="%s"
+%s
+echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
+nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
 
 BRIDGE_PID=$!
 echo "claw-bridge started (PID $BRIDGE_PID)"
@@ -886,7 +886,7 @@ func buildLLMKeyEnv(keys map[string]string) string {
 	var b strings.Builder
 	for provider, key := range keys {
 		envVar := strings.ToUpper(provider) + "_API_KEY"
-		fmt.Fprintf(&b, "  %s=\"%s\" \\\n", envVar, key)
+		fmt.Fprintf(&b, "export %s=%q\n", envVar, key)
 	}
 	return b.String()
 }
