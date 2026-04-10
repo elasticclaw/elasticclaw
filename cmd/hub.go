@@ -41,16 +41,17 @@ func init() {
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".elasticclaw")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
 	dbPath := hubDBPath
 	if dbPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		dir := filepath.Join(home, ".elasticclaw")
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
 		dbPath = filepath.Join(dir, "hub.db")
 	}
 
