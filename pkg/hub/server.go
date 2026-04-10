@@ -627,9 +627,32 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
-	log.Printf("replicated VM created: %s (claw %s) — SSH: %s", vmID, clawID, replicatedpkg.VMHostname(vmID))
+	// Store vm_id in the claw record for later operations (destroy, SSH, etc.)
 	_, _ = s.db.Exec(
 		`UPDATE claws SET status='starting' WHERE id=?`, clawID,
 	)
+
+	instanceType := req.InstanceType
+	if instanceType == "" {
+		instanceType = cfg.DefaultInstanceType
+		if instanceType == "" {
+			instanceType = replicatedpkg.DefaultInstanceType
+		}
+	}
+	ttl := req.TTL
+	if ttl == "" {
+		ttl = cfg.DefaultTTL
+		if ttl == "" {
+			ttl = replicatedpkg.DefaultTTL
+		}
+	}
+
+	log.Printf("Replicated VM provisioned")
+	log.Printf("  Claw:          %s (%s)", req.Name, clawID)
+	log.Printf("  VM ID:         %s", vmID)
+	log.Printf("  Instance type: %s", instanceType)
+	log.Printf("  TTL:           %s", ttl)
+	log.Printf("  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
+	log.Printf("  Status:        starting (waiting for claw to register)")
 	return nil
 }
