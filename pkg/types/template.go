@@ -16,18 +16,20 @@ type TemplateResources struct {
 }
 
 // HubConfig is used in two contexts:
-//   - ~/.elasticclaw/config.yaml: URL + Token (CLI connection to hub)
-//   - ~/.elasticclaw/hub.yaml:    full server config (providers, claw token, etc.)
+//   - ~/.elasticclaw/hub.yaml: CLI connection + full server config
 type HubConfig struct {
-	// CLI connection fields (stored in config.yaml)
+	// CLI connection fields
 	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
 
-	// Hub server fields (stored in hub.yaml)
-	ClawToken     string                   `yaml:"claw_token,omitempty"`
-	Providers     map[string]ProviderConfig `yaml:"providers,omitempty"`
+	// Hub server fields
+	ClawToken string                   `yaml:"claw_token,omitempty"`
+	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
-	SSHPublicKeys []string                 `yaml:"ssh_public_keys,omitempty"`
+	SSHPublicKeys []string `yaml:"ssh_public_keys,omitempty"`
+	// BridgeImage is the OCI artifact reference for the claw-bridge binary.
+	// Defaults to ghcr.io/elasticclaw/claw-bridge:latest if not set.
+	BridgeImage string `yaml:"bridge_image,omitempty"`
 }
 
 type ProviderConfig struct {

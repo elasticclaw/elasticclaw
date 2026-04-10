@@ -14,6 +14,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/google/uuid"
+	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -728,9 +729,12 @@ func (s *Server) syncReplicatedVMs() {
 		var newStatus string
 		switch vm.Status {
 		case "running":
-			// VM is up but claw hasn't registered yet — stay 'starting'
-			// Once the claw connects via WebSocket it'll flip to 'connected'
 			newStatus = "starting"
+			// First time we see running — trigger bootstrap
+			if c.status == "provisioning" {
+				log.Printf("Claw %s (%s): VM running, bootstrapping...", c.name, c.id[:8])
+				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg)
+			}
 		case "terminated", "error":
 			newStatus = "error"
 			log.Printf("Replicated VM %s for claw %s (%s) entered state: %s", c.providerID, c.name, c.id, vm.Status)
@@ -749,4 +753,93 @@ func (s *Server) syncReplicatedVMs() {
 			})
 		}
 	}
+}
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+
+const defaultBridgeImage = "ghcr.io/elasticclaw/claw-bridge:latest"
+
+// bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
+// claw-bridge binary from OCI, and starts it with hub connection env vars.
+func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	bridgeImage := s.hubCfg.BridgeImage
+	if bridgeImage == "" {
+		bridgeImage = defaultBridgeImage
+	}
+
+	host := replicatedpkg.VMHostname(vmID) // "<vmid>@replicatedvm.com"
+	// Split into user@host
+	parts := strings.SplitN(host, "@", 2)
+	if len(parts) != 2 {
+		log.Printf("bootstrap: invalid VM hostname %s", host)
+		return
+	}
+	sshUser, sshHost := parts[0], parts[1]
+
+	// Build the bootstrap script
+	script := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+
+# Install oras if not present
+if ! command -v oras &>/dev/null; then
+  echo "Installing oras..."
+  curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
+  sudo mv /tmp/oras /usr/local/bin/oras
+fi
+
+# Pull claw-bridge binary from OCI
+echo "Pulling claw-bridge from %s..."
+mkdir -p /tmp/claw-bridge-dl
+cd /tmp/claw-bridge-dl
+oras pull %s
+chmod +x claw-bridge-linux-amd64
+sudo mv claw-bridge-linux-amd64 /usr/local/bin/claw-bridge
+
+# Start claw-bridge as a background service
+echo "Starting claw-bridge..."
+nohup env \
+  ELASTICCLAW_HUB_URL="%s" \
+  ELASTICCLAW_CLAW_ID="%s" \
+  ELASTICCLAW_CLAW_TOKEN="%s" \
+  ELASTICCLAW_CLAW_NAME="%s" \
+  claw-bridge >> /var/log/claw-bridge.log 2>&1 &
+
+echo "claw-bridge started (PID $!)"
+`, bridgeImage, bridgeImage, s.hubCfg.URL, clawID, s.hubCfg.ClawToken, clawName)
+
+	if err := s.sshRun(sshUser, sshHost, script); err != nil {
+		log.Printf("bootstrap failed for claw %s: %v", clawID, err)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		return
+	}
+	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
+}
+
+// sshRun connects to host via the hub's SSH identity and runs a script.
+func (s *Server) sshRun(user, host, script string) error {
+	sshCfg := &gossh.ClientConfig{
+		User:            user,
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(), // TODO: use known_hosts
+		Timeout:         30 * time.Second,
+	}
+
+	client, err := gossh.Dial("tcp", host+":22", sshCfg)
+	if err != nil {
+		return fmt.Errorf("ssh dial %s: %w", host, err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("ssh session: %w", err)
+	}
+	defer sess.Close()
+
+	out, err := sess.CombinedOutput(script)
+	if err != nil {
+		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, string(out))
+	}
+	log.Printf("bootstrap output:\n%s", string(out))
+	return nil
 }
