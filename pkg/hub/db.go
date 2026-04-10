@@ -20,6 +20,11 @@ func openDB(path string) (*sql.DB, error) {
 }
 
 func migrate(db *sql.DB) error {
+	// Add columns that may be missing from older databases.
+	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so ignore errors.
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
+
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
@@ -41,8 +46,7 @@ func migrate(db *sql.DB) error {
 		created_at  DATETIME NOT NULL
 	);
 
-	ALTER TABLE claws ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT '';
-	ALTER TABLE claws ADD COLUMN IF NOT EXISTS provider_id TEXT NOT NULL DEFAULT '';
+
 
 	CREATE TABLE IF NOT EXISTS messages (
 		id         TEXT PRIMARY KEY,
