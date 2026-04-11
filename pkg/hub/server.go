@@ -222,9 +222,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	// Pre-register claw row so it exists before the workspace boots
 	clawID := uuid.New().String()
+	filesJSON, _ := json.Marshal(req.Files)
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, status, created_at) VALUES(?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, now(),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, status, created_at) VALUES(?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON), now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -771,6 +772,10 @@ const defaultBridgeImage = "ghcr.io/elasticclaw/claw-bridge:latest"
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from OCI, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	var filesJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	var files map[string]string
+	_ = json.Unmarshal([]byte(filesJSON), &files)
 	// Resolve model: template override wins over hub default
 	var templateDefaultModel string
 	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
@@ -804,7 +809,45 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# Install oras if not present
+# ── Install Node.js (required for OpenClaw) ───────────────────────────────────
+if ! command -v node &>/dev/null || [ "$(node -e 'process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)' 2>/dev/null; echo $?)" = "1" ]; then
+  echo "Installing Node.js 24..."
+  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+fi
+echo "Node: $(node --version)"
+
+# ── Install OpenClaw ──────────────────────────────────────────────────────────
+if ! command -v openclaw &>/dev/null; then
+  echo "Installing OpenClaw..."
+  curl -fsSL https://openclaw.ai/install.sh | bash
+  export PATH="$HOME/.openclaw/bin:$PATH"
+fi
+echo "OpenClaw: $(openclaw --version 2>/dev/null || echo 'installed')"
+
+# ── Write OpenClaw workspace files ───────────────────────────────────────────
+mkdir -p "$HOME/.openclaw/workspace"
+
+# ── Configure OpenClaw non-interactively ─────────────────────────────────────
+if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
+  echo "Configuring OpenClaw..."
+  openclaw onboard --non-interactive \
+    --provider anthropic \
+    --api-key "${ANTHROPIC_API_KEY:-}" \
+    --model "${OPENCLAW_DEFAULT_MODEL:-anthropic/claude-sonnet-4-6}" \
+    --workspace "$HOME/.openclaw/workspace" \
+    --no-daemon 2>/dev/null || true
+fi
+
+# ── Start OpenClaw gateway ────────────────────────────────────────────────────
+if ! openclaw gateway status &>/dev/null; then
+  echo "Starting OpenClaw gateway..."
+  nohup openclaw gateway start >> "$HOME/openclaw-gateway.log" 2>&1 &
+  sleep 3
+fi
+echo "OpenClaw gateway running on :18789"
+
+# ── Install oras if not present ───────────────────────────────────────────────
 if ! command -v oras &>/dev/null; then
   echo "Installing oras..."
   curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
@@ -853,6 +896,20 @@ fi
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
+
+	// Write template files to workspace via separate SSH sessions
+	if len(files) > 0 {
+		for attempt := 1; attempt <= 5; attempt++ {
+			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
+				log.Printf("Template files written for claw %s", clawName)
+				break
+			} else if attempt == 5 {
+				log.Printf("Warning: failed to write template files: %v", err)
+			} else {
+				time.Sleep(10 * time.Second)
+			}
+		}
+	}
 
 	// Retry SSH up to 5 times with 10s delay — VM may report 'running' before SSH is ready
 	var sshErr error
@@ -928,5 +985,35 @@ func (s *Server) sshRun(user, host, script string) error {
 		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, string(out))
 	}
 	log.Printf("bootstrap output:\n%s", string(out))
+	return nil
+}
+
+// sshWriteFiles writes a map of filename->content to a remote directory via SSH.
+func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) error {
+	sshCfg := &gossh.ClientConfig{
+		User:            user,
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+	client, err := gossh.Dial("tcp", host, sshCfg)
+	if err != nil {
+		return fmt.Errorf("ssh dial: %w", err)
+	}
+	defer client.Close()
+
+	for name, content := range files {
+		sess, err := client.NewSession()
+		if err != nil {
+			return fmt.Errorf("ssh session: %w", err)
+		}
+		// Use cat with heredoc to write the file safely
+		cmd := fmt.Sprintf("mkdir -p %s && cat > %s/%s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", dir, dir, name, content)
+		out, err := sess.CombinedOutput(cmd)
+		sess.Close()
+		if err != nil {
+			return fmt.Errorf("write %s: %w\n%s", name, err, string(out))
+		}
+	}
 	return nil
 }
