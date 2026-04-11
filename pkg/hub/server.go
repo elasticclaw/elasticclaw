@@ -726,7 +726,10 @@ func (s *Server) syncReplicatedVMs() {
 			log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			continue
 		}
-		log.Printf("Claw %s (%s): VM %s status=%s", c.name, c.id[:8], c.providerID, vm.Status)
+		// Only log if status changed or there's a problem
+		if vm.Status != c.status && vm.Status != "running" {
+			log.Printf("Claw %s (%s): VM %s %s → %s", c.name, c.id[:8], c.providerID, c.status, vm.Status)
+		}
 
 		// Map Replicated VM status to claw status
 		var newStatus string
