@@ -54,7 +54,7 @@ func initConfig() {
 
 		viper.AddConfigPath(home + "/.elasticclaw")
 		viper.SetConfigType("yaml")
-		viper.SetConfigName("hub")
+		viper.SetConfigName("config")
 	}
 
 	viper.SetEnvPrefix("ELASTICCLAW")

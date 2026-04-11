@@ -39,21 +39,22 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	// Load existing hub config to preserve all other fields (providers, keys, etc.)
-	hubCfg, err := config.LoadHubConfig()
+	// Write CLI connection info to config.yaml (separate from hub.yaml server config)
+	cfg, err := config.LoadGlobalConfig()
 	if err != nil {
-		hubCfg = &types.HubConfig{}
+		cfg = &types.GlobalConfig{}
 	}
 
-	// Only update the connection fields
-	hubCfg.URL = loginHub
-	hubCfg.Token = loginToken
+	cfg.Hub = &types.HubConfig{
+		URL:   loginHub,
+		Token: loginToken,
+	}
 
-	if err := config.SaveHubConfig(hubCfg); err != nil {
+	if err := config.SaveGlobalConfig(cfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Printf("✓ Logged in to %s (tenant: %s)\n", loginHub, tenantID)
-	fmt.Println("  Hub config saved to ~/.elasticclaw/hub.yaml")
+	fmt.Println("  Connection saved to ~/.elasticclaw/config.yaml")
 	return nil
 }
