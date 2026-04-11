@@ -819,12 +819,13 @@ if ! command -v node &>/dev/null || [ "$(node -e 'process.exit(parseInt(process.
   sudo apt-get install -y nodejs
 fi
 echo "Node: $(node --version)"
+export PATH="$HOME/.npm-global/bin:$HOME/.openclaw/bin:$PATH"
 
 # ── Install OpenClaw ──────────────────────────────────────────────────────────
 if ! command -v openclaw &>/dev/null; then
   echo "Installing OpenClaw..."
-  curl -fsSL https://openclaw.ai/install.sh | bash
-  export PATH="$HOME/.openclaw/bin:$PATH"
+  curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+  export PATH="$HOME/.npm-global/bin:$HOME/.openclaw/bin:$PATH"
 fi
 echo "OpenClaw: $(openclaw --version 2>/dev/null || echo 'installed')"
 
