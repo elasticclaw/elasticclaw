@@ -688,7 +688,7 @@ func (s *Server) syncReplicatedVMs() {
 		FROM claws
 		WHERE provider = 'replicated'
 		  AND provider_id != ''
-		  AND status NOT IN ('connected', 'failed', 'error', 'offline')
+		  AND status NOT IN ('failed', 'error', 'offline')
 	`)
 	if err != nil {
 		log.Printf("pollProviderStatus: query error: %v", err)
@@ -738,8 +738,15 @@ func (s *Server) syncReplicatedVMs() {
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg)
 			}
 		case "terminated", "error":
-			newStatus = "error"
-			log.Printf("Replicated VM %s for claw %s (%s) entered state: %s", c.providerID, c.name, c.id, vm.Status)
+			newStatus = "offline"
+			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
+			// Disconnect claw WebSocket if still connected
+			s.mu.Lock()
+			if cc, ok := s.claws[c.id]; ok {
+				cc.conn.Close(websocket.StatusGoingAway, "VM terminated")
+				delete(s.claws, c.id)
+			}
+			s.mu.Unlock()
 		default:
 			// assigned, pending, etc — still coming up
 			newStatus = "provisioning"
