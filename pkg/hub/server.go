@@ -831,24 +831,48 @@ echo "OpenClaw: $(openclaw --version 2>/dev/null || echo 'installed')"
 # ── Write OpenClaw workspace files ───────────────────────────────────────────
 mkdir -p "$HOME/.openclaw/workspace"
 
-# ── Configure OpenClaw non-interactively ─────────────────────────────────────
+# ── Configure OpenClaw by writing config directly ────────────────────────────
+# (onboard requires a TTY; write openclaw.json directly instead)
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
-  echo "Configuring OpenClaw..."
-  openclaw onboard --non-interactive \
-    --provider anthropic \
-    --api-key "${ANTHROPIC_API_KEY:-}" \
-    --model "${OPENCLAW_DEFAULT_MODEL:-anthropic/claude-sonnet-4-6}" \
-    --workspace "$HOME/.openclaw/workspace" \
-    --no-daemon 2>/dev/null || true
+  echo "Writing OpenClaw config..."
+  mkdir -p "$HOME/.openclaw"
+  cat > "$HOME/.openclaw/openclaw.json" << 'OCCONFIG'
+{
+  "agents": {
+    "defaults": {
+      "model": "OPENCLAW_MODEL_PLACEHOLDER"
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "apiKey": "ANTHROPIC_KEY_PLACEHOLDER"
+    }
+  },
+  "gateway": {
+    "bind": "loopback",
+    "port": 18789
+  }
+}
+OCCONFIG
+  # Replace placeholders with actual values
+  sed -i "s|OPENCLAW_MODEL_PLACEHOLDER|${OPENCLAW_DEFAULT_MODEL:-anthropic/claude-sonnet-4-6}|g" "$HOME/.openclaw/openclaw.json"
+  sed -i "s|ANTHROPIC_KEY_PLACEHOLDER|${ANTHROPIC_API_KEY:-}|g" "$HOME/.openclaw/openclaw.json"
+  echo "OpenClaw config written"
 fi
 
-# ── Start OpenClaw gateway ────────────────────────────────────────────────────
-if ! openclaw gateway status &>/dev/null; then
-  echo "Starting OpenClaw gateway..."
-  nohup openclaw gateway start >> "$HOME/openclaw-gateway.log" 2>&1 &
-  sleep 3
+# ── Start OpenClaw gateway (foreground nohup, no systemd needed) ──────────────
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+sudo loginctl enable-linger "$(whoami)" 2>/dev/null || true
+echo "Starting OpenClaw gateway..."
+nohup openclaw gateway start >> "$HOME/openclaw-gateway.log" 2>&1 &
+GATEWAY_PID=$!
+sleep 4
+if kill -0 $GATEWAY_PID 2>/dev/null; then
+  echo "OpenClaw gateway running (PID $GATEWAY_PID)"
+else
+  echo "WARNING: gateway may have failed, check ~/openclaw-gateway.log"
+  tail -5 "$HOME/openclaw-gateway.log" 2>/dev/null || true
 fi
-echo "OpenClaw gateway running on :18789"
 
 # ── Install oras if not present ───────────────────────────────────────────────
 if ! command -v oras &>/dev/null; then
