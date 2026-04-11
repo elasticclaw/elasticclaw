@@ -39,17 +39,17 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	cfg, err := config.LoadGlobalConfig()
+	// Load existing hub config to preserve all other fields (providers, keys, etc.)
+	hubCfg, err := config.LoadHubConfig()
 	if err != nil {
-		return err
+		hubCfg = &types.HubConfig{}
 	}
 
-	cfg.Hub = &types.HubConfig{
-		URL:   loginHub,
-		Token: loginToken,
-	}
+	// Only update the connection fields
+	hubCfg.URL = loginHub
+	hubCfg.Token = loginToken
 
-	if err := config.SaveGlobalConfig(cfg); err != nil {
+	if err := config.SaveHubConfig(hubCfg); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
