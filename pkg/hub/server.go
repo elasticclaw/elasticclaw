@@ -292,6 +292,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		var provider, providerID string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
 
+		// Delete messages first (FK constraint)
+		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
 		_, err := s.db.Exec(`DELETE FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db delete error for claw %s: %v", clawID, err)
