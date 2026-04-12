@@ -116,12 +116,32 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 			return fmt.Errorf("send error: %w", err)
 		}
 		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
+
+		// Animate a spinner while waiting for the reply
+		spinnerDone := make(chan struct{})
+		go func() {
+			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			i := 0
+			for {
+				select {
+				case <-spinnerDone:
+					fmt.Print("\r\033[K") // clear spinner line
+					return
+				case <-time.After(80 * time.Millisecond):
+					fmt.Printf("\r%s thinking...", frames[i%len(frames)])
+					i++
+				}
+			}
+		}()
+
 		fmt.Print("\nClaw: ")
 		// Wait up to 90s — chunks print inline, blank line printed on final message
 		select {
 		case <-replyCh:
+			close(spinnerDone)
 			// reply already printed via chunks
 		case <-time.After(90 * time.Second):
+			close(spinnerDone)
 			fmt.Println("\n(no reply received within 90s)")
 		}
 		return nil
