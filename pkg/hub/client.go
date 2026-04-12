@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 // Client talks to an ElasticClaw hub.
@@ -119,6 +122,44 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 	}
 	var claw types.Claw
 	return &claw, json.Unmarshal(data, &claw)
+}
+
+// WatchMessages connects to the hub user WebSocket and calls onMessage
+// whenever a message arrives for the given clawID. Blocks until ctx is done.
+func (c *Client) WatchMessages(ctx context.Context, clawID string, onMessage func(msg types.HubMessage)) error {
+	wsURL := strings.TrimRight(c.baseURL, "/")
+	if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	} else if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
+	}
+	wsURL += "/api/ws?token=" + c.token
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("ws connect: %w", err)
+	}
+	defer conn.CloseNow()
+
+	for {
+		var msg types.WSMessage
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if msg.Type == "message" {
+			var hm types.HubMessage
+			if b, err := json.Marshal(msg.Payload); err == nil {
+				if err := json.Unmarshal(b, &hm); err == nil {
+					if hm.ClawID == clawID && hm.Role == "claw" {
+						onMessage(hm)
+					}
+				}
+			}
+		}
+	}
 }
 
 // Login verifies a token against the hub.

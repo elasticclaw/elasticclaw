@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+
 var (
 	chatNoStream bool
 )
@@ -88,6 +89,19 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 		}
 	}
 
+	// Connect WebSocket for real-time reply delivery (no polling)
+	wsCtx, wsCancel := context.WithCancel(ctx)
+	defer wsCancel()
+	replyCh := make(chan string, 4)
+	go func() {
+		_ = client.WatchMessages(wsCtx, resolvedID, func(msg types.HubMessage) {
+			select {
+			case replyCh <- msg.Content:
+			default:
+			}
+		})
+	}()
+
 	send := func(content string) error {
 		msg, err := client.SendMessage(ctx, resolvedID, content)
 		if err != nil {
@@ -95,25 +109,13 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 		}
 		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
 		fmt.Print("Waiting for reply")
-		// Poll up to 90s for a claw reply after our sent message
-		deadline := time.Now().Add(90 * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(2 * time.Second)
-			fmt.Print(".")
-			msgs, err := client.GetMessages(ctx, resolvedID)
-			if err != nil {
-				break
-			}
-			// Find last claw message after our sent message
-			for i := len(msgs) - 1; i >= 0; i-- {
-				m := msgs[i]
-				if m.Role == "claw" && m.CreatedAt.After(msg.CreatedAt) {
-					fmt.Printf("\n\nClaw: %s\n", m.Content)
-					return nil
-				}
-			}
+		// Wait up to 90s for reply via WebSocket
+		select {
+		case reply := <-replyCh:
+			fmt.Printf("\n\nClaw: %s\n", reply)
+		case <-time.After(90 * time.Second):
+			fmt.Println("\n\n(no reply received within 90s)")
 		}
-		fmt.Println("\n\n(no reply received)")
 		return nil
 	}
 
