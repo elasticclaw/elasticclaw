@@ -294,7 +294,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 		_, err := s.db.Exec(`DELETE FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
 		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			log.Printf("kill: db delete error for claw %s: %v", clawID, err)
+			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 			return
 		}
 		// Disconnect WebSocket if online
