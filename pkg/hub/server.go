@@ -812,6 +812,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
+# ── LLM API keys (injected first so all steps can use them) ───────────────
+export OPENCLAW_DEFAULT_MODEL="%s"
+%s
 # ── Install Node.js 24 via nodesource ─────────────────────────────────────────────
 echo "Installing Node.js 24..."
 sudo apt-get update -qq
@@ -937,6 +940,7 @@ else
   exit 1
 fi
 `,
+		defaultModel, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
 		bridgeImage, bridgeImage,
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
 		defaultModel,
