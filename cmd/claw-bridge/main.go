@@ -135,7 +135,7 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 		switch msg.Type {
 		case "message":
 			// Forward to local OpenClaw gateway and stream response back
-			go func(payload json.RawMessage) {
+			go func(connCtx context.Context, payload json.RawMessage) {
 				var m map[string]interface{}
 				if err := json.Unmarshal(payload, &m); err != nil {
 					log.Printf("payload unmarshal error: %v, raw: %s", err, string(payload))
@@ -148,11 +148,15 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 					return
 				}
 
-				reply, err := forwardToGateway(ctx, gatewayAddr, content)
+				// Use an independent context so the agent call isn't cancelled when the WS read loop cancels
+				agentCtx, agentCancel := context.WithTimeout(context.Background(), 120*time.Second)
+				defer agentCancel()
+				reply, err := forwardToGateway(agentCtx, gatewayAddr, content)
 				if err != nil {
 					log.Printf("gateway error: %v", err)
 					reply = fmt.Sprintf("[error: %v]", err)
 				}
+				log.Printf("sending reply: %q", reply[:min(len(reply), 80)])
 
 				replyMsg := wsMsg{
 					Type: "message",
@@ -161,8 +165,8 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 						"content": reply,
 					}),
 				}
-				_ = wsjson.Write(ctx, conn, replyMsg)
-			}(msg.Payload)
+				_ = wsjson.Write(connCtx, conn, replyMsg)
+			}(ctx, msg.Payload)
 
 		default:
 			// ignore unknown message types
