@@ -812,68 +812,86 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# ── Install Node.js (required for OpenClaw) ───────────────────────────────────
-if ! command -v node &>/dev/null || [ "$(node -e 'process.exit(parseInt(process.version.slice(1)) < 22 ? 1 : 0)' 2>/dev/null; echo $?)" = "1" ]; then
-  echo "Installing Node.js 24..."
-  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
-  sudo apt-get install -y nodejs
-fi
+# ── Install Node.js 24 via nodesource ─────────────────────────────────────────────
+echo "Installing Node.js 24..."
+sudo apt-get update -qq
+sudo apt-get install -y curl ca-certificates
+sudo mkdir -p /etc/apt/keyrings
+# Use gpg batch mode (no /dev/tty needed)
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+sudo apt-get update -qq
+sudo apt-get install -y nodejs
 echo "Node: $(node --version)"
-export PATH="$HOME/.npm-global/bin:$HOME/.openclaw/bin:$PATH"
 
-# ── Install OpenClaw ──────────────────────────────────────────────────────────
-if ! command -v openclaw &>/dev/null; then
-  echo "Installing OpenClaw..."
-  curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-  export PATH="$HOME/.npm-global/bin:$HOME/.openclaw/bin:$PATH"
-fi
-echo "OpenClaw: $(openclaw --version 2>/dev/null || echo 'installed')"
+# ── Install OpenClaw (sudo so it lands in /usr/bin/openclaw) ──────────────────
+echo "Installing OpenClaw..."
+sudo npm install -g openclaw@latest --ignore-scripts
+echo "OpenClaw: $(openclaw --version)"
 
-# ── Write OpenClaw workspace files ───────────────────────────────────────────
+# ── Configure OpenClaw ──────────────────────────────────────────────────────────────
 mkdir -p "$HOME/.openclaw/workspace"
-
-# ── Configure OpenClaw by writing config directly ────────────────────────────
-# (onboard requires a TTY; write openclaw.json directly instead)
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
-  echo "Writing OpenClaw config..."
-  mkdir -p "$HOME/.openclaw"
-  cat > "$HOME/.openclaw/openclaw.json" << 'OCCONFIG'
-{
-  "agents": {
-    "defaults": {
-      "model": "OPENCLAW_MODEL_PLACEHOLDER"
+  echo "Configuring OpenClaw..."
+  # Use onboard --non-interactive to generate valid config (no TTY needed with these flags)
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-placeholder}" \
+  openclaw onboard \
+    --non-interactive --accept-risk \
+    --auth-choice anthropic-api-key \
+    --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}" \
+    --gateway-bind loopback --gateway-port 18789 \
+    --skip-daemon 2>/dev/null || true
+  # Patch config to add required models.providers fields
+  python3 << 'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+try:
+    with open(path) as f:
+        config = json.load(f)
+except:
+    config = {}
+model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
+apiKey = os.environ.get('ANTHROPIC_API_KEY', 'placeholder')
+config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
+config['models'] = {
+    'providers': {
+        'anthropic': {
+            'apiKey': apiKey,
+            'baseUrl': 'https://api.anthropic.com',
+            'api': 'anthropic-messages',
+            'models': [
+                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
+                {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'api': 'anthropic-messages'},
+                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
+            ]
+        }
     }
-  },
-  "providers": {
-    "anthropic": {
-      "apiKey": "ANTHROPIC_KEY_PLACEHOLDER"
-    }
-  },
-  "gateway": {
-    "bind": "loopback",
-    "port": 18789
-  }
 }
-OCCONFIG
-  # Replace placeholders with actual values
-  sed -i "s|OPENCLAW_MODEL_PLACEHOLDER|${OPENCLAW_DEFAULT_MODEL:-anthropic/claude-sonnet-4-6}|g" "$HOME/.openclaw/openclaw.json"
-  sed -i "s|ANTHROPIC_KEY_PLACEHOLDER|${ANTHROPIC_API_KEY:-}|g" "$HOME/.openclaw/openclaw.json"
-  echo "OpenClaw config written"
+config.setdefault('gateway', {})['bind'] = 'loopback'
+config['gateway']['port'] = 18789
+with open(path, 'w') as f:
+    json.dump(config, f, indent=2)
+print('OpenClaw config patched')
+PYEOF
 fi
 
-# ── Start OpenClaw gateway (foreground nohup, no systemd needed) ──────────────
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-sudo loginctl enable-linger "$(whoami)" 2>/dev/null || true
+# ── Start OpenClaw gateway ──────────────────────────────────────────────────────────────
 echo "Starting OpenClaw gateway..."
-nohup openclaw gateway start >> "$HOME/openclaw-gateway.log" 2>&1 &
-GATEWAY_PID=$!
-sleep 4
-if kill -0 $GATEWAY_PID 2>/dev/null; then
-  echo "OpenClaw gateway running (PID $GATEWAY_PID)"
-else
-  echo "WARNING: gateway may have failed, check ~/openclaw-gateway.log"
-  tail -5 "$HOME/openclaw-gateway.log" 2>/dev/null || true
-fi
+export OPENCLAW_NO_RESPAWN=1
+nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
+# Wait up to 30s for gateway to open :18789
+for i in $(seq 1 30); do
+  sleep 1
+  if curl -sf http://localhost:18789/healthz &>/dev/null; then
+    echo "OpenClaw gateway ready after ${i}s"
+    break
+  fi
+  if [ "$i" = "30" ]; then
+    echo "WARNING: gateway did not respond in 30s"
+    tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
+  fi
+done
 
 # ── Install oras if not present ───────────────────────────────────────────────
 if ! command -v oras &>/dev/null; then
