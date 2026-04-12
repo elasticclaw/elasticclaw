@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -93,14 +94,28 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 	wsCtx, wsCancel := context.WithCancel(ctx)
 	defer wsCancel()
 	replyCh := make(chan struct{}, 4)
+
+	// spinnerDone and firstChunk are set per-send; declared here so WatchStream closure can access them.
+	var spinnerDone chan struct{}
+	var stopSpinnerOnce sync.Once
+
+	stopSpinner := func() {
+		stopSpinnerOnce.Do(func() {
+			if spinnerDone != nil {
+				close(spinnerDone)
+			}
+		})
+	}
+
 	go func() {
 		_ = client.WatchStream(wsCtx, resolvedID,
 			func(chunk string) {
-				// Print chunk immediately as it arrives
+				// Stop spinner and print prefix on first chunk, then stream inline
+				stopSpinner()
 				fmt.Print(chunk)
 			},
 			func(msg types.HubMessage) {
-				// Final message received
+				// Final message: ensure newline after streamed text
 				fmt.Println()
 				select {
 				case replyCh <- struct{}{}:
@@ -117,31 +132,33 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 		}
 		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
 
-		// Animate a spinner while waiting for the reply
-		spinnerDone := make(chan struct{})
-		go func() {
+		// Reset per-send spinner state
+		spinnerDone = make(chan struct{})
+		stopSpinnerOnce = sync.Once{}
+
+		// Spinner runs until the first chunk clears it
+		go func(done chan struct{}) {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			i := 0
 			for {
 				select {
-				case <-spinnerDone:
-					fmt.Print("\r\033[K") // clear spinner line
+				case <-done:
+					fmt.Print("\r\033[K") // clear spinner line, then print prefix
+					fmt.Print("Claw: ")
 					return
 				case <-time.After(80 * time.Millisecond):
 					fmt.Printf("\r%s thinking...", frames[i%len(frames)])
 					i++
 				}
 			}
-		}()
+		}(spinnerDone)
 
-		fmt.Print("\nClaw: ")
-		// Wait up to 90s — chunks print inline, blank line printed on final message
+		// Wait up to 90s for reply
 		select {
 		case <-replyCh:
-			close(spinnerDone)
-			// reply already printed via chunks
+			stopSpinner() // no-op if already stopped by first chunk
 		case <-time.After(90 * time.Second):
-			close(spinnerDone)
+			stopSpinner()
 			fmt.Println("\n(no reply received within 90s)")
 		}
 		return nil
