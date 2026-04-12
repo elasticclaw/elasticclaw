@@ -89,17 +89,25 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 		}
 	}
 
-	// Connect WebSocket for real-time reply delivery (no polling)
+	// Connect WebSocket for streaming and reply delivery
 	wsCtx, wsCancel := context.WithCancel(ctx)
 	defer wsCancel()
-	replyCh := make(chan string, 4)
+	replyCh := make(chan struct{}, 4)
 	go func() {
-		_ = client.WatchMessages(wsCtx, resolvedID, func(msg types.HubMessage) {
-			select {
-			case replyCh <- msg.Content:
-			default:
-			}
-		})
+		_ = client.WatchStream(wsCtx, resolvedID,
+			func(chunk string) {
+				// Print chunk immediately as it arrives
+				fmt.Print(chunk)
+			},
+			func(msg types.HubMessage) {
+				// Final message received
+				fmt.Println()
+				select {
+				case replyCh <- struct{}{}:
+				default:
+				}
+			},
+		)
 	}()
 
 	send := func(content string) error {
@@ -108,13 +116,13 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 			return fmt.Errorf("send error: %w", err)
 		}
 		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
-		fmt.Print("Waiting for reply")
-		// Wait up to 90s for reply via WebSocket
+		fmt.Print("\nClaw: ")
+		// Wait up to 90s — chunks print inline, blank line printed on final message
 		select {
-		case reply := <-replyCh:
-			fmt.Printf("\n\nClaw: %s\n", reply)
+		case <-replyCh:
+			// reply already printed via chunks
 		case <-time.After(90 * time.Second):
-			fmt.Println("\n\n(no reply received within 90s)")
+			fmt.Println("\n(no reply received within 90s)")
 		}
 		return nil
 	}

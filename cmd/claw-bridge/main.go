@@ -168,10 +168,22 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), 120*time.Second)
 				defer agentCancel()
 				log.Printf("[bridge] → openclaw: %q", content)
-				reply, err := forwardToGateway(agentCtx, gatewayAddr, content)
-				if err != nil {
-					log.Printf("[bridge] ✗ agent error: %v", err)
-					reply = fmt.Sprintf("⚠️ claw-bridge error: %v", err)
+				var reply string
+				var agentErr error
+				reply, agentErr = forwardToGatewayStreaming(agentCtx, content, func(chunk string) {
+					// Send each chunk to the hub as a 'chunk' event
+					chunkMsg := wsMsg{
+						Type: "chunk",
+						Payload: mustJSON(map[string]interface{}{
+							"role":    "claw",
+							"content": chunk,
+						}),
+					}
+					_ = wsjson.Write(connCtx, conn, chunkMsg)
+				})
+				if agentErr != nil {
+					log.Printf("[bridge] ✗ agent error: %v", agentErr)
+					reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
@@ -192,23 +204,72 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 	}
 }
 
-// forwardToGateway sends a message to the local OpenClaw gateway using the
-// openclaw CLI and returns the response text.
+// forwardToGateway runs openclaw agent and streams stdout chunks to onChunk as they arrive.
+// Returns the full reply text when done.
 func forwardToGateway(ctx context.Context, _ string, message string) (string, error) {
-	// Use openclaw agent --local to send a message and get a response.
-	// The --local flag connects to the local gateway without needing channel config.
 	cmd := exec.CommandContext(ctx, "openclaw", "agent", "--local", "--session-id", "main", "--message", message)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start: %w", err)
+	}
+	var buf bytes.Buffer
+	readBuf := make([]byte, 256)
+	for {
+		n, readErr := stdout.Read(readBuf)
+		if n > 0 {
+			buf.Write(readBuf[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	if err := cmd.Wait(); err != nil {
 		return "", fmt.Errorf("openclaw agent error: %w\nstderr: %s", err, stderr.String())
 	}
-	reply := strings.TrimSpace(stdout.String())
+	reply := strings.TrimSpace(buf.String())
 	if reply == "" {
 		return "", fmt.Errorf("empty response from openclaw agent")
 	}
 	return reply, nil
+}
+
+// forwardToGatewayStreaming is like forwardToGateway but calls onChunk with each
+// chunk as it arrives so the caller can stream to the hub in real time.
+func forwardToGatewayStreaming(ctx context.Context, message string, onChunk func(chunk string)) (string, error) {
+	cmd := exec.CommandContext(ctx, "openclaw", "agent", "--local", "--session-id", "main", "--message", message)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start: %w", err)
+	}
+	var buf bytes.Buffer
+	readBuf := make([]byte, 64) // small reads for lower latency
+	for {
+		n, readErr := stdout.Read(readBuf)
+		if n > 0 {
+			chunk := string(readBuf[:n])
+			buf.WriteString(chunk)
+			if onChunk != nil {
+				onChunk(chunk)
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return "", fmt.Errorf("openclaw agent error: %w\nstderr: %s", err, stderr.String())
+	}
+	return strings.TrimSpace(buf.String()), nil
 }
 
 // checkGateway returns true if the local OpenClaw gateway is responding.

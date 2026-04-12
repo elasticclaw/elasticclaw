@@ -473,8 +473,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if err := wsjson.Read(ctx, conn, &msg); err != nil {
 				return
 			}
-			if msg.Type == "message" {
-				// Claw is sending a message — store and forward to users
+			if msg.Type == "chunk" {
+				// Streaming chunk — forward to users immediately without persisting
+				payload, _ := json.Marshal(msg.Payload)
+				var chunk struct {
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal(payload, &chunk); err == nil && chunk.Content != "" {
+					s.broadcastToUsers(tenantID, types.WSMessage{
+						Type: "chunk",
+						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
+					})
+				}
+			} else if msg.Type == "message" {
+				// Complete message — store and forward to users
 				payload, _ := json.Marshal(msg.Payload)
 				var hm types.HubMessage
 				if err := json.Unmarshal(payload, &hm); err != nil {
