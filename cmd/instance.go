@@ -34,10 +34,5 @@ func init() {
 		RunE:  runChat,
 	})
 
-	instanceCmd.AddCommand(&cobra.Command{
-		Use:   "destroy <instance>",
-		Short: "Destroy an instance",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runDestroy,
-	})
 }
+// destroy removed — use 'elasticclaw kill' instead
