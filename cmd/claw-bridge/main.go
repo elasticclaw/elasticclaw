@@ -10,12 +10,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -164,31 +166,23 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 	}
 }
 
-// forwardToGateway sends a message to the local OpenClaw gateway HTTP API
-// and returns the response text.
-func forwardToGateway(ctx context.Context, addr, message string) (string, error) {
-	url := fmt.Sprintf("http://%s/api/message", addr)
-	body := fmt.Sprintf(`{"message":%q}`, message)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
-	if err != nil {
-		return "", err
+// forwardToGateway sends a message to the local OpenClaw gateway using the
+// openclaw CLI and returns the response text.
+func forwardToGateway(ctx context.Context, _ string, message string) (string, error) {
+	// Use openclaw agent --local to send a message and get a response.
+	// The --local flag connects to the local gateway without needing channel config.
+	cmd := exec.CommandContext(ctx, "openclaw", "agent", "--local", "--message", message)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("openclaw agent error: %w\nstderr: %s", err, stderr.String())
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gateway unreachable: %w", err)
+	reply := strings.TrimSpace(stdout.String())
+	if reply == "" {
+		return "", fmt.Errorf("empty response from openclaw agent")
 	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Reply string `json:"reply"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("gateway response parse: %w", err)
-	}
-	return result.Reply, nil
+	return reply, nil
 }
 
 // checkGateway returns true if the local OpenClaw gateway is responding.
