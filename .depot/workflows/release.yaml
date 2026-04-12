@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+jobs:
+  release:
+    runs-on: depot
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine prerelease
+        id: semver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Prerelease if tag contains a hyphen after the version core (e.g. v1.0.0-alpha.1)
+          if echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-.+'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA::7}"
+          LDFLAGS="-X github.com/elasticclaw/elasticclaw/cmd.Version=${VERSION} \
+                   -X github.com/elasticclaw/elasticclaw/cmd.Commit=${COMMIT} \
+                   -X github.com/elasticclaw/elasticclaw/cmd.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          mkdir -p dist
+
+          GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-amd64   .
+          GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-arm64   .
+          GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-amd64  .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-arm64  .
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-windows-amd64.exe .
+
+          # Checksums
+          cd dist && sha256sum * > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ steps.semver.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            dist/elasticclaw-linux-amd64
+            dist/elasticclaw-linux-arm64
+            dist/elasticclaw-darwin-amd64
+            dist/elasticclaw-darwin-arm64
+            dist/elasticclaw-windows-amd64.exe
+            dist/checksums.txt
