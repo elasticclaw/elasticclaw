@@ -288,18 +288,26 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/claws/")
 
 	if r.Method == http.MethodDelete {
+		// Look up provider info before deleting so we can terminate the VM
+		var provider, providerID string
+		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
+
 		_, err := s.db.Exec(`DELETE FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
 		if err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		// Disconnect if online
+		// Disconnect WebSocket if online
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
 			cc.conn.Close(websocket.StatusNormalClosure, "killed")
 			delete(s.claws, clawID)
 		}
 		s.mu.Unlock()
+		// Terminate the provider VM asynchronously
+		if provider == "replicated" && providerID != "" {
+			go s.terminateReplicatedVM(providerID)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -1066,4 +1074,23 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		}
 	}
 	return nil
+}
+
+// terminateReplicatedVM terminates a Replicated CMX VM by ID.
+func (s *Server) terminateReplicatedVM(vmID string) {
+	cfg, ok := s.hubCfg.Providers["replicated"]
+	if !ok {
+		log.Printf("terminateReplicatedVM: no replicated provider configured")
+		return
+	}
+	p, err := newReplicatedProvider(cfg)
+	if err != nil {
+		log.Printf("terminateReplicatedVM: provider init error: %v", err)
+		return
+	}
+	if err := p.DeleteVM(context.Background(), vmID); err != nil {
+		log.Printf("terminateReplicatedVM: failed to delete VM %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Replicated VM %s terminated", vmID)
 }
