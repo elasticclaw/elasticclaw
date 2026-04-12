@@ -54,6 +54,18 @@ func main() {
 	log.Printf("  Claw ID: %s", clawID)
 	log.Printf("  Gateway: %s", gatewayAddr)
 
+	// Startup checks
+	if _, err := exec.LookPath("openclaw"); err != nil {
+		log.Printf("  ⚠️  openclaw not found in PATH: %v", err)
+	} else {
+		log.Printf("  ✓  openclaw found")
+	}
+	if checkGateway(gatewayAddr) {
+		log.Printf("  ✓  gateway healthy at %s", gatewayAddr)
+	} else {
+		log.Printf("  ⚠️  gateway not responding at %s (will retry)", gatewayAddr)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -63,7 +75,11 @@ func main() {
 				log.Printf("shutting down")
 				return
 			}
-			log.Printf("disconnected: %v — reconnecting in 5s", err)
+			log.Printf("[bridge] disconnected from hub: %v", err)
+			if !checkGateway(gatewayAddr) {
+				log.Printf("[bridge] ⚠️  openclaw gateway not responding at %s", gatewayAddr)
+			}
+			log.Printf("[bridge] reconnecting in 5s...")
 			select {
 			case <-ctx.Done():
 				return
@@ -151,12 +167,14 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 				// Use an independent context so the agent call isn't cancelled when the WS read loop cancels
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), 120*time.Second)
 				defer agentCancel()
+				log.Printf("[bridge] → openclaw: %q", content)
 				reply, err := forwardToGateway(agentCtx, gatewayAddr, content)
 				if err != nil {
-					log.Printf("gateway error: %v", err)
-					reply = fmt.Sprintf("[error: %v]", err)
+					log.Printf("[bridge] ✗ agent error: %v", err)
+					reply = fmt.Sprintf("⚠️ claw-bridge error: %v", err)
+				} else {
+					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
-				log.Printf("sending reply: %q", reply[:min(len(reply), 80)])
 
 				replyMsg := wsMsg{
 					Type: "message",
@@ -195,7 +213,7 @@ func forwardToGateway(ctx context.Context, _ string, message string) (string, er
 
 // checkGateway returns true if the local OpenClaw gateway is responding.
 func checkGateway(addr string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/healthz", addr), nil)
 	resp, err := http.DefaultClient.Do(req)
