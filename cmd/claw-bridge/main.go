@@ -131,16 +131,20 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 			return fmt.Errorf("read: %w", err)
 		}
 
+		log.Printf("recv type=%s payload=%s", msg.Type, string(msg.Payload))
 		switch msg.Type {
 		case "message":
 			// Forward to local OpenClaw gateway and stream response back
 			go func(payload json.RawMessage) {
 				var m map[string]interface{}
 				if err := json.Unmarshal(payload, &m); err != nil {
+					log.Printf("payload unmarshal error: %v, raw: %s", err, string(payload))
 					return
 				}
 				content, _ := m["content"].(string)
+				log.Printf("forwarding content: %q", content)
 				if content == "" {
+					log.Printf("empty content, skipping")
 					return
 				}
 
