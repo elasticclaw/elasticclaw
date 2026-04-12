@@ -94,16 +94,26 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 			return fmt.Errorf("send error: %w", err)
 		}
 		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
-		fmt.Println("Waiting for reply...")
-		// Poll for new messages briefly
-		time.Sleep(2 * time.Second)
-		msgs, _ := client.GetMessages(ctx, resolvedID)
-		if len(msgs) > 0 {
-			last := msgs[len(msgs)-1]
-			if last.Role == "claw" {
-				fmt.Printf("\nClaw: %s\n", last.Content)
+		fmt.Print("Waiting for reply")
+		// Poll up to 90s for a claw reply after our sent message
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(2 * time.Second)
+			fmt.Print(".")
+			msgs, err := client.GetMessages(ctx, resolvedID)
+			if err != nil {
+				break
+			}
+			// Find last claw message after our sent message
+			for i := len(msgs) - 1; i >= 0; i-- {
+				m := msgs[i]
+				if m.Role == "claw" && m.CreatedAt.After(msg.CreatedAt) {
+					fmt.Printf("\n\nClaw: %s\n", m.Content)
+					return nil
+				}
 			}
 		}
+		fmt.Println("\n\n(no reply received)")
 		return nil
 	}
 
