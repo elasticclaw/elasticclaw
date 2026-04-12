@@ -171,7 +171,7 @@ func run(ctx context.Context, wsURL, clawID, clawName, templateName, token, gate
 func forwardToGateway(ctx context.Context, _ string, message string) (string, error) {
 	// Use openclaw agent --local to send a message and get a response.
 	// The --local flag connects to the local gateway without needing channel config.
-	cmd := exec.CommandContext(ctx, "openclaw", "agent", "--local", "--message", message)
+	cmd := exec.CommandContext(ctx, "openclaw", "agent", "--local", "--session-id", "main", "--message", message)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
