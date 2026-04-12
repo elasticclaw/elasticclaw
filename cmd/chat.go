@@ -95,23 +95,21 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 	defer wsCancel()
 	replyCh := make(chan struct{}, 4)
 
-	// spinnerDone and firstChunk are set per-send; declared here so WatchStream closure can access them.
+	// clearOnce is reset per-send; the chunk callback clears the spinner synchronously.
 	var spinnerDone chan struct{}
-	var stopSpinnerOnce sync.Once
-
-	stopSpinner := func() {
-		stopSpinnerOnce.Do(func() {
-			if spinnerDone != nil {
-				close(spinnerDone)
-			}
-		})
-	}
+	var clearOnce sync.Once
 
 	go func() {
 		_ = client.WatchStream(wsCtx, resolvedID,
 			func(chunk string) {
-				// Stop spinner and print prefix on first chunk, then stream inline
-				stopSpinner()
+				// Synchronously erase spinner and print prefix on first chunk
+				clearOnce.Do(func() {
+					if spinnerDone != nil {
+						close(spinnerDone)
+					}
+					fmt.Print("\r\033[K") // erase spinner line
+					fmt.Print("Claw: ")
+				})
 				fmt.Print(chunk)
 			},
 			func(msg types.HubMessage) {
@@ -126,25 +124,21 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 	}()
 
 	send := func(content string) error {
-		msg, err := client.SendMessage(ctx, resolvedID, content)
-		if err != nil {
+		if _, err := client.SendMessage(ctx, resolvedID, content); err != nil {
 			return fmt.Errorf("send error: %w", err)
 		}
-		fmt.Printf("✓ sent (id: %s)\n", msg.ID[:8])
 
-		// Reset per-send spinner state
+		// Reset per-send state
 		spinnerDone = make(chan struct{})
-		stopSpinnerOnce = sync.Once{}
+		clearOnce = sync.Once{}
 
-		// Spinner runs until the first chunk clears it
+		// Spinner animates until closed (by the chunk callback)
 		go func(done chan struct{}) {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			i := 0
 			for {
 				select {
 				case <-done:
-					fmt.Print("\r\033[K") // clear spinner line, then print prefix
-					fmt.Print("Claw: ")
 					return
 				case <-time.After(80 * time.Millisecond):
 					fmt.Printf("\r%s thinking...", frames[i%len(frames)])
@@ -156,10 +150,13 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 		// Wait up to 90s for reply
 		select {
 		case <-replyCh:
-			stopSpinner() // no-op if already stopped by first chunk
+			// chunk callback already cleared; nothing to do
 		case <-time.After(90 * time.Second):
-			stopSpinner()
-			fmt.Println("\n(no reply received within 90s)")
+			clearOnce.Do(func() {
+				close(spinnerDone)
+				fmt.Print("\r\033[K")
+			})
+			fmt.Println("(no reply received within 90s)")
 		}
 		return nil
 	}
