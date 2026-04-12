@@ -18,3 +18,9 @@ coverage.out
 # Local dev
 .elasticclaw/
 .direnv/
+
+# build artifacts
+claw-bridge
+claw-bridge-linux
+claw-bridge-linux-amd64
+bin/

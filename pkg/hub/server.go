@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -831,12 +832,16 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 
+	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
+	gatewayPassword := randomHex(16)
+
 	// Build the bootstrap script
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
 # ── LLM API keys (injected first so all steps can use them) ───────────────
 export OPENCLAW_DEFAULT_MODEL="%s"
+export ELASTICCLAW_GATEWAY_PASSWORD="%s"
 %s
 # ── Install Node.js 24 via nodesource ─────────────────────────────────────────────
 echo "Installing Node.js 24..."
@@ -896,6 +901,11 @@ config['models'] = {
 }
 config.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
+# Use password auth so claw-bridge can connect with full scopes
+# (token auth grants limited scopes by default)
+gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
+if gw_password:
+    config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
@@ -931,8 +941,8 @@ echo "Pulling claw-bridge from %s..."
 mkdir -p /tmp/claw-bridge-dl
 cd /tmp/claw-bridge-dl
 oras pull %s
-# oras preserves the annotated path (bin/claw-bridge-linux-amd64), find and install it
-BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge-linux-amd64' -type f | head -1)
+# Find the claw-bridge binary (may be named 'claw-bridge' or 'claw-bridge-linux-amd64')
+BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
 if [ -z "$BINARY" ]; then
   echo "ERROR: claw-bridge binary not found after oras pull"
   ls -la /tmp/claw-bridge-dl/
@@ -946,6 +956,7 @@ export ELASTICCLAW_HUB_URL="%s"
 export ELASTICCLAW_CLAW_ID="%s"
 export ELASTICCLAW_CLAW_TOKEN="%s"
 export ELASTICCLAW_CLAW_NAME="%s"
+export ELASTICCLAW_GATEWAY_PASSWORD="%s"
 export OPENCLAW_DEFAULT_MODEL="%s"
 %s
 echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
@@ -963,9 +974,9 @@ else
   exit 1
 fi
 `,
-		defaultModel, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
+		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
 		bridgeImage, bridgeImage,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
@@ -1004,6 +1015,13 @@ fi
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
+
+// randomHex returns a random hex string of n bytes (2*n hex chars).
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
 
 // clawHubURL returns the URL claws should use to connect back.
 // Uses public_url if set, otherwise falls back to url.
