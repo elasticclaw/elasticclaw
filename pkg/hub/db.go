@@ -50,7 +50,10 @@ func migrate(db *sql.DB) error {
 		template_files TEXT NOT NULL DEFAULT '{}',
 		status         TEXT NOT NULL DEFAULT 'offline',
 		last_seen      DATETIME,
-		created_at     DATETIME NOT NULL
+		created_at     DATETIME NOT NULL,
+		ssh_host       TEXT NOT NULL DEFAULT '',
+		ssh_port       INTEGER NOT NULL DEFAULT 0,
+		ssh_user       TEXT NOT NULL DEFAULT ''
 	);
 
 
