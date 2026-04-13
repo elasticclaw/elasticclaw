@@ -1476,18 +1476,18 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
-	for appName, appCfg := range s.hubCfg.GitHubApps {
+	for i, appCfg := range s.hubCfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
-			log.Printf("github app %q config error: %v", appName, err)
+			log.Printf("github app[%d] (app_id=%d) config error: %v", i, appCfg.AppID, err)
 			continue
 		}
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
-			log.Printf("github app %q: no installation found for repos %v: %v", appName, repos, err)
+			log.Printf("github app[%d] (app_id=%d): no installation for repos %v: %v", i, appCfg.AppID, repos, err)
 			continue
 		}
-		log.Printf("github token issued via app %q for claw %s", appName, clawID[:8])
+		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,

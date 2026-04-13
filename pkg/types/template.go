@@ -55,17 +55,17 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
 	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
-	// GitHubApps is a named map of GitHub App configs for minting installation tokens.
-	// The hub tries each configured app to find one whose installation covers the requested repos.
+	// GitHubApps is a list of GitHub App configs for minting installation tokens.
+	// The hub tries each app to find one whose installation covers the requested repos.
+	// One app can cover multiple orgs if installed on all of them.
 	// Example:
 	//   github_apps:
-	//     my-org-app:
-	//       app_id: 123456
+	//     - app_id: 123456
 	//       private_key_pem: |
 	//         -----BEGIN RSA PRIVATE KEY-----
 	//         ...
 	//         -----END RSA PRIVATE KEY-----
-	GitHubApps map[string]*GitHubAppConfig `yaml:"github_apps,omitempty"`
+	GitHubApps []*GitHubAppConfig `yaml:"github_apps,omitempty"`
 }
 
 type ProviderConfig struct {
