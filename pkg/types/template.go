@@ -20,8 +20,8 @@ type TemplateResources struct {
 	Disk   string `yaml:"disk,omitempty"`
 }
 
-// GitHubAppConfig holds GitHub App credentials for the hub.
-// Configure in hub.yaml under the 'github:' key.
+// GitHubAppConfig holds GitHub App credentials for one GitHub App.
+// Configure in hub.yaml under 'github_apps:' as a named map.
 type GitHubAppConfig struct {
 	AppID         int64  `yaml:"app_id"`
 	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
@@ -55,8 +55,17 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
 	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
-	// GitHub is the optional GitHub App config for minting installation tokens.
-	GitHub *GitHubAppConfig `yaml:"github,omitempty"`
+	// GitHubApps is a named map of GitHub App configs for minting installation tokens.
+	// The hub tries each configured app to find one whose installation covers the requested repos.
+	// Example:
+	//   github_apps:
+	//     my-org-app:
+	//       app_id: 123456
+	//       private_key_pem: |
+	//         -----BEGIN RSA PRIVATE KEY-----
+	//         ...
+	//         -----END RSA PRIVATE KEY-----
+	GitHubApps map[string]*GitHubAppConfig `yaml:"github_apps,omitempty"`
 }
 
 type ProviderConfig struct {

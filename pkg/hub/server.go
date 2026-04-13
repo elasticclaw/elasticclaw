@@ -1163,7 +1163,7 @@ func buildLLMKeyEnv(keys map[string]string) string {
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string) string {
-	if cfg.GitHub == nil {
+	if len(cfg.GitHubApps) == 0 {
 		return "# GitHub App not configured — skipping credential helper"
 	}
 	clawToken := cfg.ClawToken
@@ -1439,14 +1439,13 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 // URL: GET /api/github/token/:clawId
 // Used by the git credential helper on the VM.
 func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
-	if s.hubCfg.GitHub == nil {
-		http.Error(w, "github app not configured", http.StatusNotImplemented)
+	if len(s.hubCfg.GitHubApps) == 0 {
+		http.Error(w, "no github apps configured", http.StatusNotImplemented)
 		return
 	}
 
 	clawToken := r.URL.Query().Get("claw_token")
 	if clawToken == "" {
-		// Also accept Authorization header for flexibility
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
 	tenantID, err := s.tenantByClawToken(clawToken)
@@ -1461,7 +1460,6 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify claw belongs to this tenant and get its github config
 	var reposJSON string
 	err = s.db.QueryRow(
 		`SELECT github_repos FROM claws WHERE id = ? AND tenant_id = ?`,
@@ -1472,29 +1470,31 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse repos
 	var repos []string
 	if reposJSON != "" && reposJSON != "[]" {
 		json.Unmarshal([]byte(reposJSON), &repos)
 	}
 
-	provider, err := NewGitHubTokenProvider(s.hubCfg.GitHub)
-	if err != nil {
-		log.Printf("github token provider: %v", err)
-		http.Error(w, "github app misconfigured", http.StatusInternalServerError)
+	// Try each configured GitHub App in order; use the first that finds an installation
+	for appName, appCfg := range s.hubCfg.GitHubApps {
+		provider, err := NewGitHubTokenProvider(appCfg)
+		if err != nil {
+			log.Printf("github app %q config error: %v", appName, err)
+			continue
+		}
+		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
+		if err != nil {
+			log.Printf("github app %q: no installation found for repos %v: %v", appName, repos, err)
+			continue
+		}
+		log.Printf("github token issued via app %q for claw %s", appName, clawID[:8])
+		jsonOK(w, map[string]interface{}{
+			"token":      token,
+			"expires_at": expiresAt,
+		})
 		return
 	}
 
-	// Pass 0 — InstallationToken auto-discovers the right installation
-	token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
-	if err != nil {
-		log.Printf("github installation token error for claw %s: %v", clawID, err)
-		http.Error(w, "failed to get github token", http.StatusInternalServerError)
-		return
-	}
-
-	jsonOK(w, map[string]interface{}{
-		"token":      token,
-		"expires_at": expiresAt,
-	})
+	log.Printf("no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
+	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
 }
