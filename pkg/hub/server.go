@@ -222,7 +222,8 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		tenantID,
 	)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		log.Printf("handleClaws query error: %v", err)
+		http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
