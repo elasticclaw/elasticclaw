@@ -180,12 +180,12 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		if needsWrite {
 			contentsPermission = "write"
 		}
-		// Only request contents permission — metadata is implicitly granted.
-		// Requesting permissions the installation doesn't have causes a 422.
 		b, _ := json.Marshal(map[string]interface{}{
 			"repositories": repoNames,
 			"permissions": map[string]string{
-				"contents": contentsPermission,
+				"contents":      contentsPermission,
+				"pull_requests": contentsPermission,
+				"metadata":      "read",
 			},
 		})
 		bodyStr = string(b)
