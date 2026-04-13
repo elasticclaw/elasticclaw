@@ -905,6 +905,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var files map[string]string
 	_ = json.Unmarshal([]byte(filesJSON), &files)
+
+	// Load github repos config for this claw
+	var githubReposJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&githubReposJSON)
+	var githubRepos []types.GitHubRepoAccess
+	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
 	// Resolve model: template override wins over hub default
 	var templateDefaultModel string
 	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
@@ -1095,6 +1101,34 @@ fi
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
+
+	// Inject GitHub tools context into TOOLS.md if GitHub is configured
+	if len(s.hubCfg.GitHubApps) > 0 && len(githubRepos) > 0 {
+		repoLines := ""
+		for _, r := range githubRepos {
+			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
+		}
+		githubSection := fmt.Sprintf(`
+## GitHub Access
+
+This claw has authenticated access to the following repositories via a GitHub App installation token. The token is fetched automatically — you don't need to configure anything.
+
+%s
+**git** and **gh CLI** are pre-configured and will work without any additional auth setup:
+
+`+"```bash\n"+`# These just work:
+git clone https://github.com/owner/repo
+gh pr create
+gh issue list
+`+"```\n"+`
+Tokens are short-lived and refreshed automatically on each git/gh operation.
+`, repoLines)
+		if existing, ok := files["TOOLS.md"]; ok {
+			files["TOOLS.md"] = existing + "\n" + githubSection
+		} else {
+			files["TOOLS.md"] = githubSection
+		}
+	}
 
 	// Write template files to workspace via separate SSH sessions
 	if len(files) > 0 {
