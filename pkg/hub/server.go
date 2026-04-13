@@ -939,12 +939,33 @@ for i in $(seq 1 30); do
   fi
 done
 
-# ── Download claw-bridge ─────────────────────────────────────────────────────
-echo "Downloading claw-bridge from %s..."
-curl -fsSL "%s" -o /tmp/claw-bridge
+# ── Install claw-bridge ─────────────────────────────────────────────────────
+BRIDGE_SRC="%s"
+echo "Installing claw-bridge from $BRIDGE_SRC..."
+if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
+  # Plain HTTP(S) URL — use curl (default: GitHub Releases)
+  curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
+else
+  # OCI ref — use oras (dev override via bridge_image in hub.yaml)
+  if ! command -v oras &>/dev/null; then
+    echo "Installing oras..."
+    curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
+    sudo mv /tmp/oras /usr/local/bin/oras
+  fi
+  mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
+  oras pull "$BRIDGE_SRC"
+  BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
+  if [ -z "$BINARY" ]; then
+    echo "ERROR: claw-bridge binary not found after oras pull"
+    ls -la /tmp/claw-bridge-dl/
+    exit 1
+  fi
+  cp "$BINARY" /tmp/claw-bridge
+  cd -
+fi
 chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
-echo "claw-bridge installed: $(claw-bridge --version 2>/dev/null || echo ok)"
+echo "claw-bridge installed"
 
 # Export env vars then start claw-bridge
 export ELASTICCLAW_HUB_URL="%s"
@@ -970,7 +991,7 @@ else
 fi
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
-		bridgeURL, bridgeURL,
+		bridgeURL,
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
