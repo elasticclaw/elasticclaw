@@ -21,17 +21,15 @@ type TemplateResources struct {
 }
 
 // GitHubAppConfig holds GitHub App credentials for the hub.
+// Configure in hub.yaml under the 'github:' key.
 type GitHubAppConfig struct {
-	AppID          int64  `yaml:"app_id"`
-	PrivateKeyPEM  string `yaml:"private_key_pem"` // PEM-encoded RSA private key
-	PrivateKeyFile string `yaml:"private_key_file"` // path to PEM file (alternative to inline)
-	InstallationID int64  `yaml:"installation_id"` // default installation; per-template overrides this
+	AppID         int64  `yaml:"app_id"`
+	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
 }
 
 // GitHubTemplateConfig specifies GitHub access needed by a template.
 type GitHubTemplateConfig struct {
-	InstallationID int64    `yaml:"installation_id,omitempty"` // override hub default
-	Repos          []string `yaml:"repos"`                     // e.g. ["owner/repo"]
+	Repos []string `yaml:"repos"` // e.g. ["owner/repo", "owner/repo2"]
 }
 
 // HubConfig is used in two contexts:

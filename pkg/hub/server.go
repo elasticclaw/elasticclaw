@@ -280,21 +280,17 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(req.Files)
 
-	// Store GitHub installation config from template if present
-	var githubInstallationID int64
+	// Store GitHub repos config from template if present
 	var githubReposJSON string = "[]"
-	if req.GitHub != nil {
-		githubInstallationID = req.GitHub.InstallationID
-		if len(req.GitHub.Repos) > 0 {
-			b, _ := json.Marshal(req.GitHub.Repos)
-			githubReposJSON = string(b)
-		}
+	if req.GitHub != nil && len(req.GitHub.Repos) > 0 {
+		b, _ := json.Marshal(req.GitHub.Repos)
+		githubReposJSON = string(b)
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_installation_id, github_repos, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, status, created_at) VALUES(?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubInstallationID, githubReposJSON, now(),
+		githubReposJSON, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1466,23 +1462,13 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify claw belongs to this tenant and get its github config
-	var installationID int64
 	var reposJSON string
 	err = s.db.QueryRow(
-		`SELECT github_installation_id, github_repos FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT github_repos FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&installationID, &reposJSON)
+	).Scan(&reposJSON)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
-		return
-	}
-
-	// Use claw-level installation ID, fall back to hub default
-	if installationID == 0 {
-		installationID = s.hubCfg.GitHub.InstallationID
-	}
-	if installationID == 0 {
-		http.Error(w, "no github installation configured for this claw", http.StatusNotFound)
 		return
 	}
 
@@ -1499,7 +1485,8 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, expiresAt, err := provider.InstallationToken(r.Context(), installationID, repos)
+	// Pass 0 — InstallationToken auto-discovers the right installation
+	token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 	if err != nil {
 		log.Printf("github installation token error for claw %s: %v", clawID, err)
 		http.Error(w, "failed to get github token", http.StatusInternalServerError)
