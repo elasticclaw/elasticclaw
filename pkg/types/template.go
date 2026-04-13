@@ -9,13 +9,29 @@ type TemplateConfig struct {
 	TTL          string            `yaml:"ttl,omitempty"`
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
-	DefaultModel string            `yaml:"default_model,omitempty"`
+	DefaultModel string                `yaml:"default_model,omitempty"`
+	// GitHub specifies GitHub repos this template's claw needs access to.
+	GitHub       *GitHubTemplateConfig `yaml:"github,omitempty"`
 }
 
 type TemplateResources struct {
 	CPU    string `yaml:"cpu,omitempty"`
 	Memory string `yaml:"memory,omitempty"`
 	Disk   string `yaml:"disk,omitempty"`
+}
+
+// GitHubAppConfig holds GitHub App credentials for the hub.
+type GitHubAppConfig struct {
+	AppID          int64  `yaml:"app_id"`
+	PrivateKeyPEM  string `yaml:"private_key_pem"` // PEM-encoded RSA private key
+	PrivateKeyFile string `yaml:"private_key_file"` // path to PEM file (alternative to inline)
+	InstallationID int64  `yaml:"installation_id"` // default installation; per-template overrides this
+}
+
+// GitHubTemplateConfig specifies GitHub access needed by a template.
+type GitHubTemplateConfig struct {
+	InstallationID int64    `yaml:"installation_id,omitempty"` // override hub default
+	Repos          []string `yaml:"repos"`                     // e.g. ["owner/repo"]
 }
 
 // HubConfig is used in two contexts:
@@ -41,6 +57,8 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
 	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
+	// GitHub is the optional GitHub App config for minting installation tokens.
+	GitHub *GitHubAppConfig `yaml:"github,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -73,6 +91,7 @@ type CreateClawRequest struct {
 	TTL          string            `json:"ttl,omitempty"`
 	// DefaultModel overrides hub default model for this claw (from template config).
 	DefaultModel string            `json:"default_model,omitempty"`
-	Files        map[string]string `json:"files"`
-	Env          map[string]string `json:"env,omitempty"`
+	Files        map[string]string     `json:"files"`
+	Env          map[string]string     `json:"env,omitempty"`
+	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
 }

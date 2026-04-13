@@ -104,6 +104,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
+	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
 
 	// Health
@@ -278,9 +279,22 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Pre-register claw row so it exists before the workspace boots
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(req.Files)
+
+	// Store GitHub installation config from template if present
+	var githubInstallationID int64
+	var githubReposJSON string = "[]"
+	if req.GitHub != nil {
+		githubInstallationID = req.GitHub.InstallationID
+		if len(req.GitHub.Repos) > 0 {
+			b, _ := json.Marshal(req.GitHub.Repos)
+			githubReposJSON = string(b)
+		}
+	}
+
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, status, created_at) VALUES(?,?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON), now(),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_installation_id, github_repos, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
+		githubInstallationID, githubReposJSON, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1051,6 +1065,10 @@ chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
 
+# ── GitHub credential helper ───────────────────────────────────────────────
+# Installs a git credential helper that fetches a fresh GitHub installation
+# token from the hub on demand. Token never expires on disk.
+%s
 # Export env vars then start claw-bridge
 export ELASTICCLAW_HUB_URL="%s"
 export ELASTICCLAW_CLAW_ID="%s"
@@ -1076,6 +1094,7 @@ fi
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
 		bridgeURL,
+		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
@@ -1145,6 +1164,49 @@ func buildLLMKeyEnv(keys map[string]string) string {
 	}
 	return b.String()
 }
+// buildGitHubCredentialHelper returns shell script lines that install a git
+// credential helper on the VM if GitHub App is configured on the hub.
+func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string) string {
+	if cfg.GitHub == nil {
+		return "# GitHub App not configured — skipping credential helper"
+	}
+	clawToken := cfg.ClawToken
+	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
+	return fmt.Sprintf(`# Install GitHub credential helper
+sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
+#!/bin/bash
+# Git credential helper — fetches a fresh GitHub App installation token from the hub.
+response=$(curl -sf %q)
+if [ $? -ne 0 ] || [ -z "$response" ]; then
+  exit 1
+fi
+token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+echo "protocol=https"
+echo "host=github.com"
+echo "username=x-access-token"
+echo "password=$token"
+CREDEOF
+sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
+
+# Configure git to use the credential helper
+git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+
+# Install gh CLI
+if ! command -v gh &>/dev/null; then
+  echo "Installing gh CLI..."
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  sudo apt-get update -qq && sudo apt-get install -y gh 2>/dev/null || echo "gh install failed, continuing"
+fi
+
+# Configure gh to use the credential helper token
+if command -v gh &>/dev/null; then
+  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep password | cut -d= -f2)
+  [ -n "$GH_TOKEN" ] && echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
+fi
+echo "GitHub credential helper installed"`, tokenURL)
+}
+
 // sshRun connects to host via the hub's SSH identity and runs a script.
 func (s *Server) sshRun(user, host, script string) error {
 	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
@@ -1372,4 +1434,80 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 		return
 	}
 	log.Printf("Replicated VM %s terminated", vmID)
+}
+
+// ─── GitHub Token Endpoint ────────────────────────────────────────────────────
+
+// handleGitHubToken mints a fresh GitHub installation token for the claw.
+// Auth: ?claw_token= query param (the claw's hub token, same as registration).
+// URL: GET /api/github/token/:clawId
+// Used by the git credential helper on the VM.
+func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
+	if s.hubCfg.GitHub == nil {
+		http.Error(w, "github app not configured", http.StatusNotImplemented)
+		return
+	}
+
+	clawToken := r.URL.Query().Get("claw_token")
+	if clawToken == "" {
+		// Also accept Authorization header for flexibility
+		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	tenantID, err := s.tenantByClawToken(clawToken)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
+	if clawID == "" {
+		http.Error(w, "missing claw id", http.StatusBadRequest)
+		return
+	}
+
+	// Verify claw belongs to this tenant and get its github config
+	var installationID int64
+	var reposJSON string
+	err = s.db.QueryRow(
+		`SELECT github_installation_id, github_repos FROM claws WHERE id = ? AND tenant_id = ?`,
+		clawID, tenantID,
+	).Scan(&installationID, &reposJSON)
+	if err != nil {
+		http.Error(w, "claw not found", http.StatusNotFound)
+		return
+	}
+
+	// Use claw-level installation ID, fall back to hub default
+	if installationID == 0 {
+		installationID = s.hubCfg.GitHub.InstallationID
+	}
+	if installationID == 0 {
+		http.Error(w, "no github installation configured for this claw", http.StatusNotFound)
+		return
+	}
+
+	// Parse repos
+	var repos []string
+	if reposJSON != "" && reposJSON != "[]" {
+		json.Unmarshal([]byte(reposJSON), &repos)
+	}
+
+	provider, err := NewGitHubTokenProvider(s.hubCfg.GitHub)
+	if err != nil {
+		log.Printf("github token provider: %v", err)
+		http.Error(w, "github app misconfigured", http.StatusInternalServerError)
+		return
+	}
+
+	token, expiresAt, err := provider.InstallationToken(r.Context(), installationID, repos)
+	if err != nil {
+		log.Printf("github installation token error for claw %s: %v", clawID, err)
+		http.Error(w, "failed to get github token", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"token":      token,
+		"expires_at": expiresAt,
+	})
 }

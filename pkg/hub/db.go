@@ -29,6 +29,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_host TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_user TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_installation_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_repos TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -53,7 +55,9 @@ func migrate(db *sql.DB) error {
 		created_at     DATETIME NOT NULL,
 		ssh_host       TEXT NOT NULL DEFAULT '',
 		ssh_port       INTEGER NOT NULL DEFAULT 0,
-		ssh_user       TEXT NOT NULL DEFAULT ''
+		ssh_user       TEXT NOT NULL DEFAULT '',
+		github_installation_id INTEGER NOT NULL DEFAULT 0,
+		github_repos   TEXT NOT NULL DEFAULT ''
 	);
 
 
