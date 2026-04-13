@@ -1096,7 +1096,7 @@ fi
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
 		bridgeURL,
-		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID),
+		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
@@ -1194,9 +1194,27 @@ func buildLLMKeyEnv(keys map[string]string) string {
 	}
 	return b.String()
 }
+// buildGitHubCloneScript returns shell lines that clone repos into the current directory.
+func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range repos {
+		parts := strings.SplitN(r.Repo, "/", 2)
+		repoName := r.Repo
+		if len(parts) == 2 {
+			repoName = parts[1]
+		}
+		fmt.Fprintf(&b, "if [ ! -d %q ]; then git clone https://github.com/%s %s && echo 'Cloned %s'; else git -C %s pull --ff-only && echo 'Updated %s'; fi\n",
+			repoName, r.Repo, repoName, r.Repo, repoName, r.Repo)
+	}
+	return b.String()
+}
+
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
-func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string) string {
+func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
 	if len(cfg.GitHubApps) == 0 {
 		return "# GitHub App not configured — skipping credential helper"
 	}
@@ -1251,7 +1269,12 @@ GHEOF
 export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
 BASHEOF
 fi
-echo "GitHub credential helper installed"`, tokenURL)
+echo "GitHub credential helper installed"
+
+# Clone repos into workspace so the agent starts with them already present
+cd "$HOME/.openclaw/workspace"
+%s
+echo "Repos cloned"`, tokenURL, buildGitHubCloneScript(repos))
 }
 
 // sshRun connects to host via the hub's SSH identity and runs a script.
