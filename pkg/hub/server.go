@@ -957,7 +957,7 @@ curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
   sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
 echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
 sudo apt-get update -qq
-sudo apt-get install -y nodejs
+sudo apt-get install -y nodejs git
 echo "Node: $(node --version)"
 
 # ── Install OpenClaw (sudo so it lands in /usr/bin/openclaw) ──────────────────
@@ -1184,15 +1184,21 @@ echo "password=$token"
 CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 
-# Configure git to use the credential helper
-git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+# Install git + gh CLI
+if ! command -v git &>/dev/null || ! command -v gh &>/dev/null; then
+  echo "Installing git and gh CLI..."
+  sudo apt-get update -qq
+  sudo apt-get install -y git 2>/dev/null || true
+  if ! command -v gh &>/dev/null; then
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+    sudo apt-get update -qq && sudo apt-get install -y gh 2>/dev/null || echo "gh install failed, continuing"
+  fi
+fi
 
-# Install gh CLI
-if ! command -v gh &>/dev/null; then
-  echo "Installing gh CLI..."
-  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-  sudo apt-get update -qq && sudo apt-get install -y gh 2>/dev/null || echo "gh install failed, continuing"
+# Configure git to use the credential helper
+if command -v git &>/dev/null; then
+  git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 fi
 
 # Configure gh to use the credential helper token
