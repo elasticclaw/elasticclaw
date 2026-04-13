@@ -423,12 +423,15 @@ func newGatewaySession(ctx context.Context, client *gatewayClient) (*gatewaySess
 		return nil, err
 	}
 
+	// Start read loop BEFORE initSession — sendReq depends on the read loop
+	// to dispatch responses; without it sendReq blocks forever.
+	go gs.readLoop(ctx)
+
 	if err := gs.initSession(ctx); err != nil {
 		gs.conn.CloseNow()
 		return nil, err
 	}
 
-	go gs.readLoop(ctx)
 	return gs, nil
 }
 
