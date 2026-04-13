@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -102,6 +103,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
 
 	// Health
@@ -216,7 +218,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -229,7 +231,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c types.Claw
 		var lastSeen sql.NullTime
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser); err != nil {
 			continue
 		}
 		c.TenantID = tenantID
@@ -370,9 +372,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var c types.Claw
 	var lastSeen sql.NullTime
 	err := s.db.QueryRow(
-		`SELECT id, name, template, status, last_seen, created_at FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -917,6 +919,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshUser := replicatedpkg.SSHUserFromPublicKey(s.identity.PublicKey)
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
+	// Store SSH connection details in the DB for terminal access
+	_, _ = s.db.Exec(
+		`UPDATE claws SET ssh_host=?, ssh_port=?, ssh_user=? WHERE id=?`,
+		vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser, clawID,
+	)
 
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
@@ -1199,6 +1206,152 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		}
 	}
 	return nil
+}
+
+// ─── Terminal WebSocket ───────────────────────────────────────────────────────
+
+// handleTerminal proxies a WebSocket connection to an SSH PTY on the claw's VM.
+// Route: GET /api/terminal/{clawID}?token=...
+func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
+	// Auth via token query param
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	tenantID, err := s.tenantByToken(token)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/terminal/")
+	if clawID == "" {
+		http.Error(w, "missing claw id", http.StatusBadRequest)
+		return
+	}
+
+	// Look up SSH details, verify tenant owns the claw
+	var sshHost string
+	var sshPort int
+	var sshUser string
+	err = s.db.QueryRow(
+		`SELECT ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
+		clawID, tenantID,
+	).Scan(&sshHost, &sshPort, &sshUser)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if sshHost == "" || sshPort == 0 {
+		http.Error(w, "ssh not available for this claw", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Upgrade to WebSocket
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	ctx := r.Context()
+
+	// Connect to SSH
+	sshCfg := &gossh.ClientConfig{
+		User:            sshUser,
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+	sshAddr := fmt.Sprintf("%s:%d", sshHost, sshPort)
+	sshClient, err := gossh.Dial("tcp", sshAddr, sshCfg)
+	if err != nil {
+		log.Printf("terminal: ssh dial %s: %v", sshAddr, err)
+		_ = conn.Close(websocket.StatusInternalError, "ssh connection failed")
+		return
+	}
+	defer sshClient.Close()
+
+	sshSess, err := sshClient.NewSession()
+	if err != nil {
+		log.Printf("terminal: ssh session: %v", err)
+		_ = conn.Close(websocket.StatusInternalError, "ssh session failed")
+		return
+	}
+	defer sshSess.Close()
+
+	// Request PTY
+	if err := sshSess.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{
+		gossh.ECHO:          1,
+		gossh.TTY_OP_ISPEED: 14400,
+		gossh.TTY_OP_OSPEED: 14400,
+	}); err != nil {
+		log.Printf("terminal: request pty: %v", err)
+		_ = conn.Close(websocket.StatusInternalError, "pty failed")
+		return
+	}
+
+	// Start shell
+	sshStdin, err := sshSess.StdinPipe()
+	if err != nil {
+		_ = conn.Close(websocket.StatusInternalError, "stdin pipe failed")
+		return
+	}
+	sshStdout, err := sshSess.StdoutPipe()
+	if err != nil {
+		_ = conn.Close(websocket.StatusInternalError, "stdout pipe failed")
+		return
+	}
+	sshSess.Stderr = sshSess.Stdout // merge stderr
+
+	if err := sshSess.Shell(); err != nil {
+		log.Printf("terminal: shell: %v", err)
+		_ = conn.Close(websocket.StatusInternalError, "shell failed")
+		return
+	}
+
+	// SSH stdout → WebSocket (in goroutine)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := sshStdout.Read(buf)
+			if n > 0 {
+				if werr := conn.Write(ctx, websocket.MessageText, buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// WebSocket → SSH stdin (resize handling)
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		// Check for resize message
+		var resizeMsg struct {
+			Type string `json:"type"`
+			Cols  uint32 `json:"cols"`
+			Rows  uint32 `json:"rows"`
+		}
+		if len(data) > 0 && data[0] == '{' {
+			if json.Unmarshal(data, &resizeMsg) == nil && resizeMsg.Type == "resize" {
+				_ = sshSess.WindowChange(int(resizeMsg.Rows), int(resizeMsg.Cols))
+				continue
+			}
+		}
+		if _, err := io.WriteString(sshStdin, string(data)); err != nil {
+			return
+		}
+	}
 }
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.

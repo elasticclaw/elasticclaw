@@ -12,6 +12,9 @@ type Claw struct {
 	LastSeen     time.Time      `json:"last_seen" db:"last_seen"`
 	CreatedAt    time.Time      `json:"created_at" db:"created_at"`
 	ContextUsage int            `json:"context_usage"`
+	SSHHost      string         `json:"ssh_host,omitempty"`
+	SSHPort      int            `json:"ssh_port,omitempty"`
+	SSHUser      string         `json:"ssh_user,omitempty"`
 }
 
 // HubMessage is a message exchanged between a claw and a user.
