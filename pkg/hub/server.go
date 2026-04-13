@@ -41,11 +41,16 @@ type clawConn struct {
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
-func initialStatus(gatewayReady bool) string {
-	if gatewayReady {
+// A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
+func initialStatus(gatewayReady *bool) string {
+	if gatewayReady == nil || *gatewayReady {
 		return "connected"
 	}
 	return "starting"
+}
+
+func gatewayReadyBool(v *bool) bool {
+	return v == nil || *v
 }
 
 type userConn struct {
@@ -466,7 +471,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		clawID, tenantID, rp.Name, rp.Template, initialStatus(rp.GatewayReady), now(), now(),
 	)
 
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: rp.GatewayReady}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady)}
 	s.mu.Lock()
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -507,16 +512,17 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == "heartbeat" {
 				payload, _ := json.Marshal(msg.Payload)
 				var hb struct {
-					GatewayHealthy bool `json:"gateway_healthy"`
-					GatewayReady   bool `json:"gateway_ready"`
-					ContextUsage   int  `json:"context_usage"`
+					GatewayHealthy bool  `json:"gateway_healthy"`
+					GatewayReady   *bool `json:"gateway_ready,omitempty"`
+					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						cc.contextUsage = hb.ContextUsage
-						// Promote from 'starting' to 'connected' once gateway is ready
-						if hb.GatewayReady && !cc.gatewayReady {
+						// Promote from 'starting' to 'connected' once gateway is ready.
+						// nil means field absent (old bridge) — treat as ready.
+						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
 							_, _ = s.db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, clawID)
 							s.broadcastToUsers(tenantID, types.WSMessage{
