@@ -794,10 +794,23 @@ func (s *Server) syncReplicatedVMs() {
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-const defaultBridgeImage = "ghcr.io/elasticclaw/claw-bridge:latest"
+const githubReleasesBase = "https://github.com/elasticclaw/elasticclaw/releases/download"
+
+// Version is set by cmd at startup so the hub can construct versioned download URLs.
+var Version = "dev"
+
+// bridgeDownloadURL returns the URL to download the claw-bridge binary.
+// If hub.yaml has bridge_image set, that URL is used as-is (dev/override).
+// Otherwise it constructs the GitHub releases URL from the hub's own version.
+func (s *Server) bridgeDownloadURL() string {
+	if s.hubCfg.BridgeImage != "" {
+		return s.hubCfg.BridgeImage
+	}
+	return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
+}
 
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
-// claw-bridge binary from OCI, and starts it with hub connection env vars.
+// claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
 	var filesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
@@ -810,10 +823,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if defaultModel == "" {
 		defaultModel = s.hubCfg.DefaultModel
 	}
-	bridgeImage := s.hubCfg.BridgeImage
-	if bridgeImage == "" {
-		bridgeImage = defaultBridgeImage
-	}
+	bridgeURL := s.bridgeDownloadURL()
 
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
 	cp, err := newReplicatedProvider(cfg)
@@ -929,27 +939,12 @@ for i in $(seq 1 30); do
   fi
 done
 
-# ── Install oras if not present ───────────────────────────────────────────────
-if ! command -v oras &>/dev/null; then
-  echo "Installing oras..."
-  curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
-  sudo mv /tmp/oras /usr/local/bin/oras
-fi
-
-# Pull claw-bridge binary from OCI
-echo "Pulling claw-bridge from %s..."
-mkdir -p /tmp/claw-bridge-dl
-cd /tmp/claw-bridge-dl
-oras pull %s
-# Find the claw-bridge binary (may be named 'claw-bridge' or 'claw-bridge-linux-amd64')
-BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
-if [ -z "$BINARY" ]; then
-  echo "ERROR: claw-bridge binary not found after oras pull"
-  ls -la /tmp/claw-bridge-dl/
-  exit 1
-fi
-chmod +x "$BINARY"
-sudo mv "$BINARY" /usr/local/bin/claw-bridge
+# ── Download claw-bridge ─────────────────────────────────────────────────────
+echo "Downloading claw-bridge from %s..."
+curl -fsSL "%s" -o /tmp/claw-bridge
+chmod +x /tmp/claw-bridge
+sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
+echo "claw-bridge installed: $(claw-bridge --version 2>/dev/null || echo ok)"
 
 # Export env vars then start claw-bridge
 export ELASTICCLAW_HUB_URL="%s"
@@ -975,7 +970,7 @@ else
 fi
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
-		bridgeImage, bridgeImage,
+		bridgeURL, bridgeURL,
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),

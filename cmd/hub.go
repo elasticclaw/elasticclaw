@@ -60,6 +60,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load hub config: %w", err)
 	}
 
+	hub.Version = Version // propagate build-time version for bridge download URL
 	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
