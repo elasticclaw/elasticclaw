@@ -217,7 +217,11 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RLock()
 		if cc, online := s.claws[c.ID]; online {
-			c.Status = "connected"
+			// Only promote to 'connected' once the gateway session is ready;
+			// otherwise preserve whatever status is in the DB ('starting', etc.)
+			if cc.gatewayReady {
+				c.Status = "connected"
+			}
 			c.ContextUsage = cc.contextUsage
 		}
 		s.mu.RUnlock()
@@ -462,7 +466,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		clawID, tenantID, rp.Name, rp.Template, initialStatus(rp.GatewayReady), now(), now(),
 	)
 
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: rp.GatewayReady}
 	s.mu.Lock()
 	s.claws[clawID] = cc
 	s.mu.Unlock()
