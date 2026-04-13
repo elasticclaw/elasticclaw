@@ -105,7 +105,22 @@ func (s *Server) Run() error {
 	})
 
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+}
+
+// corsMiddleware adds permissive CORS headers so the web UI can connect
+// from any origin (browser same-origin restrictions apply to REST + WS).
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
