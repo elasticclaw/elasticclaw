@@ -109,6 +109,22 @@ func (s *Server) Run() error {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Debug: dump in-memory claw state (auth required)
+	mux.HandleFunc("/api/debug/claws", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		type debugClaw struct {
+			ID           string `json:"id"`
+			GatewayReady bool   `json:"gateway_ready"`
+			ContextUsage int    `json:"context_usage"`
+		}
+		out := make([]debugClaw, 0, len(s.claws))
+		for id, cc := range s.claws {
+			out = append(out, debugClaw{ID: id, GatewayReady: cc.gatewayReady, ContextUsage: cc.contextUsage})
+		}
+		s.mu.RUnlock()
+		jsonOK(w, out)
+	}))
+
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	return http.ListenAndServe(s.addr, corsMiddleware(mux))
 }
@@ -476,7 +492,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
-	log.Printf("claw connected: %s (%s) gateway_ready=%v", rp.Name, clawID, rp.GatewayReady)
+	log.Printf("claw connected: %s (%s) gateway_ready=%v cc.gatewayReady=%v", rp.Name, clawID, rp.GatewayReady, cc.gatewayReady)
 
 	// Ack
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
@@ -517,6 +533,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
+					log.Printf("heartbeat from %s: gateway_healthy=%v gateway_ready=%v context_usage=%d", clawID[:8], hb.GatewayHealthy, hb.GatewayReady, hb.ContextUsage)
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						cc.contextUsage = hb.ContextUsage
