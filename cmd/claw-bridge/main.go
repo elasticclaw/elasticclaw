@@ -404,6 +404,10 @@ type gatewaySession struct {
 	// context usage (0-100), updated after each turn
 	ctxMu        sync.RWMutex
 	contextUsage int
+
+	// ready is true once the gateway session is established and ready for messages
+	readyMu sync.RWMutex
+	ready   bool
 }
 
 // newGatewaySession creates a gatewaySession, establishes the gateway
@@ -494,7 +498,11 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 		if err == nil {
 			log.Printf("[session] restored existing session: %s", key)
 			gs.sessionKey = key
-			return gs.subscribe(ctx)
+			if err := gs.subscribe(ctx); err != nil {
+				return err
+			}
+			gs.setReady()
+			return nil
 		}
 		log.Printf("[session] saved session not found (%v), creating new one", err)
 	}
@@ -515,7 +523,11 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 	saveBridgeSession(payload.Key)
 	log.Printf("[session] created new session: %s", gs.sessionKey)
 
-	return gs.subscribe(ctx)
+	if err := gs.subscribe(ctx); err != nil {
+		return err
+	}
+	gs.setReady()
+	return nil
 }
 
 // subscribe registers for events on the current session key.
@@ -662,6 +674,19 @@ func (gs *gatewaySession) ContextUsage() int {
 	return gs.contextUsage
 }
 
+// IsReady returns true once the persistent gateway session is established.
+func (gs *gatewaySession) IsReady() bool {
+	gs.readyMu.RLock()
+	defer gs.readyMu.RUnlock()
+	return gs.ready
+}
+
+func (gs *gatewaySession) setReady() {
+	gs.readyMu.Lock()
+	gs.ready = true
+	gs.readyMu.Unlock()
+}
+
 // SendMessage sends a user message to the persistent session, streams chunks
 // via onChunk, and returns the full response text.
 func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string)) (string, error) {
@@ -805,14 +830,15 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	defer conn.CloseNow()
 
-	// Register with the hub
+	// Register with the hub — gateway_ready=false until session is established
 	reg := hubMsg{
 		Type: "register",
-		Payload: mustJSON(map[string]string{
-			"claw_id":  clawID,
-			"name":     clawName,
-			"template": templateName,
-			"token":    token,
+		Payload: mustJSON(map[string]interface{}{
+			"claw_id":       clawID,
+			"name":          clawName,
+			"template":      templateName,
+			"token":         token,
+			"gateway_ready": gwSession.IsReady(),
 		}),
 	}
 	if err := wsjson.Write(ctx, conn, reg); err != nil {
@@ -843,6 +869,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					Type: "heartbeat",
 					Payload: mustJSON(map[string]interface{}{
 						"gateway_healthy": health,
+						"gateway_ready":   gwSession.IsReady(),
 						"context_usage":   gwSession.ContextUsage(),
 					}),
 				})

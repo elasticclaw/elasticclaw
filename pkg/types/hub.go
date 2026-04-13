@@ -32,9 +32,10 @@ type WSMessage struct {
 
 // RegisterPayload is sent by a claw on connect.
 type RegisterPayload struct {
-	ClawID   string `json:"claw_id"`
-	Name     string `json:"name"`
-	Template string `json:"template"`
-	Token    string `json:"token"` // hub claw token for auth
+	ClawID        string `json:"claw_id"`
+	Name          string `json:"name"`
+	Template      string `json:"template"`
+	Token         string `json:"token"` // hub claw token for auth
+	GatewayReady  bool   `json:"gateway_ready"` // true once openclaw gateway session is established
 }
 

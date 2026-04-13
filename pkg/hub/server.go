@@ -36,7 +36,16 @@ type clawConn struct {
 	id           string
 	tenantID     string
 	conn         *websocket.Conn
-	contextUsage int // 0-100, updated from heartbeats
+	contextUsage int  // 0-100, updated from heartbeats
+	gatewayReady bool // true once bridge reports gateway session established
+}
+
+// initialStatus returns the claw status string to use on bridge registration.
+func initialStatus(gatewayReady bool) string {
+	if gatewayReady {
+		return "connected"
+	}
+	return "starting"
 }
 
 type userConn struct {
@@ -433,9 +442,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Upsert claw
 	_, _ = s.db.Exec(
-		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,'connected',?,?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template, status='connected', last_seen=excluded.last_seen`,
-		clawID, tenantID, rp.Name, rp.Template, now(), now(),
+		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template, status=excluded.status, last_seen=excluded.last_seen`,
+		clawID, tenantID, rp.Name, rp.Template, initialStatus(rp.GatewayReady), now(), now(),
 	)
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn}
@@ -443,13 +452,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
-	log.Printf("claw connected: %s (%s)", rp.Name, clawID)
+	log.Printf("claw connected: %s (%s) gateway_ready=%v", rp.Name, clawID, rp.GatewayReady)
 
 	// Ack
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
 
-	// Broadcast claw online to user sessions
-	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "connected"}})
+	// Broadcast initial status to user sessions
+	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": initialStatus(rp.GatewayReady)}})
 
 	// Read loop — claw sends messages back to users
 	defer func() {
@@ -479,12 +488,23 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == "heartbeat" {
 				payload, _ := json.Marshal(msg.Payload)
 				var hb struct {
-					ContextUsage int `json:"context_usage"`
+					GatewayHealthy bool `json:"gateway_healthy"`
+					GatewayReady   bool `json:"gateway_ready"`
+					ContextUsage   int  `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						cc.contextUsage = hb.ContextUsage
+						// Promote from 'starting' to 'connected' once gateway is ready
+						if hb.GatewayReady && !cc.gatewayReady {
+							cc.gatewayReady = true
+							_, _ = s.db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, clawID)
+							s.broadcastToUsers(tenantID, types.WSMessage{
+								Type:    "claw_status",
+								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
+							})
+						}
 					}
 					s.mu.Unlock()
 				}
