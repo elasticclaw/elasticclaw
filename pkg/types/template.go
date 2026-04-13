@@ -71,7 +71,7 @@ type HubConfig struct {
 	//         -----BEGIN RSA PRIVATE KEY-----
 	//         ...
 	//         -----END RSA PRIVATE KEY-----
-	GitHubApps []*GitHubAppConfig `yaml:"github_apps,omitempty"`
+	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 }
 
 type ProviderConfig struct {
