@@ -1470,9 +1470,18 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var repos []string
+	var repos []RepoAccess
 	if reposJSON != "" && reposJSON != "[]" {
-		json.Unmarshal([]byte(reposJSON), &repos)
+		var rawRepos []types.GitHubRepoAccess
+		if err := json.Unmarshal([]byte(reposJSON), &rawRepos); err == nil {
+			for _, r := range rawRepos {
+				perm := r.Permissions
+				if perm == "" {
+					perm = "read"
+				}
+				repos = append(repos, RepoAccess{Repo: r.Repo, Permissions: perm})
+			}
+		}
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation

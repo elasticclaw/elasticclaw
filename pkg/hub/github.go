@@ -131,13 +131,23 @@ func (p *GitHubTokenProvider) FindInstallationForRepos(ctx context.Context, repo
 	return installations[0].ID, nil
 }
 
+// RepoAccess is a repo + permission level used when minting tokens.
+type RepoAccess struct {
+	Repo        string // "owner/repo"
+	Permissions string // "read" or "write"
+}
+
 // InstallationToken mints a fresh installation access token scoped to the given repos.
 // installationID is looked up automatically if not provided (0).
-func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installationID int64, repos []string) (string, time.Time, error) {
+func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installationID int64, repos []RepoAccess) (string, time.Time, error) {
 	// Auto-discover installation ID if not set
 	if installationID == 0 {
 		var err error
-		installationID, err = p.FindInstallationForRepos(ctx, repos)
+		repoStrs := make([]string, len(repos))
+		for i, r := range repos {
+			repoStrs[i] = r.Repo
+		}
+		installationID, err = p.FindInstallationForRepos(ctx, repoStrs)
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("find installation: %w", err)
 		}
@@ -148,19 +158,36 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		return "", time.Time{}, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	// Build request body scoped to specific repos
+	// Build request body scoped to repos with correct permissions.
+	// GitHub token permissions: contents=read means read-only, contents=write means read+write.
 	var bodyStr string
 	if len(repos) > 0 {
 		repoNames := make([]string, 0, len(repos))
+		// Track the highest permission needed across all repos
+		needsWrite := false
 		for _, r := range repos {
-			parts := strings.SplitN(r, "/", 2)
+			parts := strings.SplitN(r.Repo, "/", 2)
+			name := r.Repo
 			if len(parts) == 2 {
-				repoNames = append(repoNames, parts[1])
-			} else {
-				repoNames = append(repoNames, r)
+				name = parts[1]
+			}
+			repoNames = append(repoNames, name)
+			if r.Permissions == "write" {
+				needsWrite = true
 			}
 		}
-		b, _ := json.Marshal(map[string]interface{}{"repositories": repoNames})
+		contentsPermission := "read"
+		if needsWrite {
+			contentsPermission = "write"
+		}
+		b, _ := json.Marshal(map[string]interface{}{
+			"repositories": repoNames,
+			"permissions": map[string]string{
+				"contents":      contentsPermission,
+				"pull_requests": contentsPermission, // match contents level
+				"metadata":      "read",             // always needed for repo access
+			},
+		})
 		bodyStr = string(b)
 	}
 

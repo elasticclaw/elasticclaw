@@ -27,9 +27,15 @@ type GitHubAppConfig struct {
 	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
 }
 
+// GitHubRepoAccess specifies a repo and the permissions needed.
+type GitHubRepoAccess struct {
+	Repo        string `yaml:"repo"`        // e.g. "owner/repo"
+	Permissions string `yaml:"permissions"` // "read" or "write" (default: "read")
+}
+
 // GitHubTemplateConfig specifies GitHub access needed by a template.
 type GitHubTemplateConfig struct {
-	Repos []string `yaml:"repos"` // e.g. ["owner/repo", "owner/repo2"]
+	Repos []GitHubRepoAccess `yaml:"repos"`
 }
 
 // HubConfig is used in two contexts:
