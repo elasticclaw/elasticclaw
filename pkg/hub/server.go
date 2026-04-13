@@ -33,9 +33,10 @@ type Server struct {
 }
 
 type clawConn struct {
-	id       string
-	tenantID string
-	conn     *websocket.Conn
+	id           string
+	tenantID     string
+	conn         *websocket.Conn
+	contextUsage int // 0-100, updated from heartbeats
 }
 
 type userConn struct {
@@ -191,8 +192,9 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 			c.LastSeen = lastSeen.Time
 		}
 		s.mu.RLock()
-		if _, online := s.claws[c.ID]; online {
+		if cc, online := s.claws[c.ID]; online {
 			c.Status = "connected"
+			c.ContextUsage = cc.contextUsage
 		}
 		s.mu.RUnlock()
 		out = append(out, c)
@@ -474,7 +476,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if err := wsjson.Read(ctx, conn, &msg); err != nil {
 				return
 			}
-			if msg.Type == "chunk" {
+			if msg.Type == "heartbeat" {
+				payload, _ := json.Marshal(msg.Payload)
+				var hb struct {
+					ContextUsage int `json:"context_usage"`
+				}
+				if err := json.Unmarshal(payload, &hb); err == nil {
+					s.mu.Lock()
+					if cc, ok := s.claws[clawID]; ok {
+						cc.contextUsage = hb.ContextUsage
+					}
+					s.mu.Unlock()
+				}
+			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately without persisting
 				payload, _ := json.Marshal(msg.Payload)
 				var chunk struct {

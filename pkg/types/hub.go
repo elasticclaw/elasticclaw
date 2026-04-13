@@ -4,13 +4,14 @@ import "time"
 
 // Claw represents an agent instance registered with the hub.
 type Claw struct {
-	ID        string         `json:"id" db:"id"`
-	TenantID  string         `json:"tenant_id" db:"tenant_id"`
-	Name      string         `json:"name" db:"name"`
-	Template  string         `json:"template" db:"template"`
-	Status    InstanceStatus `json:"status" db:"status"`
-	LastSeen  time.Time      `json:"last_seen" db:"last_seen"`
-	CreatedAt time.Time      `json:"created_at" db:"created_at"`
+	ID           string         `json:"id" db:"id"`
+	TenantID     string         `json:"tenant_id" db:"tenant_id"`
+	Name         string         `json:"name" db:"name"`
+	Template     string         `json:"template" db:"template"`
+	Status       InstanceStatus `json:"status" db:"status"`
+	LastSeen     time.Time      `json:"last_seen" db:"last_seen"`
+	CreatedAt    time.Time      `json:"created_at" db:"created_at"`
+	ContextUsage int            `json:"context_usage"`
 }
 
 // HubMessage is a message exchanged between a claw and a user.

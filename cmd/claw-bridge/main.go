@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -73,6 +74,52 @@ type deviceIdentity struct {
 	DeviceID      string `json:"deviceId"`
 	PublicKeyPem  string `json:"publicKeyPem"`
 	PrivateKeyPem string `json:"privateKeyPem"`
+}
+
+// ─── session key persistence ──────────────────────────────────────────────────
+
+type bridgeSessionFile struct {
+	SessionKey string `json:"sessionKey"`
+}
+
+func bridgeSessionPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".elasticclaw")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "bridge-session.json"), nil
+}
+
+func loadBridgeSession() string {
+	path, err := bridgeSessionPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var f bridgeSessionFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return ""
+	}
+	return f.SessionKey
+}
+
+func saveBridgeSession(key string) {
+	path, err := bridgeSessionPath()
+	if err != nil {
+		log.Printf("[session] failed to resolve session path: %v", err)
+		return
+	}
+	data, _ := json.Marshal(bridgeSessionFile{SessionKey: key})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Printf("[session] failed to save session: %v", err)
+	}
 }
 
 // ─── openclaw gateway client ─────────────────────────────────────────────────
@@ -322,114 +369,229 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 	}
 }
 
-// sendAgentMessage sends a message to the gateway, streams chunks via onChunk,
-// and returns the full response text.
-func (gc *gatewayClient) sendAgentMessage(ctx context.Context, message string, onChunk func(string)) (string, error) {
-	conn, err := gc.connectToGateway(ctx)
-	if err != nil {
-		return "", fmt.Errorf("gateway connect: %w", err)
+// ─── persistent gateway session ──────────────────────────────────────────────
+
+type agentResult struct {
+	text string
+	err  error
+}
+
+// inFlightState tracks a single in-progress agent turn.
+type inFlightState struct {
+	onChunk  func(string)
+	fullText strings.Builder
+	done     chan agentResult
+}
+
+// gatewaySession is a long-lived connection to the OpenClaw gateway that
+// maintains a single persistent agent session across all messages.
+type gatewaySession struct {
+	client     *gatewayClient
+	sessionKey string
+
+	connMu sync.Mutex
+	conn   *websocket.Conn
+
+	// pending req/res tracking (reqID → response channel)
+	pendMu  sync.Mutex
+	pending map[string]chan gwFrame
+
+	// in-flight message tracking (one at a time, serialised by sendMu)
+	sendMu   sync.Mutex
+	infMu    sync.RWMutex
+	inFlight *inFlightState
+
+	// context usage (0-100), updated after each turn
+	ctxMu        sync.RWMutex
+	contextUsage int
+}
+
+// newGatewaySession creates a gatewaySession, establishes the gateway
+// connection, resolves (or creates) the persistent session, subscribes,
+// and starts the background read loop.
+func newGatewaySession(ctx context.Context, client *gatewayClient) (*gatewaySession, error) {
+	gs := &gatewaySession{
+		client:  client,
+		pending: make(map[string]chan gwFrame),
 	}
-	defer conn.CloseNow()
+
+	if err := gs.connect(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := gs.initSession(ctx); err != nil {
+		gs.conn.CloseNow()
+		return nil, err
+	}
+
+	go gs.readLoop(ctx)
+	return gs, nil
+}
+
+// connect dials the gateway and stores the connection. Must be called with
+// connMu unlocked.
+func (gs *gatewaySession) connect(ctx context.Context) error {
+	conn, err := gs.client.connectToGateway(ctx)
+	if err != nil {
+		return err
+	}
+	gs.connMu.Lock()
+	gs.conn = conn
+	gs.connMu.Unlock()
+	return nil
+}
+
+// sendReq sends a gateway request and waits for the corresponding response.
+func (gs *gatewaySession) sendReq(ctx context.Context, method string, params interface{}) (gwFrame, error) {
+	paramsJSON, _ := json.Marshal(params)
+	reqID := randomID()
+	ch := make(chan gwFrame, 1)
+
+	gs.pendMu.Lock()
+	gs.pending[reqID] = ch
+	gs.pendMu.Unlock()
+
+	gs.connMu.Lock()
+	conn := gs.conn
+	gs.connMu.Unlock()
+
+	if err := wsjson.Write(ctx, conn, gwFrame{
+		Type:   "req",
+		ID:     reqID,
+		Method: method,
+		Params: paramsJSON,
+	}); err != nil {
+		gs.pendMu.Lock()
+		delete(gs.pending, reqID)
+		gs.pendMu.Unlock()
+		return gwFrame{}, fmt.Errorf("%s write: %w", method, err)
+	}
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			msg := "unknown"
+			if resp.Error != nil {
+				msg = resp.Error.Message
+			}
+			return resp, fmt.Errorf("%s failed: %s", method, msg)
+		}
+		return resp, nil
+	case <-ctx.Done():
+		gs.pendMu.Lock()
+		delete(gs.pending, reqID)
+		gs.pendMu.Unlock()
+		return gwFrame{}, ctx.Err()
+	}
+}
+
+// initSession resolves the persistent session key (loading from disk and
+// verifying, or creating a new one) and subscribes to it.
+func (gs *gatewaySession) initSession(ctx context.Context) error {
+	// Try to restore an existing session
+	if key := loadBridgeSession(); key != "" {
+		_, err := gs.sendReq(ctx, "sessions.get", map[string]string{"key": key})
+		if err == nil {
+			log.Printf("[session] restored existing session: %s", key)
+			gs.sessionKey = key
+			return gs.subscribe(ctx)
+		}
+		log.Printf("[session] saved session not found (%v), creating new one", err)
+	}
 
 	// Create a new session
-	sessionID := "bridge-" + randomID()
-	createParams, _ := json.Marshal(map[string]string{"agentId": "main"})
-	createID := randomID()
-	if err := wsjson.Write(ctx, conn, gwFrame{
-		Type: "req", ID: createID, Method: "sessions.create", Params: createParams,
-	}); err != nil {
-		return "", fmt.Errorf("sessions.create write: %w", err)
+	resp, err := gs.sendReq(ctx, "sessions.create", map[string]string{"agentId": "main"})
+	if err != nil {
+		return fmt.Errorf("sessions.create: %w", err)
 	}
-	var sessionKey string
-	for {
-		var resp gwFrame
-		if err := wsjson.Read(ctx, conn, &resp); err != nil {
-			return "", fmt.Errorf("sessions.create read: %w", err)
-		}
-		if resp.Type == "res" && resp.ID == createID {
-			if !resp.OK {
-				msg := "unknown"
-				if resp.Error != nil {
-					msg = resp.Error.Message
-				}
-				return "", fmt.Errorf("sessions.create failed: %s", msg)
-			}
-			var payload struct {
-				Key string `json:"key"`
-			}
-			json.Unmarshal(resp.Payload, &payload)
-			sessionKey = payload.Key
-			break
-		}
+	var payload struct {
+		Key string `json:"key"`
 	}
-	log.Printf("[gateway] created session: %s (internal: %s)", sessionKey, sessionID)
+	json.Unmarshal(resp.Payload, &payload)
+	if payload.Key == "" {
+		return fmt.Errorf("sessions.create returned empty key")
+	}
+	gs.sessionKey = payload.Key
+	saveBridgeSession(payload.Key)
+	log.Printf("[session] created new session: %s", gs.sessionKey)
 
-	// Subscribe to session events
-	subParams, _ := json.Marshal(map[string]string{"sessionKey": sessionKey})
-	subID := randomID()
-	if err := wsjson.Write(ctx, conn, gwFrame{
-		Type: "req", ID: subID, Method: "sessions.subscribe", Params: subParams,
-	}); err != nil {
-		return "", fmt.Errorf("sessions.subscribe write: %w", err)
-	}
-	for {
-		var resp gwFrame
-		if err := wsjson.Read(ctx, conn, &resp); err != nil {
-			return "", fmt.Errorf("sessions.subscribe read: %w", err)
-		}
-		if resp.Type == "res" && resp.ID == subID {
-			if !resp.OK {
-				msg := "unknown"
-				if resp.Error != nil {
-					msg = resp.Error.Message
-				}
-				return "", fmt.Errorf("sessions.subscribe failed: %s", msg)
-			}
-			break
-		}
-	}
+	return gs.subscribe(ctx)
+}
 
-	// Send the message
-	sendParams, _ := json.Marshal(map[string]string{"key": sessionKey, "message": message})
-	sendID := randomID()
-	if err := wsjson.Write(ctx, conn, gwFrame{
-		Type: "req", ID: sendID, Method: "sessions.send", Params: sendParams,
-	}); err != nil {
-		return "", fmt.Errorf("sessions.send write: %w", err)
+// subscribe registers for events on the current session key.
+func (gs *gatewaySession) subscribe(ctx context.Context) error {
+	_, err := gs.sendReq(ctx, "sessions.subscribe", map[string]string{"sessionKey": gs.sessionKey})
+	if err != nil {
+		return fmt.Errorf("sessions.subscribe: %w", err)
 	}
+	log.Printf("[session] subscribed to session events")
+	return nil
+}
 
-	// Wait for send ack
+// readLoop reads frames from the gateway forever, dispatching responses to
+// pending channels and agent events to the in-flight handler.
+// When the connection drops it reconnects and re-subscribes.
+func (gs *gatewaySession) readLoop(ctx context.Context) {
 	for {
-		var resp gwFrame
-		if err := wsjson.Read(ctx, conn, &resp); err != nil {
-			return "", fmt.Errorf("sessions.send read: %w", err)
-		}
-		if resp.Type == "res" && resp.ID == sendID {
-			if !resp.OK {
-				msg := "unknown"
-				if resp.Error != nil {
-					msg = resp.Error.Message
-				}
-				return "", fmt.Errorf("sessions.send failed: %s", msg)
-			}
-			break
-		}
-	}
-	log.Printf("[gateway] message sent, streaming response...")
+		gs.connMu.Lock()
+		conn := gs.conn
+		gs.connMu.Unlock()
 
-	// Stream agent events until turn done
-	var fullText strings.Builder
-	for {
 		var frame gwFrame
 		if err := wsjson.Read(ctx, conn, &frame); err != nil {
-			return "", fmt.Errorf("stream read: %w", err)
-		}
-		if frame.Type != "event" {
+			if ctx.Err() != nil {
+				return // shutting down
+			}
+			log.Printf("[gateway] read error: %v — reconnecting in 3s", err)
+
+			// Fail any in-flight message
+			gs.infMu.RLock()
+			inf := gs.inFlight
+			gs.infMu.RUnlock()
+			if inf != nil {
+				select {
+				case inf.done <- agentResult{err: fmt.Errorf("gateway disconnected")}:
+				default:
+				}
+			}
+
+			time.Sleep(3 * time.Second)
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := gs.connect(ctx); err != nil {
+					log.Printf("[gateway] reconnect failed: %v — retrying in 5s", err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				if err := gs.subscribe(ctx); err != nil {
+					log.Printf("[gateway] re-subscribe failed: %v — retrying in 5s", err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				log.Printf("[gateway] reconnected and re-subscribed")
+				break
+			}
 			continue
 		}
 
-		// agent stream events carry delta chunks
-		if frame.Event == "agent" {
+		switch frame.Type {
+		case "res":
+			gs.pendMu.Lock()
+			ch, ok := gs.pending[frame.ID]
+			if ok {
+				delete(gs.pending, frame.ID)
+			}
+			gs.pendMu.Unlock()
+			if ok {
+				ch <- frame
+			}
+
+		case "event":
+			if frame.Event != "agent" {
+				continue
+			}
 			var agentPayload struct {
 				Stream     string `json:"stream"`
 				SessionKey string `json:"sessionKey"`
@@ -441,21 +603,106 @@ func (gc *gatewayClient) sendAgentMessage(ctx context.Context, message string, o
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
 				continue
 			}
-			// Only process events for our session
-			if agentPayload.SessionKey != sessionKey {
+			if agentPayload.SessionKey != gs.sessionKey {
 				continue
 			}
+
+			gs.infMu.RLock()
+			inf := gs.inFlight
+			gs.infMu.RUnlock()
+			if inf == nil {
+				continue
+			}
+
 			if agentPayload.Stream == "assistant" && agentPayload.Data.Delta != "" {
-				fullText.WriteString(agentPayload.Data.Delta)
-				if onChunk != nil {
-					onChunk(agentPayload.Data.Delta)
+				inf.fullText.WriteString(agentPayload.Data.Delta)
+				if inf.onChunk != nil {
+					inf.onChunk(agentPayload.Data.Delta)
 				}
 			}
 			if agentPayload.Stream == "lifecycle" && agentPayload.Data.Phase == "end" {
 				log.Printf("[gateway] agent turn complete")
-				return strings.TrimSpace(fullText.String()), nil
+				inf.done <- agentResult{text: strings.TrimSpace(inf.fullText.String())}
 			}
 		}
+	}
+}
+
+// refreshContextUsage polls sessions.get and updates contextUsage.
+func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
+	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := gs.sendReq(pollCtx, "sessions.get", map[string]string{"key": gs.sessionKey})
+	if err != nil {
+		log.Printf("[session] sessions.get for context usage: %v", err)
+		return
+	}
+	var info struct {
+		TotalTokens   int `json:"totalTokens"`
+		ContextTokens int `json:"contextTokens"`
+	}
+	if err := json.Unmarshal(resp.Payload, &info); err != nil || info.ContextTokens == 0 {
+		return
+	}
+	usage := info.TotalTokens * 100 / info.ContextTokens
+	if usage > 100 {
+		usage = 100
+	}
+	gs.ctxMu.Lock()
+	gs.contextUsage = usage
+	gs.ctxMu.Unlock()
+	log.Printf("[session] context usage: %d%% (%d/%d tokens)", usage, info.TotalTokens, info.ContextTokens)
+}
+
+// ContextUsage returns the last-known context window usage percentage (0-100).
+func (gs *gatewaySession) ContextUsage() int {
+	gs.ctxMu.RLock()
+	defer gs.ctxMu.RUnlock()
+	return gs.contextUsage
+}
+
+// SendMessage sends a user message to the persistent session, streams chunks
+// via onChunk, and returns the full response text.
+func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string)) (string, error) {
+	// Serialise: only one message in flight at a time
+	gs.sendMu.Lock()
+	defer gs.sendMu.Unlock()
+
+	inf := &inFlightState{
+		onChunk: onChunk,
+		done:    make(chan agentResult, 1),
+	}
+	gs.infMu.Lock()
+	gs.inFlight = inf
+	gs.infMu.Unlock()
+	defer func() {
+		gs.infMu.Lock()
+		gs.inFlight = nil
+		gs.infMu.Unlock()
+	}()
+
+	// Send the message
+	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
+		"key":     gs.sessionKey,
+		"message": message,
+	})
+	if err != nil {
+		return "", fmt.Errorf("sessions.send: %w", err)
+	}
+	log.Printf("[gateway] message sent, streaming response...")
+
+	// Wait for lifecycle/end from the read loop
+	select {
+	case result := <-inf.done:
+		if result.err != nil {
+			return "", result.err
+		}
+		// Refresh context usage after each turn (best-effort)
+		go gs.refreshContextUsage(context.Background())
+		return result.text, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }
 
@@ -499,8 +746,38 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Establish the persistent gateway session before entering the hub loop.
+	// Retry until we succeed (gateway may not be ready yet).
+	var gwSession *gatewaySession
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if !checkGateway(gatewayAddr) {
+			log.Printf("[bridge] waiting for gateway at %s...", gatewayAddr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+				continue
+			}
+		}
+		gwSession, err = newGatewaySession(ctx, gwClient)
+		if err != nil {
+			log.Printf("[bridge] failed to init gateway session: %v — retrying in 5s", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		break
+	}
+	log.Printf("[bridge] gateway session ready: %s", gwSession.sessionKey)
+
+	for {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -519,7 +796,7 @@ func main() {
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"User-Agent": {"claw-bridge/1.0"}},
 	})
@@ -552,7 +829,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
-	// Heartbeat goroutine
+	// Heartbeat goroutine — includes context_usage from persistent session
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -563,8 +840,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			case <-ticker.C:
 				health := checkGateway(gwClient.addr)
 				_ = wsjson.Write(ctx, conn, hubMsg{
-					Type:    "heartbeat",
-					Payload: mustJSON(map[string]interface{}{"gateway_healthy": health}),
+					Type: "heartbeat",
+					Payload: mustJSON(map[string]interface{}{
+						"gateway_healthy": health,
+						"context_usage":   gwSession.ContextUsage(),
+					}),
 				})
 			}
 		}
@@ -596,7 +876,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
 
-				reply, agentErr := gwClient.sendAgentMessage(agentCtx, content, func(chunk string) {
+				reply, agentErr := gwSession.SendMessage(agentCtx, content, func(chunk string) {
 					_ = wsjson.Write(connCtx, conn, hubMsg{
 						Type: "chunk",
 						Payload: mustJSON(map[string]interface{}{
