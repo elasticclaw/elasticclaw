@@ -23,7 +23,7 @@ type Client struct {
 
 // NewClient creates a hub API client.
 func NewClient(baseURL, token string) *Client {
-	return &Client{baseURL: baseURL, token: token, http: &http.Client{}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{}}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
