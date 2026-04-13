@@ -1201,10 +1201,21 @@ if command -v git &>/dev/null; then
   git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 fi
 
-# Configure gh to use the credential helper token
+# Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
+# We don't pre-auth here because the claw isn't registered with the hub yet.
+# Instead, create a gh wrapper that fetches a token on each call.
 if command -v gh &>/dev/null; then
-  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep password | cut -d= -f2)
-  [ -n "$GH_TOKEN" ] && echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null || true
+  sudo tee /usr/local/bin/gh-claw > /dev/null << 'GHEOF'
+#!/bin/bash
+export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
+exec /usr/bin/gh "$@"
+GHEOF
+  sudo chmod +x /usr/local/bin/gh-claw
+  # Also configure gh to use token from credential helper at login time
+  # This runs after claw is registered so the hub can return a real token
+  cat >> "$HOME/.bashrc" << 'BASHEOF'
+export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
+BASHEOF
 fi
 echo "GitHub credential helper installed"`, tokenURL)
 }
