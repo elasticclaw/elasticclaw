@@ -241,15 +241,21 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 			c.LastSeen = lastSeen.Time
 		}
 		s.mu.RLock()
-		if cc, online := s.claws[c.ID]; online {
-			// Only promote to 'connected' once the gateway session is ready;
-			// otherwise preserve whatever status is in the DB ('starting', etc.)
+		cc, online := s.claws[c.ID]
+		s.mu.RUnlock()
+		if online {
+			// Claw is currently connected — show live status
 			if cc.gatewayReady {
 				c.Status = "connected"
+			} else {
+				c.Status = "starting"
 			}
 			c.ContextUsage = cc.contextUsage
+		} else if c.Status != "provisioning" && c.Status != "error" {
+			// Not currently connected and not in a terminal provisioning state —
+			// DB status is stale (e.g. 'starting'/'connected' from before hub restart)
+			c.Status = "offline"
 		}
-		s.mu.RUnlock()
 		out = append(out, c)
 	}
 	if out == nil {
@@ -397,6 +403,19 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	c.TenantID = tenantID
 	if lastSeen.Valid {
 		c.LastSeen = lastSeen.Time
+	}
+	s.mu.RLock()
+	cc, online := s.claws[c.ID]
+	s.mu.RUnlock()
+	if online {
+		if cc.gatewayReady {
+			c.Status = "connected"
+		} else {
+			c.Status = "starting"
+		}
+		c.ContextUsage = cc.contextUsage
+	} else if c.Status != "provisioning" && c.Status != "error" {
+		c.Status = "offline"
 	}
 	jsonOK(w, c)
 }
