@@ -826,7 +826,10 @@ func main() {
 
 func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
-		HTTPHeader: http.Header{"User-Agent": {"claw-bridge/1.0"}},
+		HTTPHeader: http.Header{
+			"User-Agent":                  {"claw-bridge/1.0"},
+			"ngrok-skip-browser-warning":  {"true"},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("dial hub: %w", err)
