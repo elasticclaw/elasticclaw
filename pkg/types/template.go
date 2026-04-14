@@ -11,13 +11,28 @@ type TemplateConfig struct {
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string                `yaml:"default_model,omitempty"`
 	// GitHub specifies GitHub repos this template's claw needs access to.
-	GitHub       *GitHubTemplateConfig `yaml:"github,omitempty"`
+	GitHub  *GitHubTemplateConfig  `yaml:"github,omitempty"`
+	// Linear specifies which Linear workspace this template's claw should use.
+	Linear  *LinearTemplateConfig  `yaml:"linear,omitempty"`
 }
 
 type TemplateResources struct {
 	CPU    string `yaml:"cpu,omitempty"`
 	Memory string `yaml:"memory,omitempty"`
 	Disk   string `yaml:"disk,omitempty"`
+}
+
+// LinearConfig holds a Linear API token for one workspace.
+// Configure in hub.yaml under 'linear:' as a list.
+type LinearConfig struct {
+	Token     string `yaml:"token"`               // Linear API key (lin_api_...)
+	Workspace string `yaml:"workspace,omitempty"` // human label for matching; defaults to first entry
+}
+
+// LinearTemplateConfig specifies which Linear workspace a template's claw should use.
+type LinearTemplateConfig struct {
+	Workspace string `yaml:"workspace,omitempty"` // match against hub.yaml linear[].workspace
+	Team      string `yaml:"team,omitempty"`      // optional team name for context
 }
 
 // GitHubAppConfig holds GitHub App credentials for one GitHub App.
@@ -62,6 +77,9 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
 	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
+	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
+	Linear []*LinearConfig `yaml:"linear,omitempty"`
+
 	// GitHubApps is a list of GitHub App configs for minting installation tokens.
 	// The hub tries each app to find one whose installation covers the requested repos.
 	// One app can cover multiple orgs if installed on all of them.
@@ -104,8 +122,9 @@ type CreateClawRequest struct {
 	Image        string            `json:"image,omitempty"`
 	TTL          string            `json:"ttl,omitempty"`
 	// DefaultModel overrides hub default model for this claw (from template config).
-	DefaultModel string            `json:"default_model,omitempty"`
+	DefaultModel string                `json:"default_model,omitempty"`
 	Files        map[string]string     `json:"files"`
 	Env          map[string]string     `json:"env,omitempty"`
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
+	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
 }

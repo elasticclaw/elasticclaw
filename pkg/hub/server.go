@@ -293,10 +293,16 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		githubReposJSON = string(b)
 	}
 
+	// Store Linear workspace label from template if present
+	var linearWorkspace string
+	if req.Linear != nil {
+		linearWorkspace = req.Linear.Workspace
+	}
+
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, status, created_at) VALUES(?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, now(),
+		githubReposJSON, linearWorkspace, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -953,6 +959,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&githubReposJSON)
 	var githubRepos []types.GitHubRepoAccess
 	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
+
+	// Resolve Linear token for this claw
+	var linearWorkspace string
+	_ = s.db.QueryRow(`SELECT COALESCE(linear_workspace,'') FROM claws WHERE id=?`, clawID).Scan(&linearWorkspace)
+	linearToken := resolveLinearToken(s.hubCfg, linearWorkspace)
 	// Resolve model: template override wins over hub default
 	var templateDefaultModel string
 	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
@@ -991,9 +1002,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# ── LLM API keys (injected first so all steps can use them) ───────────────
+# ── LLM API keys + service tokens (injected first so all steps can use them) ───
 export OPENCLAW_DEFAULT_MODEL="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
+%s
 %s
 # ── Install Node.js 24 via nodesource ─────────────────────────────────────────────
 echo "Installing Node.js 24..."
@@ -1136,7 +1148,7 @@ else
   exit 1
 fi
 `,
-		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), // top-of-script exports
+		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), buildLinearEnv(linearToken), // top-of-script exports
 		bridgeURL,
 		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
@@ -1221,6 +1233,29 @@ func (s *Server) clawHubURL() string {
 		return s.hubCfg.PublicURL
 	}
 	return s.hubCfg.URL
+}
+
+// resolveLinearToken finds the Linear API token for the given workspace label.
+// If workspace is empty or not found, returns the first token if only one is configured.
+func resolveLinearToken(cfg *types.HubConfig, workspace string) string {
+	if len(cfg.Linear) == 0 {
+		return ""
+	}
+	for _, l := range cfg.Linear {
+		if workspace != "" && l.Workspace == workspace {
+			return l.Token
+		}
+	}
+	// Default: first entry (when workspace is empty or no match)
+	return cfg.Linear[0].Token
+}
+
+// buildLinearEnv returns a shell export line for LINEAR_API_KEY if a token is set.
+func buildLinearEnv(token string) string {
+	if token == "" {
+		return "# Linear not configured"
+	}
+	return fmt.Sprintf("export LINEAR_API_KEY=%q", token)
 }
 
 // buildLLMKeyEnv converts the llm_keys map to shell env var lines for the bootstrap script.
