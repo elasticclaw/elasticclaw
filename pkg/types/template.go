@@ -29,13 +29,13 @@ type GitHubAppConfig struct {
 
 // GitHubRepoAccess specifies a repo and the permissions needed.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"`        // e.g. "owner/repo"
-	Permissions string `yaml:"permissions"` // "read" or "write" (default: "read")
+	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo"
+	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
 }
 
 // GitHubTemplateConfig specifies GitHub access needed by a template.
 type GitHubTemplateConfig struct {
-	Repos []GitHubRepoAccess `yaml:"repos"`
+	Repos []GitHubRepoAccess `yaml:"repos" json:"repos"`
 }
 
 // HubConfig is used in two contexts:
