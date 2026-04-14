@@ -21,8 +21,9 @@ type TemplateResources struct {
 }
 
 // GitHubAppConfig holds GitHub App credentials for one GitHub App.
-// Configure in hub.yaml under 'github_apps:' as a named map.
+// Configure in hub.yaml under 'github:' as a list.
 type GitHubAppConfig struct {
+	URL           string `yaml:"url,omitempty"`           // GitHub App URL for reference/logging only
 	AppID         int64  `yaml:"app_id"`
 	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
 }

@@ -1620,15 +1620,15 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	for i, appCfg := range s.hubCfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
-			log.Printf("github app[%d] (app_id=%d) config error: %v", i, appCfg.AppID, err)
+			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
 			continue
 		}
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
-			log.Printf("github app[%d] (app_id=%d): no installation for repos %v: %v", i, appCfg.AppID, repos, err)
+			log.Printf("github app[%d] (app_id=%d url=%s): no installation for repos %v: %v", i, appCfg.AppID, appCfg.URL, repos, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
+		log.Printf("github token issued via app_id=%d (url=%s) for claw %s", appCfg.AppID, appCfg.URL, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
