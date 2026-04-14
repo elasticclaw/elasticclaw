@@ -626,6 +626,28 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
+	// Send current connected-claw statuses immediately so the client
+	// doesn't have to wait for the next event to know who is online.
+	s.mu.RLock()
+	for _, cc := range s.claws {
+		if cc.tenantID != tenantID {
+			continue
+		}
+		status := "connected"
+		if !cc.gatewayReady {
+			status = "starting"
+		}
+		_ = wsjson.Write(ctx, conn, types.WSMessage{
+			Type: "claw_status",
+			Payload: map[string]interface{}{
+				"claw_id":       cc.id,
+				"status":        status,
+				"context_usage": cc.contextUsage,
+			},
+		})
+	}
+	s.mu.RUnlock()
+
 	// Read loop (user sends messages via REST, but we keep WS open for server-push)
 	for {
 		var msg types.WSMessage
