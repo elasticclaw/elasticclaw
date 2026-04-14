@@ -1334,17 +1334,18 @@ fi
 # We don't pre-auth here because the claw isn't registered with the hub yet.
 # Instead, create a gh wrapper that fetches a token on each call.
 if command -v gh &>/dev/null; then
-  sudo tee /usr/local/bin/gh-claw > /dev/null << 'GHEOF'
-#!/bin/bash
+  # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
+  # (both interactive and non-interactive, which is what agents use)
+  sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
 export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-exec /usr/bin/gh "$@"
-GHEOF
-  sudo chmod +x /usr/local/bin/gh-claw
-  # Also configure gh to use token from credential helper at login time
-  # This runs after claw is registered so the hub can return a real token
-  cat >> "$HOME/.bashrc" << 'BASHEOF'
-export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-BASHEOF
+PROFEOF
+  sudo chmod +x /etc/profile.d/elasticclaw-github.sh
+
+  # Also configure gh auth now that the claw is registered and credential helper works
+  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
+  if [ -n "$GH_TOKEN" ]; then
+    echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo "gh CLI authenticated" || echo "gh auth failed (will retry via profile.d)"
+  fi
 fi
 echo "GitHub credential helper installed"
 
