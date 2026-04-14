@@ -90,6 +90,13 @@ type HubConfig struct {
 	//         -----BEGIN RSA PRIVATE KEY-----
 	//         ...
 	//         -----END RSA PRIVATE KEY-----
+	// RelayURL is the optional relay server for NAT traversal (e.g. wss://relay.elasticclaw.ai).
+	// When set, hub connects outbound to the relay; bridges dial the relay instead of the hub directly.
+	RelayURL string `yaml:"relay_url,omitempty"`
+
+	// RelaySecret is the HMAC secret for deriving relay tokens (must match RELAY_SECRET on the relay server).
+	RelaySecret string `yaml:"relay_secret,omitempty"`
+
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 }
 

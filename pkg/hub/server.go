@@ -128,6 +128,15 @@ func (s *Server) Run() error {
 		jsonOK(w, out)
 	}))
 
+	// Connect to relay if configured
+	if s.hubCfg.RelayURL != "" {
+		hubID := HubID(s.identity.PublicKey)
+		relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
+		log.Printf("[relay] connecting to %s", s.hubCfg.RelayURL)
+		go s.connectRelay(context.Background(), s.hubCfg.RelayURL, hubID, relayToken)
+	}
+
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	return http.ListenAndServe(s.addr, corsMiddleware(mux))
 }
@@ -1131,6 +1140,7 @@ export ELASTICCLAW_CLAW_ID="%s"
 export ELASTICCLAW_CLAW_TOKEN="%s"
 export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
+%s
 export OPENCLAW_DEFAULT_MODEL="%s"
 %s
 echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
@@ -1152,6 +1162,7 @@ fi
 		bridgeURL,
 		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
+		buildRelayEnv(s.hubCfg, s.identity.PublicKey),
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
 	)
@@ -1233,6 +1244,18 @@ func (s *Server) clawHubURL() string {
 		return s.hubCfg.PublicURL
 	}
 	return s.hubCfg.URL
+}
+
+// buildRelayEnv returns shell lines that export relay env vars for the bridge.
+// When relay is not configured, returns an empty comment.
+func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
+	if cfg.RelayURL == "" {
+		return "# Relay not configured — bridge uses direct hub connection"
+	}
+	hubID := HubID(publicKey)
+	relayToken := RelayToken(cfg.RelaySecret, hubID, cfg.ClawToken)
+	return fmt.Sprintf("export ELASTICCLAW_RELAY_URL=%q\nexport ELASTICCLAW_HUB_ID=%q\nexport ELASTICCLAW_RELAY_TOKEN=%q",
+		cfg.RelayURL, hubID, relayToken)
 }
 
 // resolveLinearToken finds the Linear API token for the given workspace label.

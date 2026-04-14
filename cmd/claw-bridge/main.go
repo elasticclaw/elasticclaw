@@ -744,14 +744,32 @@ func main() {
 	clawName := envOr("ELASTICCLAW_CLAW_NAME", clawID)
 	templateName := envOr("ELASTICCLAW_TEMPLATE", "")
 
-	// Normalise hub URL to ws:// scheme
-	wsURL := strings.TrimRight(hubURL, "/")
-	if strings.HasPrefix(wsURL, "http://") {
-		wsURL = "ws://" + wsURL[7:]
-	} else if strings.HasPrefix(wsURL, "https://") {
-		wsURL = "wss://" + wsURL[8:]
+	// Build WebSocket URL — either relay endpoint or direct hub /claw/ws
+	var wsURL string
+	relayURL := envOr("ELASTICCLAW_RELAY_URL", "")
+	hubID := envOr("ELASTICCLAW_HUB_ID", "")
+	if relayURL != "" && hubID != "" {
+		// Relay mode: bridge dials relay instead of hub directly
+		relayBase := strings.TrimRight(relayURL, "/")
+		if strings.HasPrefix(relayBase, "http://") {
+			relayBase = "ws://" + relayBase[7:]
+		} else if strings.HasPrefix(relayBase, "https://") {
+			relayBase = "wss://" + relayBase[8:]
+		}
+		wsURL = fmt.Sprintf("%s/bridge?id=%s&token=%s", relayBase, hubID, token)
+		log.Printf("  Mode:    relay")
+		log.Printf("  Relay:   %s (id=%s...)", relayURL, hubID[:8])
+	} else {
+		// Direct mode: bridge dials hub /claw/ws directly
+		wsURL = strings.TrimRight(hubURL, "/")
+		if strings.HasPrefix(wsURL, "http://") {
+			wsURL = "ws://" + wsURL[7:]
+		} else if strings.HasPrefix(wsURL, "https://") {
+			wsURL = "wss://" + wsURL[8:]
+		}
+		wsURL += "/claw/ws"
+		log.Printf("  Mode:    direct")
 	}
-	wsURL += "/claw/ws"
 
 	log.Printf("claw-bridge starting")
 	log.Printf("  Hub:     %s", wsURL)
