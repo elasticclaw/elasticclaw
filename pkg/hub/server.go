@@ -524,7 +524,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
-	log.Printf("claw connected: %s (%s) gateway_ready=%v cc.gatewayReady=%v", rp.Name, clawID, rp.GatewayReady, cc.gatewayReady)
+	log.Printf("[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.gatewayReady)
 
 	// Ack
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
@@ -539,7 +539,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
 		s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
-		log.Printf("claw disconnected: %s", clawID)
+		log.Printf("[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
 	}()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -578,6 +578,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								Type:    "claw_status",
 								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 							})
+							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
 						}
 					}
 					s.mu.Unlock()
