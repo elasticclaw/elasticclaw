@@ -1568,14 +1568,31 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 
 	var repos []RepoAccess
 	if reposJSON != "" && reposJSON != "[]" {
-		var rawRepos []types.GitHubRepoAccess
+		// Support both old (capitalized) and new (lowercase) JSON key formats.
+		// Old format: [{"Repo":"owner/repo","Permissions":"write"}]
+		// New format: [{"repo":"owner/repo","permissions":"write"}]
+		var rawRepos []struct {
+			Repo        string `json:"repo"`        // new format
+			RepoOld     string `json:"Repo"`        // old format (no json tags)
+			Permissions string `json:"permissions"` // new format
+			PermsOld    string `json:"Permissions"` // old format
+		}
 		if err := json.Unmarshal([]byte(reposJSON), &rawRepos); err == nil {
 			for _, r := range rawRepos {
+				repo := r.Repo
+				if repo == "" {
+					repo = r.RepoOld // fall back to old capitalized key
+				}
 				perm := r.Permissions
+				if perm == "" {
+					perm = r.PermsOld
+				}
 				if perm == "" {
 					perm = "read"
 				}
-				repos = append(repos, RepoAccess{Repo: r.Repo, Permissions: perm})
+				if repo != "" {
+					repos = append(repos, RepoAccess{Repo: repo, Permissions: perm})
+				}
 			}
 		}
 	}
