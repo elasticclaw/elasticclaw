@@ -810,10 +810,17 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Step 1: Upgrade OpenClaw to latest.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
-	// Upgrade openclaw using sudo + full npm path (avoids chown, works around root-owned nvm dir)
-	if err := exec("start openclaw upgrade", 20*time.Second,
+	// Uninstall old openclaw then reinstall latest (ensures nvm current symlink is updated)
+	if err := exec("uninstall old openclaw", 20*time.Second,
 		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-sudo "$NPM" install -g openclaw@latest --ignore-scripts --force > /tmp/openclaw-install.log 2>&1 & \
+sudo "$NPM" uninstall -g openclaw 2>/dev/null || true; \
+echo uninstalled`); err != nil {
+		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
+	}
+
+	if err := exec("start openclaw install", 20*time.Second,
+		`NPM="/usr/local/share/nvm/current/bin/npm"; \
+sudo "$NPM" install -g openclaw@latest --ignore-scripts > /tmp/openclaw-install.log 2>&1 & \
 echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
