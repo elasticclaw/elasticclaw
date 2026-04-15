@@ -761,10 +761,13 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
-	// Resolve snapshot: template instance_type > hub default_instance_type
-	snapshot := req.InstanceType
+	// Resolve snapshot: template snapshot > hub default_snapshot > hub default_instance_type (legacy)
+	snapshot := req.Snapshot
 	if snapshot == "" {
-		snapshot = cfg.DefaultInstanceType
+		snapshot = cfg.DefaultSnapshot
+	}
+	if snapshot == "" {
+		snapshot = cfg.DefaultInstanceType // legacy fallback
 	}
 	createReq := types.CreateRequest{
 		Name:          req.Name,

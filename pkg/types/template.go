@@ -10,6 +10,9 @@ type TemplateConfig struct {
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string                `yaml:"default_model,omitempty"`
+	// Snapshot is the Daytona snapshot name (e.g. "daytona-medium", "daytona-large").
+	// Overrides hub providers.daytona.default_snapshot.
+	Snapshot string                    `yaml:"snapshot,omitempty"`
 	// GitHub specifies GitHub repos this template's claw needs access to.
 	GitHub  *GitHubTemplateConfig  `yaml:"github,omitempty"`
 	// Linear specifies which Linear workspace this template's claw should use.
@@ -106,6 +109,10 @@ type ProviderConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 	Target string `yaml:"target,omitempty"`
 
+	// Daytona snapshot size (maps to Daytona SnapshotParams.Snapshot)
+	// Use default_snapshot in hub.yaml; template can override with 'snapshot:' field
+	DefaultSnapshot string `yaml:"default_snapshot,omitempty"`
+
 	// Vercel Sandbox
 	AccessToken string `yaml:"access_token,omitempty"` // Vercel access token
 	TeamID      string `yaml:"team_id,omitempty"`      // optional Vercel team ID
@@ -135,6 +142,7 @@ type CreateClawRequest struct {
 	TTL          string            `json:"ttl,omitempty"`
 	// DefaultModel overrides hub default model for this claw (from template config).
 	DefaultModel string                `json:"default_model,omitempty"`
+	Snapshot     string                `json:"snapshot,omitempty"`
 	Files        map[string]string     `json:"files"`
 	Env          map[string]string     `json:"env,omitempty"`
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
