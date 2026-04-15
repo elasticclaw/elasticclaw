@@ -262,9 +262,9 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				c.Status = "starting"
 			}
 			c.ContextUsage = cc.contextUsage
-		} else if c.Status != "provisioning" && c.Status != "error" {
-			// Not currently connected and not in a terminal provisioning state —
-			// DB status is stale (e.g. 'starting'/'connected' from before hub restart)
+		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" {
+			// Not currently connected and not in an active provisioning state —
+			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
 		}
 		out = append(out, c)
