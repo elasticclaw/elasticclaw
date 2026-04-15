@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	daytonaopts "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	daytonatypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -159,6 +160,12 @@ func (p *Provider) Status(ctx context.Context, instanceID string) (types.Instanc
 
 // Exec runs a command inside the sandbox
 func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string) (*types.ExecResult, error) {
+	return p.ExecWithTimeout(ctx, instanceID, cmdArgs, 60*time.Second)
+}
+
+// ExecWithTimeout runs a command with an explicit timeout. Use for long-running
+// operations like package installs that exceed the default SDK timeout.
+func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdArgs []string, timeout time.Duration) (*types.ExecResult, error) {
 	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find sandbox: %w", err)
@@ -170,7 +177,7 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 	escapedCmd := strings.ReplaceAll(cmd, "'", "'\"'\"'")
 	wrappedCmd := fmt.Sprintf("bash -c '%s'", escapedCmd)
 
-	response, err := sandbox.Process.ExecuteCommand(ctx, wrappedCmd)
+	response, err := sandbox.Process.ExecuteCommand(ctx, wrappedCmd, daytonaopts.WithExecuteTimeout(timeout))
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute command: %w", err)
 	}

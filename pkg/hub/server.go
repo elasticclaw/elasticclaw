@@ -791,21 +791,44 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string, p *daytona.Provider) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
+
+	exec := func(label string, timeout time.Duration, cmd string) error {
+		log.Printf("[daytona] %s...", label)
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cmd}, timeout)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if result.ExitCode != 0 {
+			return fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
+		}
+		log.Printf("[daytona] %s done", label)
+		return nil
+	}
+
+	// Step 1: Install OpenClaw (slow — npm install can take 3+ minutes)
+	if err := exec("install openclaw", 5*time.Minute,
+		"npm install -g openclaw@latest --ignore-scripts 2>&1 | tail -10"); err != nil {
+		return err
+	}
+
+	// Step 2: Onboard (configure OpenClaw)
+	if err := exec("onboard openclaw", 2*time.Minute,
+		"openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true"); err != nil {
+		return err
+	}
+
+	// Step 3: Download and start claw-bridge
 	bridgeURL := s.bridgeDownloadURL()
-	script := fmt.Sprintf(`set -e
-npm install -g openclaw@latest --ignore-scripts 2>&1 | tail -5
-openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
-curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
-echo done
-`, bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
-	result, err := p.Exec(ctx, instanceID, []string{"bash", "-c", script})
-	if err != nil {
-		return fmt.Errorf("daytona bootstrap exec: %w", err)
+	bridgeCmd := fmt.Sprintf(
+		`curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge && \
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
+nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
+echo started`,
+		bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+	if err := exec("install claw-bridge", 2*time.Minute, bridgeCmd); err != nil {
+		return err
 	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("daytona bootstrap failed (exit %d): %s", result.ExitCode, result.Stdout)
-	}
+
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
