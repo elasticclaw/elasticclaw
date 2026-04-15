@@ -818,30 +818,27 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
 
-	// Poll until npm install finishes (up to 5 min, polling every 15s)
+	// Poll until npm install finishes (up to 5 min, checking every 15s)
+	installed := false
 	for i := 0; i < 20; i++ {
 		time.Sleep(15 * time.Second)
-		code, _, pollErr := func() (int, string, error) {
-			r, e := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c",
-				"export HOME=/home/daytona; kill -0 $(cat /tmp/openclaw-install.pid 2>/dev/null) 2>/dev/null && echo running || echo done"}, 20*time.Second)
-			if e != nil {
-				return -1, "", e
-			}
-			return r.ExitCode, r.Stdout, nil
-		}()
-		if pollErr != nil {
+		checkCmd := "PID=$(cat /tmp/openclaw-install.pid 2>/dev/null); " +
+			"if [ -n \"$PID\" ] && kill -0 \"$PID\" 2>/dev/null; then echo running; " +
+			"else echo done; fi"
+		r, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", checkCmd}, 20*time.Second)
+		if err != nil {
+			log.Printf("[daytona] poll error: %v", err)
 			continue
 		}
-		if code == 0 {
-			// Check if still running
-			r, _ := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c",
-				"export HOME=/home/daytona; kill -0 $(cat /tmp/openclaw-install.pid 2>/dev/null) 2>/dev/null && echo running || echo done"}, 20*time.Second)
-			if r != nil && strings.Contains(r.Stdout, "done") {
-				log.Printf("[daytona] openclaw install complete")
-				break
-			}
+		if strings.TrimSpace(r.Stdout) == "done" {
+			log.Printf("[daytona] openclaw install complete")
+			installed = true
+			break
 		}
 		log.Printf("[daytona] waiting for openclaw install... (%d/20)", i+1)
+	}
+	if !installed {
+		log.Printf("[daytona] warning: openclaw install poll timed out, proceeding anyway")
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
