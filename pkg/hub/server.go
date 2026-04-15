@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
+	vercelProvider "github.com/elasticclaw/elasticclaw/pkg/provider/vercel"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
@@ -343,6 +345,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		switch req.Provider {
 		case "daytona":
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, templateFiles, env)
+		case "vercel":
+			provErr = s.provisionVercel(ctx, clawID, req, provCfg, templateFiles, env)
 		case "local":
 			provErr = s.provisionLocal(ctx, clawID, req, templateFiles, env)
 		case "replicated":
@@ -768,6 +772,119 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		return fmt.Errorf("daytona create: %w", err)
 	}
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
+
+	// Bootstrap: install OpenClaw + claw-bridge via exec
+	go func() {
+		if err := s.bootstrapDaytona(context.Background(), clawID, instance.ID, p); err != nil {
+			log.Printf("daytona bootstrap failed for claw %s: %v", clawID, err)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		}
+	}()
+	return nil
+}
+
+func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string, p *daytona.Provider) error {
+	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
+	bridgeURL := s.bridgeDownloadURL()
+	script := fmt.Sprintf(`set -e
+npm install -g openclaw@latest --ignore-scripts 2>&1 | tail -5
+openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
+curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
+echo done
+`, bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+	result, err := p.Exec(ctx, instanceID, []string{"bash", "-c", script})
+	if err != nil {
+		return fmt.Errorf("daytona bootstrap exec: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("daytona bootstrap failed (exit %d): %s", result.ExitCode, result.Stdout)
+	}
+	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
+	return nil
+}
+
+func (s *Server) provisionVercel(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	p, err := vercelProvider.New(vercelProvider.Config{
+		AccessToken: cfg.AccessToken,
+		TeamID:      cfg.TeamID,
+		ProjectID:   cfg.ProjectID,
+	})
+	if err != nil {
+		return fmt.Errorf("vercel init: %w", err)
+	}
+
+	// Merge hub env (API keys etc.) into sandbox env
+	sandboxEnv := make(map[string]string)
+	for k, v := range env {
+		sandboxEnv[k] = v
+	}
+
+	sandboxID, err := p.CreateSandbox(ctx, req.Name, sandboxEnv)
+	if err != nil {
+		return fmt.Errorf("vercel create: %w", err)
+	}
+	log.Printf("vercel sandbox created: %s (claw %s)", sandboxID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='vercel', provider_id=? WHERE id=?`, sandboxID, clawID)
+
+	// Bootstrap asynchronously
+	go func() {
+		if err := s.bootstrapVercel(context.Background(), clawID, sandboxID, p, files); err != nil {
+			log.Printf("vercel bootstrap failed for claw %s: %v", clawID, err)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+			s.broadcastToUsers("", types.WSMessage{
+				Type:    "claw_error",
+				Payload: map[string]string{"claw_id": clawID, "error": err.Error()},
+			})
+		}
+	}()
+
+	return nil
+}
+
+func (s *Server) bootstrapVercel(ctx context.Context, clawID, sandboxID string, p *vercelProvider.Provider, files map[string][]byte) error {
+	log.Printf("[vercel] bootstrapping claw %s (sandbox %s)", clawID, sandboxID)
+
+	// Write template files into the sandbox workspace
+	workdir := "/vercel/sandbox/workspace"
+	if _, _, err := p.Exec(ctx, sandboxID, "mkdir -p "+workdir); err != nil {
+		return fmt.Errorf("create workdir: %w", err)
+	}
+	for path, content := range files {
+		fullPath := workdir + "/" + path
+		if err := p.WriteFile(ctx, sandboxID, fullPath, content); err != nil {
+			log.Printf("[vercel] warning: failed to write %s: %v", path, err)
+		}
+	}
+
+	// Install OpenClaw
+	installScript := `
+set -e
+npm install -g openclaw@latest --ignore-scripts 2>&1 | tail -5
+openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
+openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
+sleep 8
+echo "OpenClaw ready"
+`
+	out, code, err := p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(installScript, "'", "'\"'\"'")+"'")
+	if err != nil || code != 0 {
+		return fmt.Errorf("openclaw install failed (exit %d): %s", code, out)
+	}
+	log.Printf("[vercel] OpenClaw installed: %s", sandboxID)
+
+	// Install and start claw-bridge
+	bridgeURL := s.bridgeDownloadURL()
+	bridgeScript := fmt.Sprintf(`
+curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
+echo "claw-bridge started"
+`, bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+	out, code, err = p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(bridgeScript, "'", "'\"'\"'")+"'")
+	if err != nil || code != 0 {
+		return fmt.Errorf("claw-bridge install failed (exit %d): %s", code, out)
+	}
+	log.Printf("[vercel] claw-bridge started: %s", sandboxID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
 	return nil
 }

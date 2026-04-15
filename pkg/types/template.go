@@ -106,6 +106,11 @@ type ProviderConfig struct {
 	APIKey string `yaml:"api_key,omitempty"`
 	Target string `yaml:"target,omitempty"`
 
+	// Vercel Sandbox
+	AccessToken string `yaml:"access_token,omitempty"` // Vercel access token
+	TeamID      string `yaml:"team_id,omitempty"`      // optional Vercel team ID
+	ProjectID   string `yaml:"project_id,omitempty"`   // optional Vercel project ID
+
 	// Replicated CMX
 	Token               string `yaml:"token,omitempty"`
 	DefaultTTL          string `yaml:"default_ttl,omitempty"`
