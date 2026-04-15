@@ -842,13 +842,13 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		"export HOME=/home/daytona; openclaw --version"); err != nil {
+		"export HOME=/home/daytona; /usr/local/share/nvm/current/bin/openclaw --version || openclaw --version"); err != nil {
 		return err
 	}
 
 	// Step 2: Onboard (configure OpenClaw)
 	if err := exec("onboard openclaw", 2*time.Minute,
-		"openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true"); err != nil {
+		"export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true"); err != nil {
 		return err
 	}
 
@@ -908,7 +908,7 @@ with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
+export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
 sleep 8
 curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
