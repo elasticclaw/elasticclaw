@@ -874,18 +874,25 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 export HOME=/home/daytona; python3 - <<'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
-with open(path) as f: cfg = json.load(f)
+try:
+  with open(path) as f: cfg = json.load(f)
+except: cfg = {}
 cfg.setdefault('agents', {}).setdefault('defaults', {})['model'] = %q
 cfg['models'] = {
   'providers': {
     'anthropic': {
-      'enabled': True,
-      'api': 'anthropic-messages',
       'apiKey': %q,
-      'models': [{'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'}]
+      'baseUrl': 'https://api.anthropic.com',
+      'api': 'anthropic-messages',
+      'models': [
+        {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
+        {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'api': 'anthropic-messages'}
+      ]
     }
   }
 }
+cfg.setdefault('gateway', {})['bind'] = 'loopback'
+cfg['gateway']['port'] = 18789
 with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('model config updated')
 PYEOF`, defaultModel, anthropicKey)
