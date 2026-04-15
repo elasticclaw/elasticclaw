@@ -131,12 +131,17 @@ func (s *Server) Run() error {
 	}))
 
 	// Connect to relay if configured
-	if s.hubCfg.RelayURL != "" {
+	// Default to the public relay unless explicitly disabled (relay_url: none)
+	relayURL := s.hubCfg.RelayURL
+	if relayURL == "" {
+		relayURL = "wss://relay.elasticclaw.ai"
+	}
+	if relayURL != "none" {
 		hubID := HubID(s.identity.PublicKey)
 		relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
 		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
-		log.Printf("[relay] connecting to %s", s.hubCfg.RelayURL)
-		go s.connectRelay(context.Background(), s.hubCfg.RelayURL, hubID, relayToken)
+		log.Printf("[relay] connecting to %s", relayURL)
+		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
 	}
 
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
@@ -1636,13 +1641,18 @@ func (s *Server) clawHubURL() string {
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.
 // When relay is not configured, returns an empty comment.
 func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
-	if cfg.RelayURL == "" {
-		return "# Relay not configured — bridge uses direct hub connection"
+	// Default to public relay unless explicitly disabled
+	relayURL := cfg.RelayURL
+	if relayURL == "" {
+		relayURL = "wss://relay.elasticclaw.ai"
+	}
+	if relayURL == "none" {
+		return "# Relay disabled"
 	}
 	hubID := HubID(publicKey)
 	relayToken := RelayToken(cfg.RelaySecret, hubID, cfg.ClawToken)
 	return fmt.Sprintf("export ELASTICCLAW_RELAY_URL=%q\nexport ELASTICCLAW_HUB_ID=%q\nexport ELASTICCLAW_RELAY_TOKEN=%q",
-		cfg.RelayURL, hubID, relayToken)
+		relayURL, hubID, relayToken)
 }
 
 // resolveLinearToken finds the Linear API token for the given workspace label.

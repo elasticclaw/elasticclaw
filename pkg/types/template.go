@@ -93,7 +93,9 @@ type HubConfig struct {
 	//         -----BEGIN RSA PRIVATE KEY-----
 	//         ...
 	//         -----END RSA PRIVATE KEY-----
-	// RelayURL is the optional relay server for NAT traversal (e.g. wss://relay.elasticclaw.ai).
+	// RelayURL is the relay server for NAT traversal.
+	// Defaults to wss://relay.elasticclaw.ai if not set.
+	// Set to "none" to disable the relay entirely.
 	// When set, hub connects outbound to the relay; bridges dial the relay instead of the hub directly.
 	RelayURL string `yaml:"relay_url,omitempty"`
 
