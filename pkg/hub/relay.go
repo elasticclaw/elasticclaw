@@ -84,6 +84,25 @@ func (s *Server) relayLoop(ctx context.Context, endpoint, hubID string) error {
 	}
 	go pipe(conn, localConn)
 	go pipe(localConn, conn)
+
+	// Keepalive: ping the relay every 30s to prevent idle timeouts
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.Ping(ctx); err != nil {
+					return
+				}
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	<-done
 	return fmt.Errorf("pipe closed")
 }
