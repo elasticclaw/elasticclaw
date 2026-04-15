@@ -584,7 +584,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
-					log.Printf("heartbeat from %s: gateway_healthy=%v gateway_ready=%v context_usage=%d", clawID[:8], hb.GatewayHealthy, hb.GatewayReady, hb.ContextUsage)
+					log.Printf("heartbeat from %s: gateway_healthy=%v gateway_ready=%v context_usage=%d", clawID[:8], hb.GatewayHealthy, gatewayReadyBool(hb.GatewayReady), hb.ContextUsage)
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						cc.contextUsage = hb.ContextUsage
