@@ -806,10 +806,13 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 		return nil
 	}
 
-	// Step 1: Upgrade OpenClaw to latest (force reinstall even if already present)
-	// Use full npm path since sudo doesn't inherit nvm PATH
+	// Step 1: Upgrade OpenClaw to latest (force reinstall).
+	// Daytona snapshots have nvm-managed npm. Source nvm profile to get correct PATH,
+	// then install without sudo (nvm global dir is user-writable).
 	if err := exec("install openclaw", 5*time.Minute,
-		`NPM=$(which npm); sudo "$NPM" install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -10`); err != nil {
+		`export NVM_DIR="/usr/local/share/nvm"; \
+[ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"; \
+npm install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -10`); err != nil {
 		return err
 	}
 
