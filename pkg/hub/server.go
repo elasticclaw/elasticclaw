@@ -665,13 +665,28 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	// Send current connected-claw statuses immediately so the client
-	// doesn't have to wait for the next event to know who is online.
+	// Send current claw statuses immediately on connect.
+	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
+	type dbClaw struct {
+		id, name, status string
+	}
+	var dbClaws []dbClaw
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	if rows != nil {
+		for rows.Next() {
+			var c dbClaw
+			_ = rows.Scan(&c.id, &c.name, &c.status)
+			dbClaws = append(dbClaws, c)
+		}
+		_ = rows.Close()
+	}
 	s.mu.RLock()
+	connectedIDs := make(map[string]bool)
 	for _, cc := range s.claws {
 		if cc.tenantID != tenantID {
 			continue
 		}
+		connectedIDs[cc.id] = true
 		status := "connected"
 		if !cc.gatewayReady {
 			status = "starting"
@@ -686,6 +701,20 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.mu.RUnlock()
+	// Emit DB-only claws (still bootstrapping, not yet bridge-connected)
+	for _, c := range dbClaws {
+		if connectedIDs[c.id] {
+			continue // already sent above
+		}
+		_ = wsjson.Write(ctx, conn, types.WSMessage{
+			Type: "claw_status",
+			Payload: map[string]interface{}{
+				"claw_id": c.id,
+				"name":    c.name,
+				"status":  c.status, // provisioning / starting / error
+			},
+		})
+	}
 
 	// Read loop (user sends messages via REST, but we keep WS open for server-push)
 	for {
