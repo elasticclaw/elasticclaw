@@ -2072,7 +2072,8 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
-			log.Printf("github app[%d] (app_id=%d url=%s): no installation for repos %v: %v", i, appCfg.AppID, appCfg.URL, repos, err)
+			// Debug-level only — expected when multiple apps configured and only one matches
+			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
 			continue
 		}
 		log.Printf("github token issued via app_id=%d (url=%s) for claw %s", appCfg.AppID, appCfg.URL, clawID[:8])

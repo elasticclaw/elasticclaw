@@ -261,6 +261,7 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 	if err != nil {
 		return nil, fmt.Errorf("dial gateway: %w", err)
 	}
+	conn.SetReadLimit(32 * 1024 * 1024) // 32MB — gateway responses can be large
 
 	// Expect connect.challenge event
 	var challenge gwFrame
@@ -845,13 +846,14 @@ func main() {
 func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
-			"User-Agent":                  {"claw-bridge/1.0"},
-			"ngrok-skip-browser-warning":  {"true"},
+			"User-Agent":                 {"claw-bridge/1.0"},
+			"ngrok-skip-browser-warning": {"true"},
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("dial hub: %w", err)
 	}
+	conn.SetReadLimit(32 * 1024 * 1024) // 32MB
 	defer conn.CloseNow()
 
 	// Register with the hub — gateway_ready=false until session is established
