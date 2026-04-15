@@ -134,10 +134,7 @@ func (s *Server) Run() error {
 
 	// Connect to relay if configured
 	relayURL := s.hubCfg.RelayURL
-	if relayURL == "" {
-		relayURL = "wss://relay.elasticclaw.ai"
-	}
-	if !s.hubCfg.DisableRelay {
+	if relayURL != "" {
 		hubID := HubID(s.identity.PublicKey)
 		relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
 		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
@@ -1045,9 +1042,6 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 	// Use setsid to detach from exec session so it survives after exec returns.
 	hubID := HubID(s.identity.PublicKey)
 	relayURL := s.hubCfg.RelayURL
-	if relayURL == "" && !s.hubCfg.DisableRelay {
-		relayURL = "wss://relay.elasticclaw.ai"
-	}
 	relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
 
 	startCmd := fmt.Sprintf(
@@ -1729,12 +1723,9 @@ func (s *Server) clawHubURL() string {
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.
 // When relay is not configured, returns an empty comment.
 func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
-	if cfg.DisableRelay {
-		return "# Relay disabled"
-	}
 	relayURL := cfg.RelayURL
 	if relayURL == "" {
-		relayURL = "wss://relay.elasticclaw.ai"
+		return "# Relay not configured"
 	}
 	hubID := HubID(publicKey)
 	relayToken := RelayToken(cfg.RelaySecret, hubID, cfg.ClawToken)

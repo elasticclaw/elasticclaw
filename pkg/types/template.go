@@ -97,9 +97,6 @@ type HubConfig struct {
 	// Defaults to wss://relay.elasticclaw.ai if not set.
 	RelayURL string `yaml:"relay_url,omitempty"`
 
-	// DisableRelay disables the relay entirely. Defaults to false (relay enabled).
-	DisableRelay bool `yaml:"disable_relay,omitempty"`
-
 	// RelaySecret is the HMAC secret for deriving relay tokens (must match RELAY_SECRET on the relay server).
 	RelaySecret string `yaml:"relay_secret,omitempty"`
 
