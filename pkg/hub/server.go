@@ -808,7 +808,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 
 	// Step 1: Upgrade OpenClaw to latest (force reinstall even if already present)
 	if err := exec("install openclaw", 5*time.Minute,
-		"npm install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -10"); err != nil {
+		"sudo npm install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -10"); err != nil {
 		return err
 	}
 
