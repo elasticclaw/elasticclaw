@@ -820,7 +820,9 @@ echo uninstalled`); err != nil {
 
 	if err := exec("start openclaw install", 20*time.Second,
 		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-sudo "$NPM" install -g openclaw@latest --ignore-scripts > /tmp/openclaw-install.log 2>&1 & \
+NODE_VER=$(ls /usr/local/share/nvm/versions/node/ | head -1); \
+PREFIX="/usr/local/share/nvm/versions/node/${NODE_VER}"; \
+sudo "$NPM" install -g openclaw@latest --prefix "$PREFIX" --ignore-scripts > /tmp/openclaw-install.log 2>&1 & \
 echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
@@ -906,6 +908,11 @@ PYEOF`, defaultModel, anthropicKey)
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 			log.Printf("[daytona] warning: failed to configure model: %v", err)
 		}
+		// Let openclaw self-heal any remaining config schema issues
+		_ = exec("openclaw doctor fix", 20*time.Second,
+			"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
+			"export PATH=$NVM_DIR/current/bin:$PATH; "+
+			"openclaw doctor --fix 2>&1 || true")
 	}
 
 	// Step 2c: Configure gateway bind/port and start it.
