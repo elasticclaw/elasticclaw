@@ -820,6 +820,9 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 	// Step 3: Download and start claw-bridge
 	// Download synchronously first, then background the process.
 	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
+	}
 	var downloadCmd string
 	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
 		downloadCmd = fmt.Sprintf(`curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
@@ -921,6 +924,9 @@ echo "OpenClaw ready"
 
 	// Install and start claw-bridge
 	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
+	}
 	bridgeScript := fmt.Sprintf(`
 curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
@@ -1109,16 +1115,17 @@ const githubReleasesBase = "https://github.com/elasticclaw/elasticclaw/releases/
 var Version = "dev"
 
 // bridgeDownloadURL returns the URL to download the claw-bridge binary.
-// Priority: hub.yaml bridge_image > GitHub releases (if tagged version) > ttl.sh dev build
+// Uses hub.yaml bridge_image if set, otherwise constructs the GitHub releases URL
+// from the hub's own version. Returns empty string if version is 'dev' and no
+// bridge_image is configured — caller must check and fail appropriately.
 func (s *Server) bridgeDownloadURL() string {
 	if s.hubCfg.BridgeImage != "" {
 		return s.hubCfg.BridgeImage
 	}
-	if Version != "dev" && Version != "" {
-		return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
+	if Version == "dev" || Version == "" {
+		return ""
 	}
-	// Dev build fallback — set bridge_image in hub.yaml to override
-	return "https://ttl.sh/marc/claw-bridge:1w"
+	return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
 }
 
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
@@ -1147,6 +1154,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		defaultModel = s.hubCfg.DefaultModel
 	}
 	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		return
+	}
 
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
 	cp, err := newReplicatedProvider(cfg)
