@@ -83,8 +83,20 @@ func runHub(cmd *cobra.Command, args []string) error {
 	fmt.Printf("ElasticClaw Hub\n")
 	fmt.Printf("  Address:    %s\n", hubAddr)
 	fmt.Printf("  Database:   %s\n", dbPath)
-	fmt.Printf("  URL:        %s\n", hubCfg.URL)
-	fmt.Printf("  Public URL: %s\n", hubCfg.PublicURL)
+	if hubCfg.URL != "" {
+		fmt.Printf("  URL:        %s\n", hubCfg.URL)
+	}
+	if hubCfg.PublicURL != "" {
+		fmt.Printf("  Public URL: %s\n", hubCfg.PublicURL)
+	}
+	if !hubCfg.DisableRelay {
+		relayDisplay := hubCfg.RelayURL
+		if relayDisplay == "" {
+			relayDisplay = "wss://relay.elasticclaw.ai (default)"
+		}
+		fmt.Printf("  Relay:      %s\n", relayDisplay)
+		fmt.Printf("  Claws connect via relay — no public hub URL needed\n")
+	}
 	fmt.Printf("  Claw token: %s\n", func() string { if hubCfg.ClawToken != "" { return "(set)" }; return "(not set)" }())
 	fmt.Println()
 
