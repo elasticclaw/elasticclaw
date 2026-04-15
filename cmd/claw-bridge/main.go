@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -737,6 +738,98 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
+// ─── Local HTTP proxy ───────────────────────────────────────────────────────
+// The bridge listens on 127.0.0.1:18790 and forwards requests to the hub
+// via the existing WS connection. This allows tools inside the sandbox
+// (e.g. git credential helper) to reach hub APIs without a public hub URL.
+
+type httpProxyReq struct {
+	ReqID  string            `json:"req_id"`
+	Method string            `json:"method"`
+	Path   string            `json:"path"`
+	Query  string            `json:"query,omitempty"`
+	Body   string            `json:"body,omitempty"`
+	Header map[string]string `json:"header,omitempty"`
+}
+
+type httpProxyRes struct {
+	ReqID  string `json:"req_id"`
+	Status int    `json:"status"`
+	Body   string `json:"body"`
+}
+
+// httpProxy holds pending proxy requests waiting for hub responses.
+type httpProxy struct {
+	mu      sync.Mutex
+	pending map[string]chan httpProxyRes
+	send    func(hubMsg) error
+}
+
+func newHTTPProxy(send func(hubMsg) error) *httpProxy {
+	return &httpProxy{
+		pending: make(map[string]chan httpProxyRes),
+		send:    send,
+	}
+}
+
+func (p *httpProxy) deliver(res httpProxyRes) {
+	p.mu.Lock()
+	ch, ok := p.pending[res.ReqID]
+	if ok {
+		delete(p.pending, res.ReqID)
+	}
+	p.mu.Unlock()
+	if ok {
+		ch <- res
+	}
+}
+
+func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
+	var body string
+	if r.Body != nil {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+	}
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+	req := httpProxyReq{
+		ReqID:  reqID,
+		Method: r.Method,
+		Path:   r.URL.Path,
+		Query:  r.URL.RawQuery,
+		Body:   body,
+		Header: headers,
+	}
+	ch := make(chan httpProxyRes, 1)
+	p.mu.Lock()
+	p.pending[reqID] = ch
+	p.mu.Unlock()
+
+	if err := p.send(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
+		p.mu.Lock()
+		delete(p.pending, reqID)
+		p.mu.Unlock()
+		http.Error(w, "bridge send error", http.StatusBadGateway)
+		return
+	}
+
+	select {
+	case res := <-ch:
+		w.WriteHeader(res.Status)
+		_, _ = w.Write([]byte(res.Body))
+	case <-time.After(10 * time.Second):
+		p.mu.Lock()
+		delete(p.pending, reqID)
+		p.mu.Unlock()
+		http.Error(w, "hub proxy timeout", http.StatusGatewayTimeout)
+	}
+}
+
 func main() {
 	hubURL := mustEnv("ELASTICCLAW_HUB_URL")
 	clawID := mustEnv("ELASTICCLAW_CLAW_ID")
@@ -790,6 +883,16 @@ func main() {
 		log.Printf("  ⚠️  gateway not responding at %s (will retry)", gatewayAddr)
 	}
 
+	// Start local HTTP proxy so tools in the sandbox can reach hub APIs
+	// via http://localhost:18790 without needing a public hub URL.
+	proxy := newHTTPProxy(nil) // send func wired up in runHubLoop
+	go func() {
+		log.Printf("[bridge] local HTTP proxy on 127.0.0.1:18790")
+		if err := http.ListenAndServe("127.0.0.1:18790", proxy); err != nil {
+			log.Printf("[bridge] HTTP proxy error: %v", err)
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -824,7 +927,7 @@ func main() {
 	log.Printf("[bridge] gateway session ready: %s", gwSession.sessionKey)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -843,7 +946,7 @@ func main() {
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -880,6 +983,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		return fmt.Errorf("expected registered, got %s", ack.Type)
 	}
 	log.Printf("registered with hub as %s", clawID)
+
+	// Wire up the HTTP proxy send function for this connection
+	proxy.mu.Lock()
+	proxy.send = func(msg hubMsg) error {
+		return wsjson.Write(ctx, conn, msg)
+	}
+	proxy.mu.Unlock()
 
 	// Heartbeat goroutine — includes context_usage from persistent session
 	go func() {
@@ -953,6 +1063,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					}),
 				})
 			}(ctx, msg.Payload)
+
+		case "http_proxy_res":
+			var res httpProxyRes
+			if err := json.Unmarshal(msg.Payload, &res); err == nil {
+				proxy.deliver(res)
+			}
 
 		default:
 			// ignore unknown message types

@@ -29,6 +29,7 @@ type Server struct {
 	addr     string
 	hubCfg   *types.HubConfig
 	identity *HubIdentity
+	mux      *http.ServeMux
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -94,6 +95,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 // Run starts the HTTP server (blocking).
 func (s *Server) Run() error {
 	mux := http.NewServeMux()
+	s.mux = mux
 
 	// Claw WebSocket
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
@@ -635,9 +637,69 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+			} else if msg.Type == "http_proxy_req" {
+				// Proxy an HTTP request from the bridge to the hub's internal API.
+				// This allows tools in the sandbox to reach hub APIs without a public URL.
+				go func(rawPayload json.RawMessage, conn *websocket.Conn) {
+					var req struct {
+						ReqID  string            `json:"req_id"`
+						Method string            `json:"method"`
+						Path   string            `json:"path"`
+						Query  string            `json:"query"`
+						Body   string            `json:"body"`
+						Header map[string]string `json:"header"`
+					}
+					if err := json.Unmarshal(rawPayload, &req); err != nil {
+						return
+					}
+					// Build an internal HTTP request
+					urls := req.Path
+					if req.Query != "" {
+						urls += "?" + req.Query
+					}
+					httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
+					if err != nil {
+						s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
+						return
+					}
+					for k, v := range req.Header {
+						httpReq.Header.Set(k, v)
+					}
+					// Inject claw_token auth so withAuth middleware passes
+					httpReq.Header.Set("X-Claw-Token", s.hubCfg.ClawToken)
+					// Execute against internal mux
+					w := &proxyResponseWriter{header: make(http.Header)}
+					s.mux.ServeHTTP(w, httpReq)
+					s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
+				}(mustJSONRaw(msg.Payload), conn)
 			}
 		}
 	}
+}
+
+func (s *Server) sendHTTPProxyRes(ctx context.Context, conn *websocket.Conn, reqID string, status int, body string) {
+	_ = wsjson.Write(ctx, conn, map[string]interface{}{
+		"type":    "http_proxy_res",
+		"payload": map[string]interface{}{"req_id": reqID, "status": status, "body": body},
+	})
+}
+
+// proxyResponseWriter captures an HTTP handler's response.
+type proxyResponseWriter struct {
+	header http.Header
+	status int
+	body   []byte
+}
+
+func (w *proxyResponseWriter) Header() http.Header {
+	return w.header
+}
+func (w *proxyResponseWriter) Write(b []byte) (int, error) {
+	w.body = append(w.body, b...)
+	return len(b), nil
+}
+func (w *proxyResponseWriter) WriteHeader(status int) {
+	w.status = status
 }
 
 // ─── User WebSocket ───────────────────────────────────────────────────────────
@@ -762,6 +824,11 @@ func (s *Server) broadcastToUsers(tenantID string, msg types.WSMessage) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+func mustJSONRaw(v interface{}) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return json.RawMessage(b)
+}
 
 func jsonOK(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1013,7 +1080,8 @@ ELASTICCLAW_EOF`,
 		_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
 		_ = json.Unmarshal([]byte(reposJSON), &githubRepos)
 
-		tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+		// Use local HTTP proxy (bridge listens on 18790, proxies to hub)
+		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, s.hubCfg.ClawToken)
 
 		// Step 5a: write the credential helper binary
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
