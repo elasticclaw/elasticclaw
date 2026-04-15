@@ -95,9 +95,10 @@ type HubConfig struct {
 	//         -----END RSA PRIVATE KEY-----
 	// RelayURL is the relay server for NAT traversal.
 	// Defaults to wss://relay.elasticclaw.ai if not set.
-	// Set to "none" to disable the relay entirely.
-	// When set, hub connects outbound to the relay; bridges dial the relay instead of the hub directly.
 	RelayURL string `yaml:"relay_url,omitempty"`
+
+	// DisableRelay disables the relay entirely. Defaults to false (relay enabled).
+	DisableRelay bool `yaml:"disable_relay,omitempty"`
 
 	// RelaySecret is the HMAC secret for deriving relay tokens (must match RELAY_SECRET on the relay server).
 	RelaySecret string `yaml:"relay_secret,omitempty"`
