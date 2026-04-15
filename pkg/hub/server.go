@@ -822,22 +822,23 @@ npm install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -10`); err !
 		return err
 	}
 
-	// Step 2b: Configure gateway with password auth and start it
-	gatewayPassword := randomHex(16)
-	gatewaySetup := fmt.Sprintf(`
+	// Step 2b: Configure gateway bind/port and start it.
+	// Use token auth (what onboard sets up) — don't override auth mode.
+	gatewaySetup := `
 python3 - <<'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
 with open(path) as f: cfg = json.load(f)
 cfg.setdefault('gateway', {})['bind'] = 'loopback'
 cfg['gateway']['port'] = 18789
-cfg['gateway']['auth'] = {'mode': 'password', 'password': '%s'}
+# Keep token auth that onboard generated - don't change auth mode
 with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('gateway config updated')
 PYEOF
-nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 &
-sleep 6
-curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`, gatewayPassword)
+export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
+sleep 8
+curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}
@@ -865,12 +866,14 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 		return err
 	}
 
-	// Now start the bridge in the background
+	// Start the bridge — it reads the gateway token from openclaw.json automatically.
+	// Use setsid to detach from exec session so it survives after exec returns.
 	startCmd := fmt.Sprintf(
-		`ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_GATEWAY_PASSWORD=%q \
-nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
+		`export HOME=/home/daytona; \
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
+setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, gatewayPassword)
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
