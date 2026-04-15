@@ -794,7 +794,8 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
 		log.Printf("[daytona] %s...", label)
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cmd}, timeout)
+		// Prefix HOME so commands run in the sandbox user's home, not the caller's
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
 		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
