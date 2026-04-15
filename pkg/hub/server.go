@@ -818,14 +818,32 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 	}
 
 	// Step 3: Download and start claw-bridge
+	// Download synchronously first, then background the process.
 	bridgeURL := s.bridgeDownloadURL()
-	bridgeCmd := fmt.Sprintf(
-		`curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge && \
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
+	var downloadCmd string
+	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
+		downloadCmd = fmt.Sprintf(`curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
+	} else {
+		// OCI ref (ttl.sh or ghcr) — use oras
+		downloadCmd = fmt.Sprintf(`
+if ! command -v oras &>/dev/null; then
+  curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp && sudo mv /tmp/oras /usr/local/bin/oras
+fi
+mkdir -p /tmp/bridge-dl && cd /tmp/bridge-dl && oras pull %q
+BIN=$(find /tmp/bridge-dl -name 'claw-bridge*' -type f | head -1)
+cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
+	}
+	if err := exec("download claw-bridge", 3*time.Minute, downloadCmd); err != nil {
+		return err
+	}
+
+	// Now start the bridge in the background
+	startCmd := fmt.Sprintf(
+		`ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
 nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
 echo started`,
-		bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
-	if err := exec("install claw-bridge", 2*time.Minute, bridgeCmd); err != nil {
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
 
@@ -1091,13 +1109,16 @@ const githubReleasesBase = "https://github.com/elasticclaw/elasticclaw/releases/
 var Version = "dev"
 
 // bridgeDownloadURL returns the URL to download the claw-bridge binary.
-// If hub.yaml has bridge_image set, that URL is used as-is (dev/override).
-// Otherwise it constructs the GitHub releases URL from the hub's own version.
+// Priority: hub.yaml bridge_image > GitHub releases (if tagged version) > ttl.sh dev build
 func (s *Server) bridgeDownloadURL() string {
 	if s.hubCfg.BridgeImage != "" {
 		return s.hubCfg.BridgeImage
 	}
-	return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
+	if Version != "dev" && Version != "" {
+		return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
+	}
+	// Dev build fallback — set bridge_image in hub.yaml to override
+	return "https://ttl.sh/marc/claw-bridge:1w"
 }
 
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
