@@ -807,14 +807,45 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 	}
 
 	// Step 1: Upgrade OpenClaw to latest.
-	// The Daytona snapshot ships an older OpenClaw installed by root into the nvm dir.
-	// Fix ownership so the daytona user can reinstall, then force-upgrade.
-	if err := exec("install openclaw", 5*time.Minute,
+	// Run install in background and poll — avoids the 60s HTTP client timeout
+	// that kills synchronous long-running commands.
+	if err := exec("prepare openclaw upgrade", 30*time.Second,
 		`export NVM_DIR="/usr/local/share/nvm"; \
 [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"; \
 sudo chown -R daytona:daytona "$NVM_DIR/current/lib" 2>/dev/null || true; \
-npm install -g openclaw@latest --ignore-scripts --force 2>&1 | tail -5; \
-openclaw --version`); err != nil {
+npm install -g openclaw@latest --ignore-scripts --force > /tmp/openclaw-install.log 2>&1 & \
+echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
+		return err
+	}
+
+	// Poll until npm install finishes (up to 5 min, polling every 15s)
+	for i := 0; i < 20; i++ {
+		time.Sleep(15 * time.Second)
+		code, _, pollErr := func() (int, string, error) {
+			r, e := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c",
+				"export HOME=/home/daytona; kill -0 $(cat /tmp/openclaw-install.pid 2>/dev/null) 2>/dev/null && echo running || echo done"}, 20*time.Second)
+			if e != nil {
+				return -1, "", e
+			}
+			return r.ExitCode, r.Stdout, nil
+		}()
+		if pollErr != nil {
+			continue
+		}
+		if code == 0 {
+			// Check if still running
+			r, _ := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c",
+				"export HOME=/home/daytona; kill -0 $(cat /tmp/openclaw-install.pid 2>/dev/null) 2>/dev/null && echo running || echo done"}, 20*time.Second)
+			if r != nil && strings.Contains(r.Stdout, "done") {
+				log.Printf("[daytona] openclaw install complete")
+				break
+			}
+		}
+		log.Printf("[daytona] waiting for openclaw install... (%d/20)", i+1)
+	}
+
+	if err := exec("verify openclaw", 20*time.Second,
+		"export HOME=/home/daytona; openclaw --version"); err != nil {
 		return err
 	}
 
