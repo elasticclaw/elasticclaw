@@ -810,10 +810,18 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Step 1: Upgrade OpenClaw to latest.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
-	if err := exec("prepare openclaw upgrade", 30*time.Second,
+	// Fix permissions first (separate fast step)
+	if err := exec("fix nvm permissions", 20*time.Second,
+		`export NVM_DIR="/usr/local/share/nvm"; \
+sudo chown -R daytona:daytona "$NVM_DIR/current/lib" 2>/dev/null || true; \
+echo done`); err != nil {
+		log.Printf("[daytona] warning: chown failed (may be ok): %v", err)
+	}
+
+	// Start npm upgrade in background
+	if err := exec("start openclaw upgrade", 20*time.Second,
 		`export NVM_DIR="/usr/local/share/nvm"; \
 [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"; \
-sudo chown -R daytona:daytona "$NVM_DIR/current/lib" 2>/dev/null || true; \
 npm install -g openclaw@latest --ignore-scripts --force > /tmp/openclaw-install.log 2>&1 & \
 echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
