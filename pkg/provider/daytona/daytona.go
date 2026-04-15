@@ -164,7 +164,7 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 }
 
 // ExecWithTimeout runs a command with an explicit timeout. Use for long-running
-// operations like package installs that exceed the default SDK timeout.
+// operations like package installs that exceed the default 60s SDK HTTP timeout.
 func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdArgs []string, timeout time.Duration) (*types.ExecResult, error) {
 	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
@@ -177,7 +177,12 @@ func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdAr
 	escapedCmd := strings.ReplaceAll(cmd, "'", "'\"'\"'")
 	wrappedCmd := fmt.Sprintf("bash -c '%s'", escapedCmd)
 
-	response, err := sandbox.Process.ExecuteCommand(ctx, wrappedCmd, daytonaopts.WithExecuteTimeout(timeout))
+	// Use a context with the timeout so the HTTP client respects it.
+	// The SDK's default HTTP client has a 60s timeout; context overrides it.
+	execCtx, cancel := context.WithTimeout(ctx, timeout+30*time.Second)
+	defer cancel()
+
+	response, err := sandbox.Process.ExecuteCommand(execCtx, wrappedCmd, daytonaopts.WithExecuteTimeout(timeout))
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute command: %w", err)
 	}
