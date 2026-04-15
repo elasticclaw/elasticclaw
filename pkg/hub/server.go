@@ -1098,6 +1098,18 @@ CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 echo 'credential helper installed'`, tokenURL)
+		// Wait for the bridge to connect and register with hub (needed for HTTP proxy)
+		log.Printf("[daytona] waiting for bridge to connect...")
+		for i := 0; i < 20; i++ {
+			s.mu.RLock()
+			_, connected := s.claws[clawID]
+			s.mu.RUnlock()
+			if connected {
+				break
+			}
+			time.Sleep(3 * time.Second)
+		}
+
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			log.Printf("[daytona] warning: credential helper install failed: %v", err)
 		} else {

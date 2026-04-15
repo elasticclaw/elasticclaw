@@ -784,7 +784,24 @@ func (p *httpProxy) deliver(res httpProxyRes) {
 	}
 }
 
+func (p *httpProxy) ready() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.send != nil
+}
+
 func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Wait up to 30s for the bridge to connect to the hub
+	for i := 0; i < 30; i++ {
+		if p.ready() {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if !p.ready() {
+		http.Error(w, "bridge not connected to hub", http.StatusServiceUnavailable)
+		return
+	}
 	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
 	var body string
 	if r.Body != nil {
@@ -810,7 +827,14 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.pending[reqID] = ch
 	p.mu.Unlock()
 
-	if err := p.send(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
+	p.mu.Lock()
+	sendFn := p.send
+	p.mu.Unlock()
+	if sendFn == nil {
+		http.Error(w, "bridge not connected", http.StatusServiceUnavailable)
+		return
+	}
+	if err := sendFn(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()
