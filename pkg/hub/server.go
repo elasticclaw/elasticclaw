@@ -817,6 +817,26 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string
 		return err
 	}
 
+	// Step 2b: Configure gateway with password auth and start it
+	gatewayPassword := randomHex(16)
+	gatewaySetup := fmt.Sprintf(`
+python3 - <<'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+with open(path) as f: cfg = json.load(f)
+cfg.setdefault('gateway', {})['bind'] = 'loopback'
+cfg['gateway']['port'] = 18789
+cfg['gateway']['auth'] = {'mode': 'password', 'password': '%s'}
+with open(path, 'w') as f: json.dump(cfg, f, indent=2)
+print('gateway config updated')
+PYEOF
+nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 &
+sleep 6
+curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`, gatewayPassword)
+	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
+		return err
+	}
+
 	// Step 3: Download and start claw-bridge
 	// Download synchronously first, then background the process.
 	bridgeURL := s.bridgeDownloadURL()
@@ -842,10 +862,10 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 
 	// Now start the bridge in the background
 	startCmd := fmt.Sprintf(
-		`ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
+		`ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_GATEWAY_PASSWORD=%q \
 nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken, gatewayPassword)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
