@@ -68,12 +68,14 @@ func (p *Provider) Info() types.ProviderInfo {
 
 // Create provisions a new sandbox
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
-	// Create sandbox params - use SnapshotParams for default snapshot-based creation
+	// Create sandbox params - use SnapshotParams for default snapshot-based creation.
+	// req.FromImage maps to the Daytona snapshot name (e.g. "daytona-medium").
 	params := daytonatypes.SnapshotParams{
 		SandboxBaseParams: daytonatypes.SandboxBaseParams{
 			Name:    req.Name,
 			EnvVars: req.Env,
 		},
+		Snapshot: req.FromImage, // snapshot name — empty string uses Daytona default
 	}
 
 	// Create the sandbox
