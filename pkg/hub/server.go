@@ -1043,12 +1043,21 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 
 	// Start the bridge — it reads the gateway token from openclaw.json automatically.
 	// Use setsid to detach from exec session so it survives after exec returns.
+	hubID := HubID(s.identity.PublicKey)
+	relayURL := s.hubCfg.RelayURL
+	if relayURL == "" && !s.hubCfg.DisableRelay {
+		relayURL = "wss://relay.elasticclaw.ai"
+	}
+	relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
+ELASTICCLAW_RELAY_URL=%q ELASTICCLAW_HUB_ID=%q ELASTICCLAW_RELAY_TOKEN=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName)
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
+		relayURL, hubID, relayToken)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
