@@ -970,6 +970,26 @@ echo started`,
 		return err
 	}
 
+	// Write template files (SOUL.md, AGENTS.md, etc.) to the workspace
+	var filesJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	var templateFiles map[string]string
+	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err == nil && len(templateFiles) > 0 {
+		for name, content := range templateFiles {
+			name := name
+			content := content
+			writeCmd := fmt.Sprintf(
+				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
+%s
+ELASTICCLAW_EOF`,
+				name, content)
+			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
+				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+			}
+		}
+		log.Printf("[daytona] template files written for claw %s", clawID)
+	}
+
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
