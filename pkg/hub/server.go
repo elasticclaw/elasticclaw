@@ -827,27 +827,10 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
 
-	// Poll until openclaw binary appears (up to 5 min, checking every 15s)
-	// Polling for the binary is more reliable than PID tracking (avoids race on PID file write)
-	installed := false
-	for i := 0; i < 20; i++ {
-		time.Sleep(15 * time.Second)
-		checkCmd := "test -f /usr/local/share/nvm/current/bin/openclaw && echo found || echo waiting"
-		r, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", checkCmd}, 20*time.Second)
-		if err != nil {
-			log.Printf("[daytona] poll error: %v", err)
-			continue
-		}
-		if strings.TrimSpace(r.Stdout) == "found" {
-			log.Printf("[daytona] openclaw install complete")
-			installed = true
-			break
-		}
-		log.Printf("[daytona] waiting for openclaw install... (%d/20)", i+1)
-	}
-	if !installed {
-		log.Printf("[daytona] warning: openclaw install poll timed out, proceeding anyway")
-	}
+	// Wait for npm install to complete — install takes ~35s, 90s is a safe margin
+	log.Printf("[daytona] waiting for openclaw install...")
+	time.Sleep(90 * time.Second)
+	log.Printf("[daytona] openclaw install wait done")
 
 	if err := exec("verify openclaw", 20*time.Second,
 		"export HOME=/home/daytona; /usr/local/share/nvm/current/bin/openclaw --version || openclaw --version"); err != nil {
