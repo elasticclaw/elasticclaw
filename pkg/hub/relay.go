@@ -85,16 +85,15 @@ func (s *Server) relayLoop(ctx context.Context, endpoint, hubID string) error {
 	go pipe(conn, localConn)
 	go pipe(localConn, conn)
 
-	// Keepalive: ping the relay every 30s to prevent idle timeouts
+	// Keepalive: ping both connections every 20s to prevent idle timeouts
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if err := conn.Ping(ctx); err != nil {
-					return
-				}
+				_ = conn.Ping(ctx)      // hub → relay
+				_ = localConn.Ping(ctx) // hub → local claw/ws
 			case <-ctx.Done():
 				return
 			case <-done:
