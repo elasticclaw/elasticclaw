@@ -781,7 +781,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec
 	go func() {
-		if err := s.bootstrapDaytona(context.Background(), clawID, instance.ID, p); err != nil {
+		if err := s.bootstrapDaytona(context.Background(), clawID, instance.ID, p, env); err != nil {
 			log.Printf("daytona bootstrap failed for claw %s: %v", clawID, err)
 			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 		}
@@ -789,7 +789,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	return nil
 }
 
-func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string, p *daytona.Provider) error {
+func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
@@ -855,7 +855,49 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
 
-	// Step 2b: Configure gateway bind/port and start it.
+	// Step 2b: Patch OpenClaw config with model + LLM API keys
+	anthropicKey := env["ANTHROPIC_API_KEY"]
+	defaultModel := env["OPENCLAW_DEFAULT_MODEL"]
+	if defaultModel == "" {
+		defaultModel = s.hubCfg.DefaultModel
+	}
+	if defaultModel == "" {
+		defaultModel = "anthropic/claude-sonnet-4-6"
+	}
+	if anthropicKey == "" {
+		for k, v := range s.hubCfg.LLMKeys {
+			if k == "anthropic" {
+				anthropicKey = v
+				break
+			}
+		}
+	}
+	if anthropicKey != "" {
+		configPatch := fmt.Sprintf(`
+export HOME=/home/daytona; python3 - <<'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+with open(path) as f: cfg = json.load(f)
+cfg.setdefault('agents', {}).setdefault('defaults', {})['model'] = %q
+cfg['models'] = {
+  'providers': {
+    'anthropic': {
+      'enabled': True,
+      'api': 'anthropic-messages',
+      'apiKey': %q,
+      'models': [{'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'}]
+    }
+  }
+}
+with open(path, 'w') as f: json.dump(cfg, f, indent=2)
+print('model config updated')
+PYEOF`, defaultModel, anthropicKey)
+		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
+			log.Printf("[daytona] warning: failed to configure model: %v", err)
+		}
+	}
+
+	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
 python3 - <<'PYEOF'
