@@ -855,7 +855,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	hubURL := mustEnv("ELASTICCLAW_HUB_URL")
+	hubURL := envOr("ELASTICCLAW_HUB_URL", "") // optional when relay is configured
 	clawID := mustEnv("ELASTICCLAW_CLAW_ID")
 	token := mustEnv("ELASTICCLAW_CLAW_TOKEN")
 	gatewayAddr := envOr("ELASTICCLAW_GATEWAY", "localhost:18789")
@@ -866,6 +866,9 @@ func main() {
 	var wsURL string
 	relayURL := envOr("ELASTICCLAW_RELAY_URL", "")
 	hubID := envOr("ELASTICCLAW_HUB_ID", "")
+	if relayURL == "" && hubURL == "" {
+		log.Fatalf("ERROR: must set either ELASTICCLAW_HUB_URL (direct) or ELASTICCLAW_RELAY_URL + ELASTICCLAW_HUB_ID (relay)")
+	}
 	if relayURL != "" && hubID != "" {
 		// Relay mode: bridge dials relay instead of hub directly
 		relayBase := strings.TrimRight(relayURL, "/")
