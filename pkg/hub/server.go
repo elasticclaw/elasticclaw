@@ -780,8 +780,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec
+	clawName := req.Name
 	go func() {
-		if err := s.bootstrapDaytona(context.Background(), clawID, instance.ID, p, env); err != nil {
+		if err := s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env); err != nil {
 			log.Printf("daytona bootstrap failed for claw %s: %v", clawID, err)
 			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 		}
@@ -789,7 +790,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	return nil
 }
 
-func (s *Server) bootstrapDaytona(ctx context.Context, clawID, instanceID string, p *daytona.Provider, env map[string]string) error {
+func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
@@ -942,10 +943,10 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 	// Use setsid to detach from exec session so it survives after exec returns.
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q \
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
