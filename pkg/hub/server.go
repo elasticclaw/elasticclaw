@@ -381,6 +381,13 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/claws/")
 
 	if r.Method == http.MethodDelete {
+		// Resolve short ID prefix to full UUID
+		var fullID string
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
+		if fullID != "" {
+			clawID = fullID
+		}
+
 		// Look up provider info before deleting so we can terminate the VM
 		var provider, providerID string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
