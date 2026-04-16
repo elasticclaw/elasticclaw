@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -38,7 +39,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 	}
 	resolvedID := target
 	for _, c := range claws {
-		if c.Name == target {
+		if c.Name == target || c.ID == target || strings.HasPrefix(c.ID, target) {
 			resolvedID = c.ID
 			break
 		}

@@ -67,7 +67,7 @@ func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
 	}
 	resolvedID := clawID
 	for _, c := range claws {
-		if c.Name == clawID {
+		if c.Name == clawID || c.ID == clawID || strings.HasPrefix(c.ID, clawID) {
 			resolvedID = c.ID
 			break
 		}
