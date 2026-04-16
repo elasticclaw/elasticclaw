@@ -105,6 +105,7 @@ func (s *Server) Run() error {
 
 	// REST API
 	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/admin/provision", s.handleAdminProvision)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -203,6 +204,38 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
+
+// handleAdminProvision allows the SaaS layer to provision tenants programmatically.
+// Requires the master_token from hub config.
+func (s *Server) handleAdminProvision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.hubCfg.MasterToken == "" {
+		http.Error(w, "admin provisioning not enabled", http.StatusForbidden)
+		return
+	}
+	masterToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if masterToken != s.hubCfg.MasterToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		Token     string `json:"token"`
+		ClawToken string `json:"claw_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	tenantID, err := s.Provision(body.Token, body.ClawToken)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("provision error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"tenant_id": tenantID, "token": body.Token})
+}
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
