@@ -15,7 +15,6 @@ var (
 	hubDBPath      string
 	hubToken       string
 	hubClawToken   string
-	hubMasterToken string
 )
 
 var hubCmd = &cobra.Command{
@@ -39,7 +38,6 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
-	hubCmd.Flags().StringVar(&hubMasterToken, "master-token", "", "admin token for SaaS multi-tenant provisioning (overrides hub.yaml master_token)")
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
@@ -62,12 +60,6 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load hub config: %w", err)
 	}
 
-	// Apply master token from flag or HUB_MASTER_TOKEN env var
-	if hubMasterToken != "" {
-		hubCfg.MasterToken = hubMasterToken
-	} else if envMaster := os.Getenv("HUB_MASTER_TOKEN"); envMaster != "" {
-		hubCfg.MasterToken = envMaster
-	}
 	// Apply LLM keys from env
 	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
 		if hubCfg.LLMKeys == nil {

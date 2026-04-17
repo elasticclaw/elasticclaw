@@ -69,9 +69,6 @@ type HubConfig struct {
 	// If not set, falls back to URL.
 	PublicURL string                   `yaml:"public_url,omitempty"`
 	ClawToken    string                   `yaml:"claw_token,omitempty"`
-	// MasterToken is an admin token for SaaS multi-tenant provisioning.
-	// When set, /api/admin/provision accepts requests with this token.
-	MasterToken string `yaml:"master_token,omitempty"`
 	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
 	SSHPublicKeys []string `yaml:"ssh_public_keys,omitempty"`
