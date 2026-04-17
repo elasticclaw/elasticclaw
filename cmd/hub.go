@@ -11,10 +11,11 @@ import (
 )
 
 var (
-	hubAddr      string
-	hubDBPath    string
-	hubToken     string
-	hubClawToken string
+	hubAddr        string
+	hubDBPath      string
+	hubToken       string
+	hubClawToken   string
+	hubMasterToken string
 )
 
 var hubCmd = &cobra.Command{
@@ -38,6 +39,7 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().StringVar(&hubMasterToken, "master-token", "", "admin token for SaaS multi-tenant provisioning (overrides hub.yaml master_token)")
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
@@ -58,6 +60,22 @@ func runHub(cmd *cobra.Command, args []string) error {
 	hubCfg, err := config.LoadHubConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load hub config: %w", err)
+	}
+
+	// Apply master token from flag or HUB_MASTER_TOKEN env var
+	if hubMasterToken != "" {
+		hubCfg.MasterToken = hubMasterToken
+	} else if envMaster := os.Getenv("HUB_MASTER_TOKEN"); envMaster != "" {
+		hubCfg.MasterToken = envMaster
+	}
+	// Apply LLM keys from env
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		if hubCfg.LLMKeys == nil {
+			hubCfg.LLMKeys = map[string]string{}
+		}
+		if hubCfg.LLMKeys["anthropic"] == "" {
+			hubCfg.LLMKeys["anthropic"] = apiKey
+		}
 	}
 
 	hub.Version = Version // propagate build-time version for bridge download URL

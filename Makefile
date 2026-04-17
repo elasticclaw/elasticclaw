@@ -16,6 +16,13 @@ build:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
 
+run-saas: build ## Build and run hub in SaaS mode using Doppler secrets (elasticclaw/dev)
+	doppler run --project elasticclaw --config dev -- sh -c '\
+		./bin/elasticclaw hub \
+			--token $$HUB_TOKEN \
+			--claw-token $$HUB_CLAW_TOKEN \
+			--master-token $$HUB_MASTER_TOKEN'
+
 build-bridge:
 	mkdir -p bin
 	CGO_ENABLED=0 go build -o bin/claw-bridge ./cmd/claw-bridge/
