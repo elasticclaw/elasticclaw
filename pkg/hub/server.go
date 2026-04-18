@@ -665,6 +665,17 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 							})
 							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
+						// Send a silent wake message to trigger an intro response.
+						// Not stored in DB — invisible to user, just wakes the agent.
+						go func(c *clawConn) {
+							wakeMsg := types.HubMessage{
+								ID:      uuid.New().String(),
+								ClawID:  clawID,
+								Role:    "system",
+								Content: "Introduce yourself briefly and let the user know you're ready to help.",
+							}
+							_ = wsjson.Write(context.Background(), c.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+						}(cc)
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
 							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
