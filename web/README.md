@@ -14,19 +14,31 @@ Web UI for [ElasticClaw](https://github.com/elasticclaw/elasticclaw) — a real-
 ### From source
 
 ```bash
-pnpm install
-NEXT_PUBLIC_HUB_URL=http://your-hub:port \
-NEXT_PUBLIC_HUB_TOKEN=your-token \
-pnpm dev
+cd web
+cp .env.example .env.local
+# Edit .env.local with your hub URL, token, and a UI password
+npm install
+npm run dev
 ```
+
+Then open http://localhost:3000 and enter the value of `ELASTICCLAW_UI_TOKEN` as the password.
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `ELASTICCLAW_UI_TOKEN` | Password for the web UI login page |
+| `ELASTICCLAW_HUB_URL` | URL of your running elasticclaw hub |
+| `ELASTICCLAW_HUB_TOKEN` | Your hub user token (from `~/.elasticclaw/config.yaml`) |
 
 ### From Docker
 
 ```bash
 docker run -p 3000:3000 \
-  -e NEXT_PUBLIC_HUB_URL=http://your-hub:port \
-  -e NEXT_PUBLIC_HUB_TOKEN=your-token \
-  ghcr.io/elasticclaw/elasticclaw-web:latest
+  -e ELASTICCLAW_UI_TOKEN=your-password \
+  -e ELASTICCLAW_HUB_URL=http://your-hub:18788 \
+  -e ELASTICCLAW_HUB_TOKEN=your-token \
+  marc/elasticclaw-web:latest
 ```
 
 ### Without env vars
