@@ -69,3 +69,7 @@ namespace: acme
 ## License
 
 Apache 2.0
+
+---
+
+*Last verified: 2026-04-18 — push access confirmed via Elasticclaw agent.*
