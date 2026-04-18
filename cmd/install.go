@@ -55,6 +55,7 @@ func init() {
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
 	installCmd.Flags().StringVar(&installUIToken, "ui-token", "", "Web UI login password (default: randomly generated)")
 	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
+	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
 	installCmd.MarkFlagRequired("host")
 	installCmd.MarkFlagRequired("domain")
 }
@@ -99,13 +100,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		AnthropicKey: anthropicKey,
 	}
 
-	// ── Preflight: DNS check ──────────────────────────────────────────────────
-	fmt.Printf("Checking DNS for %s... ", installDomain)
-	addrs, err := net.LookupHost(installDomain)
-	if err != nil || len(addrs) == 0 {
-		return fmt.Errorf("DNS lookup failed for %s — make sure an A record points to your server", installDomain)
+	// ── Preflight: DNS check (skipped with --skip-caddy) ─────────────────────
+	skipCaddyPreflight, _ := cmd.Flags().GetBool("skip-caddy")
+	if !skipCaddyPreflight {
+		fmt.Printf("Checking DNS for %s... ", installDomain)
+		addrs, err := net.LookupHost(installDomain)
+		if err != nil || len(addrs) == 0 {
+			return fmt.Errorf("DNS lookup failed for %s — make sure an A record points to your server", installDomain)
+		}
+		fmt.Printf("OK (%s)\n", addrs[0])
 	}
-	fmt.Printf("OK (%s)\n", addrs[0])
 
 	// ── Connect SSH ───────────────────────────────────────────────────────────
 	sshUser, sshHost, err := parseSSHHost(installHost)
@@ -136,8 +140,13 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		{"Writing hub config", install.ScriptWriteConfig(params)},
 		{"Installing systemd service", install.ScriptInstallSystemd()},
 		{"Starting web UI", install.ScriptRunWebUI(params)},
-		{"Installing Caddy", install.ScriptInstallCaddy()},
-		{"Configuring Caddy", install.ScriptWriteCaddyfile(installDomain)},
+	}
+	skipCaddy, _ := cmd.Flags().GetBool("skip-caddy")
+	if !skipCaddy {
+		steps = append(steps,
+			struct{ name, script string }{"Installing Caddy", install.ScriptInstallCaddy()},
+			struct{ name, script string }{"Configuring Caddy", install.ScriptWriteCaddyfile(installDomain)},
+		)
 	}
 
 	for _, step := range steps {
