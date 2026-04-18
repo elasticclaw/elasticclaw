@@ -18,14 +18,12 @@ const nextConfig = {
         process.env.ELASTICCLAW_HUB_URL ||
         process.env.HUB_URL ||
         "http://localhost:8080"
+      // Only proxy /hub/* to the hub API.
+      // /api/* is served by Next.js route handlers (auth/login, hub-config).
       return [
         {
           source: "/hub/:path*",
           destination: `${hubUrl}/:path*`,
-        },
-        {
-          source: "/api/:path*",
-          destination: `${hubUrl}/api/:path*`,
         },
       ]
     },
