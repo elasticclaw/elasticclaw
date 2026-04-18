@@ -37,11 +37,13 @@ type Server struct {
 }
 
 type clawConn struct {
-	id           string
-	tenantID     string
-	conn         *websocket.Conn
-	contextUsage int  // 0-100, updated from heartbeats
-	gatewayReady bool // true once bridge reports gateway session established
+	id             string
+	tenantID       string
+	conn           *websocket.Conn
+	contextUsage   int  // 0-100, updated from heartbeats
+	gatewayReady   bool // true once bridge reports gateway session established
+	streamingBuf   strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID string          // pre-assigned message ID for the current stream
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -687,7 +689,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Unlock()
 				}
 			} else if msg.Type == "chunk" {
-				// Streaming chunk — forward to users immediately without persisting
+				// Streaming chunk — forward to users immediately AND buffer server-side
 				payload, _ := json.Marshal(msg.Payload)
 				var chunk struct {
 					Content string `json:"content"`
@@ -697,21 +699,50 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Type: "chunk",
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
 					})
+					// Buffer chunk and upsert partial message to DB so refreshes don't lose it
+					s.mu.Lock()
+					if cc, ok := s.claws[clawID]; ok {
+						if cc.streamingMsgID == "" {
+							cc.streamingMsgID = uuid.New().String()
+						}
+						cc.streamingBuf.WriteString(chunk.Content)
+						msgID := cc.streamingMsgID
+						bufContent := cc.streamingBuf.String()
+						s.mu.Unlock()
+						// Upsert — insert on first chunk, update content on subsequent
+						_, _ = s.db.Exec(
+							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+							 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+							msgID, clawID, tenantID, "claw", bufContent, now(),
+						)
+					} else {
+						s.mu.Unlock()
+					}
 				}
 			} else if msg.Type == "message" {
-				// Complete message — store and forward to users
+				// Complete message — finalize the buffered stream or store fresh
 				payload, _ := json.Marshal(msg.Payload)
 				var hm types.HubMessage
 				if err := json.Unmarshal(payload, &hm); err != nil {
 					continue
 				}
-				hm.ID = uuid.New().String()
+				// Use the streaming message ID if we already started buffering
+				s.mu.Lock()
+				if cc, ok := s.claws[clawID]; ok && cc.streamingMsgID != "" {
+					hm.ID = cc.streamingMsgID
+					cc.streamingMsgID = ""
+					cc.streamingBuf.Reset()
+				} else {
+					hm.ID = uuid.New().String()
+				}
+				s.mu.Unlock()
 				hm.ClawID = clawID
 				hm.TenantID = tenantID
 				hm.Role = "claw"
 				hm.CreatedAt = now()
 				_, _ = s.db.Exec(
-					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
