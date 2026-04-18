@@ -41,8 +41,9 @@ var (
 	installDomain  string
 	installSSHKey  string
 	installVersion string
-	installToken   string
-	installUIToken string
+	installToken        string
+	installUIToken      string
+	installAnthropicKey string
 )
 
 func init() {
@@ -53,6 +54,7 @@ func init() {
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
 	installCmd.Flags().StringVar(&installUIToken, "ui-token", "", "Web UI login password (default: randomly generated)")
+	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
 	installCmd.MarkFlagRequired("host")
 	installCmd.MarkFlagRequired("domain")
 }
@@ -81,12 +83,20 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	clawToken := randomHex32()
 
+	// Prompt for Anthropic key if not provided
+	anthropicKey := installAnthropicKey
+	if anthropicKey == "" && !quiet {
+		fmt.Print("Anthropic API key (sk-ant-..., or press Enter to skip): ")
+		fmt.Scanln(&anthropicKey)
+	}
+
 	params := install.Params{
-		Domain:    installDomain,
-		Version:   version,
-		Token:     token,
-		ClawToken: clawToken,
-		UIToken:   uiToken,
+		Domain:       installDomain,
+		Version:      version,
+		Token:        token,
+		ClawToken:    clawToken,
+		UIToken:      uiToken,
+		AnthropicKey: anthropicKey,
 	}
 
 	// ── Preflight: DNS check ──────────────────────────────────────────────────
@@ -148,6 +158,13 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("  Login: elasticclaw login --hub https://%s --token %s\n", installDomain, token)
 	fmt.Printf("  Web UI: https://%s\n", installDomain)
+	if anthropicKey == "" {
+		fmt.Println()
+		fmt.Println("  ⚠️  No Anthropic key set. Add it later to hub.yaml on the server:")
+		fmt.Println("     llm_keys:")
+		fmt.Println("       anthropic: sk-ant-...")
+		fmt.Println("     Then: systemctl restart elasticclaw")
+	}
 	fmt.Println()
 	fmt.Println("  Save these credentials — they won't be shown again.")
 

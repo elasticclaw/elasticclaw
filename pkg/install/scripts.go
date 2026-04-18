@@ -7,11 +7,12 @@ import "fmt"
 
 // Params holds all inputs needed to generate install scripts.
 type Params struct {
-	Domain    string
-	Version   string
-	Token     string
-	ClawToken string
-	UIToken   string
+	Domain       string
+	Version      string
+	Token        string
+	ClawToken    string
+	UIToken      string
+	AnthropicKey string // optional; adds llm_keys to hub.yaml if set
 }
 
 // HubBinaryURL returns the GitHub releases download URL for the hub binary.
@@ -29,13 +30,17 @@ func WebImageTag(version string) string {
 
 // HubConfig returns the hub.yaml config file content.
 func HubConfig(p Params) string {
+	llmKeys := ""
+	if p.AnthropicKey != "" {
+		llmKeys = fmt.Sprintf("\nllm_keys:\n  anthropic: %s", p.AnthropicKey)
+	}
 	return fmt.Sprintf(`url: https://%s
 public_url: https://%s
 token: %s
 claw_token: %s
 ui_token: %s
-address: :8080
-`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIToken)
+address: :8080%s
+`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIToken, llmKeys)
 }
 
 // SystemdUnit returns the systemd unit file for the hub service.
