@@ -6,3 +6,4 @@ github:
   repos: 
     - repo: elasticclaw/elasticclaw
       permissions: write
+nix: true
