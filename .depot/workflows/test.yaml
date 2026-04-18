@@ -25,6 +25,9 @@ jobs:
       - name: Bootstrap script tests (with shellcheck)
         run: go test -v ./pkg/hub/ -run TestBootstrap
 
+      - name: Install script tests (with shellcheck)
+        run: go test -v ./pkg/install/ -run Test
+
   build:
     name: Build
     runs-on: depot-ubuntu-24.04

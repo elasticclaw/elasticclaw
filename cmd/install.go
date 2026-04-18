@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -69,7 +70,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s\n", version)
 	}
 
-	// ── Generate tokens if not provided ──────────────────────────────────────
+	// ── Generate tokens ───────────────────────────────────────────────────────
 	token := installToken
 	if token == "" {
 		token = randomHex32()
@@ -80,6 +81,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	clawToken := randomHex32()
 
+	params := install.Params{
+		Domain:    installDomain,
+		Version:   version,
+		Token:     token,
+		ClawToken: clawToken,
+		UIToken:   uiToken,
+	}
+
 	// ── Preflight: DNS check ──────────────────────────────────────────────────
 	fmt.Printf("Checking DNS for %s... ", installDomain)
 	addrs, err := net.LookupHost(installDomain)
@@ -88,13 +97,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("OK (%s)\n", addrs[0])
 
-	// ── Parse SSH host ────────────────────────────────────────────────────────
+	// ── Connect SSH ───────────────────────────────────────────────────────────
 	sshUser, sshHost, err := parseSSHHost(installHost)
 	if err != nil {
 		return err
 	}
-
-	// ── Connect SSH ───────────────────────────────────────────────────────────
 	fmt.Printf("Connecting to %s@%s... ", sshUser, sshHost)
 	client, err := dialSSH(sshUser, sshHost, installSSHKey)
 	if err != nil {
@@ -105,148 +112,31 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// ── Preflight: Docker ─────────────────────────────────────────────────────
 	fmt.Print("Checking Docker... ")
-	if out, err := sshRun(client, "docker --version 2>&1"); err != nil {
+	if out, err := sshRunClient(client, "docker --version 2>&1"); err != nil {
 		return fmt.Errorf("Docker not found on server: %s\nInstall Docker first: https://docs.docker.com/engine/install/", out)
 	} else {
 		fmt.Printf("OK (%s)\n", strings.TrimSpace(strings.Split(out, "\n")[0]))
 	}
 
-	// ── Install hub binary ────────────────────────────────────────────────────
-	fmt.Printf("Installing elasticclaw %s... ", version)
-	hubURL := fmt.Sprintf(
-		"https://github.com/elasticclaw/elasticclaw/releases/download/%s/elasticclaw-linux-amd64",
-		version,
-	)
-	script := fmt.Sprintf(`set -e
-curl -fsSL %q -o /tmp/elasticclaw-bin
-chmod +x /tmp/elasticclaw-bin
-mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw
-elasticclaw --version`, hubURL)
-	if out, err := sshRun(client, script); err != nil {
-		return fmt.Errorf("hub install failed: %s", out)
+	steps := []struct {
+		name   string
+		script string
+	}{
+		{"Installing hub binary", install.ScriptInstallBinary(version)},
+		{"Writing hub config", install.ScriptWriteConfig(params)},
+		{"Installing systemd service", install.ScriptInstallSystemd()},
+		{"Starting web UI", install.ScriptRunWebUI(params)},
+		{"Installing Caddy", install.ScriptInstallCaddy()},
+		{"Configuring Caddy", install.ScriptWriteCaddyfile(installDomain)},
 	}
-	fmt.Println("OK")
 
-	// ── Write hub config ──────────────────────────────────────────────────────
-	fmt.Print("Writing hub config... ")
-	hubConfig := fmt.Sprintf(`url: https://%s
-public_url: https://%s
-token: %s
-claw_token: %s
-ui_token: %s
-address: :8080
-`, installDomain, installDomain, token, clawToken, uiToken)
-	configScript := fmt.Sprintf(`mkdir -p /root/.elasticclaw
-cat > /root/.elasticclaw/hub.yaml << 'HUBEOF'
-%sHUBEOF`, hubConfig)
-	if _, err := sshRun(client, configScript); err != nil {
-		return fmt.Errorf("config write failed")
+	for _, step := range steps {
+		fmt.Printf("%s... ", step.name)
+		if out, err := sshRunClient(client, step.script); err != nil {
+			return fmt.Errorf("%s failed:\n%s", step.name, out)
+		}
+		fmt.Println("OK")
 	}
-	fmt.Println("OK")
-
-	// ── Install systemd service for hub ───────────────────────────────────────
-	fmt.Print("Installing hub systemd service... ")
-	unitFile := `[Unit]
-Description=ElasticClaw Hub
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/elasticclaw hub
-Restart=always
-RestartSec=5
-WorkingDirectory=/root
-
-[Install]
-WantedBy=multi-user.target
-`
-	serviceScript := fmt.Sprintf(`cat > /etc/systemd/system/elasticclaw.service << 'SVCEOF'
-%sSVCEOF
-systemctl daemon-reload
-systemctl enable elasticclaw
-systemctl restart elasticclaw`, unitFile)
-	if _, err := sshRun(client, serviceScript); err != nil {
-		return fmt.Errorf("systemd service install failed")
-	}
-	fmt.Println("OK")
-
-	// ── Pull and start web UI Docker container ────────────────────────────────
-	fmt.Printf("Starting web UI (marc/elasticclaw-web:%s)... ", version)
-	webScript := fmt.Sprintf(`docker stop elasticclaw-web 2>/dev/null || true
-docker rm elasticclaw-web 2>/dev/null || true
-docker pull marc/elasticclaw-web:%s
-docker run -d \
-  --name elasticclaw-web \
-  --restart=always \
-  --network=host \
-  -e ELASTICCLAW_HUB_URL=http://localhost:8080 \
-  -e ELASTICCLAW_HUB_TOKEN=%s \
-  -e ELASTICCLAW_UI_TOKEN=%s \
-  marc/elasticclaw-web:%s`, version, token, uiToken, version)
-	if _, err := sshRun(client, webScript); err != nil {
-		return fmt.Errorf("web UI start failed")
-	}
-	fmt.Println("OK")
-
-	// ── Install Caddy ─────────────────────────────────────────────────────────
-	fmt.Print("Installing Caddy... ")
-	caddyInstall := `which caddy >/dev/null 2>&1 || (
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -qq
-  apt-get install -y caddy
-)`
-	if _, err := sshRun(client, caddyInstall); err != nil {
-		return fmt.Errorf("Caddy install failed")
-	}
-	fmt.Println("OK")
-
-	// ── Write Caddyfile ───────────────────────────────────────────────────────
-	fmt.Print("Configuring Caddy... ")
-	caddyfile := fmt.Sprintf(`%s {
-	handle /api/login {
-		reverse_proxy localhost:8080
-	}
-	handle /api/auth/* {
-		reverse_proxy localhost:3000
-	}
-	handle /api/hub-config {
-		reverse_proxy localhost:3000
-	}
-	handle /api/claws* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/messages* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/ws* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/terminal* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/github* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/debug* {
-		reverse_proxy localhost:8080
-	}
-	handle /claw/* {
-		reverse_proxy localhost:8080
-	}
-	handle {
-		reverse_proxy localhost:3000
-	}
-}
-`, installDomain)
-	caddyScript := fmt.Sprintf(`cat > /etc/caddy/Caddyfile << 'CADDYEOF'
-%sCAddyEOF
-systemctl reload caddy || systemctl restart caddy`, caddyfile)
-	if _, err := sshRun(client, caddyScript); err != nil {
-		return fmt.Errorf("Caddy config failed")
-	}
-	fmt.Println("OK")
 
 	// ── Done ──────────────────────────────────────────────────────────────────
 	fmt.Println()
@@ -336,7 +226,7 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	return gossh.Dial("tcp", addr, cfg)
 }
 
-func sshRun(client *gossh.Client, script string) (string, error) {
+func sshRunClient(client *gossh.Client, script string) (string, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return "", err
