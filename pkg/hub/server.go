@@ -1509,182 +1509,21 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
 
-	// Build the bootstrap script
-	script := fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-
-# ── LLM API keys + service tokens (injected first so all steps can use them) ───
-export OPENCLAW_DEFAULT_MODEL="%s"
-export ELASTICCLAW_GATEWAY_PASSWORD="%s"
-%s
-%s
-# ── Install Node.js 24 via nodesource ─────────────────────────────────────────────
-echo "Installing Node.js 24..."
-sudo apt-get update -qq
-sudo apt-get install -y curl ca-certificates
-sudo mkdir -p /etc/apt/keyrings
-# Use gpg batch mode (no /dev/tty needed)
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
-echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
-sudo apt-get update -qq
-sudo apt-get install -y nodejs git
-echo "Node: $(node --version)"
-
-%s
-# ── Install OpenClaw (sudo so it lands in /usr/bin/openclaw) ──────────────────
-echo "Installing OpenClaw..."
-sudo npm install -g openclaw@latest --ignore-scripts
-echo "OpenClaw: $(openclaw --version)"
-
-# ── Configure OpenClaw ──────────────────────────────────────────────────────────────
-mkdir -p "$HOME/.openclaw/workspace"
-if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
-  echo "Configuring OpenClaw..."
-  # Use onboard --non-interactive to generate valid config (no TTY needed with these flags)
-  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-placeholder}" \
-  openclaw onboard \
-    --non-interactive --accept-risk \
-    --auth-choice anthropic-api-key \
-    --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}" \
-    --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon 2>/dev/null || true
-  # Patch config to add required models.providers fields
-  python3 << 'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-try:
-    with open(path) as f:
-        config = json.load(f)
-except:
-    config = {}
-model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
-apiKey = os.environ.get('ANTHROPIC_API_KEY', 'placeholder')
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
-config['models'] = {
-    'providers': {
-        'anthropic': {
-            'apiKey': apiKey,
-            'baseUrl': 'https://api.anthropic.com',
-            'api': 'anthropic-messages',
-            'models': [
-                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
-                {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'api': 'anthropic-messages'},
-                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
-            ]
-        }
-    }
-}
-config.setdefault('gateway', {})['bind'] = 'loopback'
-config['gateway']['port'] = 18789
-# Use password auth so claw-bridge can connect with full scopes
-# (token auth grants limited scopes by default)
-gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
-if gw_password:
-    config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
-with open(path, 'w') as f:
-    json.dump(config, f, indent=2)
-print('OpenClaw config patched')
-PYEOF
-fi
-
-# ── Start OpenClaw gateway ──────────────────────────────────────────────────────────────
-echo "Starting OpenClaw gateway..."
-export OPENCLAW_NO_RESPAWN=1
-nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
-# Wait up to 30s for gateway to open :18789
-for i in $(seq 1 30); do
-  sleep 1
-  if curl -sf http://localhost:18789/healthz &>/dev/null; then
-    echo "OpenClaw gateway ready after ${i}s"
-    break
-  fi
-  if [ "$i" = "30" ]; then
-    echo "WARNING: gateway did not respond in 30s"
-    tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
-  fi
-done
-
-# ── Install claw-bridge ─────────────────────────────────────────────────────
-BRIDGE_SRC="%s"
-echo "Installing claw-bridge from $BRIDGE_SRC..."
-if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
-  # Plain HTTP(S) URL — use curl (default: GitHub Releases)
-  curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
-else
-  # OCI ref — use oras (dev override via bridge_image in hub.yaml)
-  if ! command -v oras &>/dev/null; then
-    echo "Installing oras..."
-    curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
-    sudo mv /tmp/oras /usr/local/bin/oras
-  fi
-  mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
-  oras pull "$BRIDGE_SRC"
-  BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
-  if [ -z "$BINARY" ]; then
-    echo "ERROR: claw-bridge binary not found after oras pull"
-    ls -la /tmp/claw-bridge-dl/
-    exit 1
-  fi
-  cp "$BINARY" /tmp/claw-bridge
-  cd -
-fi
-chmod +x /tmp/claw-bridge
-sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
-echo "claw-bridge installed"
-
-# Export env vars then start claw-bridge
-export ELASTICCLAW_HUB_URL="%s"
-export ELASTICCLAW_CLAW_ID="%s"
-export ELASTICCLAW_CLAW_TOKEN="%s"
-export ELASTICCLAW_CLAW_NAME="%s"
-export ELASTICCLAW_GATEWAY_PASSWORD="%s"
-%s
-export OPENCLAW_DEFAULT_MODEL="%s"
-%s
-echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
-
-BRIDGE_PID=$!
-echo "claw-bridge started (PID $BRIDGE_PID)"
-# Wait up to 10s for bridge to either die or show log output
-for i in $(seq 1 10); do
-  sleep 1
-  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
-    echo "ERROR: claw-bridge died after ${i}s"
-    echo "=== claw-bridge.log ==="
-    cat "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log)"
-    exit 1
-  fi
-  # Check if bridge has connected (looks for 'connected' in log)
-  if grep -q 'connected\|registered\|ready' "$HOME/claw-bridge.log" 2>/dev/null; then
-    echo "claw-bridge connected after ${i}s"
-    break
-  fi
-done
-if kill -0 $BRIDGE_PID 2>/dev/null; then
-  echo "claw-bridge is running (PID $BRIDGE_PID)"
-  tail -10 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
-else
-  echo "ERROR: claw-bridge died"
-  cat "$HOME/claw-bridge.log" 2>/dev/null
-  exit 1
-fi
-
-# ── GitHub credential helper ───────────────────────────────────────────────
-# Bridge is running — install credential helper and clone repos now
-%s
-`,
-		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), buildLinearEnv(linearToken), // top-of-script exports
-		buildNixInstall(nixEnabled != 0), // nix block (after Node install)
-		bridgeURL,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
-		buildRelayEnv(s.hubCfg, s.identity.PublicKey),
-		defaultModel,
-		buildLLMKeyEnv(s.hubCfg.LLMKeys),
-		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
-	)
-
+	script := GenerateReplicatedBootstrapScript(BootstrapParams{
+		ClawID:          clawID,
+		ClawName:        clawName,
+		ClawToken:       s.hubCfg.ClawToken,
+		HubURL:          s.clawHubURL(),
+		DefaultModel:    defaultModel,
+		GatewayPassword: gatewayPassword,
+		BridgeURL:       bridgeURL,
+		Nix:             nixEnabled != 0,
+		HubCfg:          s.hubCfg,
+		GitHubRepos:     githubRepos,
+		LLMKeyEnv:       buildLLMKeyEnv(s.hubCfg.LLMKeys),
+		LinearEnv:       buildLinearEnv(linearToken),
+		RelayEnv:        buildRelayEnv(s.hubCfg, s.identity.PublicKey),
+	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	if len(s.hubCfg.GitHubApps) > 0 && len(githubRepos) > 0 {
 		repoLines := ""

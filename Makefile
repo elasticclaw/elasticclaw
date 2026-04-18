@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test clean install lint tidy
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -31,6 +31,14 @@ install:
 
 test:
 	go test -v ./...
+
+# Run only bootstrap unit tests (fast, no infra needed)
+test-bootstrap:
+	go test -v ./pkg/hub/ -run TestBootstrap
+
+# Run container integration tests (requires Docker + ELASTICCLAW_TEST_BRIDGE_URL)
+test-container:
+	ELASTICCLAW_CONTAINER_TESTS=1 go test -v ./pkg/hub/ -run TestBootstrap_ContainerRun -timeout 10m
 
 lint:
 	golangci-lint run
