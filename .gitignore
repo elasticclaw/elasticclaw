@@ -1,6 +1,5 @@
 # Binaries
 bin/
-elasticclaw
 *.exe
 
 # IDE
@@ -16,7 +15,6 @@ elasticclaw
 coverage.out
 
 # Local dev
-.elasticclaw/
 .direnv/
 
 # Web UI
