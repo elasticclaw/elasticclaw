@@ -198,22 +198,6 @@ func TestScripts_Shellcheck(t *testing.T) {
 	}
 }
 
-// ── Container integration test ────────────────────────────────────────────────
-
-func TestInstall_Container(t *testing.T) {
-	if os.Getenv("ELASTICCLAW_INSTALL_TESTS") == "" {
-		t.Skip("set ELASTICCLAW_INSTALL_TESTS=1 to run container integration tests")
-	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not in PATH")
-	}
-	t.Log("Container install test — TODO: spin up Ubuntu+SSH container and run install")
-	// TODO: use testcontainers-go
-	// 1. Start ubuntu:24.04 with sshd
-	// 2. Run each script via SSH
-	// 3. Assert binary exists, config written, caddyfile written
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func assertContains(t *testing.T, s, substr, desc string) {
