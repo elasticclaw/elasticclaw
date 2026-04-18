@@ -133,7 +133,7 @@ export function useHub(selectedClawId: string | null): HubState {
     })
   }, [])
 
-  const refreshClaws = useCallback(async () => {
+  const refreshClaws = useCallback(async (): Promise<void> => {
     try {
       const apiClaws = await fetchClaws()
       mergeClaws(apiClaws)
@@ -143,7 +143,6 @@ export function useHub(selectedClawId: string | null): HubState {
       const msg = err instanceof Error ? err.message : String(err)
       setHubError(msg)
       setLoading(false)
-      return []
     }
   }, [mergeClaws])
 
