@@ -39,6 +39,44 @@ type hubMsg struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
+// ─── Inbound message queue ───────────────────────────────────────────────────
+// Queues user messages when the hub connection is temporarily unavailable.
+// Messages older than msgQueueTTL are dropped to prevent unbounded growth.
+
+const msgQueueTTL = 10 * time.Minute
+
+type queuedMsg struct {
+	content   string
+	queuedAt  time.Time
+}
+
+type msgQueue struct {
+	mu    sync.Mutex
+	msgs  []queuedMsg
+}
+
+func (q *msgQueue) push(content string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.msgs = append(q.msgs, queuedMsg{content: content, queuedAt: time.Now()})
+}
+
+// drain returns all non-expired messages and clears the queue.
+func (q *msgQueue) drain() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var out []string
+	for _, m := range q.msgs {
+		if time.Since(m.queuedAt) < msgQueueTTL {
+			out = append(out, m.content)
+		} else {
+			log.Printf("[bridge] dropped queued message (TTL exceeded): %q", m.content[:min(len(m.content), 60)])
+		}
+	}
+	q.msgs = nil
+	return out
+}
+
 // ─── openclaw gateway wire types ────────────────────────────────────────────
 
 type gwFrame struct {
@@ -913,6 +951,7 @@ func main() {
 	// Start local HTTP proxy so tools in the sandbox can reach hub APIs
 	// via http://localhost:18790 without needing a public hub URL.
 	proxy := newHTTPProxy(nil) // send func wired up in runHubLoop
+	queue := &msgQueue{}
 	go func() {
 		log.Printf("[bridge] local HTTP proxy on 127.0.0.1:18790")
 		if err := http.ListenAndServe("127.0.0.1:18790", proxy); err != nil {
@@ -954,7 +993,7 @@ func main() {
 	log.Printf("[bridge] gateway session ready: %s", gwSession.sessionKey)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -973,7 +1012,7 @@ func main() {
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -1010,6 +1049,31 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		return fmt.Errorf("expected registered, got %s", ack.Type)
 	}
 	log.Printf("registered with hub as %s", clawID)
+
+	// Replay any queued messages that arrived while we were disconnected
+	if queued := queue.drain(); len(queued) > 0 {
+		log.Printf("[bridge] replaying %d queued message(s)", len(queued))
+		connCtx := ctx
+		for _, content := range queued {
+			go func(c string) {
+				agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer agentCancel()
+				reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
+					_ = wsjson.Write(connCtx, conn, hubMsg{
+						Type: "chunk",
+						Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
+					})
+				})
+				if agentErr != nil {
+					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
+				}
+				_ = wsjson.Write(connCtx, conn, hubMsg{
+					Type:    "message",
+					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
+				})
+			}(content)
+		}
+	}
 
 	// Wire up the HTTP proxy send function for this connection
 	proxy.mu.Lock()
@@ -1060,6 +1124,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				if content == "" {
 					return
 				}
+				if !gwSession.IsReady() {
+					log.Printf("[bridge] gateway not ready, queuing message for later")
+					queue.push(content)
+					return
+				}
 
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer agentCancel()
@@ -1082,13 +1151,17 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
 
-				_ = wsjson.Write(connCtx, conn, hubMsg{
+				if writeErr := wsjson.Write(connCtx, conn, hubMsg{
 					Type: "message",
 					Payload: mustJSON(map[string]interface{}{
 						"role":    "claw",
 						"content": reply,
 					}),
-				})
+				}); writeErr != nil {
+					// Hub connection dropped — queue content for replay on reconnect
+					log.Printf("[bridge] hub write failed, queuing response for replay: %v", writeErr)
+					queue.push(reply)
+				}
 			}(ctx, msg.Payload)
 
 		case "http_proxy_res":
