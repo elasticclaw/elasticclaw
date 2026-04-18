@@ -46,6 +46,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
+      "ngrok-skip-browser-warning": "true", // skip ngrok interstitial in dev
       ...options?.headers,
     },
   })
