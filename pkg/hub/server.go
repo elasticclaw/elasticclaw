@@ -107,15 +107,9 @@ func (s *Server) Run() error {
 
 	// REST API
 	mux.HandleFunc("/api/login", s.handleLogin)
-	// Handle both /api/claws and /api/claws/ to avoid Go ServeMux trailing-slash redirect
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
-	mux.HandleFunc("/api/claws/", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/claws/" || r.URL.Path == "/api/claws" {
-			s.handleClaws(w, r)
-		} else {
-			s.handleClawDetail(w, r)
-		}
-	}))
+	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("/api/claws/{id}/", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
