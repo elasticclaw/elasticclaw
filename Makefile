@@ -40,6 +40,10 @@ test-bootstrap:
 test-container:
 	ELASTICCLAW_CONTAINER_TESTS=1 go test -v ./pkg/hub/ -run TestBootstrap_ContainerRun -timeout 10m
 
+# Run install integration tests in a real Ubuntu container (requires Docker)
+test-install:
+	ELASTICCLAW_INSTALL_TESTS=1 go test -tags integration -v ./pkg/install/ -run TestInstall_Container -timeout 5m
+
 lint:
 	golangci-lint run
 
