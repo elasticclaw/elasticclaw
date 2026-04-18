@@ -313,10 +313,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		linearWorkspace = req.Linear.Workspace
 	}
 
+	nixEnabled := 0
+	if req.Nix {
+		nixEnabled = 1
+	}
+
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1464,6 +1469,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if defaultModel == "" {
 		defaultModel = s.hubCfg.DefaultModel
 	}
+	// Read nix flag
+	var nixEnabled int
+	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
+
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
@@ -1518,6 +1527,7 @@ sudo apt-get update -qq
 sudo apt-get install -y nodejs git
 echo "Node: $(node --version)"
 
+%s
 # ── Install OpenClaw (sudo so it lands in /usr/bin/openclaw) ──────────────────
 echo "Installing OpenClaw..."
 sudo npm install -g openclaw@latest --ignore-scripts
@@ -1663,6 +1673,7 @@ fi
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), buildLinearEnv(linearToken), // top-of-script exports
 		bridgeURL,
+		buildNixInstall(nixEnabled != 0),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		buildRelayEnv(s.hubCfg, s.identity.PublicKey),
 		defaultModel,
@@ -1747,6 +1758,27 @@ func (s *Server) clawHubURL() string {
 		return s.hubCfg.PublicURL
 	}
 	return s.hubCfg.URL
+}
+
+// buildNixInstall returns shell script lines to install Determinate Systems Nix.
+// Returns an empty comment when nix is not enabled.
+func buildNixInstall(enabled bool) string {
+	if !enabled {
+		return "# Nix not enabled for this template"
+	}
+	return `# ── Install Nix (Determinate Systems) ──────────────────────────────────────────
+echo "Installing Nix (Determinate Systems)..."
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+  sh -s -- install linux --no-confirm --init none
+# Source Nix profile for subsequent script steps
+if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+elif [ -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
+  . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+fi
+# Persist Nix in PATH for all future shells
+echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
+echo "Nix: $(nix --version 2>/dev/null || echo 'installed, restart shell to use')"`
 }
 
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.

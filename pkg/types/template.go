@@ -17,6 +17,9 @@ type TemplateConfig struct {
 	GitHub  *GitHubTemplateConfig  `yaml:"github,omitempty"`
 	// Linear specifies which Linear workspace this template's claw should use.
 	Linear  *LinearTemplateConfig  `yaml:"linear,omitempty"`
+	// Nix installs the Determinate Systems variant of Nix during bootstrap.
+	// Adds ~2-3 min to bootstrap time. Opt-in only.
+	Nix bool `yaml:"nix,omitempty"`
 }
 
 type TemplateResources struct {
@@ -147,4 +150,5 @@ type CreateClawRequest struct {
 	Env          map[string]string     `json:"env,omitempty"`
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
 	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
+	Nix          bool                  `json:"nix,omitempty"`
 }
