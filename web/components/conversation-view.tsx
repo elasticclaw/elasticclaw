@@ -346,11 +346,30 @@ function ClawBoardCard({
           {/* Input area */}
           <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border">
             <div className="flex gap-1.5">
-              <Input
+              <textarea
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                rows={1}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  const el = e.target
+                  el.style.height = "auto"
+                  const maxH = 120
+                  if (el.scrollHeight <= maxH) {
+                    el.style.height = el.scrollHeight + "px"
+                    el.style.overflowY = "hidden"
+                  } else {
+                    el.style.height = maxH + "px"
+                    el.style.overflowY = "auto"
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    if (input.trim() && !isPending) handleSubmit(e as unknown as React.FormEvent)
+                  }
+                }}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Claw offline" : "Starting up...") : "Send message..."}
-                className="h-8 text-xs flex-1"
+                className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 onClick={(e) => e.stopPropagation()}
               />
