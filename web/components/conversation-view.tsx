@@ -595,7 +595,7 @@ function MessageBubble({
   const isUser = message.role === "user"
 
   return (
-    <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
+    <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
           "max-w-[70%] min-w-0 rounded-lg px-4 py-3",
