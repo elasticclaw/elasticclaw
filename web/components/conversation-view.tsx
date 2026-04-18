@@ -675,30 +675,37 @@ function ClawChatView({
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
+  // Track whether user has scrolled away from the bottom
+  const pinnedToBottom = useRef(true)
 
   const isAtBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return true
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 200
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 60
   }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
+    pinnedToBottom.current = true
+    setShowScrollBtn(false)
   }, [])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 120)
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    pinnedToBottom.current = atBottom
+    setShowScrollBtn(!atBottom)
   }, [])
 
-  // On mount and when messages change: scroll to bottom
+  // Only auto-scroll when pinned to bottom
   useEffect(() => {
+    if (!pinnedToBottom.current) return
     const run = () => {
       const el = scrollRef.current
-      if (el) el.scrollTop = el.scrollHeight
+      if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight
     }
     const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
     return () => timers.forEach(clearTimeout)
@@ -709,6 +716,7 @@ function ClawChatView({
     if (input.trim()) {
       onSendMessage(input)
       setInput("")
+      pinnedToBottom.current = true
       if (panelTextareaRef.current) {
         panelTextareaRef.current.style.height = "auto"
         panelTextareaRef.current.style.overflowY = "hidden"
