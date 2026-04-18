@@ -1629,12 +1629,26 @@ nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
 
 BRIDGE_PID=$!
 echo "claw-bridge started (PID $BRIDGE_PID)"
-sleep 2
+# Wait up to 10s for bridge to either die or show log output
+for i in $(seq 1 10); do
+  sleep 1
+  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
+    echo "ERROR: claw-bridge died after ${i}s"
+    echo "=== claw-bridge.log ==="
+    cat "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log)"
+    exit 1
+  fi
+  # Check if bridge has connected (looks for 'connected' in log)
+  if grep -q 'connected\|registered\|ready' "$HOME/claw-bridge.log" 2>/dev/null; then
+    echo "claw-bridge connected after ${i}s"
+    break
+  fi
+done
 if kill -0 $BRIDGE_PID 2>/dev/null; then
-  echo "claw-bridge is running"
-  tail -5 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
+  echo "claw-bridge is running (PID $BRIDGE_PID)"
+  tail -10 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
 else
-  echo "ERROR: claw-bridge died immediately"
+  echo "ERROR: claw-bridge died"
   cat "$HOME/claw-bridge.log" 2>/dev/null
   exit 1
 fi
