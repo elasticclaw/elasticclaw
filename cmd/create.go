@@ -74,6 +74,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Template files: %d files, provider: %s\n", len(files), tmplCfg.Provider)
+	if tmplCfg.Nix {
+		fmt.Println("  Nix: enabled (Determinate Systems)")
+	}
+	if tmplCfg.GitHub != nil && len(tmplCfg.GitHub.Repos) > 0 {
+		fmt.Printf("  GitHub repos: %d\n", len(tmplCfg.GitHub.Repos))
+	}
 
 	// Parse extra env vars
 	env := parseEnvVars(createEnvs)
