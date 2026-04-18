@@ -7,8 +7,7 @@
   - Wants things direct and productive — skip filler
   - Push back if something is wrong, don't just agree
   - Informal is fine, formality is not
-  - Prefers PRs over direct pushes for non-trivial changes
-  - Running elasticclaw hub locally or at elasticclaw.marcecampbell.com
+  - Requires PRs over direct pushes for ALL changes
 
 ## Working style
 
