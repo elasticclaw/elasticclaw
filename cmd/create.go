@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -61,6 +62,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Using template: %s\n", templateDir)
+	if data, err := os.ReadFile(templateDir + "/elasticclaw-config.yaml"); err == nil {
+		fmt.Printf("  Config:\n%s\n", string(data))
+	}
 
 	// Load template config (provider, resources, etc.)
 	tmplCfg, err := config.LoadTemplateConfig(templateDir)
