@@ -757,7 +757,7 @@ function ClawChatView({
             }}
             placeholder="Send a message to this claw..."
             rows={1}
-            className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px] max-h-[200px]"
+            className="flex-1 resize-none overflow-y-auto overflow-x-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px] max-h-[200px]"
           />
           <Button type="submit" size="icon" disabled={!input.trim()} className="shrink-0">
             <Send className="size-4" />
