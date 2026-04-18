@@ -1611,18 +1611,29 @@ func buildNixInstall(enabled bool) string {
 	}
 	return `# ── Install Nix (Determinate Systems) ──────────────────────────────────────────
 echo "Installing Nix (Determinate Systems)..."
+# Use systemd init if available, otherwise start daemon manually
+NIX_INIT_MODE="none"
+if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
+  NIX_INIT_MODE="systemd"
+fi
 curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init none
-# Source Nix profile for subsequent script steps
+  sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE"
+# Source profile to get nix in PATH
 if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
   . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-elif [ -e "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
-  . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+fi
+# Start daemon manually when systemd is not available
+if [ "$NIX_INIT_MODE" = "none" ]; then
+  echo "Starting nix daemon (no systemd)..."
+  sudo /nix/var/nix/profiles/default/bin/nix-daemon &
+  sleep 3
+  export NIX_REMOTE=daemon
 fi
 # Persist Nix in PATH for all future shells
 echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
-echo "Nix: $(nix --version 2>/dev/null || echo 'installed, restart shell to use')"`
+echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"`
 }
+
 
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.
 // When relay is not configured, returns an empty comment.
