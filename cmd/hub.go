@@ -92,6 +92,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("ElasticClaw Hub\n")
 	fmt.Printf("  Address:    %s\n", hubAddr)
+	fmt.Printf("  Web UI:     http://localhost%s\n", hubAddr)
 	fmt.Printf("  Database:   %s\n", dbPath)
 	if hubCfg.URL != "" {
 		fmt.Printf("  URL:        %s\n", hubCfg.URL)
