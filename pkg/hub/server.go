@@ -109,7 +109,6 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
-	mux.HandleFunc("/api/claws/{id}/", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
@@ -396,7 +395,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/claws/")
+	clawID := r.PathValue("id")
+	if clawID == "" {
+		clawID = strings.TrimPrefix(r.URL.Path, "/api/claws/")
+	}
 
 	if r.Method == http.MethodPatch {
 		var body struct {
