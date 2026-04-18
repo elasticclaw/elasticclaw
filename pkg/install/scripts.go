@@ -136,7 +136,7 @@ func ScriptInstallCaddy() string {
 // ScriptWriteCaddyfile returns the shell script to write the Caddyfile and reload Caddy.
 func ScriptWriteCaddyfile(domain string) string {
 	return fmt.Sprintf(`cat > /etc/caddy/Caddyfile << 'CADDYEOF'
-%sCaddyEOF
+%sCADDYEOF
 systemctl reload caddy || systemctl restart caddy`, Caddyfile(domain))
 }
 

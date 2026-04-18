@@ -130,7 +130,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 	// ── Write Caddyfile ───────────────────────────────────────────────────────
 	// Create /etc/caddy dir (already done in container setup)
 	run("write caddyfile", fmt.Sprintf(`cat > /etc/caddy/Caddyfile << 'CADDYEOF'
-%sCaddyEOF`, install.Caddyfile(params.Domain)))
+%sCADDYEOF`, install.Caddyfile(params.Domain)))
 	assertFile("/etc/caddy/Caddyfile", "hub.test.example.com")
 	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:8080")
 	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:3000")
