@@ -18,8 +18,10 @@ build-web:
 	rm -rf internal/webui/out
 	cp -r web/out internal/webui/out
 
-# Build Go binary only (skips web UI build — uses existing internal/webui/out if present)
-build-no-web:
+# Build Go binary only — skips npm, fast for local dev iteration
+# Uses existing internal/webui/out if present (from a prior make build)
+build-no-web: build-dev
+build-dev:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
 
