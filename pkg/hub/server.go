@@ -233,7 +233,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]') FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -247,9 +247,11 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c types.Claw
 		var lastSeen sql.NullTime
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser); err != nil {
+		var tagsJSON string
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON); err != nil {
 			continue
 		}
+		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 		c.TenantID = tenantID
 		if lastSeen.Valid {
 			c.LastSeen = lastSeen.Time
@@ -319,10 +321,13 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
 
+	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
+	tagsJSON, _ := json.Marshal(tags)
+
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -423,10 +428,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 	var c types.Claw
 	var lastSeen sql.NullTime
+	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON)
+	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -1588,6 +1595,30 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 
 // randomHex returns a random hex string of n bytes (2*n hex chars).
+// mergeTags combines tags from all sources in priority order:
+// 1. auto tag (template:<name>)
+// 2. template config tags (elasticclaw-config.yaml)
+// 3. CLI --tag flags
+// Deduplicates while preserving order.
+func mergeTags(templateName string, configTags []string, cliTags []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	add := func(t string) {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			result = append(result, t)
+		}
+	}
+	add("template:" + templateName)
+	for _, t := range configTags {
+		add(t)
+	}
+	for _, t := range cliTags {
+		add(t)
+	}
+	return result
+}
+
 func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)

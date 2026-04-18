@@ -20,6 +20,9 @@ type TemplateConfig struct {
 	// Nix installs the Determinate Systems variant of Nix during bootstrap.
 	// Adds ~2-3 min to bootstrap time. Opt-in only.
 	Nix bool `yaml:"nix,omitempty"`
+	// Tags are static labels applied to every claw created from this template.
+	// Merged with the auto template:<name> tag and any --tag CLI flags.
+	Tags []string `yaml:"tags,omitempty"`
 }
 
 type TemplateResources struct {
@@ -151,4 +154,5 @@ type CreateClawRequest struct {
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
 	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
 	Nix          bool                  `json:"nix,omitempty"`
+	Tags         []string              `json:"tags,omitempty"`
 }

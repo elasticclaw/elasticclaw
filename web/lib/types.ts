@@ -9,7 +9,7 @@ export interface Claw {
   unreadCount: number
   isStreaming: boolean
   pinned: boolean
-  tags: Record<string, string>
+  tags: string[]
   contextUsage: number // 0-100 percentage, hardcoded 0 for now
   description?: string
   // SSH / terminal access
@@ -42,6 +42,7 @@ export interface ApiClaw {
   created_at: string
   tenant_id: string
   context_usage?: number
+  tags?: string[]
   ssh_host?: string
   ssh_port?: number
   ssh_user?: string

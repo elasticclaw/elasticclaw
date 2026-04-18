@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -36,6 +37,7 @@ var (
 	createTemplate     string
 	createInstanceType string
 	createTTL          string
+	createTags         []string
 )
 
 func init() {
@@ -47,6 +49,7 @@ func init() {
 	createCmd.Flags().StringArrayVar(&createEnvs, "env", nil, "extra env vars to inject (KEY=value)")
 	createCmd.Flags().StringVar(&createInstanceType, "instance-type", "", "override instance type (e.g. r1.small for Replicated)")
 	createCmd.Flags().StringVar(&createTTL, "ttl", "", "override TTL (e.g. 2h, 24h)")
+	createCmd.Flags().StringArrayVar(&createTags, "tag", nil, "tag to apply (repeatable: --tag nix --tag env:prod)")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -83,6 +86,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 	if tmplCfg.GitHub != nil && len(tmplCfg.GitHub.Repos) > 0 {
 		fmt.Printf("  GitHub repos: %d\n", len(tmplCfg.GitHub.Repos))
+	}
+	// Merge tags: auto (template:<name>) + config yaml tags + --tag flags
+	tmplCfg.Tags = mergeCLITags(createTemplate, tmplCfg.Tags, createTags)
+	if len(tmplCfg.Tags) > 0 {
+		fmt.Printf("  Tags: %s\n", strings.Join(tmplCfg.Tags, ", "))
 	}
 
 	// Parse extra env vars
@@ -124,6 +132,26 @@ func parseEnvVars(envs []string) map[string]string {
 				break
 			}
 		}
+	}
+	return result
+}
+
+func mergeCLITags(templateName string, configTags, cliTags []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			result = append(result, t)
+		}
+	}
+	add("template:" + templateName)
+	for _, t := range configTags {
+		add(t)
+	}
+	for _, t := range cliTags {
+		add(t)
 	}
 	return result
 }

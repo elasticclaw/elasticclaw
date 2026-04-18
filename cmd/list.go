@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -19,6 +20,7 @@ var (
 	listProvider    string
 	listAll         bool
 	listAllProfiles bool
+	listTag         string
 )
 
 var listCmd = &cobra.Command{
@@ -34,6 +36,7 @@ func init() {
 	listCmd.Flags().StringVarP(&listProvider, "provider", "p", "", "filter by provider")
 	listCmd.Flags().BoolVar(&listAll, "all", false, "include stopped instances")
 	listCmd.Flags().BoolVar(&listAllProfiles, "all-profiles", false, "show instances from all profiles")
+	listCmd.Flags().StringVar(&listTag, "tag", "", "filter by tag")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -112,13 +115,29 @@ func runListHub(h *types.HubProfile) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tTEMPLATE\tSTATUS\tAGE")
+	fmt.Fprintln(w, "ID\tNAME\tTEMPLATE\tSTATUS\tAGE\tTAGS")
 	for _, c := range claws {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			c.ID[:8], c.Name, c.Template, c.Status, formatAge(c.CreatedAt))
+		if listTag != "" && !clawHasTag(c.Tags, listTag) {
+			continue
+		}
+		tags := strings.Join(c.Tags, ", ")
+		if tags == "" {
+			tags = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			c.ID[:8], c.Name, c.Template, c.Status, formatAge(c.CreatedAt), tags)
 	}
 	w.Flush()
 	return nil
+}
+
+func clawHasTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func formatAge(t time.Time) string {

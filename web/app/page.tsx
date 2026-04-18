@@ -16,7 +16,7 @@ export default function Home() {
   })
   const [spawnModalOpen, setSpawnModalOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
-  const [activeTagFilters, setActiveTagFilters] = useState<Array<{ key: string; value: string }>>([])
+  const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
 
@@ -86,18 +86,9 @@ export default function Home() {
 
   // Collect all unique tags from all claws
   const allTags = useMemo(() => {
-    const tagMap: Record<string, Set<string>> = {}
-    claws.forEach((claw) => {
-      Object.entries(claw.tags).forEach(([key, value]) => {
-        if (!tagMap[key]) tagMap[key] = new Set()
-        tagMap[key].add(value)
-      })
-    })
-    const result: Record<string, string[]> = {}
-    Object.keys(tagMap).sort().forEach((key) => {
-      result[key] = Array.from(tagMap[key]).sort()
-    })
-    return result
+    const tagSet = new Set<string>()
+    claws.forEach((claw) => claw.tags.forEach((t) => tagSet.add(t)))
+    return Array.from(tagSet).sort()
   }, [claws])
 
   const selectedClaw = useMemo(() => {
@@ -121,7 +112,7 @@ export default function Home() {
 
     if (activeTagFilters.length > 0) {
       result = result.filter((c) =>
-        activeTagFilters.every((filter) => c.tags[filter.key] === filter.value)
+        activeTagFilters.every((tag) => c.tags.includes(tag))
       )
     }
 
@@ -131,7 +122,7 @@ export default function Home() {
   const filteredPinnedClaws = useMemo(() => {
     if (activeTagFilters.length === 0) return pinnedClaws
     return pinnedClaws.filter((c) =>
-      activeTagFilters.every((filter) => c.tags[filter.key] === filter.value)
+      activeTagFilters.every((tag) => c.tags.includes(tag))
     )
   }, [pinnedClaws, activeTagFilters])
 
@@ -165,17 +156,12 @@ export default function Home() {
     [claws, hub]
   )
 
-  const handleAddTagFilter = useCallback((filter: { key: string; value: string }) => {
-    setActiveTagFilters((prev) => {
-      if (prev.some((f) => f.key === filter.key && f.value === filter.value)) return prev
-      return [...prev, filter]
-    })
+  const handleAddTagFilter = useCallback((tag: string) => {
+    setActiveTagFilters((prev) => prev.includes(tag) ? prev : [...prev, tag])
   }, [])
 
-  const handleRemoveTagFilter = useCallback((filter: { key: string; value: string }) => {
-    setActiveTagFilters((prev) =>
-      prev.filter((f) => !(f.key === filter.key && f.value === filter.value))
-    )
+  const handleRemoveTagFilter = useCallback((tag: string) => {
+    setActiveTagFilters((prev) => prev.filter((t) => t !== tag))
   }, [])
 
   const handleClearTagFilters = useCallback(() => {

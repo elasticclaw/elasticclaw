@@ -118,16 +118,14 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
           )}
         </span>
       </div>
-      {Object.keys(claw.tags).length > 0 && (
+      {claw.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-2 pl-5">
-          {Object.entries(claw.tags).map(([key, value]) => (
+          {claw.tags.map((tag) => (
             <span
-              key={key}
+              key={tag}
               className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
             >
-              <span className="text-foreground/70">{key}</span>
-              <span className="mx-0.5">=</span>
-              <span>{value}</span>
+              {tag}
             </span>
           ))}
         </div>

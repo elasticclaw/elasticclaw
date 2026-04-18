@@ -17,10 +17,8 @@ import {
 import { cn } from "@/lib/utils"
 import type { Claw } from "@/lib/types"
 
-interface TagFilter {
-  key: string
-  value: string
-}
+// Tag is now a flat string, e.g. "template:elasticclaw" or "nix"
+type TagFilter = string
 
 interface SidebarProps {
   claws: Claw[]
@@ -31,7 +29,7 @@ interface SidebarProps {
   onSpawn: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
-  allTags: Record<string, string[]>
+  allTags: string[]
   activeTagFilters: TagFilter[]
   onAddTagFilter: (filter: TagFilter) => void
   onRemoveTagFilter: (filter: TagFilter) => void
@@ -57,7 +55,7 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
 }: SidebarProps) {
-  const tagKeys = Object.keys(allTags)
+  const tagKeys = allTags
 
   // Merge pinned + unpinned for collapsed view
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
@@ -159,53 +157,31 @@ export function Sidebar({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-48">
-                {tagKeys.map((key) => (
-                  <DropdownMenuSub key={key}>
-                    <DropdownMenuSubTrigger className="text-xs">
-                      {key}
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="w-40">
-                      {allTags[key].map((value) => {
-                        const isActive = activeTagFilters.some(
-                          (f) => f.key === key && f.value === value
-                        )
-                        return (
-                          <DropdownMenuItem
-                            key={value}
-                            className="text-xs"
-                            onClick={() => {
-                              if (isActive) {
-                                onRemoveTagFilter({ key, value })
-                              } else {
-                                onAddTagFilter({ key, value })
-                              }
-                            }}
-                          >
-                            <span className={isActive ? "font-medium" : ""}>
-                              {value}
-                            </span>
-                            {isActive && (
-                              <span className="ml-auto text-muted-foreground">✓</span>
-                            )}
-                          </DropdownMenuItem>
-                        )
-                      })}
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
+                {tagKeys.map((tag) => {
+                  const isActive = activeTagFilters.includes(tag)
+                  return (
+                    <DropdownMenuItem
+                      key={tag}
+                      className="text-xs"
+                      onClick={() => isActive ? onRemoveTagFilter(tag) : onAddTagFilter(tag)}
+                    >
+                      <span className={isActive ? "font-medium" : ""}>{tag}</span>
+                      {isActive && <span className="ml-auto text-muted-foreground">✓</span>}
+                    </DropdownMenuItem>
+                  )}
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
           
-          {activeTagFilters.map((filter) => (
+          {activeTagFilters.map((tag) => (
             <span
-              key={`${filter.key}-${filter.value}`}
+              key={tag}
               className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded"
             >
-              <span className="text-muted-foreground">{filter.key}=</span>
-              {filter.value}
+              {tag}
               <button
-                onClick={() => onRemoveTagFilter(filter)}
+                onClick={() => onRemoveTagFilter(tag)}
                 className="ml-0.5 hover:text-destructive"
               >
                 <X className="size-3" />

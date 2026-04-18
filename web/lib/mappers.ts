@@ -58,7 +58,7 @@ export function mapApiClaw(
     unreadCount: overrides.unreadCount ?? 0,
     isStreaming: overrides.isStreaming ?? false,
     pinned: overrides.pinned ?? false,
-    tags: overrides.tags ?? parseTagsFromName(apiClaw.name),
+    tags: overrides.tags ?? (apiClaw.tags ?? []),
     contextUsage: overrides.contextUsage ?? apiClaw.context_usage ?? 0,
     description: overrides.description,
     ssh_host: apiClaw.ssh_host,
