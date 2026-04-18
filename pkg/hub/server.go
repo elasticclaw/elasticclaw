@@ -1611,10 +1611,6 @@ chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
 
-# ── GitHub credential helper ───────────────────────────────────────────────
-# Installs a git credential helper that fetches a fresh GitHub installation
-# token from the hub on demand. Token never expires on disk.
-%s
 # Export env vars then start claw-bridge
 export ELASTICCLAW_HUB_URL="%s"
 export ELASTICCLAW_CLAW_ID="%s"
@@ -1652,14 +1648,18 @@ else
   cat "$HOME/claw-bridge.log" 2>/dev/null
   exit 1
 fi
+
+# ── GitHub credential helper ───────────────────────────────────────────────
+# Bridge is running — install credential helper and clone repos now
+%s
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), buildLinearEnv(linearToken), // top-of-script exports
 		bridgeURL,
-		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		buildRelayEnv(s.hubCfg, s.identity.PublicKey),
 		defaultModel,
 		buildLLMKeyEnv(s.hubCfg.LLMKeys),
+		buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos),
 	)
 
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
@@ -1850,28 +1850,20 @@ if command -v git &>/dev/null; then
 fi
 
 # Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
-# We don't pre-auth here because the claw isn't registered with the hub yet.
-# Instead, create a gh wrapper that fetches a token on each call.
 if command -v gh &>/dev/null; then
   # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
-  # (both interactive and non-interactive, which is what agents use)
   sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
 export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
 PROFEOF
   sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-
-  # Also configure gh auth now that the claw is registered and credential helper works
-  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-  if [ -n "$GH_TOKEN" ]; then
-    echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo "gh CLI authenticated" || echo "gh auth failed (will retry via profile.d)"
-  fi
+  echo "GitHub profile.d configured"
 fi
 echo "GitHub credential helper installed"
 
-# Clone repos into workspace so the agent starts with them already present
-cd "$HOME/.openclaw/workspace"
-%s
-echo "Repos cloned"`, tokenURL, buildGitHubCloneScript(repos))
+# Clone repos — non-fatal: token may not be available until bridge connects
+# The agent can clone manually if this fails
+cd "$HOME/.openclaw/workspace" || true
+{ %s } || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
 }
 
 // sshRun connects to host via the hub's SSH identity and runs a script.
