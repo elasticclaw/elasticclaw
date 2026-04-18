@@ -17,8 +17,8 @@ import {
 import { cn } from "@/lib/utils"
 import type { Claw } from "@/lib/types"
 
-// Tag is now a flat string, e.g. "template:elasticclaw" or "nix"
-type TagFilter = string
+// Tag format is "key=value", e.g. "template=elasticclaw", "env=prod"
+type TagFilter = string // "key=value"
 
 interface SidebarProps {
   claws: Claw[]
@@ -29,7 +29,8 @@ interface SidebarProps {
   onSpawn: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
-  allTags: string[]
+  // allTags: map of key → sorted unique values
+  allTags: Record<string, string[]>
   activeTagFilters: TagFilter[]
   onAddTagFilter: (filter: TagFilter) => void
   onRemoveTagFilter: (filter: TagFilter) => void
@@ -55,7 +56,7 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
 }: SidebarProps) {
-  const tagKeys = allTags
+  const tagKeys = Object.keys(allTags).sort()
 
   // Merge pinned + unpinned for collapsed view
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
@@ -157,37 +158,49 @@ export function Sidebar({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-48">
-                {tagKeys.map((tag) => {
-                  const isActive = activeTagFilters.includes(tag)
-                  return (
-                    <DropdownMenuItem
-                      key={tag}
-                      className="text-xs"
-                      onClick={() => isActive ? onRemoveTagFilter(tag) : onAddTagFilter(tag)}
-                    >
-                      <span className={isActive ? "font-medium" : ""}>{tag}</span>
-                      {isActive && <span className="ml-auto text-muted-foreground">✓</span>}
-                    </DropdownMenuItem>
-                  )}
+                {tagKeys.map((key) => (
+                  <DropdownMenuSub key={key}>
+                    <DropdownMenuSubTrigger className="text-xs">{key}</DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-40">
+                      {(allTags[key] ?? []).map((value) => {
+                        const filter = `${key}=${value}`
+                        const isActive = activeTagFilters.includes(filter)
+                        return (
+                          <DropdownMenuItem
+                            key={value}
+                            className="text-xs"
+                            onClick={() => isActive ? onRemoveTagFilter(filter) : onAddTagFilter(filter)}
+                          >
+                            <span className={isActive ? "font-medium" : ""}>{value}</span>
+                            {isActive && <span className="ml-auto text-muted-foreground">✓</span>}
+                          </DropdownMenuItem>
+                        )
+                      })}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
           
-          {activeTagFilters.map((tag) => (
-            <span
-              key={tag}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded"
-            >
-              {tag}
-              <button
-                onClick={() => onRemoveTagFilter(tag)}
-                className="ml-0.5 hover:text-destructive"
+          {activeTagFilters.map((filter) => {
+            const [key, value] = filter.split('=', 2)
+            return (
+              <span
+                key={filter}
+                className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded"
               >
-                <X className="size-3" />
-              </button>
-            </span>
-          ))}
+                <span className="text-muted-foreground">{key}=</span>
+                <span>{value}</span>
+                <button
+                  onClick={() => onRemoveTagFilter(filter)}
+                  className="ml-0.5 hover:text-destructive"
+                >
+                  <X className="size-3" />
+                </button>
+              </span>
+            )
+          })}
           
           {activeTagFilters.length > 1 && (
             <button

@@ -120,14 +120,18 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
       </div>
       {claw.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-2 pl-5">
-          {claw.tags.map((tag) => (
-            <span
-              key={tag}
-              className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
-            >
-              {tag}
-            </span>
-          ))}
+          {claw.tags.map((tag) => {
+            const [key, value] = tag.split('=', 2)
+            return (
+              <span
+                key={tag}
+                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
+              >
+                <span className="opacity-60">{key}=</span>
+                <span className="text-foreground/80">{value}</span>
+              </span>
+            )
+          })}
         </div>
       )}
       {claw.isStreaming && (

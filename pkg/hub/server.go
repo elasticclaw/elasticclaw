@@ -1604,12 +1604,18 @@ func mergeTags(templateName string, configTags []string, cliTags []string) []str
 	seen := make(map[string]bool)
 	var result []string
 	add := func(t string) {
-		if t != "" && !seen[t] {
+		if t == "" {
+			return
+		}
+		if !strings.Contains(t, "=") {
+			t = t + "=true"
+		}
+		if !seen[t] {
 			seen[t] = true
 			result = append(result, t)
 		}
 	}
-	add("template:" + templateName)
+	add("template=" + templateName)
 	for _, t := range configTags {
 		add(t)
 	}

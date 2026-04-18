@@ -141,12 +141,19 @@ func mergeCLITags(templateName string, configTags, cliTags []string) []string {
 	var result []string
 	add := func(t string) {
 		t = strings.TrimSpace(t)
-		if t != "" && !seen[t] {
+		if t == "" {
+			return
+		}
+		// Ensure k=v format — bare keys get =true appended
+		if !strings.Contains(t, "=") {
+			t = t + "=true"
+		}
+		if !seen[t] {
 			seen[t] = true
 			result = append(result, t)
 		}
 	}
-	add("template:" + templateName)
+	add("template=" + templateName)
 	for _, t := range configTags {
 		add(t)
 	}
