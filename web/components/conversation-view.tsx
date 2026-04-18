@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench } from "lucide-react"
 import { MarkdownContent } from "@/components/markdown-content"
 import { COLOR_CLASSES } from "@/lib/mappers"
+import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -656,7 +657,7 @@ function MessageBubble({
 
 function ClawChatView({
   claw,
-  messages,
+  messages: liveMessages,
   onSendMessage,
   onKill,
   onNewSession,
@@ -671,9 +672,13 @@ function ClawChatView({
 }) {
   const [input, setInput] = useState("")
   const [terminalOpen, setTerminalOpen] = useState(false)
-  const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
+    clawId: claw.id,
+    liveMessages,
+  })
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
@@ -698,7 +703,8 @@ function ClawChatView({
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
-  }, [])
+    onWindowScroll()
+  }, [onWindowScroll])
 
   // Only auto-scroll when pinned to bottom
   useEffect(() => {
@@ -758,6 +764,16 @@ function ClawChatView({
 
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-hide p-6 relative">
         <div className="space-y-4 max-w-3xl mx-auto">
+          {loadingOlder && (
+            <div className="flex justify-center py-2">
+              <span className="text-xs text-muted-foreground animate-pulse">Loading older messages...</span>
+            </div>
+          )}
+          {hasOlder && !loadingOlder && (
+            <div className="flex justify-center py-1">
+              <div className="h-px w-full bg-border" />
+            </div>
+          )}
           {messages.length === 0 ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (

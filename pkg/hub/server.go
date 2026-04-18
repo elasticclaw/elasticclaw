@@ -540,10 +540,40 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.db.Query(
-		`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages WHERE claw_id = ? AND tenant_id = ? ORDER BY created_at ASC`,
-		clawID, tenantID,
-	)
+	// Pagination: ?before=<created_at>&limit=<n> for older messages
+	// ?after=<created_at>&limit=<n> for newer messages
+	// Default: last 100 messages
+	const defaultLimit = 100
+	limit := defaultLimit
+	before := r.URL.Query().Get("before") // ISO timestamp — return messages older than this
+	after := r.URL.Query().Get("after")   // ISO timestamp — return messages newer than this
+
+	var rows *sql.Rows
+	var err error
+	if before != "" {
+		// Fetch older messages — return in ASC order after fetching DESC
+		rows, err = s.db.Query(
+			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
+			 ORDER BY created_at DESC LIMIT ?`,
+			clawID, tenantID, before, limit,
+		)
+	} else if after != "" {
+		rows, err = s.db.Query(
+			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
+			 ORDER BY created_at ASC LIMIT ?`,
+			clawID, tenantID, after, limit,
+		)
+	} else {
+		// Default: last N messages
+		rows, err = s.db.Query(
+			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			 WHERE claw_id = ? AND tenant_id = ?
+			 ORDER BY created_at DESC LIMIT ?`,
+			clawID, tenantID, limit,
+		)
+	}
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -556,6 +586,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		msgs = append(msgs, m)
+	}
+	// Reverse DESC results to get ASC order
+	if before != "" || (before == "" && after == "") {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
 	}
 	if msgs == nil {
 		msgs = []types.HubMessage{}

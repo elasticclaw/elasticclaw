@@ -60,9 +60,14 @@ export async function fetchClaws(): Promise<ApiClaw[]> {
   return apiFetch<ApiClaw[]>("/api/claws")
 }
 
-export async function fetchMessages(clawId: string): Promise<ApiMessage[]> {
-  return apiFetch<ApiMessage[]>(`/api/messages/${clawId}`)
+export async function fetchMessages(clawId: string, opts?: { before?: string; after?: string }): Promise<ApiMessage[]> {
+  const params = new URLSearchParams()
+  if (opts?.before) params.set('before', opts.before)
+  if (opts?.after) params.set('after', opts.after)
+  const qs = params.toString() ? '?' + params.toString() : ''
+  return apiFetch<ApiMessage[]>(`/api/messages/${clawId}${qs}`)
 }
+
 
 export async function sendMessage(clawId: string, content: string): Promise<ApiMessage> {
   return apiFetch<ApiMessage>(`/api/messages/${clawId}`, {
