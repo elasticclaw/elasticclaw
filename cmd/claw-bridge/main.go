@@ -1061,7 +1061,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					return
 				}
 
-				agentCtx, agentCancel := context.WithTimeout(context.Background(), 120*time.Second)
+				agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer agentCancel()
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
