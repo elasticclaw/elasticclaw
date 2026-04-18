@@ -2,9 +2,13 @@ import { NextRequest, NextResponse } from "next/server"
 
 export async function POST(req: NextRequest) {
   const { password } = await req.json()
-  const uiToken = process.env.ELASTICCLAW_UI_TOKEN
+  // Default to 'admin' if not set, but warn loudly in dev
+  const uiToken = process.env.ELASTICCLAW_UI_TOKEN || 'admin'
+  if (!process.env.ELASTICCLAW_UI_TOKEN && process.env.NODE_ENV !== 'production') {
+    console.warn('[elasticclaw] ELASTICCLAW_UI_TOKEN not set — defaulting to "admin"')
+  }
 
-  if (!uiToken || password !== uiToken) {
+  if (password !== uiToken) {
     return NextResponse.json({ error: "Invalid password" }, { status: 401 })
   }
 

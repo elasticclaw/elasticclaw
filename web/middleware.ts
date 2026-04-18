@@ -12,7 +12,8 @@ export function middleware(req: NextRequest) {
 
   // Check session cookie
   const session = req.cookies.get("elasticclaw_session")?.value
-  if (!session || session !== process.env.ELASTICCLAW_UI_TOKEN) {
+  const uiToken = process.env.ELASTICCLAW_UI_TOKEN || 'admin'
+  if (!session || session !== uiToken) {
     const loginUrl = new URL("/login", req.url)
     loginUrl.searchParams.set("next", pathname)
     return NextResponse.redirect(loginUrl)
