@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
+import { COLOR_CLASSES } from "@/lib/mappers"
 import { Loader2, Pin, AlertCircle } from "lucide-react"
 
 interface ClawCardProps {
@@ -69,9 +70,10 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
         }
       }}
       className={cn(
-        "w-full text-left p-3 rounded-md transition-colors relative group",
+        "w-full text-left p-3 rounded-md transition-colors relative group border-l-2",
+        COLOR_CLASSES[claw.color]?.border ?? "border-l-border",
         isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
-        isSelected && "bg-accent border-l-2 border-l-primary",
+        isSelected && "bg-accent",
         hasUnread && !isSelected && "bg-blue-950/30"
       )}
     >

@@ -21,8 +21,13 @@ type TemplateConfig struct {
 	// Adds ~2-3 min to bootstrap time. Opt-in only.
 	Nix bool `yaml:"nix,omitempty"`
 	// Tags are static labels applied to every claw created from this template.
-	// Merged with the auto template:<name> tag and any --tag CLI flags.
+	// Merged with the auto template=<name> tag and any --tag CLI flags.
 	Tags []string `yaml:"tags,omitempty"`
+	// Color sets the accent color for this claw in the UI.
+	// One of: slate, red, orange, amber, lime, green, emerald, teal,
+	//         cyan, sky, blue, indigo, violet, purple, pink, rose
+	// If unset, a color is auto-assigned from the claw name.
+	Color string `yaml:"color,omitempty"`
 }
 
 type TemplateResources struct {
@@ -155,4 +160,5 @@ type CreateClawRequest struct {
 	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
 	Nix          bool                  `json:"nix,omitempty"`
 	Tags         []string              `json:"tags,omitempty"`
+	Color        string                `json:"color,omitempty"`
 }

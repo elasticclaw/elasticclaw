@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench } from "lucide-react"
 import { MarkdownContent } from "@/components/markdown-content"
+import { COLOR_CLASSES } from "@/lib/mappers"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -549,9 +550,11 @@ function formatTimestamp(date: Date): string {
 function MessageBubble({
   message,
   clawName,
+  clawColor,
 }: {
   message: Message
   clawName: string
+  clawColor?: string
 }) {
   if (message.role === "system") {
     if (message.content === "__TOOL_GAP__") {
@@ -601,7 +604,7 @@ function MessageBubble({
           "w-[70%] min-w-0 rounded-lg px-4 py-3",
           isUser
             ? "bg-blue-600/20 border border-blue-500/20"
-            : "bg-secondary"
+            : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
         <div className="flex items-center gap-2 mb-1">
@@ -725,7 +728,7 @@ function ClawChatView({
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
             messages.map((message) => (
-              <MessageBubble key={message.id} message={message} clawName={claw.name} />
+              <MessageBubble key={message.id} message={message} clawName={claw.name} clawColor={claw.color} />
             ))
           )}
           <div ref={bottomRef} className="h-[40vh]" />

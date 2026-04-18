@@ -120,6 +120,7 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 		Snapshot:     tmplCfg.Snapshot,
 		Nix:          tmplCfg.Nix,
 		Tags:         tmplCfg.Tags,
+		Color:        tmplCfg.Color,
 	}
 	data, err := c.do(ctx, http.MethodPost, "/api/claws", req)
 	if err != nil {

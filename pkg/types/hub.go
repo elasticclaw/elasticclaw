@@ -13,6 +13,7 @@ type Claw struct {
 	CreatedAt    time.Time      `json:"created_at" db:"created_at"`
 	ContextUsage int            `json:"context_usage"`
 	Tags         []string       `json:"tags,omitempty"`
+	Color        string         `json:"color,omitempty"`
 	SSHHost      string         `json:"ssh_host,omitempty"`
 	SSHPort      int            `json:"ssh_port,omitempty"`
 	SSHUser      string         `json:"ssh_user,omitempty"`

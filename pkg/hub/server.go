@@ -233,7 +233,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]') FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -248,7 +248,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color); err != nil {
 			continue
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
@@ -323,11 +323,12 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
 	tagsJSON, _ := json.Marshal(tags)
+	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), now(),
+		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -430,9 +431,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1600,6 +1601,33 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 // 2. template config tags (elasticclaw-config.yaml)
 // 3. CLI --tag flags
 // Deduplicates while preserving order.
+var clawColors = []string{
+	"slate", "red", "orange", "amber", "lime", "green", "emerald", "teal",
+	"cyan", "sky", "blue", "indigo", "violet", "purple", "pink", "rose",
+}
+
+var clawColorSet = func() map[string]bool {
+	m := make(map[string]bool, len(clawColors))
+	for _, c := range clawColors {
+		m[c] = true
+	}
+	return m
+}()
+
+// resolveColor returns the color for a claw.
+// Uses the requested color if valid, otherwise auto-assigns from the claw name.
+func resolveColor(requested, clawName string) string {
+	if requested != "" && clawColorSet[requested] {
+		return requested
+	}
+	// Hash name → deterministic color
+	var h uint32
+	for _, c := range clawName {
+		h = h*31 + uint32(c)
+	}
+	return clawColors[h%uint32(len(clawColors))]
+}
+
 func mergeTags(templateName string, configTags []string, cliTags []string) []string {
 	seen := make(map[string]bool)
 	var result []string
