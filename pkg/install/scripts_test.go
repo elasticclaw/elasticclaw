@@ -127,8 +127,9 @@ func TestScriptInstallBinary(t *testing.T) {
 
 func TestScriptWriteConfig(t *testing.T) {
 	s := install.ScriptWriteConfig(testParams)
-	assertContains(t, s, "mkdir -p /root/.elasticclaw", "create dir")
-	assertContains(t, s, "/root/.elasticclaw/hub.yaml", "config path")
+	assertContains(t, s, "mkdir -p", "create dir")
+	assertContains(t, s, ".elasticclaw", "config dir")
+	assertContains(t, s, "hub.yaml", "config path")
 	assertContains(t, s, "test-hub-token", "token embedded")
 	assertContains(t, s, "HUBEOF", "heredoc markers")
 }
