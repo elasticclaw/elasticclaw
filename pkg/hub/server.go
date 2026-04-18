@@ -2111,8 +2111,8 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	tenantID, err := s.tenantByClawToken(clawToken)
-	if err != nil {
+	// Single-tenant: validate against hub's claw_token directly
+	if clawToken != s.hubCfg.ClawToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -2124,9 +2124,9 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reposJSON string
-	err = s.db.QueryRow(
-		`SELECT github_repos FROM claws WHERE id = ? AND tenant_id = ?`,
-		clawID, tenantID,
+	err := s.db.QueryRow(
+		`SELECT github_repos FROM claws WHERE id = ?`,
+		clawID,
 	).Scan(&reposJSON)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
