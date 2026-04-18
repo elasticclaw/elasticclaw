@@ -75,11 +75,11 @@ echo "OpenClaw: $(openclaw --version)"
 mkdir -p "$HOME/.openclaw/workspace"
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   echo "Configuring OpenClaw..."
-  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-placeholder}" \
+  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-placeholder}"
   openclaw onboard \
     --non-interactive --accept-risk \
     --auth-choice anthropic-api-key \
-    --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}" \
+    --anthropic-api-key "$ANTHROPIC_API_KEY" \
     --gateway-bind loopback --gateway-port 18789 \
     --skip-daemon 2>/dev/null || true
   python3 << 'PYEOF'
