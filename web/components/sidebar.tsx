@@ -222,7 +222,7 @@ export function Sidebar({
         </div>
       )}
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 scrollbar-hide">
         <div className="p-2">
           {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-2">

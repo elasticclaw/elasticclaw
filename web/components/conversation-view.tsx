@@ -287,7 +287,7 @@ function ClawBoardCard({
           
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
-          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto p-3 space-y-2">
+          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-hide p-3 space-y-2">
             {messages.length === 0 ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 No messages yet
@@ -429,7 +429,7 @@ function ClawBoardCard({
           </div>
 
           {/* Bot info content */}
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto scrollbar-hide p-4">
             <div className="space-y-4">
               <div>
                 <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
@@ -756,7 +756,7 @@ function ClawChatView({
         </div>
       </header>
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-6 relative">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-hide p-6 relative">
         <div className="space-y-4 max-w-3xl mx-auto">
           {messages.length === 0 ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
