@@ -757,7 +757,7 @@ function ClawChatView({
               <MessageBubble key={message.id} message={message} clawName={claw.name} clawColor={claw.color} />
             ))
           )}
-          <div ref={bottomRef} className="h-[40vh]" />
+          <div ref={bottomRef} className="h-4" />
         </div>
         {showScrollBtn && (
           <button
