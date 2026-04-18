@@ -594,9 +594,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
-					log.Printf("heartbeat from %s: gateway_healthy=%v gateway_ready=%v context_usage=%d", clawID[:8], hb.GatewayHealthy, gatewayReadyBool(hb.GatewayReady), hb.ContextUsage)
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
+						// Log only on status changes, not every heartbeat
+						prevHealthy := cc.gatewayReady
+						prevUsage := cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
@@ -608,6 +610,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 							})
 							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
+						} else if !hb.GatewayHealthy && prevHealthy {
+							// Gateway went unhealthy
+							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
+						} else if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
+							// Log context usage only when crossing 80% threshold
+							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
 					}
 					s.mu.Unlock()
