@@ -598,7 +598,7 @@ function MessageBubble({
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[70%] min-w-0 overflow-hidden rounded-lg px-4 py-3",
+          "max-w-[70%] min-w-0 rounded-lg px-4 py-3",
           isUser
             ? "bg-blue-600/20 border border-blue-500/20"
             : "bg-secondary"

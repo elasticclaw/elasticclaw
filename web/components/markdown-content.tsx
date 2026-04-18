@@ -28,13 +28,13 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
           const isBlock = className?.startsWith("language-")
           if (isBlock) {
             return (
-              <code className="block bg-black/40 rounded px-3 py-2 text-xs font-mono overflow-x-auto whitespace-pre my-2 max-w-full">
+              <code className="block bg-black/40 rounded px-3 py-2 text-xs font-mono overflow-x-auto whitespace-pre-wrap break-all my-2">
                 {children}
               </code>
             )
           }
           return (
-            <code className="bg-black/40 rounded px-1.5 py-0.5 text-xs font-mono">{children}</code>
+            <code className="bg-black/40 rounded px-1.5 py-0.5 text-xs font-mono break-words">{children}</code>
           )
         },
         pre: ({ children }) => <pre className="not-prose my-2">{children}</pre>,
