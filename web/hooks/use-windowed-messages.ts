@@ -5,8 +5,8 @@ import { fetchMessages } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import type { Message } from "@/lib/types"
 
-const PAGE_SIZE = 100   // messages per page
-const MAX_WINDOW = 200  // max messages kept in DOM
+const PAGE_SIZE = 50    // messages per page
+const MAX_WINDOW = 50   // max messages kept in DOM
 
 interface UseWindowedMessagesOptions {
   clawId: string

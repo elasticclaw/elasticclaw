@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useState, useRef, useEffect, useCallback, memo } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench } from "lucide-react"
 import { MarkdownContent } from "@/components/markdown-content"
 import { COLOR_CLASSES } from "@/lib/mappers"
@@ -569,7 +569,7 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
   clawName,
   clawColor,
@@ -649,8 +649,7 @@ function MessageBubble({
         )}
       </div>
     </div>
-  )
-}
+  )})
 
 // ─── ClawChatView ─────────────────────────────────────────────────────────────
 // Extracted so scroll refs are only live when this branch is mounted.
