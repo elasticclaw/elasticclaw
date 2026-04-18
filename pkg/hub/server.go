@@ -144,12 +144,16 @@ func (s *Server) Run() error {
 		s.mux.ServeHTTP(w, r2)
 	})
 
-	webFS, err := webui.FS()
-	if err != nil {
-		log.Printf("[hub] web UI assets not embedded (run make build-web): %v", err)
-		s.registerWebHandlers(nil)
+	if s.hubCfg.NoWebUI {
+		log.Printf("[hub] web UI disabled (--no-web-ui)")
 	} else {
-		s.registerWebHandlers(webFS)
+		webFS, err := webui.FS()
+		if err != nil {
+			log.Printf("[hub] web UI assets not embedded (run make build-web): %v", err)
+			s.registerWebHandlers(nil)
+		} else {
+			s.registerWebHandlers(webFS)
+		}
 	}
 
 	// Connect to relay if configured

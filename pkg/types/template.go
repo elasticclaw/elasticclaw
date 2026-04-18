@@ -75,6 +75,7 @@ type HubConfig struct {
 	URL      string `yaml:"url"`
 	Token    string `yaml:"token"`
 	UIToken  string `yaml:"ui_token,omitempty"`
+	NoWebUI  bool   `yaml:"-"` // runtime-only: set via --no-web-ui flag, not persisted
 
 	// Hub server fields
 	// PublicURL is the URL claws use to connect back to the hub from remote VMs.

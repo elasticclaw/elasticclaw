@@ -15,6 +15,7 @@ var (
 	hubDBPath      string
 	hubToken       string
 	hubClawToken   string
+	hubNoWebUI     bool
 )
 
 var hubCmd = &cobra.Command{
@@ -38,6 +39,7 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().BoolVar(&hubNoWebUI, "no-web-ui", false, "disable embedded web UI (useful in dev: run npm run dev separately)")
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
@@ -71,6 +73,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 
 	hub.Version = Version // propagate build-time version for bridge download URL
+	hubCfg.NoWebUI = hubNoWebUI
 	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
@@ -92,7 +95,11 @@ func runHub(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("ElasticClaw Hub\n")
 	fmt.Printf("  Address:    %s\n", hubAddr)
-	fmt.Printf("  Web UI:     http://localhost%s\n", hubAddr)
+	if !hubNoWebUI {
+		fmt.Printf("  Web UI:     http://localhost%s\n", hubAddr)
+	} else {
+		fmt.Printf("  Web UI:     disabled (--no-web-ui)\n")
+	}
 	fmt.Printf("  Database:   %s\n", dbPath)
 	if hubCfg.URL != "" {
 		fmt.Printf("  URL:        %s\n", hubCfg.URL)
