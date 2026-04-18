@@ -1672,8 +1672,8 @@ fi
 %s
 `,
 		defaultModel, gatewayPassword, buildLLMKeyEnv(s.hubCfg.LLMKeys), buildLinearEnv(linearToken), // top-of-script exports
+		buildNixInstall(nixEnabled != 0), // nix block (after Node install)
 		bridgeURL,
-		buildNixInstall(nixEnabled != 0),
 		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName, gatewayPassword,
 		buildRelayEnv(s.hubCfg, s.identity.PublicKey),
 		defaultModel,
