@@ -24,8 +24,8 @@ web/tsconfig.tsbuildinfo
 web/package-lock.json
 web/pnpm-lock.yaml
 
-# build artifacts
-claw-bridge
-claw-bridge-linux
-claw-bridge-linux-amd64
+# build artifacts (root-level binaries only, not cmd/claw-bridge/ source)
+/claw-bridge
+/claw-bridge-linux
+/claw-bridge-linux-amd64
 bin/
