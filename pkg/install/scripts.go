@@ -9,6 +9,7 @@ import "fmt"
 type Params struct {
 	Domain       string
 	Version      string
+	WebImage     string // override Docker image; defaults to marc/elasticclaw-web:<version>
 	Token        string
 	ClawToken    string
 	UIToken      string
@@ -24,7 +25,11 @@ func HubBinaryURL(version string) string {
 }
 
 // WebImageTag returns the Docker image tag for the web UI.
+// Defaults to :latest when version is empty or "dev".
 func WebImageTag(version string) string {
+	if version == "" || version == "dev" {
+		return "marc/elasticclaw-web:latest"
+	}
 	return fmt.Sprintf("marc/elasticclaw-web:%s", version)
 }
 
@@ -51,6 +56,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=HOME=/root
 ExecStart=/usr/local/bin/elasticclaw hub
 Restart=always
 RestartSec=5
@@ -107,24 +113,25 @@ func ScriptInstallBinary(version string) string {
 	return fmt.Sprintf(`set -e
 curl -fsSL %q -o /tmp/elasticclaw-bin
 chmod +x /tmp/elasticclaw-bin
-mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw
-elasticclaw --version`, url)
+sudo mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw
+elasticclaw version || elasticclaw --version || true`, url)
 }
 
 // ScriptWriteConfig returns the shell script to write the hub config.
 func ScriptWriteConfig(p Params) string {
-	return fmt.Sprintf(`mkdir -p /root/.elasticclaw
-cat > /root/.elasticclaw/hub.yaml << 'HUBEOF'
+	return fmt.Sprintf(`mkdir -p "$HOME/.elasticclaw"
+cat > "$HOME/.elasticclaw/hub.yaml" << 'HUBEOF'
 %sHUBEOF`, HubConfig(p))
 }
 
 // ScriptInstallSystemd returns the shell script to install and start the systemd service.
 func ScriptInstallSystemd() string {
-	return fmt.Sprintf(`cat > /etc/systemd/system/elasticclaw.service << 'SVCEOF'
+	return fmt.Sprintf(`cat > /tmp/elasticclaw.service << 'SVCEOF'
 %sSVCEOF
-systemctl daemon-reload
-systemctl enable elasticclaw
-systemctl restart elasticclaw`, SystemdUnit())
+sudo mv /tmp/elasticclaw.service /etc/systemd/system/elasticclaw.service
+sudo systemctl daemon-reload
+sudo systemctl enable elasticclaw
+sudo systemctl restart elasticclaw`, SystemdUnit())
 }
 
 // ScriptInstallCaddy returns the shell script to install Caddy if not present.
@@ -140,18 +147,22 @@ func ScriptInstallCaddy() string {
 
 // ScriptWriteCaddyfile returns the shell script to write the Caddyfile and reload Caddy.
 func ScriptWriteCaddyfile(domain string) string {
-	return fmt.Sprintf(`cat > /etc/caddy/Caddyfile << 'CADDYEOF'
+	return fmt.Sprintf(`cat > /tmp/Caddyfile << 'CADDYEOF'
 %sCADDYEOF
-systemctl reload caddy || systemctl restart caddy`, Caddyfile(domain))
+sudo mv /tmp/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy || sudo systemctl restart caddy`, Caddyfile(domain))
 }
 
 // ScriptRunWebUI returns the shell script to pull and start the web UI Docker container.
 func ScriptRunWebUI(p Params) string {
-	image := WebImageTag(p.Version)
-	return fmt.Sprintf(`docker stop elasticclaw-web 2>/dev/null || true
-docker rm elasticclaw-web 2>/dev/null || true
-docker pull %s
-docker run -d \
+	image := p.WebImage
+	if image == "" {
+		image = WebImageTag(p.Version)
+	}
+	return fmt.Sprintf(`sudo docker stop elasticclaw-web 2>/dev/null || true
+sudo docker rm elasticclaw-web 2>/dev/null || true
+sudo docker pull %s
+sudo docker run -d \
   --name elasticclaw-web \
   --restart=always \
   --network=host \

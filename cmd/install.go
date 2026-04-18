@@ -56,6 +56,7 @@ func init() {
 	installCmd.Flags().StringVar(&installUIToken, "ui-token", "", "Web UI login password (default: randomly generated)")
 	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
+	installCmd.Flags().String("web-image", "", "Override web UI Docker image (default: marc/elasticclaw-web:<version>)")
 	installCmd.MarkFlagRequired("host")
 	installCmd.MarkFlagRequired("domain")
 }
@@ -91,9 +92,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Scanln(&anthropicKey)
 	}
 
+	webImage, _ := cmd.Flags().GetString("web-image")
+
 	params := install.Params{
 		Domain:       installDomain,
 		Version:      version,
+		WebImage:     webImage,
 		Token:        token,
 		ClawToken:    clawToken,
 		UIToken:      uiToken,
@@ -126,10 +130,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// ── Preflight: Docker ─────────────────────────────────────────────────────
 	fmt.Print("Checking Docker... ")
-	if out, err := sshRunClient(client, "docker --version 2>&1"); err != nil {
+	if out, err := sshRunClient(client, "sudo docker --version 2>&1"); err != nil {
 		return fmt.Errorf("Docker not found on server: %s\nInstall Docker first: https://docs.docker.com/engine/install/", out)
 	} else {
 		fmt.Printf("OK (%s)\n", strings.TrimSpace(strings.Split(out, "\n")[0]))
+		// Ensure daemon is running
+		_, _ = sshRunClient(client, "sudo systemctl start docker 2>/dev/null || true")
 	}
 
 	steps := []struct {
