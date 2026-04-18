@@ -150,6 +150,7 @@ function ClawBoardCard({
   onKill: () => void
 }) {
   const [input, setInput] = useState("")
+  const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
   const [showTerminal, setShowTerminal] = useState(false)
   const hasUnread = claw.unreadCount > 0
@@ -174,6 +175,10 @@ function ClawBoardCard({
     if (input.trim()) {
       onSendMessage(input.trim())
       setInput("")
+      if (cardTextareaRef.current) {
+        cardTextareaRef.current.style.height = "auto"
+        cardTextareaRef.current.style.overflowY = "hidden"
+      }
     }
   }
 
@@ -371,6 +376,7 @@ function ClawBoardCard({
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Claw offline" : "Starting up...") : "Send message..."}
                 className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
+                ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
               />
               <Button 
@@ -667,6 +673,7 @@ function ClawChatView({
   const [terminalOpen, setTerminalOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
 
   const isAtBottom = useCallback(() => {
@@ -702,6 +709,10 @@ function ClawChatView({
     if (input.trim()) {
       onSendMessage(input)
       setInput("")
+      if (panelTextareaRef.current) {
+        panelTextareaRef.current.style.height = "auto"
+        panelTextareaRef.current.style.overflowY = "hidden"
+      }
     }
   }
 
@@ -782,6 +793,7 @@ function ClawChatView({
                 if (input.trim()) handleSubmit(e as unknown as React.FormEvent)
               }
             }}
+            ref={panelTextareaRef}
             placeholder="Send a message to this claw..."
             rows={1}
             className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
