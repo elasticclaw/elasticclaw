@@ -7,6 +7,13 @@ export function resolveToken(): Promise<string> {
   if (_token !== null) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
 
+  // In dev mode, read token directly from NEXT_PUBLIC_ env to avoid cookie round-trip
+  const devToken = process.env.NEXT_PUBLIC_HUB_TOKEN
+  if (devToken) {
+    _token = devToken
+    return Promise.resolve(_token)
+  }
+
   _tokenPromise = fetch("/api/hub-config")
     .then((r) => r.json())
     .then((d) => {
