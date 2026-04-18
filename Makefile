@@ -25,7 +25,11 @@ build-dev:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
 
-build: build-web
+build:
+	mkdir -p bin
+	go build $(LDFLAGS) -o bin/elasticclaw .
+
+build-release: build-web
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
 
