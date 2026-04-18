@@ -161,4 +161,7 @@ type CreateClawRequest struct {
 	Nix          bool                  `json:"nix,omitempty"`
 	Tags         []string              `json:"tags,omitempty"`
 	Color        string                `json:"color,omitempty"`
+	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).
+	// Never set by the CLI; Name is the display name.
+	ProviderName string                `json:"provider_name,omitempty"`
 }

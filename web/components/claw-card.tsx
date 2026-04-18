@@ -1,11 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useRef, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
-import { Loader2, Pin, AlertCircle } from "lucide-react"
+import { patchClaw } from "@/lib/api"
+import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
 
 interface ClawCardProps {
   claw: Claw
@@ -59,10 +60,42 @@ function UnreadBadge({ count }: { count: number }) {
 
 export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true }: ClawCardProps) {
   const [localTags, setLocalTags] = useState(claw.tags)
+  const [localName, setLocalName] = useState(claw.name)
+  const [editingName, setEditingName] = useState(false)
+  const [nameValue, setNameValue] = useState(claw.name)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (editingName) nameInputRef.current?.focus()
+  }, [editingName])
 
   function handleTagsChange(tags: string[]) {
     setLocalTags(tags)
     onTagsChange?.(tags)
+  }
+
+  function startRename(e: React.MouseEvent) {
+    e.stopPropagation()
+    setNameValue(localName)
+    setEditingName(true)
+  }
+
+  async function commitRename() {
+    const name = nameValue.trim()
+    setEditingName(false)
+    if (!name || name === localName) return
+    setLocalName(name)
+    try {
+      await patchClaw(claw.id, { name })
+    } catch (e) {
+      console.error("Failed to rename", e)
+      setLocalName(claw.name)
+    }
+  }
+
+  function handleNameKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter") commitRename()
+    if (e.key === "Escape") { setEditingName(false); setNameValue(localName) }
   }
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
@@ -90,11 +123,32 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} />
         <span 
           className={cn(
-            "font-mono text-sm truncate flex-1",
+            "font-mono text-sm truncate flex-1 group/name flex items-center gap-1",
             hasUnread ? "text-foreground font-medium" : "text-foreground"
           )}
         >
-          {claw.name}
+          {editingName ? (
+            <input
+              ref={nameInputRef}
+              value={nameValue}
+              onChange={(e) => setNameValue(e.target.value)}
+              onKeyDown={handleNameKeyDown}
+              onBlur={commitRename}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-transparent border-b border-ring outline-none text-sm font-mono w-full"
+            />
+          ) : (
+            <>
+              <span className="truncate">{localName}</span>
+              <button
+                onClick={startRename}
+                className="opacity-0 group-hover/name:opacity-60 hover:!opacity-100 transition-opacity flex-shrink-0"
+                title="Rename"
+              >
+                <Pencil className="size-3" />
+              </button>
+            </>
+          )}
         </span>
         <UnreadBadge count={claw.unreadCount} />
         {showPinButton && (

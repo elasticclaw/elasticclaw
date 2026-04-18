@@ -352,8 +352,11 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Provision asynchronously so the HTTP request returns quickly
+	// Use a stable short ID as the provider-side name so renaming the claw
+	// doesn't require a provider API call.
+	req.ProviderName = "ec-" + clawID[:8]
 	go func() {
-		log.Printf("Provisioning claw %s (%s) via %s...", req.Name, clawID, req.Provider)
+		log.Printf("Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
 		ctx := context.Background()
 		var provErr error
 
@@ -394,12 +397,16 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPatch {
 		var body struct {
+			Name  *string   `json:"name"`
 			Tags  *[]string `json:"tags"`
 			Color *string   `json:"color"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
+		}
+		if body.Name != nil && strings.TrimSpace(*body.Name) != "" {
+			_, _ = s.db.Exec(`UPDATE claws SET name = ? WHERE id = ? AND tenant_id = ?`, strings.TrimSpace(*body.Name), clawID, tenantID)
 		}
 		if body.Tags != nil {
 			// Normalize tags to k=v format
@@ -927,8 +934,8 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		snapshot = cfg.DefaultSnapshot
 	}
 	createReq := types.CreateRequest{
-		Name:          req.Name,
-		FromImage:     snapshot, // Daytona: snapshot name (e.g. "daytona-medium")
+		Name:          req.ProviderName, // stable ec-<shortid>, decoupled from display name
+		FromImage:     snapshot,
 		TemplateFiles: files,
 		Env:           env,
 	}
@@ -1326,7 +1333,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	}
 
 	vmID, err := p.ProvisionClaw(ctx, replicatedpkg.VMCreateRequest{
-		Name:         req.Name,
+		Name:         req.ProviderName, // stable ec-<shortid>
 		InstanceType: req.InstanceType,
 		TTL:          req.TTL,
 	}, nil, env)
