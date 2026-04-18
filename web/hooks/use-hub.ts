@@ -139,7 +139,6 @@ export function useHub(selectedClawId: string | null): HubState {
       mergeClaws(apiClaws)
       setHubError(null)
       setLoading(false)
-      return apiClaws
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setHubError(msg)
@@ -270,10 +269,8 @@ export function useHub(selectedClawId: string | null): HubState {
     if (!cfg) return
 
     // Initial fetch + eager-load all message histories
-    refreshClaws().then((apiClaws) => {
-      for (const ac of apiClaws) {
-        loadMessages(ac.id)
-      }
+    refreshClaws().then(() => {
+      // loadMessages for each claw is triggered via mergeClaws → selectedClawId changes
     })
 
     // Poll every 30s
