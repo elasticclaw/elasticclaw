@@ -317,6 +317,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	if req.Nix {
 		nixEnabled = 1
 	}
+	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
 
 	_, err := s.db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
@@ -1471,7 +1472,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	}
 	// Read nix flag
 	var nixEnabled int
-	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
+	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
+		log.Printf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
+	}
+	log.Printf("[bootstrap] claw %s nix=%d", clawID[:8], nixEnabled)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
