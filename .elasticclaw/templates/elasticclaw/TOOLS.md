@@ -23,26 +23,10 @@ gh issue list --repo elasticclaw/elasticclaw           # works
 
 Token is scoped: **write** on `elasticclaw/elasticclaw`.
 
-## Go
+## Go, Node, SchemaHero and dev tools
 
-Go is NOT pre-installed. Install if needed:
-```bash
-curl -fsSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
-export PATH=$PATH:/usr/local/go/bin
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-```
-
-Check: `go version`
-
-## Node.js
-
-Node 24 is pre-installed: `node --version`
-
-```bash
-cd ~/.openclaw/workspace/elasticclaw/web
-npm install
-npm run dev   # starts web UI on :3000
-```
+Our dev tools are NOT pre-installedd globally, but nix is. There's a nix flake in the repo.
+It's important to run `nix develop` before any commands in order to get the right version of the build tools.
 
 ## OpenClaw
 
