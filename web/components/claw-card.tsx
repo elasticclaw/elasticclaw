@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
+import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
@@ -233,10 +234,11 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
               )}
               title="Change color"
             />
-            {showColorPicker && (
+            {showColorPicker && typeof document !== 'undefined' && createPortal(
               <div
-                className="fixed z-[9999] bg-popover border border-border rounded-lg p-2 shadow-xl"
-                style={{ top: pickerPos.top, left: pickerPos.left }}
+                data-color-picker
+                className="fixed bg-popover border border-border rounded-lg p-2 shadow-xl"
+                style={{ top: pickerPos.top, left: pickerPos.left, zIndex: 99999 }}
               >
                 <div className="grid grid-cols-8 gap-1">
                   {CLAW_COLORS.map((c) => (
@@ -252,7 +254,8 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
                     />
                   ))}
                 </div>
-              </div>
+              </div>,
+              document.body
             )}
           </div>
         </div>
