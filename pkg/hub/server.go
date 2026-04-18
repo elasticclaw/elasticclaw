@@ -152,7 +152,13 @@ func (s *Server) Run() error {
 			log.Printf("[hub] web UI assets not embedded (run make build-web): %v", err)
 			s.registerWebHandlers(nil)
 		} else {
-			s.registerWebHandlers(webFS)
+			// Check if this is the placeholder (web UI not built yet)
+			if _, placeholderErr := webFS.Open("placeholder.txt"); placeholderErr == nil {
+				log.Printf("[hub] web UI not built — run: make build-web (or: cd web && npm install && npm run build)")
+				s.registerWebHandlers(nil)
+			} else {
+				s.registerWebHandlers(webFS)
+			}
 		}
 	}
 

@@ -13,9 +13,15 @@ tidy:
 	go mod tidy
 
 build-web:
+	@command -v npm >/dev/null 2>&1 || (echo "❌ npm not found in PATH — install Node.js or run: make build-no-web" && exit 1)
 	cd web && npm install && npm run build
 	rm -rf internal/webui/out
 	cp -r web/out internal/webui/out
+
+# Build Go binary only (skips web UI build — uses existing internal/webui/out if present)
+build-no-web:
+	mkdir -p bin
+	go build $(LDFLAGS) -o bin/elasticclaw .
 
 build: build-web
 	mkdir -p bin

@@ -26,7 +26,9 @@ web/package-lock.json
 web/pnpm-lock.yaml
 
 # Embedded web UI build output
-internal/webui/out/
+internal/webui/out/*
+!internal/webui/out/.gitkeep
+!internal/webui/out/placeholder.txt
 
 # build artifacts
 claw-bridge
