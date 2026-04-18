@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
-import { COLOR_CLASSES } from "@/lib/mappers"
+import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
 import { patchClaw } from "@/lib/api"
 import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
@@ -61,6 +61,8 @@ function UnreadBadge({ count }: { count: number }) {
 export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true }: ClawCardProps) {
   const [localTags, setLocalTags] = useState(claw.tags)
   const [localName, setLocalName] = useState(claw.name)
+  const [localColor, setLocalColor] = useState(claw.color)
+  const [showColorPicker, setShowColorPicker] = useState(false)
   const [editingName, setEditingName] = useState(false)
   const [nameValue, setNameValue] = useState(claw.name)
   const nameInputRef = useRef<HTMLInputElement>(null)
@@ -68,6 +70,16 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
   useEffect(() => {
     if (editingName) nameInputRef.current?.focus()
   }, [editingName])
+
+  useEffect(() => {
+    if (!showColorPicker) return
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (!target.closest('[data-color-picker]')) setShowColorPicker(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showColorPicker])
 
   function handleTagsChange(tags: string[]) {
     setLocalTags(tags)
@@ -97,6 +109,17 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
     if (e.key === "Enter") commitRename()
     if (e.key === "Escape") { setEditingName(false); setNameValue(localName) }
   }
+
+  async function handleColorChange(color: string) {
+    setLocalColor(color)
+    setShowColorPicker(false)
+    try {
+      await patchClaw(claw.id, { color })
+    } catch (e) {
+      console.error("Failed to update color", e)
+      setLocalColor(claw.color)
+    }
+  }
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
 
@@ -113,7 +136,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
       }}
       className={cn(
         "w-full text-left p-3 rounded-md transition-colors relative group border-l-2",
-        COLOR_CLASSES[claw.color]?.border ?? "border-l-border",
+        COLOR_CLASSES[localColor]?.border ?? "border-l-border",
         isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
         isSelected && "bg-accent",
         hasUnread && !isSelected && "bg-blue-950/30"
@@ -184,12 +207,42 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         </span>
       </div>
       {(localTags.length > 0 || isSelected) && (
-        <div className="mt-1.5 pl-5" onClick={(e) => e.stopPropagation()}>
+        <div className="mt-1.5 pl-5 flex items-start gap-2" onClick={(e) => e.stopPropagation()}>
           <TagEditor
             clawId={claw.id}
             tags={localTags}
             onTagsChange={handleTagsChange}
           />
+          {/* Color picker */}
+          <div className="relative flex-shrink-0" data-color-picker>
+            <button
+              onClick={() => setShowColorPicker((v) => !v)}
+              className={cn(
+                "size-3 rounded-full mt-0.5 ring-2 ring-offset-1 ring-offset-background transition-all",
+                COLOR_CLASSES[localColor]?.dot ?? "bg-muted",
+                showColorPicker ? "ring-foreground" : "ring-transparent hover:ring-muted-foreground"
+              )}
+              title="Change color"
+            />
+            {showColorPicker && (
+              <div className="absolute left-0 top-5 z-50 bg-popover border border-border rounded-lg p-2 shadow-lg">
+                <div className="grid grid-cols-8 gap-1">
+                  {CLAW_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => handleColorChange(c)}
+                      className={cn(
+                        "size-4 rounded-full transition-transform hover:scale-125",
+                        COLOR_CLASSES[c]?.dot,
+                        localColor === c && "ring-2 ring-offset-1 ring-offset-background ring-foreground"
+                      )}
+                      title={c}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
       {claw.isStreaming && (
