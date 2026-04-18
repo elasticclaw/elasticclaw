@@ -833,9 +833,12 @@ export function ConversationView({
           <div className="rounded-full bg-red-500/10 p-4">
             <AlertCircle className="size-8 text-red-500" />
           </div>
-          <div className="space-y-1">
+          <div className="space-y-2">
             <p className="text-base font-medium text-foreground">Cannot reach the hub</p>
-            <p className="text-sm text-muted-foreground max-w-sm">Make sure the hub is running and your hub URL is configured correctly.</p>
+            <p className="text-sm text-muted-foreground max-w-sm">Make sure <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_URL</code> and <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_TOKEN</code> are set correctly.</p>
+            <a href="/api/debug" target="_blank" rel="noopener" className="text-xs text-blue-400 hover:underline">
+              View debug info →
+            </a>
           </div>
         </div>
       </main>
