@@ -114,3 +114,10 @@ export function getConfig() {
     token: getTokenSync(),
   }
 }
+
+export async function patchClaw(clawId: string, patch: { tags?: string[]; color?: string }): Promise<void> {
+  await apiFetch(`/api/claws/${clawId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  })
+}

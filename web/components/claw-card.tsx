@@ -1,8 +1,10 @@
 "use client"
 
+import { useState } from "react"
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES } from "@/lib/mappers"
+import { TagEditor } from "@/components/tag-editor"
 import { Loader2, Pin, AlertCircle } from "lucide-react"
 
 interface ClawCardProps {
@@ -10,6 +12,7 @@ interface ClawCardProps {
   isSelected: boolean
   onClick: () => void
   onTogglePin: (e: React.MouseEvent) => void
+  onTagsChange?: (tags: string[]) => void
   showPinButton?: boolean
 }
 
@@ -54,7 +57,13 @@ function UnreadBadge({ count }: { count: number }) {
   )
 }
 
-export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true }: ClawCardProps) {
+export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true }: ClawCardProps) {
+  const [localTags, setLocalTags] = useState(claw.tags)
+
+  function handleTagsChange(tags: string[]) {
+    setLocalTags(tags)
+    onTagsChange?.(tags)
+  }
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
 
@@ -120,20 +129,13 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
           )}
         </span>
       </div>
-      {claw.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2 pl-5">
-          {claw.tags.map((tag) => {
-            const [key, value] = tag.split('=', 2)
-            return (
-              <span
-                key={tag}
-                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
-              >
-                <span className="opacity-60">{key}=</span>
-                <span className="text-foreground/80">{value}</span>
-              </span>
-            )
-          })}
+      {(localTags.length > 0 || isSelected) && (
+        <div className="mt-1.5 pl-5" onClick={(e) => e.stopPropagation()}>
+          <TagEditor
+            clawId={claw.id}
+            tags={localTags}
+            onTagsChange={handleTagsChange}
+          />
         </div>
       )}
       {claw.isStreaming && (

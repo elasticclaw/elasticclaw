@@ -392,6 +392,43 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/claws/")
 
+	if r.Method == http.MethodPatch {
+		var body struct {
+			Tags  *[]string `json:"tags"`
+			Color *string   `json:"color"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if body.Tags != nil {
+			// Normalize tags to k=v format
+			normalized := make([]string, 0, len(*body.Tags))
+			seen := make(map[string]bool)
+			for _, t := range *body.Tags {
+				t = strings.TrimSpace(t)
+				if t == "" {
+					continue
+				}
+				if !strings.Contains(t, "=") {
+					t = t + "=true"
+				}
+				if !seen[t] {
+					seen[t] = true
+					normalized = append(normalized, t)
+				}
+			}
+			tagsJSON, _ := json.Marshal(normalized)
+			_, _ = s.db.Exec(`UPDATE claws SET tags = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`, string(tagsJSON), clawID, tenantID)
+		}
+		if body.Color != nil {
+			color := resolveColor(*body.Color, clawID)
+			_, _ = s.db.Exec(`UPDATE claws SET color = ? WHERE id = ? AND tenant_id = ?`, color, clawID, tenantID)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if r.Method == http.MethodDelete {
 		// Resolve short ID prefix to full UUID
 		var fullID string
