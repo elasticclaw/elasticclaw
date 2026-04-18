@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy
+.PHONY: build build-web build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -12,10 +12,14 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 tidy:
 	go mod tidy
 
-build:
+build-web:
+	cd web && npm install && npm run build
+	rm -rf internal/webui/out
+	cp -r web/out internal/webui/out
+
+build: build-web
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/elasticclaw .
-
 
 build-bridge:
 	mkdir -p bin

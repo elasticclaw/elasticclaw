@@ -20,9 +20,13 @@ coverage.out
 # Web UI
 web/node_modules/
 web/.next/
+web/out/
 web/tsconfig.tsbuildinfo
 web/package-lock.json
 web/pnpm-lock.yaml
+
+# Embedded web UI build output
+internal/webui/out/
 
 # build artifacts
 claw-bridge

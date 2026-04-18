@@ -72,8 +72,9 @@ type GitHubTemplateConfig struct {
 //   - ~/.elasticclaw/hub.yaml: CLI connection + full server config
 type HubConfig struct {
 	// CLI connection fields
-	URL   string `yaml:"url"`
-	Token string `yaml:"token"`
+	URL      string `yaml:"url"`
+	Token    string `yaml:"token"`
+	UIToken  string `yaml:"ui_token,omitempty"`
 
 	// Hub server fields
 	// PublicURL is the URL claws use to connect back to the hub from remote VMs.

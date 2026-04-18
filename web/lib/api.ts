@@ -1,18 +1,11 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
 
-// Token is resolved once and cached — fetched from /api/hub-config on first use
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
 
 export function resolveToken(): Promise<string> {
   if (_token !== null) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
-
-  if (typeof window === "undefined") {
-    // Server-side
-    _token = process.env.HUB_TOKEN || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
-    return Promise.resolve(_token)
-  }
 
   _tokenPromise = fetch("/api/hub-config")
     .then((r) => r.json())
@@ -21,19 +14,17 @@ export function resolveToken(): Promise<string> {
       return _token!
     })
     .catch(() => {
-      _token = process.env.NEXT_PUBLIC_HUB_TOKEN || ""
-      return _token!
+      _token = ""
+      return ""
     })
 
   return _tokenPromise
 }
 
-// Sync getter — returns cached token or empty string; call resolveToken() first
 function getTokenSync(): string {
-  return _token || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
+  return _token || ""
 }
 
-// Pre-fetch token on module load (client-side)
 if (typeof window !== "undefined") {
   resolveToken()
 }
@@ -95,13 +86,10 @@ export function getTerminalWsUrl(clawId: string): string {
 }
 
 export function isConfigured(): boolean {
-  // With server-side auth, always considered configured
   return true
 }
 
-export function saveConfig(_hubUrl: string, _token: string) {
-  // No-op — config is server-side
-}
+export function saveConfig(_hubUrl: string, _token: string) {}
 
 export function clearConfig() {
   _token = null
@@ -109,10 +97,7 @@ export function clearConfig() {
 }
 
 export function getConfig() {
-  return {
-    hubUrl: "",
-    token: getTokenSync(),
-  }
+  return { hubUrl: "", token: getTokenSync() }
 }
 
 export async function patchClaw(clawId: string, patch: { tags?: string[]; color?: string }): Promise<void> {

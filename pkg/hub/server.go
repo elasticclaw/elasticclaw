@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/internal/webui"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
@@ -131,6 +132,25 @@ func (s *Server) Run() error {
 		s.mu.RUnlock()
 		jsonOK(w, out)
 	}))
+
+	// /hub/* — browser uses /hub/api/... prefix; strip it and re-dispatch
+	mux.HandleFunc("/hub/", func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/hub")
+		if r2.URL.Path == "" {
+			r2.URL.Path = "/"
+		}
+		r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/hub")
+		s.mux.ServeHTTP(w, r2)
+	})
+
+	webFS, err := webui.FS()
+	if err != nil {
+		log.Printf("[hub] web UI assets not embedded (run make build-web): %v", err)
+		s.registerWebHandlers(nil)
+	} else {
+		s.registerWebHandlers(webFS)
+	}
 
 	// Connect to relay if configured
 	relayURL := s.hubCfg.RelayURL
