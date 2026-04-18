@@ -63,6 +63,8 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
   const [localName, setLocalName] = useState(claw.name)
   const [localColor, setLocalColor] = useState(claw.color)
   const [showColorPicker, setShowColorPicker] = useState(false)
+  const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 })
+  const colorDotRef = useRef<HTMLButtonElement>(null)
   const [editingName, setEditingName] = useState(false)
   const [nameValue, setNameValue] = useState(claw.name)
   const nameInputRef = useRef<HTMLInputElement>(null)
@@ -216,7 +218,14 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
           {/* Color picker */}
           <div className="relative flex-shrink-0" data-color-picker>
             <button
-              onClick={() => setShowColorPicker((v) => !v)}
+              ref={colorDotRef}
+              onClick={() => {
+                if (!showColorPicker && colorDotRef.current) {
+                  const rect = colorDotRef.current.getBoundingClientRect()
+                  setPickerPos({ top: rect.bottom + 6, left: rect.left })
+                }
+                setShowColorPicker((v) => !v)
+              }}
               className={cn(
                 "size-3 rounded-full mt-0.5 ring-2 ring-offset-1 ring-offset-background transition-all",
                 COLOR_CLASSES[localColor]?.dot ?? "bg-muted",
@@ -225,7 +234,10 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
               title="Change color"
             />
             {showColorPicker && (
-              <div className="absolute left-0 top-5 z-50 bg-popover border border-border rounded-lg p-2 shadow-lg">
+              <div
+                className="fixed z-[9999] bg-popover border border-border rounded-lg p-2 shadow-xl"
+                style={{ top: pickerPos.top, left: pickerPos.left }}
+              >
                 <div className="grid grid-cols-8 gap-1">
                   {CLAW_COLORS.map((c) => (
                     <button
