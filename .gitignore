@@ -19,6 +19,11 @@ coverage.out
 .elasticclaw/
 .direnv/
 
+# Web UI
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+
 # build artifacts
 claw-bridge
 claw-bridge-linux
