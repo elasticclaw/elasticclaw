@@ -86,21 +86,9 @@ export default function Home() {
 
   // Collect all unique tags from all claws
   const allTags = useMemo(() => {
-    const tagMap: Record<string, Set<string>> = {}
-    claws.forEach((claw) => {
-      claw.tags.forEach((tag) => {
-        const [key, value] = tag.split('=', 2)
-        if (key && value !== undefined) {
-          if (!tagMap[key]) tagMap[key] = new Set()
-          tagMap[key].add(value)
-        }
-      })
-    })
-    const result: Record<string, string[]> = {}
-    Object.keys(tagMap).sort().forEach((key) => {
-      result[key] = Array.from(tagMap[key]).sort()
-    })
-    return result
+    const tagSet = new Set<string>()
+    claws.forEach((claw) => claw.tags.forEach((t) => tagSet.add(t)))
+    return Array.from(tagSet).sort()
   }, [claws])
 
   const selectedClaw = useMemo(() => {

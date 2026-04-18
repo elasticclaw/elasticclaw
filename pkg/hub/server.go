@@ -410,9 +410,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 				if t == "" {
 					continue
 				}
-				if !strings.Contains(t, "=") {
-					t = t + "=true"
-				}
 				if !seen[t] {
 					seen[t] = true
 					normalized = append(normalized, t)
@@ -1672,15 +1669,12 @@ func mergeTags(templateName string, configTags []string, cliTags []string) []str
 		if t == "" {
 			return
 		}
-		if !strings.Contains(t, "=") {
-			t = t + "=true"
-		}
 		if !seen[t] {
 			seen[t] = true
 			result = append(result, t)
 		}
 	}
-	add("template=" + templateName)
+	add("template:" + templateName)
 	for _, t := range configTags {
 		add(t)
 	}

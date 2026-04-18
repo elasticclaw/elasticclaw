@@ -131,18 +131,10 @@ func runListHub(h *types.HubProfile) error {
 	return nil
 }
 
-// clawHasTag checks if a claw has a tag matching the filter.
-// Filter can be "key" (match any value for that key) or "key=value" (exact match).
 func clawHasTag(tags []string, filter string) bool {
 	for _, t := range tags {
 		if t == filter {
 			return true
-		}
-		// Filter is a bare key — match any k=v with that key
-		if !strings.Contains(filter, "=") {
-			if strings.HasPrefix(t, filter+"=") {
-				return true
-			}
 		}
 	}
 	return false

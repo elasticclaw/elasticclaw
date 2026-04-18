@@ -36,14 +36,8 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
   }
 
   async function addTag() {
-    const raw = inputValue.trim()
-    if (!raw) {
-      setAdding(false)
-      return
-    }
-    // Normalize to k=v
-    const tag = raw.includes("=") ? raw : `${raw}=true`
-    if (tags.includes(tag)) {
+    const tag = inputValue.trim()
+    if (!tag || tags.includes(tag)) {
       setInputValue("")
       setAdding(false)
       return
@@ -72,26 +66,22 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
 
   return (
     <div className={cn("flex flex-wrap items-center gap-1", className)}>
-      {tags.map((tag) => {
-        const [key, value] = tag.split("=", 2)
-        return (
-          <span
-            key={tag}
-            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded group/tag"
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded group/tag"
+        >
+          {tag}
+          <button
+            onClick={() => removeTag(tag)}
+            disabled={saving}
+            className="ml-0.5 opacity-0 group-hover/tag:opacity-100 hover:text-destructive transition-opacity"
+            title="Remove tag"
           >
-            <span className="opacity-60">{key}=</span>
-            <span className="text-foreground/80">{value}</span>
-            <button
-              onClick={() => removeTag(tag)}
-              disabled={saving}
-              className="ml-0.5 opacity-0 group-hover/tag:opacity-100 hover:text-destructive transition-opacity"
-              title="Remove tag"
-            >
-              <X className="size-2.5" />
-            </button>
-          </span>
-        )
-      })}
+            <X className="size-2.5" />
+          </button>
+        </span>
+      ))}
 
       {adding ? (
         <input
@@ -100,7 +90,7 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
           onBlur={addTag}
-          placeholder="key=value"
+          placeholder="tag name"
           className="h-5 w-24 px-1.5 text-[10px] bg-secondary border border-border rounded outline-none focus:border-ring"
           disabled={saving}
         />
