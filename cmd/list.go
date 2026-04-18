@@ -38,9 +38,8 @@ func init() {
 
 func runList(cmd *cobra.Command, args []string) error {
 	// Use hub if configured
-	cfg, _ := config.LoadGlobalConfig()
-	if cfg != nil && cfg.Hub != nil && cfg.Hub.URL != "" {
-		return runListHub(cfg.Hub)
+	if h, _, err := config.ResolveHub(profile); err == nil {
+		return runListHub(h)
 	}
 
 	// Fallback: local state
@@ -92,7 +91,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runListHub(h *types.HubConfig) error {
+func runListHub(h *types.HubProfile) error {
 	client := hub.NewClient(h.URL, h.Token)
 	claws, err := client.ListClaws(context.Background())
 	if err != nil {

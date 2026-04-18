@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
+
+var validProfileName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // Paths returns the standard config paths
 type Paths struct {
@@ -321,7 +324,7 @@ func IsInitialized() bool {
 	return err == nil
 }
 
-// GetActiveProfile returns the currently active profile
+// GetActiveProfile returns the currently active profile (legacy)
 func GetActiveProfile() (*types.Profile, error) {
 	cfg, err := LoadGlobalConfig()
 	if err != nil {
@@ -329,7 +332,6 @@ func GetActiveProfile() (*types.Profile, error) {
 	}
 
 	if cfg.ActiveProfile == "" {
-		// Return a default profile
 		return &types.Profile{
 			Name:     "default",
 			Provider: "daytona",
@@ -338,4 +340,140 @@ func GetActiveProfile() (*types.Profile, error) {
 	}
 
 	return LoadProfile(cfg.ActiveProfile)
+}
+
+// ── Hub profile management ────────────────────────────────────────────────────
+
+// ResolveHub returns the hub connection for the given profile name.
+// Resolution order: profileFlag > ELASTICCLAW_PROFILE env > active_profile > "default".
+// Migrates legacy flat cfg.Hub to profiles["default"] transparently.
+func ResolveHub(profileFlag string) (*types.HubProfile, string, error) {
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Migrate legacy flat hub config to profiles map
+	if cfg.Hub != nil && cfg.Hub.URL != "" {
+		if cfg.Profiles == nil {
+			cfg.Profiles = make(map[string]*types.HubProfile)
+		}
+		if _, exists := cfg.Profiles["default"]; !exists {
+			cfg.Profiles["default"] = &types.HubProfile{
+				URL:   cfg.Hub.URL,
+				Token: cfg.Hub.Token,
+			}
+			if cfg.ActiveProfile == "" {
+				cfg.ActiveProfile = "default"
+			}
+			cfg.Hub = nil // clear legacy field
+			_ = SaveGlobalConfig(cfg)
+		}
+	}
+
+	// Determine which profile name to use
+	name := profileFlag
+	if name == "" {
+		name = os.Getenv("ELASTICCLAW_PROFILE")
+	}
+	if name == "" {
+		name = cfg.ActiveProfile
+	}
+	if name == "" {
+		name = "default"
+	}
+
+	if cfg.Profiles == nil || cfg.Profiles[name] == nil {
+		if name == "default" {
+			return nil, "", fmt.Errorf("not logged in — run: elasticclaw login --hub <url> --token <token>")
+		}
+		return nil, "", fmt.Errorf("profile %q not found — run: elasticclaw profile ls", name)
+	}
+
+	return cfg.Profiles[name], name, nil
+}
+
+// AddHubProfile creates or updates a named hub profile.
+func AddHubProfile(name, url, token string) error {
+	if !validProfileName.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q: use letters, numbers, hyphens, underscores", name)
+	}
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		cfg = &types.GlobalConfig{}
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = make(map[string]*types.HubProfile)
+	}
+	cfg.Profiles[name] = &types.HubProfile{URL: url, Token: token}
+	if cfg.ActiveProfile == "" {
+		cfg.ActiveProfile = name
+	}
+	return SaveGlobalConfig(cfg)
+}
+
+// RemoveHubProfile deletes a named hub profile.
+func RemoveHubProfile(name string) error {
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.ActiveProfile == name {
+		return fmt.Errorf("cannot remove active profile %q — switch first: elasticclaw profile use <other>", name)
+	}
+	if cfg.Profiles == nil || cfg.Profiles[name] == nil {
+		return fmt.Errorf("profile %q not found", name)
+	}
+	delete(cfg.Profiles, name)
+	return SaveGlobalConfig(cfg)
+}
+
+// UseHubProfile sets the active profile.
+func UseHubProfile(name string) error {
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Profiles == nil || cfg.Profiles[name] == nil {
+		return fmt.Errorf("profile %q not found", name)
+	}
+	cfg.ActiveProfile = name
+	return SaveGlobalConfig(cfg)
+}
+
+// RenameHubProfile renames a profile.
+func RenameHubProfile(oldName, newName string) error {
+	if !validProfileName.MatchString(newName) {
+		return fmt.Errorf("invalid profile name %q: use letters, numbers, hyphens, underscores", newName)
+	}
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Profiles == nil || cfg.Profiles[oldName] == nil {
+		return fmt.Errorf("profile %q not found", oldName)
+	}
+	if cfg.Profiles[newName] != nil {
+		return fmt.Errorf("profile %q already exists", newName)
+	}
+	cfg.Profiles[newName] = cfg.Profiles[oldName]
+	delete(cfg.Profiles, oldName)
+	if cfg.ActiveProfile == oldName {
+		cfg.ActiveProfile = newName
+	}
+	return SaveGlobalConfig(cfg)
+}
+
+// ListHubProfiles returns all hub profiles sorted, with active profile name.
+func ListHubProfiles() (profiles map[string]*types.HubProfile, active string, err error) {
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	// Trigger migration if needed
+	if cfg.Hub != nil && cfg.Hub.URL != "" {
+		_, _, _ = ResolveHub("")
+		cfg, _ = LoadGlobalConfig()
+	}
+	return cfg.Profiles, cfg.ActiveProfile, nil
 }

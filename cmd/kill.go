@@ -23,13 +23,11 @@ func init() {
 
 func runKill(cmd *cobra.Command, args []string) error {
 	target := args[0]
-	cfg, _ := config.LoadGlobalConfig()
-
-	if cfg == nil || cfg.Hub == nil || cfg.Hub.URL == "" {
-		return fmt.Errorf("no hub configured — run 'elasticclaw login' first")
+	h, _, err := config.ResolveHub(profile)
+	if err != nil {
+		return err
 	}
-
-	client := hub.NewClient(cfg.Hub.URL, cfg.Hub.Token)
+	client := hub.NewClient(h.URL, h.Token)
 	ctx := context.Background()
 
 	// Resolve name → ID

@@ -44,19 +44,16 @@ func init() {
 
 func runChat(cmd *cobra.Command, args []string) error {
 	target := args[0]
-	cfg, _ := config.LoadGlobalConfig()
-
-	if cfg != nil && cfg.Hub != nil && cfg.Hub.URL != "" {
-		return runChatHub(cfg.Hub, target, args[1:])
+	if h, _, err := config.ResolveHub(profile); err == nil {
+		return runChatHub(h, target, args[1:])
 	}
-
 	// Fallback: direct provider chat
 	return runChatDirect(target, args[1:])
 }
 
 // ─── Hub chat ─────────────────────────────────────────────────────────────────
 
-func runChatHub(h *types.HubConfig, clawID string, rest []string) error {
+func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 	client := hub.NewClient(h.URL, h.Token)
 	ctx := context.Background()
 

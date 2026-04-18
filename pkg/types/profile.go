@@ -1,6 +1,12 @@
 package types
 
-// Profile represents an execution context
+// HubProfile holds connection details for one ElasticClaw hub.
+type HubProfile struct {
+	URL   string `yaml:"url"`
+	Token string `yaml:"token"`
+}
+
+// Profile represents an execution context (legacy, kept for compat)
 type Profile struct {
 	Name      string `yaml:"-"` // Set from filename
 	Provider  string `yaml:"provider,omitempty"`
@@ -14,7 +20,9 @@ type Profile struct {
 
 // GlobalConfig represents ~/.elasticclaw/config.yaml
 type GlobalConfig struct {
-	ActiveProfile string     `yaml:"active_profile,omitempty"`
+	ActiveProfile string                 `yaml:"active_profile,omitempty"`
+	Profiles      map[string]*HubProfile `yaml:"profiles,omitempty"`
+	// Hub is the legacy single-hub field. Migrated to Profiles["default"] on first use.
 	Hub           *HubConfig `yaml:"hub,omitempty"`
 }
 

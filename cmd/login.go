@@ -6,7 +6,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -15,7 +14,8 @@ var loginCmd = &cobra.Command{
 	Short: "Connect the CLI to an ElasticClaw hub",
 	Long: `Configure the CLI to talk to an ElasticClaw hub.
 
-  elasticclaw login --hub https://hub.example.com --token mytoken`,
+  elasticclaw login --hub https://hub.example.com --token mytoken
+  elasticclaw login --hub https://hub.example.com --token mytoken --profile work`,
 	RunE: runLogin,
 }
 
@@ -34,27 +34,22 @@ func init() {
 
 func runLogin(cmd *cobra.Command, args []string) error {
 	client := hub.NewClient(loginHub, loginToken)
-	tenantID, err := client.Login(context.Background())
+	_, err := client.Login(context.Background())
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	// Write CLI connection info to config.yaml (separate from hub.yaml server config)
-	cfg, err := config.LoadGlobalConfig()
-	if err != nil {
-		cfg = &types.GlobalConfig{}
+	// Determine which profile to save to
+	profileName := profile // root --profile flag
+	if profileName == "" {
+		profileName = "default"
 	}
 
-	cfg.Hub = &types.HubConfig{
-		URL:   loginHub,
-		Token: loginToken,
-	}
-
-	if err := config.SaveGlobalConfig(cfg); err != nil {
+	if err := config.AddHubProfile(profileName, loginHub, loginToken); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Printf("✓ Logged in to %s (tenant: %s)\n", loginHub, tenantID)
-	fmt.Println("  Connection saved to ~/.elasticclaw/config.yaml")
+	fmt.Printf("✓ Logged in to %s\n", loginHub)
+	fmt.Printf("  Saved as profile %q (~/.elasticclaw/config.yaml)\n", profileName)
 	return nil
 }

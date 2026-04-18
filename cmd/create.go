@@ -49,13 +49,10 @@ func init() {
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
-	// Load CLI config → get hub connection
-	cfg, err := config.LoadGlobalConfig()
+	// Resolve hub connection from profile
+	h, _, err := config.ResolveHub(profile)
 	if err != nil {
 		return err
-	}
-	if cfg.Hub == nil || cfg.Hub.URL == "" {
-		return fmt.Errorf("no hub configured — run 'elasticclaw login' first")
 	}
 
 	// Resolve template directory
@@ -90,7 +87,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// POST to hub
-	client := hub.NewClient(cfg.Hub.URL, cfg.Hub.Token)
+	client := hub.NewClient(h.URL, h.Token)
 	claw, err := client.CreateClaw(context.Background(), createName, createTemplate, tmplCfg, files, env)
 	if err != nil {
 		return fmt.Errorf("hub error: %w", err)
