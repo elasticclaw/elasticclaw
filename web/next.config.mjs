@@ -14,6 +14,7 @@ const nextConfig = {
       {
         source: "/hub/:path*",
         destination: `${hubUrl}/:path*`,
+        headers: [{ key: "ngrok-skip-browser-warning", value: "true" }],
       },
     ]
   },
