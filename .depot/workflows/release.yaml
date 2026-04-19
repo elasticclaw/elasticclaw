@@ -20,6 +20,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build web UI
+        run: make build-web
+          cache: true
+
       - name: Determine prerelease
         id: semver
         run: |
@@ -42,11 +50,11 @@ jobs:
           mkdir -p dist
 
           # elasticclaw CLI
-          GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-amd64   .
-          GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-arm64   .
-          GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-amd64  .
-          GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-arm64  .
-          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/elasticclaw-windows-amd64.exe .
+          GOOS=linux   GOARCH=amd64 go build -tags embedweb -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-amd64   .
+          GOOS=linux   GOARCH=arm64 go build -tags embedweb -ldflags "$LDFLAGS" -o dist/elasticclaw-linux-arm64   .
+          GOOS=darwin  GOARCH=amd64 go build -tags embedweb -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-amd64  .
+          GOOS=darwin  GOARCH=arm64 go build -tags embedweb -ldflags "$LDFLAGS" -o dist/elasticclaw-darwin-arm64  .
+          GOOS=windows GOARCH=amd64 go build -tags embedweb -ldflags "$LDFLAGS" -o dist/elasticclaw-windows-amd64.exe .
 
           # claw-bridge (VM-side agent; only needs linux/amd64)
           GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/claw-bridge-linux-amd64 ./cmd/claw-bridge/
