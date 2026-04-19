@@ -85,18 +85,19 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}
 
-	if hubToken != "" {
-		if hubClawToken == "" {
-			return fmt.Errorf("--claw-token is required when --token is set")
-		}
-		tenantID, err := s.Provision(hubToken, hubClawToken)
-		if err != nil {
+	// Provision tenant from CLI flags or hub.yaml (whichever is set)
+	provToken := hubToken
+	if provToken == "" {
+		provToken = hubCfg.Token
+	}
+	provClawToken := hubClawToken
+	if provClawToken == "" {
+		provClawToken = hubCfg.ClawToken
+	}
+	if provToken != "" && provClawToken != "" {
+		if _, err := s.Provision(provToken, provClawToken); err != nil {
 			return fmt.Errorf("failed to provision tenant: %w", err)
 		}
-		fmt.Printf("Tenant provisioned: %s\n", tenantID)
-		fmt.Printf("  User token:  %s\n", hubToken)
-		fmt.Printf("  Claw token:  %s\n", hubClawToken)
-		fmt.Println()
 	}
 
 	fmt.Printf("ElasticClaw Hub\n")
