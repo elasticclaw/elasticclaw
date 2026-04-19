@@ -264,7 +264,6 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const providers = [
     { id: "anthropic", label: "Anthropic", placeholder: "sk-ant-..." },
-    { id: "openai", label: "OpenAI", placeholder: "sk-..." },
   ]
   const [keys, setKeys] = useState<Record<string, string>>({})
 
