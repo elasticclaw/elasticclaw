@@ -341,7 +341,14 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                     {app.keySet ? "Key set" : "No key"}
                   </span>
                   <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
-                    onClick={() => onSave({ github: settings.github.filter(a => a.appId !== app.appId) })}>
+                    onClick={() => {
+                      const filtered = settings.github.filter(a => a.appId !== app.appId).map(a => {
+                        const item: { appId: number; url?: string } = { appId: a.appId }
+                        if (a.url) item.url = a.url
+                        return item
+                      })
+                      onSave({ github: filtered })
+                    }}>
                     Remove
                   </Button>
                 </div>
@@ -357,7 +364,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
-              <Input value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
+              <Input type="number" value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">App URL (optional)</label>
@@ -373,8 +380,11 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
               className="w-full h-32 rounded-md border border-border bg-background px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring"
             />
           </div>
-          <Button size="sm" disabled={saving || !appId || !pem} onClick={() => {
-            onSave({ github: [...(settings.github || []), { appId: parseInt(appId), url, privateKeyPem: pem }] })
+          <Button size="sm" disabled={saving || !appId || !pem || isNaN(Number(appId))} onClick={() => {
+            const parsedAppId = parseInt(appId, 10)
+            const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
+            if (url) newApp.url = url
+            onSave({ github: [...(settings.github || []), newApp] })
             setAppId(""); setUrl(""); setPem("")
           }}>
             Add App
