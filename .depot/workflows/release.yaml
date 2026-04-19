@@ -8,7 +8,7 @@ on:
 
 jobs:
   release:
-    runs-on: depot
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: write
 

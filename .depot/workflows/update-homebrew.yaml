@@ -6,7 +6,7 @@ on:
 
 jobs:
   update-tap:
-    runs-on: depot
+    runs-on: depot-ubuntu-24.04
     steps:
       - name: Update Homebrew formula
         env:
