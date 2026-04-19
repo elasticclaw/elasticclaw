@@ -113,9 +113,9 @@ type HubConfig struct {
 
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 
-	// UIToken is the password for the web UI. If not set, defaults to "admin".
+	// UIPassword is the password for the web UI. If not set, defaults to "admin".
 	// The hub validates this on /api/auth/login and returns a session token.
-	UIToken string `yaml:"ui_token,omitempty"`
+	UIPassword string `yaml:"ui_password,omitempty"`
 }
 
 type ProviderConfig struct {

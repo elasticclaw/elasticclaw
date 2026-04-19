@@ -232,14 +232,14 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 // ─── REST handlers ────────────────────────────────────────────────────────────
 
 // ─── Web UI auth (for embedded/static web UI) ───────────────────────────────────
-// These endpoints validate the UI password (ui_token) and return a session token
+// These endpoints validate the UI password (ui_password) and return a session token
 // the browser stores and sends as Authorization: Bearer <token>.
 
 const webSessionHeader = "X-Elasticclaw-Session"
 
-func (s *Server) resolveUIToken() string {
-	if s.hubCfg.UIToken != "" {
-		return s.hubCfg.UIToken
+func (s *Server) resolveUIPassword() string {
+	if s.hubCfg.UIPassword != "" {
+		return s.hubCfg.UIPassword
 	}
 	return "admin"
 }
@@ -250,7 +250,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		if token != s.resolveUIToken() {
+		if token != s.resolveUIPassword() {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -270,7 +270,7 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if body.Password != s.resolveUIToken() {
+	if body.Password != s.resolveUIPassword() {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
@@ -278,7 +278,7 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 	// The client stores it in sessionStorage and sends as Bearer
 	jsonOK(w, map[string]interface{}{
 		"ok":    true,
-		"token": s.resolveUIToken(),
+		"token": s.resolveUIPassword(),
 		"hubToken": s.hubCfg.Token,
 	})
 }
@@ -293,7 +293,7 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	fileServer := http.FileServer(http.FS(staticFS))
-	uiToken := s.resolveUIToken()
+	uiToken := s.resolveUIPassword()
 
 	// Auth gate for the web UI files
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
