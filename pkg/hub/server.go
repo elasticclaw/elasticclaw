@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -290,6 +291,22 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
+	// Register MIME types that may not be set on the host OS
+	// (important for embedded static files served from Go)
+	for ext, mimeType := range map[string]string{
+		".js":   "application/javascript",
+		".mjs":  "application/javascript",
+		".css":  "text/css",
+		".html": "text/html",
+		".json": "application/json",
+		".svg":  "image/svg+xml",
+		".png":  "image/png",
+		".ico":  "image/x-icon",
+		".woff2": "font/woff2",
+		".woff":  "font/woff",
+	} {
+		mime.AddExtensionType(ext, mimeType)
+	}
 	fileServer := http.FileServer(http.FS(staticFS))
 
 	// Auth gate for the web UI files
