@@ -9,51 +9,73 @@ Repo: github.com/elasticclaw/elasticclaw
 
 - **Hub** (`pkg/hub/server.go`) — Go HTTP/WS server, SQLite backing, manages claw lifecycle
 - **claw-bridge** (`cmd/claw-bridge/`) — runs on each VM, persistent WS → hub, proxies gateway
-- **CLI** (`cmd/`) — login, list, create, chat, kill, template, hub init
-- **Web UI** (`web/`) — Next.js, server-side auth, connects to hub via `/hub/*` rewrite proxy
+- **CLI** (`cmd/`) — login, list, create, chat, kill, template, hub, install, profile
+- **Web UI** (`web/`) — Next.js static export, embedded in Go binary via `//go:embed all:out`
 - **Providers** — `pkg/provider/replicated`, `daytona`, `vercel`, `local`
 - **Relay** (`relay` repo) — optional TURN-style WS proxy for NAT traversal
 
+### Single binary architecture (feat/embedded-web, merged to main)
+- `make build` = Go only, no web (fast dev iteration)
+- `make build-release` = npm build → copy to `internal/webui/out/` → go build with `-tags embedweb`
+- `//go:embed all:out` required (not `//go:embed out`) to include `_next/` directory
+- `http.FileServer` causes 301 redirects — use `fs.ReadFile` directly for static serving
+- No Next.js middleware, no cookies — auth via sessionStorage `ec_hub_token`
+
+### Auth model
+- Login: `POST /api/auth/login` with `{password}` → returns `{hubToken}`
+- Browser stores `ec_hub_token` in sessionStorage
+- All hub calls: `Authorization: Bearer <hubToken>`
+- Hub validates against `hubCfg.Token` (same token for API and web UI)
+- `ui_password:` in hub.yaml sets the login password
+
 ### Key decisions
 
-- Single-tenant OSS only (no SaaS, no master token, no tenant table in active use)
-- SQLite backing (no Postgres)
-- `bridge_image` in hub.yaml: set → use as-is OCI ref; unset + tagged → GitHub releases URL; unset + dev → fail loudly
-- Relay is explicit opt-in via `relay_url` / `relay_secret` in hub.yaml
-- claw-bridge has 32MB WS read limit (default was 32KB — broke on large LLM responses)
-- Credential helper calls hub at `/api/github/token/<clawID>` — runs AFTER bridge starts
-- GitHub token endpoint auth: validates against `hub_claw_token` directly (no tenant lookup)
-- Web UI default password: `admin` if `ELASTICCLAW_UI_TOKEN` not set (warns in dev)
-- Daytona exec needs `export HOME=/home/daytona` + full PATH in every command
+- Single-tenant OSS only (no SaaS, no master token)
+- SQLite backing
+- bridge_image in hub.yaml: set → use as-is OCI ref; unset + tagged → GitHub releases; unset + dev → fail
+- Relay is explicit opt-in via `relay_url` / `relay_secret`
+- claw-bridge has 32MB WS read limit
+- Credential helper calls hub AFTER bridge starts (hub API reachable via bridge proxy)
+- Config: `/etc/elasticclaw/hub.yaml` (system) or `~/.elasticclaw/hub.yaml` (dev)
+- Data: `/var/lib/elasticclaw/` (system) or `~/.elasticclaw/` (dev)
+
+### Install command
+- `elasticclaw install --server ssh://user@ip --domain hub.example.com`
+- No Docker needed — single binary handles everything
+- Caddy config: single `reverse_proxy localhost:8080` (not split routing)
+- `elasticclaw hub service install` for manual systemd setup on server
+- `elasticclaw hub caddy install --domain hub.example.com` for Caddy
 
 ### Bootstrap sequence (Replicated)
-
 1. Apt: Node 24, git
 2. `npm install -g openclaw@latest`
-3. `openclaw onboard --non-interactive` + Python patch to set model/key/gateway auth
-4. Start gateway via `nohup`, wait for `:18789` to respond
+3. Configure OpenClaw (model, gateway password, auth)
+4. Start gateway, wait for :18789
 5. Download claw-bridge (OCI or GitHub releases)
-6. Export env vars, start bridge via `nohup`
-7. Wait up to 10s for bridge to connect (check log for "connected|registered|ready")
-8. Install GitHub credential helper (now that bridge proxy is up)
-9. Run `gh auth login` + clone repos
+6. Start bridge, wait for connection
+7. Install GitHub credential helper (AFTER bridge)
+8. Clone repos
 
-### Hub env vars (web UI)
-
-- `ELASTICCLAW_UI_TOKEN` — web UI password
-- `ELASTICCLAW_HUB_URL` — hub URL (server-side only)
-- `ELASTICCLAW_HUB_TOKEN` — hub user token (server-side only)
+### Hub env vars (web)
+- `NEXT_PUBLIC_HUB_URL` — browser-visible hub URL for dev (not a secret)
+- No server-side env needed in production (same-origin)
 
 ### CI
+- Depot-based (`.depot/workflows/`)
+- `release.yaml` — Go binaries on tag push
+- `release-web.yaml` — Docker image (deprecated, now embedded)
+- `test.yaml` — unit tests + shellcheck + container integration tests on PR
 
-- Depot-based CI (`.depot/workflows/`)
-- `release.yaml` — Go binaries on tag push, triggers Homebrew update
-- `release-web.yaml` — Docker image `marc/elasticclaw-web` on tag push
-- Homebrew tap: `elasticclaw/elasticclaw`
-
-### Known issues / gotchas
-
+### Known gotchas
 - `tsconfig.tsbuildinfo` causes merge conflicts — always resolve with `--theirs`
-- Linux-only npm deps (tailwindcss oxide) must be in `optionalDependencies`
-- `isRedirectError` is in `next/dist/client/components/redirect-error`, not `next/navigation`
-- Relay over Cloudflare Tunnel has idle WS timeouts — use Caddy directly on VPS
+- Linux-only npm deps must be in `optionalDependencies`
+- `isRedirectError` is in `next/dist/client/components/redirect-error`
+- `trailingSlash: true` causes 308 loops in dev — only enable in prod static export
+- `SilenceUsage: true` on cobra root command to avoid wall of help text on errors
+- Replicated VMs use SSH proxy that rejects arbitrary bash commands (not suitable for `install`)
+
+### Claw features
+- **Tags**: flat strings (e.g. `template:elasticclaw`, `nix`), auto-assigned `template:<name>`
+- **Color**: 16 named accent colors, auto-assigned from name hash
+- **Rename**: inline from UI card
+- **Auto-wake**: hub sends silent intro message when claw first connects

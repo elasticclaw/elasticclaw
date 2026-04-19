@@ -7,7 +7,6 @@ Check: `ls ~/.openclaw/workspace/` or `ls ~/`
 
 ```bash
 cd ~/.openclaw/workspace/elasticclaw
-# or wherever it landed
 ```
 
 ## Git & GitHub
@@ -23,10 +22,28 @@ gh issue list --repo elasticclaw/elasticclaw           # works
 
 Token is scoped: **write** on `elasticclaw/elasticclaw`.
 
-## Go, Node, SchemaHero and dev tools
+## Go
 
-Our dev tools are NOT pre-installedd globally, but nix is. There's a nix flake in the repo.
-It's important to run `nix develop` before any commands in order to get the right version of the build tools.
+Go is NOT pre-installed by default. Use nix if available, otherwise install:
+```bash
+curl -fsSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
+export PATH=$PATH:/usr/local/go/bin
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+```
+
+Or if nix is enabled: it's already there via the flake.
+
+Check: `go version`
+
+## Node.js
+
+Node 24 is pre-installed: `node --version`, `npm --version`
+
+```bash
+cd ~/.openclaw/workspace/elasticclaw/web
+npm install
+npm run dev   # dev server on :3000 (requires NEXT_PUBLIC_HUB_URL)
+```
 
 ## OpenClaw
 
@@ -42,85 +59,69 @@ Logs: `~/claw-bridge.log`
 
 Don't kill it — you'll lose your connection.
 
+## Build Commands
+
+```bash
+make build          # Go only, fast (dev iteration)
+make build-release  # Full: web UI + Go binary (requires npm)
+make build-dev      # Alias for make build
+make build-web      # npm build → copy to internal/webui/out/
+make test           # Go unit tests
+make test-bootstrap # Bootstrap script tests
+make test-install   # Container integration test for install scripts
+```
+
 ## Architecture: How This VM Got Here
 
 1. User ran `elasticclaw create --template elasticclaw` from the hub CLI
 2. Hub provisioned a Replicated CMX VM (r1.large)
-3. Hub SSHed in and ran the bootstrap script which:
+3. Hub SSHed in and ran the bootstrap script:
    - Installed Node 24, OpenClaw, claw-bridge
-   - Configured OpenClaw with the right model + gateway password
-   - Started the OpenClaw gateway (port 18789)
-   - Started claw-bridge (connects back to hub via WebSocket)
-   - Installed git credential helper (fetches GitHub App tokens from hub)
+   - Configured OpenClaw with model + gateway password
+   - Started gateway (port 18789) + bridge (WS to hub)
+   - Installed git credential helper (fetches GitHub App tokens)
    - Cloned this repo into workspace
-4. claw-bridge registered with hub → status became "online"
-5. You are now running inside that OpenClaw instance
+4. Bridge registered with hub → status became "online"
+5. Hub sent intro message → you replied
 
-## Hub Architecture
+## Single Binary Architecture (important!)
 
+The web UI is **embedded in the Go binary** via `//go:embed all:out`.
+
+Key files:
+- `internal/webui/embed.go` — embed directive (build tag: `embedweb`)
+- `internal/webui/embed_stub.go` — stub when not embedded
+- `internal/webui/out/` — built Next.js static export (gitignored, populated by `make build-web`)
+
+`make build` does NOT embed web (uses stub). `make build-release` embeds it.
+
+## Hub Config Paths
+
+- System: `/etc/elasticclaw/hub.yaml` + `/var/lib/elasticclaw/`
+- Dev: `~/.elasticclaw/hub.yaml` + `~/.elasticclaw/`
+
+## Install Command
+
+```bash
+elasticclaw install \
+  --server ssh://root@ip \
+  --domain hub.example.com \
+  --anthropic-key sk-ant-... \
+  [--version v0.0.9] \
+  [--skip-caddy]
 ```
-elasticclaw CLI / Web UI
-        |
-        v
-    Hub (Go)  ← SQLite DB, REST + WS API
-        |
-        |--- REST: /api/claws, /api/messages, /api/github/token
-        |--- WS:   /ws/user (UI), /ws/claw (bridge)
-        |
-        v
-  claw-bridge (on this VM)
-        |
-        v
-  OpenClaw gateway (localhost:18789)
+
+Or manual on the server:
+```bash
+sudo elasticclaw hub service install
+sudo elasticclaw hub caddy install --domain hub.example.com
 ```
-
-## Relay (optional)
-
-If `relay_url` is set in hub.yaml, claw-bridge connects to the relay instead
-of directly to the hub. This handles NAT traversal.
-
-Relay env vars (set automatically if relay is configured):
-- `ELASTICCLAW_RELAY_URL`
-- `ELASTICCLAW_HUB_ID`
-- `ELASTICCLAW_RELAY_TOKEN`
-
-## Environment Variables (set during bootstrap)
-
-- `ELASTICCLAW_HUB_URL` — hub URL (may be via relay proxy on localhost:18790)
-- `ELASTICCLAW_CLAW_ID` — this claw's UUID
-- `ELASTICCLAW_CLAW_TOKEN` — auth token for hub API calls
-- `ELASTICCLAW_CLAW_NAME` — human-readable name
-- `ELASTICCLAW_GATEWAY_PASSWORD` — OpenClaw gateway auth password
-- `ANTHROPIC_API_KEY` — injected from hub's llm_keys config
-- `OPENCLAW_DEFAULT_MODEL` — e.g. `anthropic/claude-sonnet-4-6`
-
-## Key Providers
-
-### Replicated CMX
-- Instance types: `r1.small`, `r1.medium`, `r1.large`
-- SSH user: derived from hub's ed25519 key comment (`elasticclaw@hub`)
-- Hub polls Replicated API for status; bootstrap triggers when VM hits "running"
-
-### Daytona
-- Uses `snapshot` + `default_snapshot` fields (not `instance_type`)
-- exec via Daytona API (no SSH) — PATH must include nvm dir in every call
-
-### Vercel Sandbox
-- Not fully tested yet
-
-## Template System
-
-Templates live in `.elasticclaw/templates/<name>/` in any repo.
-Files written to the agent's workspace on bootstrap:
-- `elasticclaw-config.yaml` — provider config
-- `SOUL.md`, `AGENTS.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md`
-
-The hub reads these files from the DB (`template_files` JSON column) and writes
-them to `~/.openclaw/workspace/` via SSH after the bridge connects.
 
 ## Debugging Tips
 
 - Bridge not connecting? Check `~/claw-bridge.log`
 - Gateway not responding? Check `~/openclaw-gateway.log`
-- GitHub auth not working? The credential helper calls the hub at `$ELASTICCLAW_HUB_URL/api/github/token/$ELASTICCLAW_CLAW_ID`
-- Hub unreachable? If relay is configured, check relay connection first
+- GitHub auth not working? Credential helper calls hub at `$ELASTICCLAW_HUB_URL/api/github/token/$ELASTICCLAW_CLAW_ID`
+- Web UI 404? Did you `make build-release`? Check `internal/webui/out/` has `index.html`
+- White page? Missing `_next/` in embedded files — ensure `//go:embed all:out` (not `//go:embed out`)
+- 301 redirect loop? Don't use `http.FileServer` for embedded files, use `fs.ReadFile`
