@@ -2170,6 +2170,18 @@ cd "$HOME/.openclaw/workspace" || true
 { %s } || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
 }
 
+// syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
+type syncedWriter struct {
+	buf *bytes.Buffer
+	mu  *sync.Mutex
+}
+
+func (w *syncedWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
 // sshRun connects to host via the hub's SSH identity and runs a script.
 func (s *Server) sshRun(user, host, script string) error {
 	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
@@ -2199,13 +2211,21 @@ func (s *Server) sshRun(user, host, script string) error {
 	// Pipe the script to bash via stdin — avoids the server's default shell (/bin/sh,
 	// often dash on Ubuntu) which may not support bash-specific syntax.
 	var buf bytes.Buffer
-	sess.Stdout = &buf
-	sess.Stderr = &buf
+	var mu sync.Mutex
+	syncWriter := &syncedWriter{buf: &buf, mu: &mu}
+	sess.Stdout = syncWriter
+	sess.Stderr = syncWriter
 	sess.Stdin = strings.NewReader(script)
 	if err := sess.Run("/bin/bash"); err != nil {
-		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, buf.String())
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, output)
 	}
-	log.Printf("bootstrap output:\n%s", buf.String())
+	mu.Lock()
+	output := buf.String()
+	mu.Unlock()
+	log.Printf("bootstrap output:\n%s", output)
 	return nil
 }
 
