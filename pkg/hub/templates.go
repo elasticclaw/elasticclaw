@@ -75,7 +75,7 @@ func (s *Server) pushTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate name
-	if strings.ContainsAny(body.Name, "/\\..") {
+	if strings.ContainsAny(body.Name, "/\\") || strings.Contains(body.Name, "..") {
 		http.Error(w, "invalid template name", http.StatusBadRequest)
 		return
 	}

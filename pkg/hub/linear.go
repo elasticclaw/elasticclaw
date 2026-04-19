@@ -22,7 +22,7 @@ type linearWebhookPayload struct {
 	Type   string `json:"type"`   // "Issue", "IssueLabel", etc.
 	Data   struct {
 		ID          string `json:"id"`
-		Identifier  string `json:"identifier"`  // e.g. "ELA-123"
+		Identifier  string `json:"identifier"` // e.g. "ELA-123"
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		URL         string `json:"url"`
@@ -189,7 +189,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 
 	// Insert claw record
 	clawID := uuid.New().String()
-	filesJSON, _ := json.Marshal(filesMapToBytes(templateFiles))
+	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
 	_, err = s.db.Exec(`
@@ -288,16 +288,7 @@ func buildLinearContext(payload linearWebhookPayload) string {
 	return b.String()
 }
 
-func filesMapToBytes(files map[string]string) map[string][]byte {
-	result := make(map[string][]byte, len(files))
-	for k, v := range files {
-		result[k] = []byte(v)
-	}
-	return result
-}
-
 // Avoid collision with existing now() function
-
 
 // handleClawDoneSignal is called when a claw sends a message containing [DONE].
 // Finds the matching factory config and moves the Linear issue to done_status.
