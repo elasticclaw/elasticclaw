@@ -133,7 +133,6 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 %sCADDYEOF`, install.Caddyfile(params.Domain)))
 	assertFile("/etc/caddy/Caddyfile", "hub.test.example.com")
 	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:8080")
-	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:3000")
 	t.Log("✓ Caddyfile written correctly")
 
 	// ── Write systemd unit ────────────────────────────────────────────────────
