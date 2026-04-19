@@ -259,7 +259,13 @@ export function Sidebar({
           size="sm"
           className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
           onClick={async () => {
-            await fetch("/api/auth/logout", { method: "POST" })
+            const token = sessionStorage.getItem("ec_hub_token") || ""
+            if (token) {
+              const hubUrl = process.env.NEXT_PUBLIC_HUB_URL || ""
+              const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
+              await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
+            }
+            sessionStorage.removeItem("ec_hub_token")
             window.location.href = "/login"
           }}
         >

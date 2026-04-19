@@ -135,6 +135,10 @@ export function saveConfig(_hubUrl: string, _token: string) {
 export function clearConfig() {
   _token = null
   _tokenPromise = null
+  _hubUrl = null
+  if (typeof window !== "undefined") {
+    sessionStorage.removeItem("ec_hub_token")
+  }
 }
 
 export function getConfig() {
