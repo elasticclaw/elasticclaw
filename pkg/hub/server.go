@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -2195,11 +2196,16 @@ func (s *Server) sshRun(user, host, script string) error {
 	}
 	defer sess.Close()
 
-	out, err := sess.CombinedOutput(script)
-	if err != nil {
-		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, string(out))
+	// Pipe the script to bash via stdin — avoids the server's default shell (/bin/sh,
+	// often dash on Ubuntu) which may not support bash-specific syntax.
+	var buf bytes.Buffer
+	sess.Stdout = &buf
+	sess.Stderr = &buf
+	sess.Stdin = strings.NewReader(script)
+	if err := sess.Run("/bin/bash"); err != nil {
+		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, buf.String())
 	}
-	log.Printf("bootstrap output:\n%s", string(out))
+	log.Printf("bootstrap output:\n%s", buf.String())
 	return nil
 }
 
