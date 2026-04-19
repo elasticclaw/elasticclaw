@@ -229,36 +229,30 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 		}
 	}
 
-	// Try key file
-	if keyPath == "" {
+	// Load all available keys (explicit path or all standard ~/.ssh/ keys)
+	keyPaths := []string{}
+	if keyPath != "" {
+		keyPaths = []string{keyPath}
+	} else {
 		home, _ := os.UserHomeDir()
-		for _, k := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
-			p := home + "/.ssh/" + k
-			if _, err := os.Stat(p); err == nil {
-				keyPath = p
-				break
-			}
+		for _, k := range []string{"id_ed25519", "id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519_sk"} {
+			keyPaths = append(keyPaths, home+"/.ssh/"+k)
 		}
 	}
-	if keyPath != "" {
-		key, readErr := os.ReadFile(keyPath)
-		if readErr != nil {
-			return nil, fmt.Errorf("failed to read SSH key %s: %w", keyPath, readErr)
+	var signers []gossh.Signer
+	for _, p := range keyPaths {
+		key, err := os.ReadFile(p)
+		if err != nil {
+			continue // key doesn't exist, skip
 		}
-		signer, parseErr := gossh.ParsePrivateKey(key)
-		if parseErr != nil {
-			if _, ok := parseErr.(*gossh.PassphraseMissingError); ok {
-				if len(authMethods) == 0 {
-					return nil, fmt.Errorf("SSH key %s is passphrase-protected and no SSH agent is running", keyPath)
-				}
-				// agent will handle it
-			} else {
-				return nil, fmt.Errorf("failed to parse SSH key %s: %w", keyPath, parseErr)
-			}
-		} else {
-			fmt.Printf("  Using key: %s\n", keyPath)
-			authMethods = append(authMethods, gossh.PublicKeys(signer))
+		signer, err := gossh.ParsePrivateKey(key)
+		if err != nil {
+			continue // passphrase-protected or unreadable, skip (agent handles it)
 		}
+		signers = append(signers, signer)
+	}
+	if len(signers) > 0 {
+		authMethods = append(authMethods, gossh.PublicKeys(signers...))
 	}
 
 	if len(authMethods) == 0 {
