@@ -97,6 +97,9 @@ func Caddyfile(domain string) string {
 	handle /api/debug* {
 		reverse_proxy localhost:8080
 	}
+	handle /hub/* {
+		reverse_proxy localhost:8080
+	}
 	handle /claw/* {
 		reverse_proxy localhost:8080
 	}
