@@ -131,7 +131,7 @@ export default function SettingsPage() {
             <GitHubSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "security" && (
-            <SecuritySection settings={settings} onSave={save} saving={saving} />
+            <SecuritySection onSave={save} saving={saving} />
           )}
         </main>
       </div>
@@ -140,6 +140,7 @@ export default function SettingsPage() {
 }
 
 function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const [newKey, setNewKey] = useState("")
   const rep = settings.providers?.replicated
   const day = settings.providers?.daytona
 
@@ -196,6 +197,29 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
             }}>
               Save Replicated
             </Button>
+            {/* SSH Keys for Replicated VMs */}
+            <div className="border-t border-border mt-4 pt-4">
+              <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
+              <p className="text-xs text-muted-foreground mb-3">Public keys injected into Replicated VMs at bootstrap for direct SSH access.</p>
+              {(settings.sshPublicKeys || []).map((key, i) => (
+                <div key={i} className="flex items-center gap-2 mb-2">
+                  <code className="flex-1 text-xs bg-secondary px-2 py-1 rounded truncate">{key}</code>
+                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
+                    onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              <div className="flex gap-2">
+                <Input value={newKey} onChange={e => setNewKey(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
+                  placeholder="ssh-ed25519 AAAA..." className="h-7 text-xs font-mono flex-1" />
+                <Button size="sm" disabled={saving || !newKey.trim()}
+                  onClick={() => { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}>
+                  Add
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -344,84 +368,36 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
   )
 }
 
-function SecuritySection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+function SecuritySection({ onSave, saving }: { onSave: (p: object) => void; saving: boolean }) {
   const [newPw, setNewPw] = useState("")
   const [confirm, setConfirm] = useState("")
   const [pwErr, setPwErr] = useState("")
-  const [newKey, setNewKey] = useState("")
 
   function handlePasswordSave() {
     setPwErr("")
     if (newPw.length < 8) { setPwErr("Password must be at least 8 characters"); return }
-    if (newPw !== confirm) { setPwErr("Passwords don't match"); return }
+    if (newPw !== confirm) { setPwErr("Passwords don\'t match"); return }
     onSave({ uiPassword: newPw })
     setNewPw(""); setConfirm("")
   }
 
-  function addKey() {
-    const key = newKey.trim()
-    if (!key) return
-    const keys = [...(settings.sshPublicKeys || []), key]
-    onSave({ sshPublicKeys: keys })
-    setNewKey("")
-  }
-
-  function removeKey(idx: number) {
-    const keys = (settings.sshPublicKeys || []).filter((_, i) => i !== idx)
-    onSave({ sshPublicKeys: keys })
-  }
-
   return (
-    <div className="space-y-8">
-      {/* Password */}
-      <div>
-        <h2 className="text-base font-semibold mb-1">Security</h2>
-        <p className="text-sm text-muted-foreground mb-4">Change the web UI login password.</p>
-        <div className="border border-border rounded-lg p-5 max-w-sm space-y-3">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
-            <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
-            <Input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
-          </div>
-          {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
-          <Button size="sm" disabled={saving || !newPw || !confirm} onClick={handlePasswordSave}>
-            Change Password
-          </Button>
+    <div>
+      <h2 className="text-base font-semibold mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-4">Change the web UI login password.</p>
+      <div className="border border-border rounded-lg p-5 max-w-sm space-y-3">
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
+          <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
         </div>
-      </div>
-
-      {/* SSH Keys */}
-      <div>
-        <h3 className="text-sm font-semibold mb-1">Additional SSH Keys</h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          These public keys are injected into every sandbox VM at bootstrap, giving direct SSH access for debugging.
-        </p>
-        <div className="border border-border rounded-lg p-4 space-y-3 max-w-xl">
-          {(settings.sshPublicKeys || []).length === 0 && (
-            <p className="text-xs text-muted-foreground italic">No additional SSH keys configured.</p>
-          )}
-          {(settings.sshPublicKeys || []).map((key, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <code className="flex-1 text-xs bg-secondary px-2 py-1 rounded truncate">{key}</code>
-              <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving} onClick={() => removeKey(i)}>
-                Remove
-              </Button>
-            </div>
-          ))}
-          <div className="flex gap-2 pt-1">
-            <Input
-              value={newKey}
-              onChange={e => setNewKey(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") addKey() }}
-              placeholder="ssh-ed25519 AAAA... or ssh-rsa AAAA..."
-              className="h-8 text-xs font-mono flex-1"
-            />
-            <Button size="sm" disabled={saving || !newKey.trim()} onClick={addKey}>Add</Button>
-          </div>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+          <Input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
         </div>
+        {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
+        <Button size="sm" disabled={saving || !newPw || !confirm} onClick={handlePasswordSave}>
+          Change Password
+        </Button>
       </div>
     </div>
   )
