@@ -218,7 +218,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                     Remove
                   </Button>
                 </div>
-              ))}
+              )
+              })}
               <div className="flex gap-2">
                 <Input value={newKey} onChange={e => setNewKey(e.target.value)}
                   onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
