@@ -19,10 +19,33 @@ type SettingsStatus struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys       map[string]bool         `json:"llmKeys"`   // provider → keySet
-	Providers     map[string]ProviderView `json:"providers"` // provider name → config (tokens masked)
+	LLMKeys       map[string]bool         `json:"llmKeys"`
+	Providers     map[string]ProviderView `json:"providers"`
 	GitHub        []GitHubAppView         `json:"github"`
-	SSHPublicKeys []string                `json:"sshPublicKeys"` // extra keys added to all sandbox VMs
+	SSHPublicKeys []string                `json:"sshPublicKeys"`
+	Integrations  *IntegrationsView       `json:"integrations"`
+	Factories     []FactoryView           `json:"factories"`
+}
+
+type IntegrationsView struct {
+	Linear []LinearIntegrationView `json:"linear"`
+}
+
+type LinearIntegrationView struct {
+	Workspace        string `json:"workspace"`
+	TokenSet         bool   `json:"tokenSet"`
+	WebhookSecretSet bool   `json:"webhookSecretSet"`
+}
+
+type FactoryView struct {
+	Name             string `json:"name"`
+	Integration      string `json:"integration"`
+	Workspace        string `json:"workspace"`
+	Team             string `json:"team"`
+	TriggerStatus    string `json:"triggerStatus"`
+	DoneStatus       string `json:"doneStatus"`
+	TerminateOnLeave bool   `json:"terminateOnLeave"`
+	Template         string `json:"template"`
 }
 
 type ProviderView struct {
@@ -51,7 +74,30 @@ type SettingsPatch struct {
 	Providers     map[string]ProviderPatch `json:"providers,omitempty"`
 	GitHub        []GitHubAppPatch         `json:"github,omitempty"`
 	UIPassword    string                   `json:"uiPassword,omitempty"`
-	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"` // nil = no change, [] = clear all
+	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"`
+	Integrations  *IntegrationsPatch       `json:"integrations,omitempty"`
+	Factories     []FactoryPatch           `json:"factories,omitempty"`
+}
+
+type IntegrationsPatch struct {
+	Linear []LinearIntegrationPatch `json:"linear,omitempty"`
+}
+
+type LinearIntegrationPatch struct {
+	Workspace     string `json:"workspace"`
+	Token         string `json:"token,omitempty"`
+	WebhookSecret string `json:"webhookSecret,omitempty"`
+}
+
+type FactoryPatch struct {
+	Name             string `json:"name"`
+	Integration      string `json:"integration"`
+	Workspace        string `json:"workspace"`
+	Team             string `json:"team,omitempty"`
+	TriggerStatus    string `json:"triggerStatus"`
+	DoneStatus       string `json:"doneStatus,omitempty"`
+	TerminateOnLeave bool   `json:"terminateOnLeave"`
+	Template         string `json:"template"`
 }
 
 type ProviderPatch struct {
@@ -143,6 +189,33 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			AppID:  app.AppID,
 			URL:    app.URL,
 			KeySet: app.PrivateKeyPEM != "",
+		})
+	}
+
+	// Integrations
+	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}}
+	if s.hubCfg.Integrations != nil {
+		for _, li := range s.hubCfg.Integrations.Linear {
+			view.Integrations.Linear = append(view.Integrations.Linear, LinearIntegrationView{
+				Workspace:        li.Workspace,
+				TokenSet:         li.Token != "",
+				WebhookSecretSet: li.WebhookSecret != "",
+			})
+		}
+	}
+
+	// Factories
+	view.Factories = []FactoryView{}
+	for _, f := range s.hubCfg.Factories {
+		view.Factories = append(view.Factories, FactoryView{
+			Name:             f.Name,
+			Integration:      f.Integration,
+			Workspace:        f.Workspace,
+			Team:             f.Team,
+			TriggerStatus:    f.TriggerStatus,
+			DoneStatus:       f.DoneStatus,
+			TerminateOnLeave: f.TerminateOnLeave,
+			Template:         f.Template,
 		})
 	}
 	s.mu.RUnlock()
@@ -253,9 +326,50 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		updatedCfg.UIPassword = patch.UIPassword
 	}
 
-	// SSH public keys (nil = no change, pointer to slice = replace all)
+	// SSH public keys
 	if patch.SSHPublicKeys != nil {
 		updatedCfg.SSHPublicKeys = *patch.SSHPublicKeys
+	}
+
+	// Integrations
+	if patch.Integrations != nil && patch.Integrations.Linear != nil {
+		if updatedCfg.Integrations == nil {
+			updatedCfg.Integrations = &types.IntegrationsConfig{}
+		}
+		var linears []*types.LinearIntegrationConfig
+		for _, lp := range patch.Integrations.Linear {
+			li := &types.LinearIntegrationConfig{Workspace: lp.Workspace}
+			// Find existing to preserve secrets not being updated
+			for _, existing := range updatedCfg.Integrations.Linear {
+				if existing.Workspace == lp.Workspace {
+					li.Token = existing.Token
+					li.WebhookSecret = existing.WebhookSecret
+					break
+				}
+			}
+			if lp.Token != "" {
+				li.Token = lp.Token
+			}
+			if lp.WebhookSecret != "" {
+				li.WebhookSecret = lp.WebhookSecret
+			}
+			linears = append(linears, li)
+		}
+		updatedCfg.Integrations.Linear = linears
+	}
+
+	// Factories (full replace)
+	if patch.Factories != nil {
+		var factories []*types.FactoryConfig
+		for _, fp := range patch.Factories {
+			factories = append(factories, &types.FactoryConfig{
+				Name: fp.Name, Integration: fp.Integration,
+				Workspace: fp.Workspace, Team: fp.Team,
+				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
+				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
+			})
+		}
+		updatedCfg.Factories = factories
 	}
 
 	// Save to disk before applying to in-memory config

@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
-type Section = "runtimes" | "llm" | "github" | "security"
+type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories"
 
 interface SettingsData {
   llmKeys: Record<string, boolean>
@@ -23,6 +23,13 @@ interface SettingsData {
   }>
   github: Array<{ appId: number; url?: string; keySet: boolean }>
   sshPublicKeys: string[]
+  integrations?: {
+    linear?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
+  }
+  factories?: Array<{
+    name: string; integration: string; workspace: string; team: string
+    triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
+  }>
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -84,6 +91,8 @@ export default function SettingsPage() {
     { id: "llm", label: "LLM Keys", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
     { id: "security", label: "Security", icon: Shield },
+    { id: "integrations", label: "Integrations", icon: Zap },
+    { id: "factories", label: "Factories", icon: Factory },
   ]
 
   return (
@@ -132,6 +141,12 @@ export default function SettingsPage() {
           )}
           {settings && section === "security" && (
             <SecuritySection onSave={save} saving={saving} />
+          )}
+          {settings && section === "integrations" && (
+            <IntegrationsSection settings={settings} onSave={save} saving={saving} />
+          )}
+          {settings && section === "factories" && (
+            <FactoriesSection settings={settings} onSave={save} saving={saving} />
           )}
         </main>
       </div>
@@ -424,6 +439,164 @@ function SecuritySection({ onSave, saving }: { onSave: (p: object) => void; savi
         {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
         <Button size="sm" disabled={saving || !newPw || !confirm} onClick={handlePasswordSave}>
           Change Password
+        </Button>
+      </div>
+    </div>
+  )
+}
+function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const linear = settings.integrations?.linear || []
+  const [workspace, setWorkspace] = useState("")
+  const [token, setToken] = useState("")
+  const [secret, setSecret] = useState("")
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Integrations</h2>
+        <p className="text-sm text-muted-foreground mb-6">Connect external services to enable Factories.</p>
+      </div>
+
+      {/* Linear */}
+      <div>
+        <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+          <Zap className="size-4" /> Linear
+        </h3>
+        {linear.length > 0 && (
+          <div className="mb-4 space-y-2">
+            {linear.map((li, i) => (
+              <div key={i} className="border border-border rounded-lg p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">{li.workspace}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Token: {li.tokenSet ? "✓" : "✗"} · Webhook secret: {li.webhookSecretSet ? "✓" : "✗"}
+                  </p>
+                </div>
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
+                  onClick={() => onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } })}>
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <p className="text-xs text-muted-foreground">Add a Linear workspace to enable factory automation.</p>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+            <Input value={workspace} onChange={e => setWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+            <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_..." />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
+            <Input type="password" value={secret} onChange={e => setSecret(e.target.value)} className="h-8 text-sm" placeholder="Used to validate incoming webhooks" />
+          </div>
+          <Button size="sm" disabled={saving || !workspace || !token}
+            onClick={() => {
+              onSave({ integrations: { linear: [...linear, { workspace, token, webhookSecret: secret || undefined }] } })
+              setWorkspace(""); setToken(""); setSecret("")
+            }}>
+            Add Linear Workspace
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface FactoryFormData {
+  name: string; workspace: string; team: string
+  triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
+}
+
+function FactoriesSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const factories = settings.factories || []
+  const [form, setForm] = useState<FactoryFormData>({
+    name: "", workspace: "", team: "", triggerStatus: "Ready for Agent",
+    doneStatus: "In Review", terminateOnLeave: true, template: "base"
+  })
+
+  const workspaces = settings.integrations?.linear?.map(l => l.workspace) || []
+
+  function update(k: keyof FactoryFormData, v: string | boolean) {
+    setForm(prev => ({ ...prev, [k]: v }))
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Factories</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Automation rules that spin up claws when Linear issues enter a status.
+        </p>
+      </div>
+
+      {factories.length > 0 && (
+        <div className="space-y-2 mb-6">
+          {factories.map((f, i) => (
+            <div key={i} className="border border-border rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">{f.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → template: {f.template}
+                  </p>
+                </div>
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
+                  onClick={() => onSave({ factories: factories.filter((_, j) => j !== i) })}>
+                  Remove
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="border border-border rounded-lg p-5 space-y-4">
+        <h3 className="text-sm font-semibold">New Factory</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Factory name</label>
+            <Input value={form.name} onChange={e => update("name", e.target.value)} className="h-8 text-sm" placeholder="ELA feature work" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Linear workspace</label>
+            <select value={form.workspace} onChange={e => update("workspace", e.target.value)}
+              className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+              <option value="">Select workspace</option>
+              {workspaces.map(w => <option key={w} value={w}>{w}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+            <Input value={form.team} onChange={e => update("team", e.target.value)} className="h-8 text-sm" placeholder="ELA" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Template (push to hub first)</label>
+            <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
+            <Input value={form.triggerStatus} onChange={e => update("triggerStatus", e.target.value)} className="h-8 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Done status</label>
+            <Input value={form.doneStatus} onChange={e => update("doneStatus", e.target.value)} className="h-8 text-sm" />
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={form.terminateOnLeave} onChange={e => update("terminateOnLeave", e.target.checked)} />
+          Terminate claw when issue leaves trigger status
+        </label>
+        <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
+          onClick={() => {
+            onSave({ factories: [...factories, { ...form, integration: "linear" }] })
+            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base" })
+          }}>
+          Add Factory
         </Button>
       </div>
     </div>
