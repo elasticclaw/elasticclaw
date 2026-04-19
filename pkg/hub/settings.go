@@ -19,9 +19,10 @@ type SettingsStatus struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys   map[string]string      `json:"llmKeys"`   // provider → masked key ("sk-ant-...***")
-	Providers map[string]ProviderView `json:"providers"` // provider name → config (tokens masked)
-	GitHub    []GitHubAppView        `json:"github"`
+	LLMKeys       map[string]string      `json:"llmKeys"`       // provider → masked key
+	Providers     map[string]ProviderView `json:"providers"`     // provider name → config (tokens masked)
+	GitHub        []GitHubAppView        `json:"github"`
+	SSHPublicKeys []string               `json:"sshPublicKeys"` // extra keys added to all sandbox VMs
 }
 
 type ProviderView struct {
@@ -46,10 +47,11 @@ type GitHubAppView struct {
 // SettingsPatch is the request body for PATCH /api/settings.
 // Only non-nil fields are updated.
 type SettingsPatch struct {
-	LLMKeys    map[string]string         `json:"llmKeys,omitempty"`
-	Providers  map[string]ProviderPatch  `json:"providers,omitempty"`
-	GitHub     []GitHubAppPatch          `json:"github,omitempty"`
-	UIPassword string                    `json:"uiPassword,omitempty"`
+	LLMKeys       map[string]string         `json:"llmKeys,omitempty"`
+	Providers     map[string]ProviderPatch  `json:"providers,omitempty"`
+	GitHub        []GitHubAppPatch          `json:"github,omitempty"`
+	UIPassword    string                    `json:"uiPassword,omitempty"`
+	SSHPublicKeys *[]string                 `json:"sshPublicKeys,omitempty"` // nil = no change, [] = clear all
 }
 
 type ProviderPatch struct {
@@ -128,6 +130,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			pv.DefaultInstanceType = p.DefaultInstanceType
 		}
 		view.Providers[name] = pv
+	}
+
+	// SSH public keys
+	view.SSHPublicKeys = s.hubCfg.SSHPublicKeys
+	if view.SSHPublicKeys == nil {
+		view.SSHPublicKeys = []string{}
 	}
 
 	// GitHub Apps
@@ -224,6 +232,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	// UI password
 	if patch.UIPassword != "" {
 		s.hubCfg.UIPassword = patch.UIPassword
+	}
+
+	// SSH public keys (nil = no change, pointer to slice = replace all)
+	if patch.SSHPublicKeys != nil {
+		s.hubCfg.SSHPublicKeys = *patch.SSHPublicKeys
 	}
 
 	// Save to disk
