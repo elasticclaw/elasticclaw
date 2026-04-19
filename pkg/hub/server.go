@@ -152,7 +152,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if noWebUI {
 		log.Printf("[hub] web UI disabled (--no-web-ui)")
 	} else if webFS, err := webui.FS(); err == nil {
-		if _, placeholderErr := webFS.Open("placeholder.txt"); placeholderErr == nil {
+		if _, indexErr := webFS.Open("index.html"); indexErr != nil {
 			log.Printf("[hub] web UI not built — run: make build-web")
 		} else {
 			s.serveWebUI(mux, webFS)
