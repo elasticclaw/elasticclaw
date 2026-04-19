@@ -1486,9 +1486,7 @@ if command -v gh &>/dev/null; then
   GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
   if [ -n "$GH_TOKEN" ]; then
     echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
-    sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
-export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-PROFEOF
+    printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
     sudo chmod +x /etc/profile.d/elasticclaw-github.sh
   fi
 else
@@ -2160,9 +2158,7 @@ fi
 # Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
 if command -v gh &>/dev/null; then
   # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
-  sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
-export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-PROFEOF
+  printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
   sudo chmod +x /etc/profile.d/elasticclaw-github.sh
   echo "GitHub profile.d configured"
 fi
