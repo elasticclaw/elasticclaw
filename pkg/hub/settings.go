@@ -160,7 +160,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Create a deep copy of the config to apply changes
+	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
 
 	// LLM keys
