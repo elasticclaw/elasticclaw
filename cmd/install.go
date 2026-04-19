@@ -123,16 +123,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	defer client.Close()
 	fmt.Println("OK")
 
-	// ── Preflight: Docker ─────────────────────────────────────────────────────
-	fmt.Print("Checking Docker... ")
-	if out, err := sshRunClient(client, "sudo docker --version 2>&1"); err != nil {
-		return fmt.Errorf("Docker not found on server: %s\nInstall Docker first: https://docs.docker.com/engine/install/", out)
-	} else {
-		fmt.Printf("OK (%s)\n", strings.TrimSpace(strings.Split(out, "\n")[0]))
-		// Ensure daemon is running
-		_, _ = sshRunClient(client, "sudo systemctl start docker 2>/dev/null || true")
-	}
-
 	steps := []struct {
 		name   string
 		script string
