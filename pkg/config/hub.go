@@ -102,7 +102,7 @@ func ResolveTemplate(name string) (string, error) {
 // downloadTemplate fetches a template from the public registry into dest.
 func downloadTemplate(name, dest string) error {
 	// Template files to fetch
-	files := []string{"elasticclaw-config.yaml", "SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md", "MEMORY.md"}
+	files := []string{"elasticclaw-config.yaml", "SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md", "MEMORY.md", "BOOTSTRAP.md", "HEARTBEAT.md"}
 
 	if err := os.MkdirAll(dest, 0755); err != nil {
 		return err
@@ -120,13 +120,14 @@ func downloadTemplate(name, dest string) error {
 			}
 			continue // file is optional
 		}
-		defer resp.Body.Close()
 
 		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(dest, f), data, 0644); err != nil {
+			os.RemoveAll(dest)
 			return err
 		}
 		fetched++
