@@ -10,7 +10,7 @@ import (
 // The out/ directory must exist with at least a README.md for this to compile.
 // Run `make build-web` or `make build-release` to populate it with the real UI.
 //
-//go:embed out
+//go:embed all:out
 var files embed.FS
 
 // FS returns the embedded Next.js static files rooted at the out/ directory.
