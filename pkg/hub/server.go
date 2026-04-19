@@ -164,10 +164,14 @@ func (s *Server) Run(opts ...RunOptions) error {
 	}
 
 	// Connect to relay if configured
+	s.mu.RLock()
 	relayURL := s.hubCfg.RelayURL
+	relaySecret := s.hubCfg.RelaySecret
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	if relayURL != "" {
 		hubID := HubID(s.identity.PublicKey)
-		relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+		relayToken := RelayToken(relaySecret, hubID, clawToken)
 		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
 		log.Printf("[relay] connecting to %s", relayURL)
 		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
@@ -260,7 +264,10 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		// Hub token doubles as the web session token — reject empty tokens even if hub token is unset
-		if token == "" || token != s.hubCfg.Token {
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		s.mu.RUnlock()
+		if token == "" || token != hubToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -284,9 +291,12 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
+	s.mu.RLock()
+	hubToken := s.hubCfg.Token
+	s.mu.RUnlock()
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
-		"hubToken": s.hubCfg.Token, // hub API token — browser uses for all hub calls
+		"hubToken": hubToken, // hub API token — browser uses for all hub calls
 	})
 }
 
@@ -376,15 +386,18 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 }
 
 func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
 	hubURL := s.hubCfg.URL
 	if s.hubCfg.PublicURL != "" {
 		hubURL = s.hubCfg.PublicURL
 	}
+	token := s.hubCfg.Token
+	s.mu.RUnlock()
 	if hubURL == "" {
 		hubURL = "http://localhost:8080"
 	}
 	jsonOK(w, map[string]interface{}{
-		"token":  s.hubCfg.Token,
+		"token":  token,
 		"hubUrl": hubURL,
 	})
 }
@@ -523,10 +536,13 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Build env to inject: hub connection info so the claw can register back
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":   s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":   clawID,
-		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 	for k, v := range req.Env {
 		env[k] = v
@@ -999,7 +1015,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						httpReq.Header.Set(k, v)
 					}
 					// Inject claw_token auth so withAuth middleware passes
-					httpReq.Header.Set("X-Claw-Token", s.hubCfg.ClawToken)
+					s.mu.RLock()
+					clawToken := s.hubCfg.ClawToken
+					s.mu.RUnlock()
+					httpReq.Header.Set("X-Claw-Token", clawToken)
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}
 					s.mux.ServeHTTP(w, httpReq)
@@ -1379,8 +1398,12 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 	// Start the bridge — it reads the gateway token from openclaw.json automatically.
 	// Use setsid to detach from exec session so it survives after exec returns.
 	hubID := HubID(s.identity.PublicKey)
+	s.mu.RLock()
 	relayURL := s.hubCfg.RelayURL
-	relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+	relaySecret := s.hubCfg.RelaySecret
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	relayToken := RelayToken(relaySecret, hubID, clawToken)
 
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
@@ -1388,7 +1411,7 @@ ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICC
 ELASTICCLAW_RELAY_URL=%q ELASTICCLAW_HUB_ID=%q ELASTICCLAW_RELAY_TOKEN=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
+		s.clawHubURL(), clawID, clawToken, clawName,
 		relayURL, hubID, relayToken)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
@@ -1417,7 +1440,6 @@ ELASTICCLAW_EOF`,
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
 	s.mu.RLock()
 	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
-	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
 	if hasGitHubApps {
 		var githubRepos []types.GitHubRepoAccess
@@ -1565,11 +1587,14 @@ echo "OpenClaw ready"
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	bridgeScript := fmt.Sprintf(`
 curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
 echo "claw-bridge started"
-`, bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+`, bridgeURL, s.clawHubURL(), clawID, clawToken)
 	out, code, err = p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(bridgeScript, "'", "'\"'\"'")+"'")
 	if err != nil || code != 0 {
 		return fmt.Errorf("claw-bridge install failed (exit %d): %s", code, out)
@@ -2398,7 +2423,10 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
 	// Single-tenant: validate against hub's claw_token directly
-	if clawToken != s.hubCfg.ClawToken {
+	s.mu.RLock()
+	hubClawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if clawToken != hubClawToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
