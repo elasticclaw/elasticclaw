@@ -7,7 +7,7 @@ let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
 
 export function resolveToken(): Promise<string> {
-  if (_token !== null) return Promise.resolve(_token)
+  if (_token) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
 
   if (typeof window === "undefined") {
