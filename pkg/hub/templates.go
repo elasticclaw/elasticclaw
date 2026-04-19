@@ -123,14 +123,5 @@ func (s *Server) resolveTemplateFiles(name string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	fsFiles, err := config.ReadTemplateFiles(templateDir)
-	if err != nil {
-		return nil, err
-	}
-	// Convert []byte values to string
-	result := make(map[string]string, len(fsFiles))
-	for k, v := range fsFiles {
-		result[k] = string(v)
-	}
-	return result, nil
+	return config.ReadTemplateFiles(templateDir)
 }

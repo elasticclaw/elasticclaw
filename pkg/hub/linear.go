@@ -33,10 +33,12 @@ type linearWebhookPayload struct {
 			Key  string `json:"key"`
 			Name string `json:"name"`
 		} `json:"team"`
-		PreviousState *struct {
-			Name string `json:"name"`
-		} `json:"previousState,omitempty"`
 	} `json:"data"`
+	UpdatedFrom *struct {
+		State *struct {
+			Name string `json:"name"`
+		} `json:"state,omitempty"`
+	} `json:"updatedFrom,omitempty"`
 }
 
 func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
@@ -105,8 +107,8 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 
 	currentStatus := payload.Data.State.Name
 	previousStatus := ""
-	if payload.Data.PreviousState != nil {
-		previousStatus = payload.Data.PreviousState.Name
+	if payload.UpdatedFrom != nil && payload.UpdatedFrom.State != nil {
+		previousStatus = payload.UpdatedFrom.State.Name
 	}
 	teamKey := payload.Data.Team.Key
 	issueID := payload.Data.Identifier // e.g. "ELA-123"
@@ -120,7 +122,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue entering trigger status → create claw
-		if currentStatus == factory.TriggerStatus && previousStatus != factory.TriggerStatus {
+		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			if err := s.createClawForIssue(factory, payload); err != nil {
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
@@ -128,7 +130,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue leaving trigger status → terminate claw
-		if factory.TerminateOnLeave && previousStatus == factory.TriggerStatus && currentStatus != factory.TriggerStatus {
+		if factory.TerminateOnLeave && strings.EqualFold(previousStatus, factory.TriggerStatus) && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			log.Printf("[factory:%s] issue %s left '%s' — terminating claw", factory.Name, issueID, factory.TriggerStatus)
 			s.terminateClawForIssue(issueID)
 		}
