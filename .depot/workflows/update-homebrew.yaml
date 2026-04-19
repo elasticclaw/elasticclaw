@@ -16,10 +16,17 @@ jobs:
           VERSION="${{ github.event.release.tag_name }}"
           VERSION_NO_V="${VERSION#v}"
 
-          # Download the release binaries to compute sha256
-          curl -sLo elasticclaw-darwin-arm64 \
-            "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-arm64"
-          curl -sLo elasticclaw-darwin-amd64 \
+          # Wait for binaries to be uploaded (release.yaml uploads after creating release)
+          for i in $(seq 1 20); do
+            if curl -fsSLo elasticclaw-darwin-arm64 \
+              "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-arm64" 2>/dev/null; then
+              echo "Downloaded arm64 binary (attempt ${i})"
+              break
+            fi
+            echo "Waiting for binaries... attempt ${i}/20"
+            sleep 30
+          done
+          curl -fsSLo elasticclaw-darwin-amd64 \
             "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-amd64"
 
           SHA_ARM64=$(sha256sum elasticclaw-darwin-arm64 | awk '{print $1}')
