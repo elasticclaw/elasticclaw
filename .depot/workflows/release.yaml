@@ -26,7 +26,6 @@ jobs:
 
       - name: Build web UI
         run: make build-web
-          cache: true
 
       - name: Determine prerelease
         id: semver
