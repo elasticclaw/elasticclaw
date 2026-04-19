@@ -252,36 +252,38 @@ export function Sidebar({
         </div>
       </ScrollArea>
 
-      {/* Logout */}
+      {/* Logout + Settings */}
       <div className="p-2 border-t border-border">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-          onClick={async () => {
-            const token = sessionStorage.getItem("ec_hub_token") || ""
-            if (token) {
-              const { getHubUrl } = await import("@/lib/hub-url")
-              const hubUrl = getHubUrl()
-              const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
-              await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
-            }
-            sessionStorage.removeItem("ec_hub_token")
-            window.location.href = "/login"
-          }}
-        >
-          <LogOut className="size-4" />
-          Sign out
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-          onClick={() => { window.location.href = "/settings" }}
-        >
-          <Settings className="size-4" />
-          Settings
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="flex-1 justify-start gap-2 text-muted-foreground hover:text-foreground"
+            onClick={async () => {
+              const token = sessionStorage.getItem("ec_hub_token") || ""
+              if (token) {
+                const { getHubUrl } = await import("@/lib/hub-url")
+                const hubUrl = getHubUrl()
+                const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
+                await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
+              }
+              sessionStorage.removeItem("ec_hub_token")
+              window.location.href = "/login"
+            }}
+          >
+            <LogOut className="size-4" />
+            Sign out
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 text-muted-foreground hover:text-foreground flex-shrink-0"
+            onClick={() => { window.location.href = "/settings" }}
+            title="Settings"
+          >
+            <Settings className="size-4" />
+          </Button>
+        </div>
       </div>
     </aside>
   )
