@@ -870,8 +870,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.claws, clawID)
 		s.mu.Unlock()
-		_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
-		s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus != "completed" && currentStatus != "deleted" {
+			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
+		}
 		log.Printf("[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
 	}()
 
