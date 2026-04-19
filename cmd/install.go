@@ -77,7 +77,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	uiToken := installUIPassword
 	if uiToken == "" {
-		uiToken = randomPassword()
+		uiToken = randomHex32()
 	}
 	clawToken := randomHex32()
 
@@ -264,29 +264,4 @@ func randomHex32() string {
 
 func shellescape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
-// randomPassword generates a memorable but secure password like "coral-tiger-42"
-func randomPassword() string {
-	adjectives := []string{
-		"amber", "azure", "bright", "calm", "cedar", "cobalt", "coral", "crimson",
-		"dawn", "elder", "ember", "frosted", "golden", "ivory", "jade", "lunar",
-		"maple", "misty", "noble", "ocean", "onyx", "opal", "pine", "prism",
-		"quiet", "rapid", "russet", "sage", "silver", "solar", "stone", "swift",
-		"teal", "velvet", "vivid", "willow",
-	}
-	nouns := []string{
-		"anchor", "arrow", "bear", "birch", "brook", "canyon", "cedar", "cliff",
-		"cloud", "comet", "crane", "dawn", "dune", "eagle", "falcon", "field",
-		"flame", "forest", "frost", "gale", "grove", "hawk", "heron", "hill",
-		"horizon", "lake", "lark", "lynx", "maple", "marsh", "moon", "moss",
-		"mountain", "oak", "otter", "peak", "pine", "rain", "raven", "reed",
-		"river", "robin", "shore", "sierra", "stone", "storm", "tiger", "vale",
-	}
-	b := make([]byte, 4)
-	io.ReadFull(rand.Reader, b)
-	adj := adjectives[int(b[0])%len(adjectives)]
-	noun := nouns[int(b[1])%len(nouns)]
-	num := int(b[2])%90 + 10 // 10-99
-	return fmt.Sprintf("%s-%s-%d", adj, noun, num)
 }
