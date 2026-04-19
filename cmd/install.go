@@ -239,10 +239,24 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	}
 	if keyPath != "" {
 		if key, err := os.ReadFile(keyPath); err == nil {
-			if signer, err := gossh.ParsePrivateKey(key); err == nil {
+			signer, err := gossh.ParsePrivateKey(key)
+			if err != nil {
+				// Key may be passphrase-protected — try parsing without passphrase failed,
+				// rely on SSH agent which already has the decrypted key
+				if _, ok := err.(*gossh.PassphraseMissingError); ok {
+					// Already handled by SSH agent above if agent is running
+					// If no agent, we can't use this key without a passphrase prompt
+				} else {
+					return nil, fmt.Errorf("failed to parse SSH key %s: %w", keyPath, err)
+				}
+			} else {
 				authMethods = append(authMethods, gossh.PublicKeys(signer))
 			}
 		}
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH auth methods available — ensure SSH agent is running (eval $(ssh-agent)) or use --ssh-key with an unencrypted key")
 	}
 
 	cfg := &gossh.ClientConfig{
