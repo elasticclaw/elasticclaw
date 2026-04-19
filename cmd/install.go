@@ -219,10 +219,13 @@ func parseSSHHost(host string) (user, addr string, err error) {
 func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	var authMethods []gossh.AuthMethod
 
-	// Try SSH agent first
+	// Try SSH agent first — call Signers() eagerly so failures are visible
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.Dial("unix", sock); err == nil {
-			authMethods = append(authMethods, gossh.PublicKeysCallback(agent.NewClient(conn).Signers))
+			agentClient := agent.NewClient(conn)
+			if signers, err := agentClient.Signers(); err == nil && len(signers) > 0 {
+				authMethods = append(authMethods, gossh.PublicKeys(signers...))
+			}
 		}
 	}
 
