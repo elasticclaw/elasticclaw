@@ -2,12 +2,16 @@ package config
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
+
+var httpGet = http.Get
 
 // LoadHubConfig loads the hub configuration from (in order):
 //  1. $ELASTICCLAW_HUB_CONFIG env var path
@@ -62,9 +66,16 @@ func hubConfigPaths() []string {
 	return paths
 }
 
+// TemplateRegistryURL is the GitHub repo used as the default template registry.
+const TemplateRegistryURL = "https://github.com/elasticclaw/elasticclaw-templates"
+
+// TemplateRegistryRawBase is the raw content base URL for fetching templates.
+const TemplateRegistryRawBase = "https://raw.githubusercontent.com/elasticclaw/elasticclaw-templates/main/templates"
+
 // ResolveTemplate finds a template by name, checking:
 //  1. ./.elasticclaw/templates/<name>/ (repo-local)
-//  2. ~/.elasticclaw/templates/<name>/ (global)
+//  2. ~/.elasticclaw/templates/<name>/ (global / cached)
+//  3. Download from the public registry into ~/.elasticclaw/templates/<name>/
 func ResolveTemplate(name string) (string, error) {
 	// Repo-local first
 	cwd, err := os.Getwd()
@@ -74,14 +85,59 @@ func ResolveTemplate(name string) (string, error) {
 			return local, nil
 		}
 	}
-	// Global fallback
+	// Global / cached
 	if home, err := os.UserHomeDir(); err == nil {
 		global := filepath.Join(home, ".elasticclaw", "templates", name)
 		if stat, err := os.Stat(global); err == nil && stat.IsDir() {
 			return global, nil
 		}
+		// Not found locally — try downloading from registry
+		if dlErr := downloadTemplate(name, global); dlErr == nil {
+			return global, nil
+		}
 	}
-	return "", fmt.Errorf("template %q not found in .elasticclaw/templates/ or ~/.elasticclaw/templates/", name)
+	return "", fmt.Errorf("template %q not found locally or in registry (%s)", name, TemplateRegistryURL)
+}
+
+// downloadTemplate fetches a template from the public registry into dest.
+func downloadTemplate(name, dest string) error {
+	// Template files to fetch
+	files := []string{"elasticclaw-config.yaml", "SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md", "MEMORY.md"}
+
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+
+	fetched := 0
+	for _, f := range files {
+		url := fmt.Sprintf("%s/%s/%s", TemplateRegistryRawBase, name, f)
+		
+		// Use net/http to fetch
+		resp, err := httpGet(url)
+		if err != nil || resp.StatusCode != 200 {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue // file is optional
+		}
+		defer resp.Body.Close()
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dest, f), data, 0644); err != nil {
+			return err
+		}
+		fetched++
+	}
+
+	if fetched == 0 {
+		// Nothing fetched — template doesn't exist in registry
+		os.RemoveAll(dest)
+		return fmt.Errorf("template %q not found in registry", name)
+	}
+	return nil
 }
 
 // LoadTemplateConfig reads elasticclaw-config.yaml from a template directory.
