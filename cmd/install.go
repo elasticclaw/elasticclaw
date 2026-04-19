@@ -26,7 +26,7 @@ Installs the hub binary (with embedded web UI), Caddy reverse proxy with TLS,
 and systemd service — fully configured and ready to use.
 
   elasticclaw install \
-    --host user@my-server.com \
+    --server ssh://root@my-server.com \
     --domain hub.mycompany.com
 
 Prerequisites:
@@ -36,7 +36,7 @@ Prerequisites:
 }
 
 var (
-	installHost    string
+	installServer   string
 	installDomain  string
 	installSSHKey  string
 	installVersion string
@@ -47,7 +47,7 @@ var (
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().StringVar(&installHost, "host", "", "SSH host (e.g. root@1.2.3.4 or user@myserver.com)")
+	installCmd.Flags().StringVar(&installServer, "server", "", "SSH URI of the server (e.g. ssh://root@1.2.3.4 or ssh://root@1.2.3.4:22)")
 	installCmd.Flags().StringVar(&installDomain, "domain", "", "Domain name that resolves to the server (e.g. hub.mycompany.com)")
 	installCmd.Flags().StringVar(&installSSHKey, "ssh-key", "", "Path to SSH private key (default: SSH agent or ~/.ssh/id_rsa)")
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
@@ -55,7 +55,7 @@ func init() {
 	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
 	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
-	installCmd.MarkFlagRequired("host")
+	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")
 }
 
@@ -111,7 +111,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// ── Connect SSH ───────────────────────────────────────────────────────────
-	sshUser, sshHost, err := parseSSHHost(installHost)
+	sshUser, sshHost, err := parseSSHHost(installServer)
 	if err != nil {
 		return err
 	}
@@ -202,6 +202,8 @@ func latestGitHubRelease(owner, repo string) (string, error) {
 }
 
 func parseSSHHost(host string) (user, addr string, err error) {
+	// Strip ssh:// prefix
+	host = strings.TrimPrefix(host, "ssh://")
 	user = "root"
 	addr = host
 	if strings.Contains(host, "@") {
