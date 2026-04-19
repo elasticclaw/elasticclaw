@@ -3,6 +3,7 @@ import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
 // Token is resolved once and cached — fetched from /api/hub-config on first use
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
+let _hubUrl: string | null = null
 
 export function resolveToken(): Promise<string> {
   if (_token !== null) return Promise.resolve(_token)
@@ -18,6 +19,7 @@ export function resolveToken(): Promise<string> {
     .then((r) => r.json())
     .then((d) => {
       _token = d.token || ""
+      _hubUrl = d.hubUrl || null
       return _token!
     })
     .catch(() => {
@@ -88,16 +90,21 @@ export async function killClaw(id: string): Promise<void> {
   return apiFetch<void>(`/api/claws/${id}`, { method: "DELETE" })
 }
 
+// Get the hub's base WS URL — uses the hub URL directly (not proxied through Next.js)
+// so WebSocket upgrades work correctly regardless of how the web server is configured.
+function getHubWsBase(): string {
+  const hub = _hubUrl || "http://localhost:8080"
+  return hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+}
+
 export function getHubWsUrl(): string {
   const token = getTokenSync()
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/hub/api/ws?token=${encodeURIComponent(token)}`
+  return `${getHubWsBase()}/api/ws?token=${encodeURIComponent(token)}`
 }
 
 export function getTerminalWsUrl(clawId: string): string {
   const token = getTokenSync()
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/hub/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
+  return `${getHubWsBase()}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
 }
 
 export function isConfigured(): boolean {
