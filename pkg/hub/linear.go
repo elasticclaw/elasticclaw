@@ -352,9 +352,15 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 
 // moveLinearIssue updates a Linear issue's state by name using the Linear GraphQL API.
 func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
-	// First find the issue ID from identifier
-	query := fmt.Sprintf(`{"query": "{ issue(id: \"%s\") { id team { states { nodes { id name } } } } }"}`, issueIdentifier)
-	req, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(query))
+	// First find the issue ID from identifier using GraphQL variables
+	queryBody := map[string]interface{}{
+		"query": "query($id: String!) { issue(id: $id) { id team { states { nodes { id name } } } } }",
+		"variables": map[string]string{
+			"id": issueIdentifier,
+		},
+	}
+	queryJSON, _ := json.Marshal(queryBody)
+	req, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(string(queryJSON)))
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -395,9 +401,16 @@ func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
 		return fmt.Errorf("issue or state not found")
 	}
 
-	// Update the issue state
-	mutation := fmt.Sprintf(`{"query": "mutation { issueUpdate(id: \"%s\", input: { stateId: \"%s\" }) { success } }"}`, issueID, stateID)
-	req2, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(mutation))
+	// Update the issue state using GraphQL variables
+	mutationBody := map[string]interface{}{
+		"query": "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
+		"variables": map[string]string{
+			"id":      issueID,
+			"stateId": stateID,
+		},
+	}
+	mutationJSON, _ := json.Marshal(mutationBody)
+	req2, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(string(mutationJSON)))
 	req2.Header.Set("Authorization", token)
 	req2.Header.Set("Content-Type", "application/json")
 	resp2, err := http.DefaultClient.Do(req2)

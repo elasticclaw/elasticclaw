@@ -46,6 +46,7 @@ type FactoryView struct {
 	DoneStatus       string `json:"doneStatus"`
 	TerminateOnLeave bool   `json:"terminateOnLeave"`
 	Template         string `json:"template"`
+	NamePattern      string `json:"namePattern"`
 }
 
 type ProviderView struct {
@@ -98,6 +99,7 @@ type FactoryPatch struct {
 	DoneStatus       string `json:"doneStatus,omitempty"`
 	TerminateOnLeave bool   `json:"terminateOnLeave"`
 	Template         string `json:"template"`
+	NamePattern      string `json:"namePattern,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -216,6 +218,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			DoneStatus:       f.DoneStatus,
 			TerminateOnLeave: f.TerminateOnLeave,
 			Template:         f.Template,
+			NamePattern:      f.NamePattern,
 		})
 	}
 	s.mu.RUnlock()
@@ -333,18 +336,24 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Integrations
 	if patch.Integrations != nil && patch.Integrations.Linear != nil {
-		if updatedCfg.Integrations == nil {
-			updatedCfg.Integrations = &types.IntegrationsConfig{}
+		// Deep copy IntegrationsConfig to avoid mutating live config
+		var existingIntegrations *types.IntegrationsConfig
+		if updatedCfg.Integrations != nil {
+			existingIntegrations = updatedCfg.Integrations
 		}
+		updatedCfg.Integrations = &types.IntegrationsConfig{}
+
 		var linears []*types.LinearIntegrationConfig
 		for _, lp := range patch.Integrations.Linear {
 			li := &types.LinearIntegrationConfig{Workspace: lp.Workspace}
 			// Find existing to preserve secrets not being updated
-			for _, existing := range updatedCfg.Integrations.Linear {
-				if existing.Workspace == lp.Workspace {
-					li.Token = existing.Token
-					li.WebhookSecret = existing.WebhookSecret
-					break
+			if existingIntegrations != nil {
+				for _, existing := range existingIntegrations.Linear {
+					if existing.Workspace == lp.Workspace {
+						li.Token = existing.Token
+						li.WebhookSecret = existing.WebhookSecret
+						break
+					}
 				}
 			}
 			if lp.Token != "" {
@@ -367,6 +376,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				Workspace: fp.Workspace, Team: fp.Team,
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
+				NamePattern: fp.NamePattern,
 			})
 		}
 		updatedCfg.Factories = factories
