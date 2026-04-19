@@ -341,38 +341,10 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 		rawFS.ServeHTTP(w, r)
 	})
 
-	// Auth gate for the web UI files
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Login page always passes through
-		if r.URL.Path == "/login" || r.URL.Path == "/login/" {
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// Static assets pass through
-		if strings.HasPrefix(r.URL.Path, "/_next/") ||
-			strings.HasSuffix(r.URL.Path, ".png") ||
-			strings.HasSuffix(r.URL.Path, ".svg") ||
-			strings.HasSuffix(r.URL.Path, ".ico") {
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// Check session token
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
-		if token != s.hubCfg.Token {
-			// For HTML requests redirect to login, for API return 401
-			accept := r.Header.Get("Accept")
-			if strings.Contains(accept, "text/html") {
-				http.Redirect(w, r, "/login/?next="+r.URL.RequestURI(), http.StatusFound)
-				return
-			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		fileServer.ServeHTTP(w, r)
-	})
+	// Serve static files openly — auth is enforced client-side (sessionStorage)
+	// and on the API endpoints (withAuth middleware).
+	// Static HTML/JS/CSS files don't contain secrets so no server-side gate needed.
+	mux.Handle("/", fileServer)
 }
 
 func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
