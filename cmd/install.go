@@ -142,7 +142,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	for _, step := range steps {
 		fmt.Printf("%s... ", step.name)
 		if out, err := sshRunClient(client, step.script); err != nil {
-			return fmt.Errorf("%s failed:\n%s", step.name, out)
+			return fmt.Errorf("%s failed: %v\n%s", step.name, err, out)
 		}
 		fmt.Println("OK")
 	}
