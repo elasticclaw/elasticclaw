@@ -45,11 +45,18 @@ func init() {
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// Use /var/lib/elasticclaw/ when system config exists (/etc/elasticclaw/hub.yaml),
+	// otherwise fall back to ~/.elasticclaw/ for local dev.
+	var dir string
+	if _, err := os.Stat("/etc/elasticclaw/hub.yaml"); err == nil {
+		dir = "/var/lib/elasticclaw"
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir = filepath.Join(home, ".elasticclaw")
 	}
-	dir := filepath.Join(home, ".elasticclaw")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}

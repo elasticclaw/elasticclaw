@@ -69,10 +69,11 @@ func runHubServiceInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not resolve binary path: %w", err)
 	}
 
-	// Resolve home dir for WorkingDirectory
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "/root"
+	// Create standard dirs
+	for _, d := range []string{"/etc/elasticclaw", "/var/lib/elasticclaw"} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", d, err)
+		}
 	}
 
 	unit := fmt.Sprintf(`[Unit]
@@ -81,15 +82,15 @@ After=network.target
 
 [Service]
 Type=simple
-Environment=HOME=%s
+Environment=HOME=/root
 ExecStart=%s hub
 Restart=always
 RestartSec=5
-WorkingDirectory=%s
+WorkingDirectory=/var/lib/elasticclaw
 
 [Install]
 WantedBy=multi-user.target
-`, home, binaryPath, home)
+`, binaryPath)
 
 	fmt.Printf("Writing %s... ", systemdUnitPath)
 	if err := os.WriteFile(systemdUnitPath, []byte(unit), 0644); err != nil {
@@ -115,6 +116,10 @@ WantedBy=multi-user.target
 
 	fmt.Println()
 	fmt.Println("✓ ElasticClaw hub service installed and running")
+	fmt.Println()
+	fmt.Println("  Config:  /etc/elasticclaw/hub.yaml")
+	fmt.Println("  Data:    /var/lib/elasticclaw/")
+	fmt.Println()
 	fmt.Println("  systemctl status elasticclaw")
 	fmt.Println("  journalctl -u elasticclaw -f")
 	return nil
