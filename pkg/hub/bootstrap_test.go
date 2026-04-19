@@ -252,11 +252,86 @@ func TestBootstrapScript_Shellcheck(t *testing.T) {
 			cmd := exec.Command("shellcheck", "-s", "bash",
 				"-e", "SC1091", // don't check sourced files
 				"-e", "SC2086", // we're ok with unquoted vars in some places
+				"-e", "SC2016", // $() in single quotes is intentional (expands on remote host)
 				f.Name(),
 			)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Errorf("shellcheck failed for %s:\n%s", tc.name, string(out))
+			}
+		})
+	}
+}
+
+// ── Stdin-pipe parse test ──────────────────────────────────────────────
+
+// TestBootstrapScript_StdinExec executes the bootstrap script via stdin to bash with all
+// network/system commands stubbed out. This is the same code path as sshRun() which uses
+// sess.Stdin = strings.NewReader(script) piped to /bin/bash.
+// Catches heredoc-in-stdin parse bugs that shellcheck misses (shellcheck reads from a file,
+// bash -n also misses this since it doesn't actually consume heredoc bodies from stdin).
+func TestBootstrapScript_StdinExec(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+
+	cases := []struct {
+		name   string
+		params BootstrapParams
+	}{
+		{"base", baseParams()},
+		{"with_github", func() BootstrapParams {
+			p := baseParams()
+			p.HubCfg = &types.HubConfig{
+				GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
+				ClawToken:  "tok",
+			}
+			p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "org/repo", Permissions: "write"}}
+			return p
+		}()},
+		{"nix_enabled", func() BootstrapParams { p := baseParams(); p.Nix = true; return p }()},
+		// Regression: GitHub App configured but no repos — was producing empty { } group command
+		{"github_app_no_repos", func() BootstrapParams {
+			p := baseParams()
+			p.HubCfg = &types.HubConfig{
+				GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
+				ClawToken:  "tok",
+			}
+			p.GitHubRepos = nil // no repos
+			return p
+		}()},
+	}
+
+	// We need to verify heredoc-in-stdin parsing works.
+	// Strategy: prepend function stubs for every command and use a fake PATH
+	// so the script runs to completion without actually doing anything.
+	stubScript := `
+set +e
+# Stub everything
+for cmd in curl apt-get npm sudo systemctl git gh oras python3 gpg tee chmod mv nohup; do
+  eval "${cmd}() { return 0; }"
+done
+curl() { echo stub_curl_output; return 0; }
+openclaw() {
+  if [ "$1" = "--version" ]; then echo "OpenClaw 2026.1.0"; fi
+  return 0
+}
+`
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script := GenerateReplicatedBootstrapScript(tc.params)
+			// Replace set -euo pipefail with set -uo pipefail so stubs can fail gracefully
+			script = strings.Replace(script, "set -euo pipefail", "set -uo pipefail", 1)
+			full := stubScript + script
+			// Execute via stdin — same as sshRun()
+			cmd := exec.Command("bash")
+			cmd.Stdin = strings.NewReader(full)
+			out, err := cmd.CombinedOutput()
+			// We allow non-zero exit (stubs may fail mid-script)
+			// What we're checking is no *parse* error from the heredoc-in-stdin pattern
+			if err != nil && strings.Contains(string(out), "syntax error") {
+				t.Errorf("bash syntax error (stdin exec) for %s:\n%s", tc.name, string(out))
 			}
 		})
 	}

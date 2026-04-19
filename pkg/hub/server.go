@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -18,10 +19,10 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	vercelProvider "github.com/elasticclaw/elasticclaw/pkg/provider/vercel"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
@@ -45,8 +46,8 @@ type clawConn struct {
 	id             string
 	tenantID       string
 	conn           *websocket.Conn
-	contextUsage   int  // 0-100, updated from heartbeats
-	gatewayReady   bool // true once bridge reports gateway session established
+	contextUsage   int             // 0-100, updated from heartbeats
+	gatewayReady   bool            // true once bridge reports gateway session established
 	streamingBuf   strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID string          // pre-assigned message ID for the current stream
 }
@@ -89,8 +90,8 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		addr:     addr,
 		hubCfg:   hubCfg,
 		identity: id,
-		claws: make(map[string]*clawConn),
-		users: make(map[string]*userConn),
+		claws:    make(map[string]*clawConn),
+		users:    make(map[string]*userConn),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -312,14 +313,14 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	// Register MIME types that may not be set on the host OS
 	// (important for embedded static files served from Go)
 	for ext, mimeType := range map[string]string{
-		".js":   "application/javascript",
-		".mjs":  "application/javascript",
-		".css":  "text/css",
-		".html": "text/html",
-		".json": "application/json",
-		".svg":  "image/svg+xml",
-		".png":  "image/png",
-		".ico":  "image/x-icon",
+		".js":    "application/javascript",
+		".mjs":   "application/javascript",
+		".css":   "text/css",
+		".html":  "text/html",
+		".json":  "application/json",
+		".svg":   "image/svg+xml",
+		".png":   "image/png",
+		".ico":   "image/x-icon",
 		".woff2": "font/woff2",
 		".woff":  "font/woff",
 	} {
@@ -540,8 +541,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
 	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":   s.clawHubURL(),
-		"ELASTICCLAW_CLAW_ID":   clawID,
+		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
+		"ELASTICCLAW_CLAW_ID":    clawID,
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 	for k, v := range req.Env {
@@ -907,17 +908,17 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 							})
 							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-						// Send a silent wake message to trigger an intro response.
-						// Not stored in DB — invisible to user, just wakes the agent.
-						go func(c *clawConn) {
-							wakeMsg := types.HubMessage{
-								ID:      uuid.New().String(),
-								ClawID:  clawID,
-								Role:    "system",
-								Content: "Introduce yourself briefly and let the user know you're ready to help.",
-							}
-							_ = wsjson.Write(context.Background(), c.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
-						}(cc)
+							// Send a silent wake message to trigger an intro response.
+							// Not stored in DB — invisible to user, just wakes the agent.
+							go func(c *clawConn) {
+								wakeMsg := types.HubMessage{
+									ID:      uuid.New().String(),
+									ClawID:  clawID,
+									Role:    "system",
+									Content: "Introduce yourself briefly and let the user know you're ready to help.",
+								}
+								_ = wsjson.Write(context.Background(), c.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+							}(cc)
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
 							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
@@ -936,7 +937,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				if err := json.Unmarshal(payload, &chunk); err == nil && chunk.Content != "" {
 					s.broadcastToUsers(tenantID, types.WSMessage{
-						Type: "chunk",
+						Type:    "chunk",
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
 					})
 					// Buffer chunk and upsert partial message to DB so refreshes don't lose it
@@ -1347,8 +1348,8 @@ PYEOF`, defaultModel, anthropicKey)
 		// Let openclaw self-heal any remaining config schema issues
 		_ = exec("openclaw doctor fix", 20*time.Second,
 			"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
-			"export PATH=$NVM_DIR/current/bin:$PATH; "+
-			"openclaw doctor --fix 2>&1 || true")
+				"export PATH=$NVM_DIR/current/bin:$PATH; "+
+				"openclaw doctor --fix 2>&1 || true")
 	}
 
 	// Step 2c: Configure gateway bind/port and start it.
@@ -1486,9 +1487,7 @@ if command -v gh &>/dev/null; then
   GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
   if [ -n "$GH_TOKEN" ]; then
     echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
-    sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
-export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-PROFEOF
+    printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
     sudo chmod +x /etc/profile.d/elasticclaw-github.sh
   fi
 else
@@ -1944,7 +1943,6 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
-
 // randomHex returns a random hex string of n bytes (2*n hex chars).
 // mergeTags combines tags from all sources in priority order:
 // 1. auto tag (template:<name>)
@@ -2048,7 +2046,6 @@ echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null ||
 echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"`
 }
 
-
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.
 // When relay is not configured, returns an empty comment.
 func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
@@ -2098,6 +2095,7 @@ func buildLLMKeyEnv(keys map[string]string) string {
 	}
 	return b.String()
 }
+
 // buildGitHubCloneScript returns shell lines that clone repos into the current directory.
 func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	if len(repos) == 0 {
@@ -2125,19 +2123,7 @@ func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, re
 	clawToken := cfg.ClawToken
 	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
 	return fmt.Sprintf(`# Install GitHub credential helper
-sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
-#!/bin/bash
-# Git credential helper — fetches a fresh GitHub App installation token from the hub.
-response=$(curl -sf %q)
-if [ $? -ne 0 ] || [ -z "$response" ]; then
-  exit 1
-fi
-token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-echo "protocol=https"
-echo "host=github.com"
-echo "username=x-access-token"
-echo "password=$token"
-CREDEOF
+printf '%%s' '#!/bin/bash\n# Git credential helper — fetches a fresh GitHub App installation token from the hub.\nresponse=$(curl -sf %q)\nif [ $? -ne 0 ] || [ -z "$response" ]; then\n  exit 1\nfi\ntoken=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['"'"'token'"'"'])")\necho "protocol=https"\necho "host=github.com"\necho "username=x-access-token"\necho "password=$token"\n' | sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 
 # Install git + gh CLI
@@ -2160,9 +2146,7 @@ fi
 # Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
 if command -v gh &>/dev/null; then
   # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
-  sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFEOF'
-export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-PROFEOF
+  printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
   sudo chmod +x /etc/profile.d/elasticclaw-github.sh
   echo "GitHub profile.d configured"
 fi
@@ -2172,6 +2156,18 @@ echo "GitHub credential helper installed"
 # The agent can clone manually if this fails
 cd "$HOME/.openclaw/workspace" || true
 { %s } || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
+}
+
+// syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
+type syncedWriter struct {
+	buf *bytes.Buffer
+	mu  *sync.Mutex
+}
+
+func (w *syncedWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
 }
 
 // sshRun connects to host via the hub's SSH identity and runs a script.
@@ -2200,11 +2196,24 @@ func (s *Server) sshRun(user, host, script string) error {
 	}
 	defer sess.Close()
 
-	out, err := sess.CombinedOutput(script)
-	if err != nil {
-		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, string(out))
+	// Pipe the script to bash via stdin — avoids the server's default shell (/bin/sh,
+	// often dash on Ubuntu) which may not support bash-specific syntax.
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	syncWriter := &syncedWriter{buf: &buf, mu: &mu}
+	sess.Stdout = syncWriter
+	sess.Stderr = syncWriter
+	sess.Stdin = strings.NewReader(script)
+	if err := sess.Run("/bin/bash"); err != nil {
+		mu.Lock()
+		output := buf.String()
+		mu.Unlock()
+		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, output)
 	}
-	log.Printf("bootstrap output:\n%s", string(out))
+	mu.Lock()
+	output := buf.String()
+	mu.Unlock()
+	log.Printf("bootstrap output:\n%s", output)
 	return nil
 }
 
@@ -2369,8 +2378,8 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		// Check for resize message
 		var resizeMsg struct {
 			Type string `json:"type"`
-			Cols  uint32 `json:"cols"`
-			Rows  uint32 `json:"rows"`
+			Cols uint32 `json:"cols"`
+			Rows uint32 `json:"rows"`
 		}
 		if len(data) > 0 && data[0] == '{' {
 			if json.Unmarshal(data, &resizeMsg) == nil && resizeMsg.Type == "resize" {

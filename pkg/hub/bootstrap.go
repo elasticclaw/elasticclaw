@@ -82,40 +82,7 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --anthropic-api-key "$ANTHROPIC_API_KEY" \
     --gateway-bind loopback --gateway-port 18789 \
     --skip-daemon 2>/dev/null || true
-  python3 << 'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-try:
-    with open(path) as f:
-        config = json.load(f)
-except:
-    config = {}
-model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
-apiKey = os.environ.get('ANTHROPIC_API_KEY', 'placeholder')
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
-config['models'] = {
-    'providers': {
-        'anthropic': {
-            'apiKey': apiKey,
-            'baseUrl': 'https://api.anthropic.com',
-            'api': 'anthropic-messages',
-            'models': [
-                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
-                {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'api': 'anthropic-messages'},
-                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
-            ]
-        }
-    }
-}
-config.setdefault('gateway', {})['bind'] = 'loopback'
-config['gateway']['port'] = 18789
-gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
-if gw_password:
-    config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
-with open(path, 'w') as f:
-    json.dump(config, f, indent=2)
-print('OpenClaw config patched')
-PYEOF
+  printf 'import json, os\npath = os.path.expanduser('"'"'~/.openclaw/openclaw.json'"'"')\ntry:\n    with open(path) as f:\n        config = json.load(f)\nexcept:\n    config = {}\nmodel = os.environ.get('"'"'OPENCLAW_DEFAULT_MODEL'"'"', '"'"'anthropic/claude-sonnet-4-6'"'"')\napiKey = os.environ.get('"'"'ANTHROPIC_API_KEY'"'"', '"'"'placeholder'"'"')\nconfig.setdefault('"'"'agents'"'"', {}).setdefault('"'"'defaults'"'"', {})['"'"'model'"'"'] = model\nconfig['"'"'models'"'"'] = {\n    '"'"'providers'"'"': {\n        '"'"'anthropic'"'"': {\n            '"'"'apiKey'"'"': apiKey,\n            '"'"'baseUrl'"'"': '"'"'https://api.anthropic.com'"'"',\n            '"'"'api'"'"': '"'"'anthropic-messages'"'"',\n            '"'"'models'"'"': [\n                {'"'"'id'"'"': '"'"'claude-sonnet-4-6'"'"', '"'"'name'"'"': '"'"'Claude Sonnet 4.6'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'},\n                {'"'"'id'"'"': '"'"'claude-opus-4-5'"'"', '"'"'name'"'"': '"'"'Claude Opus 4.5'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'},\n                {'"'"'id'"'"': '"'"'claude-sonnet-4-5'"'"', '"'"'name'"'"': '"'"'Claude Sonnet 4.5'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'}\n            ]\n        }\n    }\n}\nconfig.setdefault('"'"'gateway'"'"', {})['"'"'bind'"'"'] = '"'"'loopback'"'"'\nconfig['"'"'gateway'"'"']['"'"'port'"'"'] = 18789\ngw_password = os.environ.get('"'"'ELASTICCLAW_GATEWAY_PASSWORD'"'"', '"'"''"'"')\nif gw_password:\n    config['"'"'gateway'"'"']['"'"'auth'"'"'] = {'"'"'mode'"'"': '"'"'password'"'"', '"'"'password'"'"': gw_password}\nwith open(path, '"'"'w'"'"') as f:\n    json.dump(config, f, indent=2)\nprint('"'"'OpenClaw config patched'"'"')\n' | python3
 fi
 
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
