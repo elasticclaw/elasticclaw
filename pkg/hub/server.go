@@ -307,6 +307,15 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	} {
 		mime.AddExtensionType(ext, mimeType)
 	}
+	// Log what's in the embedded FS for debugging
+	if entries, err2 := fs.ReadDir(staticFS, "."); err2 == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		log.Printf("[webui] embedded files: %v", names)
+	}
+
 	// Wrap file server to serve index.html for directory requests
 	// (needed for Next.js static export with trailingSlash: true)
 	rawFS := http.FileServer(http.FS(staticFS))
