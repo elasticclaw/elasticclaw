@@ -252,6 +252,7 @@ func TestBootstrapScript_Shellcheck(t *testing.T) {
 			cmd := exec.Command("shellcheck", "-s", "bash",
 				"-e", "SC1091", // don't check sourced files
 				"-e", "SC2086", // we're ok with unquoted vars in some places
+				"-e", "SC2016", // $() in single quotes is intentional (expands on remote host)
 				f.Name(),
 			)
 			out, err := cmd.CombinedOutput()
