@@ -18,7 +18,7 @@ interface UseWindowedMessages {
   hasOlder: boolean
   loadingOlder: boolean
   loadOlder: () => Promise<void>
-  scrollRef: React.RefObject<HTMLDivElement>
+  scrollRef: React.RefObject<HTMLDivElement | null>
   onScroll: () => void
 }
 
