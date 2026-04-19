@@ -1,4 +1,5 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
+import { getHubUrl, setHubUrl } from "./hub-url"
 
 // Token is resolved once and cached.
 // Priority: sessionStorage (set on login) > /api/hub-config (proxy to hub)
@@ -24,11 +25,16 @@ export function resolveToken(): Promise<string> {
   }
 
   // Fall back to hub-config proxy (supports dev mode with Next.js)
-  _tokenPromise = fetch("/api/hub-config")
+  const hubUrl = getHubUrl()
+  const hubConfigUrl = hubUrl ? `${hubUrl}/api/hub-config` : "/api/hub-config"
+
+  _tokenPromise = fetch(hubConfigUrl, {
+    headers: { Authorization: `Bearer ${sessionStorage.getItem("ec_ui_token") || ""}` }
+  })
     .then((r) => r.json())
     .then((d) => {
       _token = d.token || ""
-      _hubUrl = d.hubUrl || null
+      if (d.hubUrl) setHubUrl(d.hubUrl)
       return _token!
     })
     .catch(() => {
@@ -55,7 +61,8 @@ if (typeof window !== "undefined") {
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
-  const url = `/hub${path}`
+  const hubBase = getHubUrl()
+  const url = hubBase ? `${hubBase}${path}` : `/hub${path}`
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -105,15 +112,15 @@ export async function killClaw(id: string): Promise<void> {
 
 export function getHubWsUrl(): string {
   const token = getTokenSync()
-  // Use the browser's own origin so WebSocket goes through Caddy/reverse proxy
-  // Caddy routes /api/ws* → hub:8080
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  const hub = getHubUrl() || window.location.origin
+  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
   return `${wsBase}/api/ws?token=${encodeURIComponent(token)}`
 }
 
 export function getTerminalWsUrl(clawId: string): string {
   const token = getTokenSync()
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  const hub = getHubUrl() || window.location.origin
+  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
   return `${wsBase}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
 }
 

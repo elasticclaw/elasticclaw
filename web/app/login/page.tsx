@@ -2,6 +2,7 @@
 
 import { useState, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { getHubUrl } from "@/lib/hub-url"
 
 function LoginForm() {
   const router = useRouter()
@@ -18,7 +19,9 @@ function LoginForm() {
     setError("")
 
     try {
-      const res = await fetch("/api/auth/login", {
+      const hubUrl = getHubUrl()
+      const loginUrl = hubUrl ? `${hubUrl}/api/auth/login` : "/api/auth/login"
+      const res = await fetch(loginUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),

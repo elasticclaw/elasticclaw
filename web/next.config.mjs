@@ -8,20 +8,8 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  // Dev only: proxy /hub/* and /api/* to the hub
-  ...(isDev && {
-    async rewrites() {
-      const hubUrl =
-        process.env.ELASTICCLAW_HUB_URL ||
-        process.env.HUB_URL ||
-        "http://localhost:8080"
-      return [
-        { source: "/hub/:path*", destination: `${hubUrl}/:path*` },
-        { source: "/api/auth/:path*", destination: `${hubUrl}/api/auth/:path*` },
-        { source: "/api/hub-config", destination: `${hubUrl}/api/hub-config` },
-      ]
-    },
-  }),
+  // No rewrites needed — in dev, the browser calls the hub directly via NEXT_PUBLIC_HUB_URL
+  // In production, the hub serves the static files so everything is same-origin
 }
 
 export default nextConfig
