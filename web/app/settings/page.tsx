@@ -320,14 +320,22 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       {settings.github?.length > 0 && (
         <div className="mb-6 space-y-2">
           {settings.github.map(app => (
-            <div key={app.appId} className="border border-border rounded-lg p-4 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">App ID: {app.appId}</p>
-                {app.url && <p className="text-xs text-muted-foreground">{app.url}</p>}
+            <div key={app.appId} className="border border-border rounded-lg p-4">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <p className="text-sm font-medium">App ID: {app.appId}</p>
+                  {app.url && <p className="text-xs text-muted-foreground">{app.url}</p>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={cn("text-xs px-2 py-1 rounded", app.keySet ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
+                    {app.keySet ? "Key set" : "No key"}
+                  </span>
+                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
+                    onClick={() => onSave({ github: settings.github.filter(a => a.appId !== app.appId) })}>
+                    Remove
+                  </Button>
+                </div>
               </div>
-              <span className={cn("text-xs px-2 py-1 rounded", app.keySet ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
-                {app.keySet ? "Key set" : "No key"}
-              </span>
             </div>
           ))}
         </div>
