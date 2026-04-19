@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
@@ -95,7 +98,13 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 }
 
 // Run starts the HTTP server (blocking).
-func (s *Server) Run() error {
+// RunOptions configures runtime behavior of the hub.
+type RunOptions struct {
+	NoWebUI bool // skip serving embedded web UI (use in dev when Next.js runs separately)
+}
+
+func (s *Server) Run(opts ...RunOptions) error {
+	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
 
@@ -107,6 +116,10 @@ func (s *Server) Run() error {
 
 	// REST API
 	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
+	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
+	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
+	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -133,6 +146,18 @@ func (s *Server) Run() error {
 		s.mu.RUnlock()
 		jsonOK(w, out)
 	}))
+
+	// Serve embedded web UI (static export)
+	if noWebUI {
+		log.Printf("[hub] web UI disabled (--no-web-ui)")
+	} else if webFS, err := webui.FS(); err == nil {
+		if _, placeholderErr := webFS.Open("placeholder.txt"); placeholderErr == nil {
+			log.Printf("[hub] web UI not built — run: make build-web")
+		} else {
+			s.serveWebUI(mux, webFS)
+			log.Printf("[hub] serving embedded web UI")
+		}
+	}
 
 	// Connect to relay if configured
 	relayURL := s.hubCfg.RelayURL
@@ -205,6 +230,118 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
+
+// ─── Web UI auth (for embedded/static web UI) ───────────────────────────────────
+// These endpoints validate the UI password (ui_token) and return a session token
+// the browser stores and sends as Authorization: Bearer <token>.
+
+const webSessionHeader = "X-Elasticclaw-Session"
+
+func (s *Server) resolveUIToken() string {
+	if s.hubCfg.UIToken != "" {
+		return s.hubCfg.UIToken
+	}
+	return "admin"
+}
+
+func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		if token != s.resolveUIToken() {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if body.Password != s.resolveUIToken() {
+		http.Error(w, "invalid password", http.StatusUnauthorized)
+		return
+	}
+	// Return the UI token as the session token
+	// The client stores it in sessionStorage and sends as Bearer
+	jsonOK(w, map[string]interface{}{
+		"ok":    true,
+		"token": s.resolveUIToken(),
+		"hubToken": s.hubCfg.Token,
+	})
+}
+
+func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
+	fileServer := http.FileServer(http.FS(staticFS))
+	uiToken := s.resolveUIToken()
+
+	// Auth gate for the web UI files
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Login page always passes through
+		if r.URL.Path == "/login" || r.URL.Path == "/login/" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// Static assets pass through
+		if strings.HasPrefix(r.URL.Path, "/_next/") ||
+			strings.HasSuffix(r.URL.Path, ".png") ||
+			strings.HasSuffix(r.URL.Path, ".svg") ||
+			strings.HasSuffix(r.URL.Path, ".ico") {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// Check session token
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		if token != uiToken {
+			// For HTML requests redirect to login, for API return 401
+			accept := r.Header.Get("Accept")
+			if strings.Contains(accept, "text/html") {
+				http.Redirect(w, r, "/login/?next="+r.URL.RequestURI(), http.StatusFound)
+				return
+			}
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
+	hubURL := s.hubCfg.URL
+	if s.hubCfg.PublicURL != "" {
+		hubURL = s.hubCfg.PublicURL
+	}
+	if hubURL == "" {
+		hubURL = "http://localhost:8080"
+	}
+	jsonOK(w, map[string]interface{}{
+		"token":  s.hubCfg.Token,
+		"hubUrl": hubURL,
+	})
+}
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

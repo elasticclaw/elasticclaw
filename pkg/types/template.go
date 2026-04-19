@@ -112,6 +112,10 @@ type HubConfig struct {
 	RelaySecret string `yaml:"relay_secret,omitempty"`
 
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
+
+	// UIToken is the password for the web UI. If not set, defaults to "admin".
+	// The hub validates this on /api/auth/login and returns a session token.
+	UIToken string `yaml:"ui_token,omitempty"`
 }
 
 type ProviderConfig struct {

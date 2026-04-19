@@ -1,6 +1,7 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
 
-// Token is resolved once and cached — fetched from /api/hub-config on first use
+// Token is resolved once and cached.
+// Priority: sessionStorage (set on login) > /api/hub-config (proxy to hub)
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
 let _hubUrl: string | null = null
@@ -10,11 +11,19 @@ export function resolveToken(): Promise<string> {
   if (_tokenPromise) return _tokenPromise
 
   if (typeof window === "undefined") {
-    // Server-side
-    _token = process.env.HUB_TOKEN || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
+    // Server-side: no token (hub is the authority)
+    _token = ""
     return Promise.resolve(_token)
   }
 
+  // Check sessionStorage first (set by login page)
+  const stored = sessionStorage.getItem("ec_hub_token")
+  if (stored) {
+    _token = stored
+    return Promise.resolve(_token)
+  }
+
+  // Fall back to hub-config proxy (supports dev mode with Next.js)
   _tokenPromise = fetch("/api/hub-config")
     .then((r) => r.json())
     .then((d) => {
@@ -23,8 +32,8 @@ export function resolveToken(): Promise<string> {
       return _token!
     })
     .catch(() => {
-      _token = process.env.NEXT_PUBLIC_HUB_TOKEN || ""
-      return _token!
+      _token = ""
+      return ""
     })
 
   return _tokenPromise
@@ -32,7 +41,11 @@ export function resolveToken(): Promise<string> {
 
 // Sync getter — returns cached token or empty string; call resolveToken() first
 function getTokenSync(): string {
-  return _token || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
+  if (_token) return _token
+  if (typeof window !== "undefined") {
+    return sessionStorage.getItem("ec_hub_token") || ""
+  }
+  return ""
 }
 
 // Pre-fetch token on module load (client-side)

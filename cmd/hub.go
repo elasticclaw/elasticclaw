@@ -15,6 +15,7 @@ var (
 	hubDBPath      string
 	hubToken       string
 	hubClawToken   string
+	hubNoWebUI     bool
 )
 
 var hubCmd = &cobra.Command{
@@ -38,6 +39,7 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().BoolVar(&hubNoWebUI, "no-web-ui", false, "disable embedded web UI (use when running Next.js dev server separately)")
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
@@ -137,5 +139,5 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	return s.Run()
+	return s.Run(hub.RunOptions{NoWebUI: hubNoWebUI})
 }

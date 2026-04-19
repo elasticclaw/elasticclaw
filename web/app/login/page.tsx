@@ -25,6 +25,10 @@ function LoginForm() {
       })
 
       if (res.ok) {
+        const data = await res.json()
+        // Store both tokens in sessionStorage for client-side use
+        sessionStorage.setItem("ec_ui_token", data.token)
+        if (data.hubToken) sessionStorage.setItem("ec_hub_token", data.hubToken)
         router.push(next)
         router.refresh()
       } else {
