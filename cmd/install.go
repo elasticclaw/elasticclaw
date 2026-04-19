@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -264,8 +265,13 @@ func sshRunClient(client *gossh.Client, script string) (string, error) {
 		return "", err
 	}
 	defer sess.Close()
-	out, err := sess.CombinedOutput(script)
-	return string(out), err
+	// Pipe script to bash stdin so multi-line scripts work with any shell
+	sess.Stdin = strings.NewReader(script)
+	var buf bytes.Buffer
+	sess.Stdout = &buf
+	sess.Stderr = &buf
+	err = sess.Run("bash")
+	return buf.String(), err
 }
 
 func randomHex32() string {
