@@ -15,6 +15,7 @@ var (
 	hubDBPath      string
 	hubToken       string
 	hubClawToken   string
+	hubUIToken     string
 	hubNoWebUI     bool
 )
 
@@ -39,6 +40,7 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().StringVar(&hubUIToken, "ui-token", "", "web UI login password (default: value from hub.yaml ui_token, or 'admin')")
 	hubCmd.Flags().BoolVar(&hubNoWebUI, "no-web-ui", false, "disable embedded web UI (use when running Next.js dev server separately)")
 }
 
@@ -70,6 +72,11 @@ func runHub(cmd *cobra.Command, args []string) error {
 		if hubCfg.LLMKeys["anthropic"] == "" {
 			hubCfg.LLMKeys["anthropic"] = apiKey
 		}
+	}
+
+	// CLI flag overrides yaml for ui_token
+	if hubUIToken != "" {
+		hubCfg.UIToken = hubUIToken
 	}
 
 	hub.Version = Version // propagate build-time version for bridge download URL
