@@ -11,6 +11,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -318,38 +319,48 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 
 	// Wrap file server to serve index.html for directory requests
 	// (needed for Next.js static export with trailingSlash: true)
-	rawFS := http.FileServer(http.FS(staticFS))
-	fileServer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		// Next.js static export: every route has an index.html in its directory.
-		// Serve index.html directly for directory-style paths to avoid redirect loops.
-		paths := []string{p}
-		if p == "" || p == "/" {
-			paths = []string{"/index.html"}
-		} else {
-			// Try path as-is, then with /index.html appended
-			paths = append(paths, strings.TrimRight(p, "/")+"/index.html")
-		}
-		for _, try := range paths {
-			f, err := staticFS.Open(strings.TrimPrefix(try, "/"))
-			if err != nil {
-				continue
-			}
-			stat, serr := f.Stat()
-			f.Close()
-			if serr != nil || stat.IsDir() {
-				continue
-			}
-			// Found a file — serve it
-			r2 := r.Clone(r.Context())
-			r2.URL.Path = try
-			rawFS.ServeHTTP(w, r2)
+	serveFile := func(w http.ResponseWriter, r *http.Request, path string) {
+		content, err := fs.ReadFile(staticFS, path)
+		if err != nil {
+			http.NotFound(w, r)
 			return
 		}
-		// Fall back to SPA root for unknown paths (client-side routing)
-		r2 := r.Clone(r.Context())
-		r2.URL.Path = "/index.html"
-		rawFS.ServeHTTP(w, r2)
+		ext := filepath.Ext(path)
+		if ct, ok := map[string]string{
+			".html": "text/html; charset=utf-8",
+			".js":   "application/javascript",
+			".css":  "text/css",
+			".json": "application/json",
+			".svg":  "image/svg+xml",
+			".png":  "image/png",
+			".ico":  "image/x-icon",
+			".txt":  "text/plain",
+		}[ext]; ok {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.Write(content)
+	}
+
+	fileServer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			p = "index.html"
+		}
+		// Try exact path first
+		if _, err := staticFS.Open(p); err == nil {
+			f, _ := staticFS.Open(p)
+			stat, _ := f.Stat()
+			f.Close()
+			if stat != nil && !stat.IsDir() {
+				serveFile(w, r, p)
+				return
+			}
+			// It's a dir — try index.html inside
+			serveFile(w, r, strings.TrimRight(p, "/")+"/index.html")
+			return
+		}
+		// Unknown path — serve root index.html (SPA fallback)
+		serveFile(w, r, "index.html")
 	})
 
 	// Serve static files openly — auth is enforced client-side (sessionStorage)
