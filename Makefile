@@ -22,12 +22,13 @@ build-dev:
 build-web:
 	@command -v npm >/dev/null 2>&1 || (echo "❌ npm not found in PATH — install Node.js" && exit 1)
 	cd web && npm install && npm run build
+	mkdir -p internal/webui/out
 	rm -rf internal/webui/out && cp -r web/out internal/webui/out
 
 # Full production build — compiles web UI then embeds in Go binary.
 build-release: build-web
 	mkdir -p bin
-	go build $(LDFLAGS) -o bin/elasticclaw .
+	go build $(LDFLAGS) -tags embedweb -o bin/elasticclaw .
 
 
 build-bridge:
