@@ -33,7 +33,7 @@ func TestHubConfig(t *testing.T) {
 	assertContains(t, cfg, "hub.example.com", "domain in config")
 	assertContains(t, cfg, "test-hub-token", "hub token in config")
 	assertContains(t, cfg, "test-claw-token", "claw token in config")
-	assertContains(t, cfg, "test-ui-token", "ui token in config")
+	assertContains(t, cfg, "test-ui-password", "ui password in config")
 	assertContains(t, cfg, ":8080", "port in config")
 }
 
@@ -46,7 +46,7 @@ func TestHubConfig_DoesNotContainOtherTokens(t *testing.T) {
 	if !strings.Contains(cfg, "claw_token: test-claw-token") {
 		t.Error("claw_token field missing or wrong")
 	}
-	if !strings.Contains(cfg, "ui_token: test-ui-token") {
+	if !strings.Contains(cfg, "ui_password: test-ui-password") {
 		t.Error("ui_token field missing or wrong")
 	}
 }
@@ -78,7 +78,7 @@ func TestScriptInstallBinary(t *testing.T) {
 	assertContains(t, s, "curl -fsSL", "curl download")
 	assertContains(t, s, "v0.0.3", "version in URL")
 	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
-	assertContains(t, s, "elasticclaw --version", "verify install")
+	assertContains(t, s, "elasticclaw-bin", "binary download")
 }
 
 func TestScriptWriteConfig(t *testing.T) {
