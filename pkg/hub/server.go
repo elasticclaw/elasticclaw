@@ -252,8 +252,8 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		// Hub token doubles as the web session token — simple, one token
-		if token != s.hubCfg.Token {
+		// Hub token doubles as the web session token — reject empty tokens even if hub token is unset
+		if token == "" || token != s.hubCfg.Token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -347,8 +347,7 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 			p = "index.html"
 		}
 		// Try exact path first
-		if _, err := staticFS.Open(p); err == nil {
-			f, _ := staticFS.Open(p)
+		if f, err := staticFS.Open(p); err == nil {
 			stat, _ := f.Stat()
 			f.Close()
 			if stat != nil && !stat.IsDir() {

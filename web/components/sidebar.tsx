@@ -261,7 +261,8 @@ export function Sidebar({
           onClick={async () => {
             const token = sessionStorage.getItem("ec_hub_token") || ""
             if (token) {
-              const hubUrl = process.env.NEXT_PUBLIC_HUB_URL || ""
+              const { getHubUrl } = await import("@/lib/hub-url")
+              const hubUrl = getHubUrl()
               const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
               await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
             }

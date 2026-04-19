@@ -5,7 +5,6 @@ import { getHubUrl, setHubUrl } from "./hub-url"
 // Priority: sessionStorage (set on login) > /api/hub-config (proxy to hub)
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
-let _hubUrl: string | null = null
 
 export function resolveToken(): Promise<string> {
   if (_token !== null) return Promise.resolve(_token)
@@ -34,7 +33,6 @@ export function resolveToken(): Promise<string> {
     .then((r) => r.json())
     .then((d) => {
       _token = d.token || ""
-      if (d.hubUrl) setHubUrl(d.hubUrl)
       return _token!
     })
     .catch(() => {
@@ -135,7 +133,6 @@ export function saveConfig(_hubUrl: string, _token: string) {
 export function clearConfig() {
   _token = null
   _tokenPromise = null
-  _hubUrl = null
   if (typeof window !== "undefined") {
     sessionStorage.removeItem("ec_hub_token")
   }
