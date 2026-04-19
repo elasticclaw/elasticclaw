@@ -2156,6 +2156,7 @@ echo "GitHub credential helper installed"
 # The agent can clone manually if this fails
 cd "$HOME/.openclaw/workspace" || true
 (
+set +e
 %s) || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
 }
 

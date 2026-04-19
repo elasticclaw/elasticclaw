@@ -146,8 +146,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("  Login: elasticclaw login --hub https://%s --token %s\n", installDomain, token)
 	fmt.Printf("  Web UI: https://%s\n", installDomain)
-	skipCaddyFinal, _ := cmd.Flags().GetBool("skip-caddy")
-	if !skipCaddyFinal {
+	if !skipCaddy {
 		fmt.Println()
 		fmt.Println("  ⏳ Caddy is obtaining a TLS certificate from Let's Encrypt.")
 		fmt.Println("     This may take a minute. If the site is unreachable, wait 60s and try again.")
