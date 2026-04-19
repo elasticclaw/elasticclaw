@@ -475,7 +475,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Check provider is configured
+	s.mu.RLock()
 	provCfg, ok := s.hubCfg.Providers[req.Provider]
+	s.mu.RUnlock()
 	if !ok {
 		http.Error(w, fmt.Sprintf("provider %q is not configured on this hub", req.Provider), http.StatusUnprocessableEntity)
 		return
@@ -1282,12 +1284,14 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		defaultModel = "anthropic/claude-sonnet-4-6"
 	}
 	if anthropicKey == "" {
+		s.mu.RLock()
 		for k, v := range s.hubCfg.LLMKeys {
 			if k == "anthropic" {
 				anthropicKey = v
 				break
 			}
 		}
+		s.mu.RUnlock()
 	}
 	if anthropicKey != "" {
 		configPatch := fmt.Sprintf(`
@@ -1409,14 +1413,18 @@ ELASTICCLAW_EOF`,
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
-	if len(s.hubCfg.GitHubApps) > 0 {
+	s.mu.RLock()
+	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if hasGitHubApps {
 		var githubRepos []types.GitHubRepoAccess
 		var reposJSON string
 		_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
 		_ = json.Unmarshal([]byte(reposJSON), &githubRepos)
 
 		// Use local HTTP proxy (bridge listens on 18790, proxies to hub)
-		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, s.hubCfg.ClawToken)
+		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
@@ -1645,7 +1653,9 @@ func (s *Server) pollProviderStatus() {
 }
 
 func (s *Server) syncReplicatedVMs() {
+	s.mu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
+	s.mu.RUnlock()
 	if !ok || replicatedCfg.Token == "" {
 		return
 	}
@@ -1820,6 +1830,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
 
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys)
+	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
+	s.mu.RUnlock()
+
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -1831,12 +1846,15 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		Nix:             nixEnabled != 0,
 		HubCfg:          s.hubCfg,
 		GitHubRepos:     githubRepos,
-		LLMKeyEnv:       buildLLMKeyEnv(s.hubCfg.LLMKeys),
+		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
-		RelayEnv:        buildRelayEnv(s.hubCfg, s.identity.PublicKey),
+		RelayEnv:        relayEnv,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
-	if len(s.hubCfg.GitHubApps) > 0 && len(githubRepos) > 0 {
+	s.mu.RLock()
+	hasGitHubApps2 := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
+	if hasGitHubApps2 && len(githubRepos) > 0 {
 		repoLines := ""
 		for _, r := range githubRepos {
 			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
@@ -2337,7 +2355,9 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.
 func (s *Server) terminateReplicatedVM(vmID string) {
+	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["replicated"]
+	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateReplicatedVM: no replicated provider configured")
 		return
@@ -2361,7 +2381,10 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 // URL: GET /api/github/token/:clawId
 // Used by the git credential helper on the VM.
 func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
-	if len(s.hubCfg.GitHubApps) == 0 {
+	s.mu.RLock()
+	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
+	if !hasGitHubApps {
 		http.Error(w, "no github apps configured", http.StatusNotImplemented)
 		return
 	}
@@ -2424,7 +2447,10 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
-	for i, appCfg := range s.hubCfg.GitHubApps {
+	s.mu.RLock()
+	githubApps := s.hubCfg.GitHubApps
+	s.mu.RUnlock()
+	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)

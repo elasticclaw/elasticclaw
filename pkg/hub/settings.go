@@ -72,6 +72,7 @@ type GitHubAppPatch struct {
 }
 
 func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
 	hasProvider := false
 	for _, p := range s.hubCfg.Providers {
 		if p.Token != "" || p.APIKey != "" {
@@ -81,6 +82,7 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	hasLLMKey := len(s.hubCfg.LLMKeys) > 0
 	hasGitHub := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
 
 	jsonOK(w, SettingsStatus{
 		HasProvider: hasProvider,
@@ -107,6 +109,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		GitHub:    []GitHubAppView{},
 	}
 
+	s.mu.RLock()
 	// Mask LLM keys — show prefix only
 	for provider, key := range s.hubCfg.LLMKeys {
 		if len(key) > 8 {
@@ -146,6 +149,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			KeySet: app.PrivateKeyPEM != "",
 		})
 	}
+	s.mu.RUnlock()
 
 	jsonOK(w, view)
 }
@@ -157,28 +161,47 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update in-memory config
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create a deep copy of the config to apply changes
+	updatedCfg := *s.hubCfg
+
 	// LLM keys
 	if patch.LLMKeys != nil {
-		if s.hubCfg.LLMKeys == nil {
-			s.hubCfg.LLMKeys = make(map[string]string)
+		if updatedCfg.LLMKeys == nil {
+			updatedCfg.LLMKeys = make(map[string]string)
+		} else {
+			// Deep copy the map
+			newKeys := make(map[string]string, len(updatedCfg.LLMKeys))
+			for k, v := range updatedCfg.LLMKeys {
+				newKeys[k] = v
+			}
+			updatedCfg.LLMKeys = newKeys
 		}
 		for k, v := range patch.LLMKeys {
 			if v == "" {
-				delete(s.hubCfg.LLMKeys, k)
+				delete(updatedCfg.LLMKeys, k)
 			} else {
-				s.hubCfg.LLMKeys[k] = v
+				updatedCfg.LLMKeys[k] = v
 			}
 		}
 	}
 
 	// Providers
 	if patch.Providers != nil {
-		if s.hubCfg.Providers == nil {
-			s.hubCfg.Providers = make(map[string]types.ProviderConfig)
+		if updatedCfg.Providers == nil {
+			updatedCfg.Providers = make(map[string]types.ProviderConfig)
+		} else {
+			// Deep copy the map
+			newProviders := make(map[string]types.ProviderConfig, len(updatedCfg.Providers))
+			for k, v := range updatedCfg.Providers {
+				newProviders[k] = v
+			}
+			updatedCfg.Providers = newProviders
 		}
 		for name, pp := range patch.Providers {
-			existing := s.hubCfg.Providers[name]
+			existing := updatedCfg.Providers[name]
 			switch name {
 			case "daytona":
 				if pp.APIURL != "" {
@@ -201,7 +224,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 					existing.DefaultInstanceType = pp.DefaultInstanceType
 				}
 			}
-			s.hubCfg.Providers[name] = existing
+			updatedCfg.Providers[name] = existing
 		}
 	}
 
@@ -226,24 +249,27 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			apps = append(apps, app)
 		}
-		s.hubCfg.GitHubApps = apps
+		updatedCfg.GitHubApps = apps
 	}
 
 	// UI password
 	if patch.UIPassword != "" {
-		s.hubCfg.UIPassword = patch.UIPassword
+		updatedCfg.UIPassword = patch.UIPassword
 	}
 
 	// SSH public keys (nil = no change, pointer to slice = replace all)
 	if patch.SSHPublicKeys != nil {
-		s.hubCfg.SSHPublicKeys = *patch.SSHPublicKeys
+		updatedCfg.SSHPublicKeys = *patch.SSHPublicKeys
 	}
 
-	// Save to disk
-	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+	// Save to disk before applying to in-memory config
+	if err := config.SaveHubConfig(&updatedCfg); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Only update in-memory config after successful disk write
+	s.hubCfg = &updatedCfg
 
 	jsonOK(w, map[string]bool{"ok": true})
 }
