@@ -90,21 +90,18 @@ export async function killClaw(id: string): Promise<void> {
   return apiFetch<void>(`/api/claws/${id}`, { method: "DELETE" })
 }
 
-// Get the hub's base WS URL — uses the hub URL directly (not proxied through Next.js)
-// so WebSocket upgrades work correctly regardless of how the web server is configured.
-function getHubWsBase(): string {
-  const hub = _hubUrl || "http://localhost:8080"
-  return hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-}
-
 export function getHubWsUrl(): string {
   const token = getTokenSync()
-  return `${getHubWsBase()}/api/ws?token=${encodeURIComponent(token)}`
+  // Use the browser's own origin so WebSocket goes through Caddy/reverse proxy
+  // Caddy routes /api/ws* → hub:8080
+  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  return `${wsBase}/api/ws?token=${encodeURIComponent(token)}`
 }
 
 export function getTerminalWsUrl(clawId: string): string {
   const token = getTokenSync()
-  return `${getHubWsBase()}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
+  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  return `${wsBase}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
 }
 
 export function isConfigured(): boolean {
