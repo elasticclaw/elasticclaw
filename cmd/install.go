@@ -270,7 +270,7 @@ func sshRunClient(client *gossh.Client, script string) (string, error) {
 	var buf bytes.Buffer
 	sess.Stdout = &buf
 	sess.Stderr = &buf
-	err = sess.Run("bash")
+	err = sess.Run("/bin/bash")
 	return buf.String(), err
 }
 
