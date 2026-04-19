@@ -76,3 +76,38 @@ jobs:
             dist/elasticclaw-windows-amd64.exe
             dist/claw-bridge-linux-amd64
             dist/checksums.txt
+
+  update-homebrew:
+    runs-on: depot-ubuntu-24.04
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}  # skip prereleases
+    steps:
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NO_V="${VERSION#v}"
+
+          SHA_ARM64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-arm64" | sha256sum | awk '{print $1}')
+          SHA_AMD64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-amd64" | sha256sum | awk '{print $1}')
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/elasticclaw/homebrew-elasticclaw.git" tap
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          awk -v arm_sha="${SHA_ARM64}" -v amd_sha="${SHA_AMD64}" -v ver="${VERSION_NO_V}" '
+            /version ".*"/ { sub(/version ".*"/, "version \"" ver "\"") }
+            /on_arm/ { in_arm=1 }
+            /on_intel/ { in_arm=0; in_amd=1 }
+            /end/ { in_arm=0; in_amd=0 }
+            in_arm && /sha256/ { sub(/sha256 ".*"/, "sha256 \"" arm_sha "\"") }
+            in_amd && /sha256/ { sub(/sha256 ".*"/, "sha256 \"" amd_sha "\"") }
+            { print }
+          ' Formula/elasticclaw.rb > Formula/elasticclaw.rb.tmp
+          mv Formula/elasticclaw.rb.tmp Formula/elasticclaw.rb
+
+          git add Formula/elasticclaw.rb
+          git diff --staged --quiet || git commit -m "elasticclaw ${VERSION}"
+          git push
