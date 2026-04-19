@@ -31,6 +31,21 @@ function LoginForm() {
         const data = await res.json()
         // One token for everything — hub API token stored in sessionStorage
         if (data.hubToken) sessionStorage.setItem("ec_hub_token", data.hubToken)
+        // Check if settings are required before going to main dashboard
+        try {
+          const { getHubUrl } = await import("@/lib/hub-url")
+          const hubUrl = getHubUrl()
+          const statusRes = await fetch(`${hubUrl}/api/settings/status`, {
+            headers: { Authorization: `Bearer ${data.hubToken}` },
+          })
+          if (statusRes.ok) {
+            const status = await statusRes.json()
+            if (!status.hasProvider || !status.hasLLMKey) {
+              router.push("/settings")
+              return
+            }
+          }
+        } catch { /* ignore — proceed to dashboard */ }
         router.push(next)
         router.refresh()
       } else {

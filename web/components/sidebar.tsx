@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -272,6 +272,15 @@ export function Sidebar({
         >
           <LogOut className="size-4" />
           Sign out
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+          onClick={() => { window.location.href = "/settings" }}
+        >
+          <Settings className="size-4" />
+          Settings
         </Button>
       </div>
     </aside>

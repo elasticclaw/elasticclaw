@@ -122,6 +122,8 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
+	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
