@@ -29,8 +29,8 @@ function LoginForm() {
 
       if (res.ok) {
         const data = await res.json()
-        // Store both tokens in sessionStorage for client-side use
-        sessionStorage.setItem("ec_ui_token", data.token)
+        // Store session token (for hub-config auth) and hub API token separately
+        if (data.session) sessionStorage.setItem("ec_ui_token", data.session)
         if (data.hubToken) sessionStorage.setItem("ec_hub_token", data.hubToken)
         router.push(next)
         router.refresh()
