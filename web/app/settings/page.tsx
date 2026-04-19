@@ -201,9 +201,18 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
             <div className="border-t border-border mt-4 pt-4">
               <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
               <p className="text-xs text-muted-foreground mb-3">Public keys injected into Replicated VMs at bootstrap for direct SSH access.</p>
-              {(settings.sshPublicKeys || []).map((key, i) => (
+              {(settings.sshPublicKeys || []).map((key, i) => {
+                const parts = key.trim().split(/\s+/)
+                const keyType = parts[0] || ""
+                const comment = parts[2] || ""
+                const keyBody = parts[1] || ""
+                const shortKey = keyBody.length > 12 ? keyBody.slice(0, 8) + "..." + keyBody.slice(-4) : keyBody
+                return (
                 <div key={i} className="flex items-center gap-2 mb-2">
-                  <code className="flex-1 text-xs bg-secondary px-2 py-1 rounded truncate">{key}</code>
+                  <div className="flex-1 min-w-0">
+                    <code className="text-xs font-mono">{keyType} {shortKey}</code>
+                    {comment && <span className="ml-2 text-xs text-muted-foreground">{comment}</span>}
+                  </div>
                   <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
                     onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
                     Remove
