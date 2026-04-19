@@ -321,24 +321,35 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	rawFS := http.FileServer(http.FS(staticFS))
 	fileServer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
+		// Next.js static export: every route has an index.html in its directory.
+		// Serve index.html directly for directory-style paths to avoid redirect loops.
+		paths := []string{p}
 		if p == "" || p == "/" {
+			paths = []string{"/index.html"}
+		} else {
+			// Try path as-is, then with /index.html appended
+			paths = append(paths, strings.TrimRight(p, "/")+"/index.html")
+		}
+		for _, try := range paths {
+			f, err := staticFS.Open(strings.TrimPrefix(try, "/"))
+			if err != nil {
+				continue
+			}
+			stat, serr := f.Stat()
+			f.Close()
+			if serr != nil || stat.IsDir() {
+				continue
+			}
+			// Found a file — serve it
 			r2 := r.Clone(r.Context())
-			r2.URL.Path = "/index.html"
+			r2.URL.Path = try
 			rawFS.ServeHTTP(w, r2)
 			return
 		}
-		f, err := staticFS.Open(strings.TrimPrefix(p, "/"))
-		if err == nil {
-			stat, serr := f.Stat()
-			f.Close()
-			if serr == nil && stat.IsDir() {
-				r2 := r.Clone(r.Context())
-				r2.URL.Path = strings.TrimRight(p, "/") + "/index.html"
-				rawFS.ServeHTTP(w, r2)
-				return
-			}
-		}
-		rawFS.ServeHTTP(w, r)
+		// Fall back to SPA root for unknown paths (client-side routing)
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/index.html"
+		rawFS.ServeHTTP(w, r2)
 	})
 
 	// Serve static files openly — auth is enforced client-side (sessionStorage)
