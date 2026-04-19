@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils"
 type Section = "runtimes" | "llm" | "github" | "security"
 
 interface SettingsData {
-  llmKeys: Record<string, string>
+  llmKeys: Record<string, boolean>
   providers: Record<string, {
     type: string
     enabled: boolean
@@ -291,7 +291,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
             <div className="flex gap-2">
               <Input
                 type="password"
-                placeholder={settings.llmKeys?.[id] ? `${settings.llmKeys[id]}` : placeholder}
+                placeholder={settings.llmKeys?.[id] ? "••••••••••• (set)" : placeholder}
                 value={keys[id] || ""}
                 onChange={e => setKeys(prev => ({ ...prev, [id]: e.target.value }))}
                 className="h-8 text-sm flex-1"

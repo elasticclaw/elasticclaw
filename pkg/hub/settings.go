@@ -19,10 +19,10 @@ type SettingsStatus struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys       map[string]string      `json:"llmKeys"`       // provider → masked key
-	Providers     map[string]ProviderView `json:"providers"`     // provider name → config (tokens masked)
-	GitHub        []GitHubAppView        `json:"github"`
-	SSHPublicKeys []string               `json:"sshPublicKeys"` // extra keys added to all sandbox VMs
+	LLMKeys       map[string]bool         `json:"llmKeys"`   // provider → keySet
+	Providers     map[string]ProviderView `json:"providers"` // provider name → config (tokens masked)
+	GitHub        []GitHubAppView         `json:"github"`
+	SSHPublicKeys []string                `json:"sshPublicKeys"` // extra keys added to all sandbox VMs
 }
 
 type ProviderView struct {
@@ -39,19 +39,19 @@ type ProviderView struct {
 }
 
 type GitHubAppView struct {
-	AppID     int64  `json:"appId"`
-	URL       string `json:"url,omitempty"`
-	KeySet    bool   `json:"keySet"`
+	AppID  int64  `json:"appId"`
+	URL    string `json:"url,omitempty"`
+	KeySet bool   `json:"keySet"`
 }
 
 // SettingsPatch is the request body for PATCH /api/settings.
 // Only non-nil fields are updated.
 type SettingsPatch struct {
-	LLMKeys       map[string]string         `json:"llmKeys,omitempty"`
-	Providers     map[string]ProviderPatch  `json:"providers,omitempty"`
-	GitHub        []GitHubAppPatch          `json:"github,omitempty"`
-	UIPassword    string                    `json:"uiPassword,omitempty"`
-	SSHPublicKeys *[]string                 `json:"sshPublicKeys,omitempty"` // nil = no change, [] = clear all
+	LLMKeys       map[string]string        `json:"llmKeys,omitempty"`
+	Providers     map[string]ProviderPatch `json:"providers,omitempty"`
+	GitHub        []GitHubAppPatch         `json:"github,omitempty"`
+	UIPassword    string                   `json:"uiPassword,omitempty"`
+	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"` // nil = no change, [] = clear all
 }
 
 type ProviderPatch struct {
@@ -75,7 +75,7 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	hasProvider := false
 	for _, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" {
+		if p.Token != "" || p.APIKey != "" || p.AccessToken != "" || p.Enabled {
 			hasProvider = true
 			break
 		}
@@ -104,19 +104,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view := SettingsView{
-		LLMKeys:   make(map[string]string),
+		LLMKeys:   make(map[string]bool),
 		Providers: make(map[string]ProviderView),
 		GitHub:    []GitHubAppView{},
 	}
 
 	s.mu.RLock()
-	// Mask LLM keys — show prefix only
+	// LLM keys — boolean flag only
 	for provider, key := range s.hubCfg.LLMKeys {
-		if len(key) > 8 {
-			view.LLMKeys[provider] = key[:8] + "***"
-		} else if key != "" {
-			view.LLMKeys[provider] = "***"
-		}
+		view.LLMKeys[provider] = key != ""
 	}
 
 	// Providers
