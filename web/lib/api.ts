@@ -148,7 +148,7 @@ export function getConfig() {
   }
 }
 
-export async function patchClaw(clawId: string, patch: { tags?: string[]; color?: string }): Promise<void> {
+export async function patchClaw(clawId: string, patch: { name?: string; tags?: string[]; color?: string }): Promise<void> {
   await apiFetch(`/api/claws/${clawId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
