@@ -12,7 +12,6 @@ type Params struct {
 	Token        string
 	ClawToken    string
 	UIPassword   string
-	AnthropicKey string // optional; adds llm_keys to hub.yaml if set
 }
 
 // HubBinaryURL returns the GitHub releases download URL for the hub binary.
@@ -25,17 +24,13 @@ func HubBinaryURL(version string) string {
 
 // HubConfig returns the hub.yaml config file content.
 func HubConfig(p Params) string {
-	llmKeys := ""
-	if p.AnthropicKey != "" {
-		llmKeys = fmt.Sprintf("\nllm_keys:\n  anthropic: %s", p.AnthropicKey)
-	}
 	return fmt.Sprintf(`url: https://%s
 public_url: https://%s
 token: %s
 claw_token: %s
 ui_password: %s
-address: :8080%s
-`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIPassword, llmKeys)
+address: :8080
+`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIPassword)
 }
 
 // SystemdUnit returns the systemd unit file for the hub service.

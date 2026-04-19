@@ -122,6 +122,8 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
+	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -162,16 +164,23 @@ func (s *Server) Run(opts ...RunOptions) error {
 	}
 
 	// Connect to relay if configured
+	s.mu.RLock()
 	relayURL := s.hubCfg.RelayURL
+	relaySecret := s.hubCfg.RelaySecret
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	if relayURL != "" {
 		hubID := HubID(s.identity.PublicKey)
-		relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+		relayToken := RelayToken(relaySecret, hubID, clawToken)
 		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
 		log.Printf("[relay] connecting to %s", relayURL)
 		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
 	}
 
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
+	if s.hubCfg.UIPassword == "" {
+		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
+	}
 	return http.ListenAndServe(s.addr, corsMiddleware(mux))
 }
 
@@ -240,6 +249,8 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 const webSessionHeader = "X-Elasticclaw-Session"
 
 func (s *Server) resolveUIPassword() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.hubCfg.UIPassword != "" {
 		return s.hubCfg.UIPassword
 	}
@@ -253,7 +264,10 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		// Hub token doubles as the web session token — reject empty tokens even if hub token is unset
-		if token == "" || token != s.hubCfg.Token {
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		s.mu.RUnlock()
+		if token == "" || token != hubToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -277,9 +291,12 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
+	s.mu.RLock()
+	hubToken := s.hubCfg.Token
+	s.mu.RUnlock()
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
-		"hubToken": s.hubCfg.Token, // hub API token — browser uses for all hub calls
+		"hubToken": hubToken, // hub API token — browser uses for all hub calls
 	})
 }
 
@@ -369,15 +386,18 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 }
 
 func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
 	hubURL := s.hubCfg.URL
 	if s.hubCfg.PublicURL != "" {
 		hubURL = s.hubCfg.PublicURL
 	}
+	token := s.hubCfg.Token
+	s.mu.RUnlock()
 	if hubURL == "" {
 		hubURL = "http://localhost:8080"
 	}
 	jsonOK(w, map[string]interface{}{
-		"token":  s.hubCfg.Token,
+		"token":  token,
 		"hubUrl": hubURL,
 	})
 }
@@ -470,7 +490,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Check provider is configured
+	s.mu.RLock()
 	provCfg, ok := s.hubCfg.Providers[req.Provider]
+	s.mu.RUnlock()
 	if !ok {
 		http.Error(w, fmt.Sprintf("provider %q is not configured on this hub", req.Provider), http.StatusUnprocessableEntity)
 		return
@@ -514,10 +536,13 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Build env to inject: hub connection info so the claw can register back
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":   s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":   clawID,
-		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 	for k, v := range req.Env {
 		env[k] = v
@@ -990,7 +1015,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						httpReq.Header.Set(k, v)
 					}
 					// Inject claw_token auth so withAuth middleware passes
-					httpReq.Header.Set("X-Claw-Token", s.hubCfg.ClawToken)
+					s.mu.RLock()
+					clawToken := s.hubCfg.ClawToken
+					s.mu.RUnlock()
+					httpReq.Header.Set("X-Claw-Token", clawToken)
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}
 					s.mux.ServeHTTP(w, httpReq)
@@ -1270,6 +1298,7 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 	// Step 2b: Patch OpenClaw config with model + LLM API keys
 	anthropicKey := env["ANTHROPIC_API_KEY"]
 	defaultModel := env["OPENCLAW_DEFAULT_MODEL"]
+	s.mu.RLock()
 	if defaultModel == "" {
 		defaultModel = s.hubCfg.DefaultModel
 	}
@@ -1284,6 +1313,7 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 			}
 		}
 	}
+	s.mu.RUnlock()
 	if anthropicKey != "" {
 		configPatch := fmt.Sprintf(`
 export HOME=/home/daytona; python3 - <<'PYEOF'
@@ -1368,8 +1398,12 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 	// Start the bridge — it reads the gateway token from openclaw.json automatically.
 	// Use setsid to detach from exec session so it survives after exec returns.
 	hubID := HubID(s.identity.PublicKey)
+	s.mu.RLock()
 	relayURL := s.hubCfg.RelayURL
-	relayToken := RelayToken(s.hubCfg.RelaySecret, hubID, s.hubCfg.ClawToken)
+	relaySecret := s.hubCfg.RelaySecret
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	relayToken := RelayToken(relaySecret, hubID, clawToken)
 
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
@@ -1377,7 +1411,7 @@ ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICC
 ELASTICCLAW_RELAY_URL=%q ELASTICCLAW_HUB_ID=%q ELASTICCLAW_RELAY_TOKEN=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, s.hubCfg.ClawToken, clawName,
+		s.clawHubURL(), clawID, clawToken, clawName,
 		relayURL, hubID, relayToken)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
@@ -1404,14 +1438,17 @@ ELASTICCLAW_EOF`,
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
-	if len(s.hubCfg.GitHubApps) > 0 {
+	s.mu.RLock()
+	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
+	if hasGitHubApps {
 		var githubRepos []types.GitHubRepoAccess
 		var reposJSON string
 		_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
 		_ = json.Unmarshal([]byte(reposJSON), &githubRepos)
 
 		// Use local HTTP proxy (bridge listens on 18790, proxies to hub)
-		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, s.hubCfg.ClawToken)
+		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
@@ -1550,11 +1587,14 @@ echo "OpenClaw ready"
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
 	bridgeScript := fmt.Sprintf(`
 curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
 echo "claw-bridge started"
-`, bridgeURL, s.clawHubURL(), clawID, s.hubCfg.ClawToken)
+`, bridgeURL, s.clawHubURL(), clawID, clawToken)
 	out, code, err = p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(bridgeScript, "'", "'\"'\"'")+"'")
 	if err != nil || code != 0 {
 		return fmt.Errorf("claw-bridge install failed (exit %d): %s", code, out)
@@ -1640,7 +1680,9 @@ func (s *Server) pollProviderStatus() {
 }
 
 func (s *Server) syncReplicatedVMs() {
+	s.mu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
+	s.mu.RUnlock()
 	if !ok || replicatedCfg.Token == "" {
 		return
 	}
@@ -1815,23 +1857,33 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
 
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys)
+	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
+
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
-		ClawToken:       s.hubCfg.ClawToken,
+		ClawToken:       clawToken,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
-		HubCfg:          s.hubCfg,
+		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
-		LLMKeyEnv:       buildLLMKeyEnv(s.hubCfg.LLMKeys),
+		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
-		RelayEnv:        buildRelayEnv(s.hubCfg, s.identity.PublicKey),
+		RelayEnv:        relayEnv,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
-	if len(s.hubCfg.GitHubApps) > 0 && len(githubRepos) > 0 {
+	s.mu.RLock()
+	hasGitHubApps2 := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
+	if hasGitHubApps2 && len(githubRepos) > 0 {
 		repoLines := ""
 		for _, r := range githubRepos {
 			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
@@ -1957,6 +2009,8 @@ func randomHex(n int) string {
 // clawHubURL returns the URL claws should use to connect back.
 // Uses public_url if set, otherwise falls back to url.
 func (s *Server) clawHubURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.hubCfg.PublicURL != "" {
 		return s.hubCfg.PublicURL
 	}
@@ -2332,7 +2386,9 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.
 func (s *Server) terminateReplicatedVM(vmID string) {
+	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["replicated"]
+	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateReplicatedVM: no replicated provider configured")
 		return
@@ -2356,7 +2412,10 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 // URL: GET /api/github/token/:clawId
 // Used by the git credential helper on the VM.
 func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
-	if len(s.hubCfg.GitHubApps) == 0 {
+	s.mu.RLock()
+	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
+	s.mu.RUnlock()
+	if !hasGitHubApps {
 		http.Error(w, "no github apps configured", http.StatusNotImplemented)
 		return
 	}
@@ -2366,7 +2425,10 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
 	// Single-tenant: validate against hub's claw_token directly
-	if clawToken != s.hubCfg.ClawToken {
+	s.mu.RLock()
+	hubClawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if clawToken != hubClawToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -2419,7 +2481,10 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
-	for i, appCfg := range s.hubCfg.GitHubApps {
+	s.mu.RLock()
+	githubApps := s.hubCfg.GitHubApps
+	s.mu.RUnlock()
+	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
