@@ -2123,19 +2123,7 @@ func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, re
 	clawToken := cfg.ClawToken
 	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
 	return fmt.Sprintf(`# Install GitHub credential helper
-sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
-#!/bin/bash
-# Git credential helper — fetches a fresh GitHub App installation token from the hub.
-response=$(curl -sf %q)
-if [ $? -ne 0 ] || [ -z "$response" ]; then
-  exit 1
-fi
-token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-echo "protocol=https"
-echo "host=github.com"
-echo "username=x-access-token"
-echo "password=$token"
-CREDEOF
+printf '#!/bin/bash\n# Git credential helper — fetches a fresh GitHub App installation token from the hub.\nresponse=$(curl -sf %q)\nif [ $? -ne 0 ] || [ -z "$response" ]; then\n  exit 1\nfi\ntoken=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['"'"'token'"'"'])")\necho "protocol=https"\necho "host=github.com"\necho "username=x-access-token"\necho "password=$token"\n' | sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 
 # Install git + gh CLI
