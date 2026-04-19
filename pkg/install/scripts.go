@@ -70,11 +70,10 @@ func Caddyfile(domain string) string {
 // ScriptInstallBinary returns the shell script to download and install the hub binary.
 func ScriptInstallBinary(version string) string {
 	url := HubBinaryURL(version)
-	return fmt.Sprintf(`set -e
+	return fmt.Sprintf(`set -ex
 curl -fsSL %q -o /tmp/elasticclaw-bin
 chmod +x /tmp/elasticclaw-bin
-sudo mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw
-elasticclaw version || elasticclaw --version || true`, url)
+sudo mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw`, url)
 }
 
 // ScriptWriteConfig returns the shell script to write the hub config.
