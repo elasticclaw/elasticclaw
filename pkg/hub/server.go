@@ -34,10 +34,9 @@ type Server struct {
 	identity *HubIdentity
 	mux      *http.ServeMux
 
-	mu           sync.RWMutex
-	claws        map[string]*clawConn // claw_id -> conn
-	users        map[string]*userConn // tenant_id -> []conn (broadcast)
-	uiSessions   map[string]struct{} // set of valid UI session tokens
+	mu    sync.RWMutex
+	claws map[string]*clawConn // claw_id -> conn
+	users map[string]*userConn // tenant_id -> []conn (broadcast)
 }
 
 type clawConn struct {
@@ -88,9 +87,8 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		addr:     addr,
 		hubCfg:   hubCfg,
 		identity: id,
-		claws:      make(map[string]*clawConn),
-		users:      make(map[string]*userConn),
-		uiSessions: make(map[string]struct{}),
+		claws: make(map[string]*clawConn),
+		users: make(map[string]*userConn),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -252,10 +250,8 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		s.mu.RLock()
-		_, valid := s.uiSessions[token]
-		s.mu.RUnlock()
-		if !valid {
+		// Hub token doubles as the web session token — simple, one token
+		if token != s.hubCfg.Token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -279,25 +275,13 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
-	// Generate a random session token — never expose the password itself
-	sessionToken := randomHex(32)
-	s.mu.Lock()
-	s.uiSessions[sessionToken] = struct{}{}
-	s.mu.Unlock()
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
-		"session":  sessionToken, // UI session token (for hub-config and web auth)
-		"hubToken": s.hubCfg.Token, // hub API token (for /api/claws etc.)
+		"hubToken": s.hubCfg.Token, // hub API token — browser uses for all hub calls
 	})
 }
 
 func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token != "" {
-		s.mu.Lock()
-		delete(s.uiSessions, token)
-		s.mu.Unlock()
-	}
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
@@ -328,10 +312,7 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
-		s.mu.RLock()
-		_, validSession := s.uiSessions[token]
-		s.mu.RUnlock()
-		if !validSession {
+		if token != s.hubCfg.Token {
 			// For HTML requests redirect to login, for API return 401
 			accept := r.Header.Get("Accept")
 			if strings.Contains(accept, "text/html") {

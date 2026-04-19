@@ -29,7 +29,7 @@ export function resolveToken(): Promise<string> {
   const hubConfigUrl = hubUrl ? `${hubUrl}/api/hub-config` : "/api/hub-config"
 
   _tokenPromise = fetch(hubConfigUrl, {
-    headers: { Authorization: `Bearer ${sessionStorage.getItem("ec_ui_token") || ""}` }
+    headers: { Authorization: `Bearer ${sessionStorage.getItem("ec_hub_token") || ""}` }
   })
     .then((r) => r.json())
     .then((d) => {

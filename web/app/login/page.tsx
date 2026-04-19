@@ -29,8 +29,7 @@ function LoginForm() {
 
       if (res.ok) {
         const data = await res.json()
-        // Store session token (for hub-config auth) and hub API token separately
-        if (data.session) sessionStorage.setItem("ec_ui_token", data.session)
+        // One token for everything — hub API token stored in sessionStorage
         if (data.hubToken) sessionStorage.setItem("ec_hub_token", data.hubToken)
         router.push(next)
         router.refresh()
