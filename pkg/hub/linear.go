@@ -212,7 +212,6 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			Files:        templateFiles,
 			Env:          env,
 		}
-		_ = req // provisioning called below
 		switch provider {
 		case "replicated":
 			if err := s.provisionReplicated(ctx, clawID, req, provCfg, env); err != nil {
@@ -299,3 +298,119 @@ func filesMapToBytes(files map[string]string) map[string][]byte {
 
 // Avoid collision with existing now() function
 
+
+// handleClawDoneSignal is called when a claw sends a message containing [DONE].
+// Finds the matching factory config and moves the Linear issue to done_status.
+func (s *Server) handleClawDoneSignal(clawID string) {
+	// Get the linear_issue_id for this claw
+	var issueID string
+	if err := s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id = ?`, clawID).Scan(&issueID); err != nil || issueID == "" {
+		return // not a factory claw
+	}
+
+	log.Printf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
+
+	// Find the factory config for this issue
+	factory := s.findFactoryForIssue(issueID)
+	if factory == nil {
+		return
+	}
+
+	// Move Linear issue to done_status if configured
+	if factory.DoneStatus != "" {
+		linearToken := s.resolveLinearTokenForFactory(factory)
+		if linearToken != "" {
+			if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
+				log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
+			} else {
+				log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
+			}
+		}
+	}
+
+	// Mark claw as completed
+	_, _ = s.db.Exec(`UPDATE claws SET status='completed' WHERE id=?`, clawID)
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.conn.Close(1000, "factory: claw signaled done")
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
+	// Extract team key from issue ID (e.g. "ELA" from "ELA-123")
+	parts := strings.SplitN(issueID, "-", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	teamKey := parts[0]
+
+	for _, factory := range s.hubCfg.Factories {
+		if factory.Integration != "linear" {
+			continue
+		}
+		if factory.Team == "" || strings.EqualFold(factory.Team, teamKey) {
+			return factory
+		}
+	}
+	return nil
+}
+
+// moveLinearIssue updates a Linear issue's state by name using the Linear GraphQL API.
+func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
+	// First find the issue ID from identifier
+	query := fmt.Sprintf(`{"query": "{ issue(id: \"%s\") { id team { states { nodes { id name } } } } }"}`, issueIdentifier)
+	req, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(query))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data struct {
+			Issue struct {
+				ID   string `json:"id"`
+				Team struct {
+					States struct {
+						Nodes []struct {
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"nodes"`
+					} `json:"states"`
+				} `json:"team"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	issueID := result.Data.Issue.ID
+	var stateID string
+	for _, s := range result.Data.Issue.Team.States.Nodes {
+		if strings.EqualFold(s.Name, targetStateName) {
+			stateID = s.ID
+			break
+		}
+	}
+	if issueID == "" || stateID == "" {
+		return fmt.Errorf("issue or state not found")
+	}
+
+	// Update the issue state
+	mutation := fmt.Sprintf(`{"query": "mutation { issueUpdate(id: \"%s\", input: { stateId: \"%s\" }) { success } }"}`, issueID, stateID)
+	req2, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(mutation))
+	req2.Header.Set("Authorization", token)
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		return err
+	}
+	resp2.Body.Close()
+	return nil
+}
