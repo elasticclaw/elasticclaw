@@ -22,42 +22,40 @@ var installCmd = &cobra.Command{
 	Short: "Install ElasticClaw on a remote server",
 	Long: `Install and configure ElasticClaw on a remote VPS.
 
-Installs the hub binary, web UI (Docker), Caddy reverse proxy with TLS,
+Installs the hub binary (with embedded web UI), Caddy reverse proxy with TLS,
 and systemd service — fully configured and ready to use.
 
   elasticclaw install \
-    --host user@my-server.com \
+    --server ssh://root@my-server.com \
     --domain hub.mycompany.com
 
 Prerequisites:
   - SSH access to the server (key-based auth)
-  - Docker installed on the server
   - DNS A record for --domain pointing to the server IP`,
 	RunE: runInstall,
 }
 
 var (
-	installHost    string
+	installServer   string
 	installDomain  string
 	installSSHKey  string
 	installVersion string
 	installToken        string
-	installUIToken      string
+	installUIPassword   string
 	installAnthropicKey string
 )
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().StringVar(&installHost, "host", "", "SSH host (e.g. root@1.2.3.4 or user@myserver.com)")
+	installCmd.Flags().StringVar(&installServer, "server", "", "SSH URI of the server (e.g. ssh://root@1.2.3.4 or ssh://root@1.2.3.4:22)")
 	installCmd.Flags().StringVar(&installDomain, "domain", "", "Domain name that resolves to the server (e.g. hub.mycompany.com)")
 	installCmd.Flags().StringVar(&installSSHKey, "ssh-key", "", "Path to SSH private key (default: SSH agent or ~/.ssh/id_rsa)")
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
-	installCmd.Flags().StringVar(&installUIToken, "ui-token", "", "Web UI login password (default: randomly generated)")
+	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
 	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
-	installCmd.Flags().String("web-image", "", "Override web UI Docker image (default: marc/elasticclaw-web:<version>)")
-	installCmd.MarkFlagRequired("host")
+	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")
 }
 
@@ -79,7 +77,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if token == "" {
 		token = randomHex32()
 	}
-	uiToken := installUIToken
+	uiToken := installUIPassword
 	if uiToken == "" {
 		uiToken = randomHex32()
 	}
@@ -92,15 +90,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Scanln(&anthropicKey)
 	}
 
-	webImage, _ := cmd.Flags().GetString("web-image")
-
 	params := install.Params{
 		Domain:       installDomain,
 		Version:      version,
-		WebImage:     webImage,
 		Token:        token,
 		ClawToken:    clawToken,
-		UIToken:      uiToken,
+		UIPassword:   uiToken,
 		AnthropicKey: anthropicKey,
 	}
 
@@ -116,7 +111,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// ── Connect SSH ───────────────────────────────────────────────────────────
-	sshUser, sshHost, err := parseSSHHost(installHost)
+	sshUser, sshHost, err := parseSSHHost(installServer)
 	if err != nil {
 		return err
 	}
@@ -128,16 +123,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	defer client.Close()
 	fmt.Println("OK")
 
-	// ── Preflight: Docker ─────────────────────────────────────────────────────
-	fmt.Print("Checking Docker... ")
-	if out, err := sshRunClient(client, "sudo docker --version 2>&1"); err != nil {
-		return fmt.Errorf("Docker not found on server: %s\nInstall Docker first: https://docs.docker.com/engine/install/", out)
-	} else {
-		fmt.Printf("OK (%s)\n", strings.TrimSpace(strings.Split(out, "\n")[0]))
-		// Ensure daemon is running
-		_, _ = sshRunClient(client, "sudo systemctl start docker 2>/dev/null || true")
-	}
-
 	steps := []struct {
 		name   string
 		script string
@@ -145,7 +130,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		{"Installing hub binary", install.ScriptInstallBinary(version)},
 		{"Writing hub config", install.ScriptWriteConfig(params)},
 		{"Installing systemd service", install.ScriptInstallSystemd()},
-		{"Starting web UI", install.ScriptRunWebUI(params)},
 	}
 	skipCaddy, _ := cmd.Flags().GetBool("skip-caddy")
 	if !skipCaddy {
@@ -158,7 +142,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	for _, step := range steps {
 		fmt.Printf("%s... ", step.name)
 		if out, err := sshRunClient(client, step.script); err != nil {
-			return fmt.Errorf("%s failed:\n%s", step.name, out)
+			return fmt.Errorf("%s failed: %v\n%s", step.name, err, out)
 		}
 		fmt.Println("OK")
 	}
@@ -208,6 +192,8 @@ func latestGitHubRelease(owner, repo string) (string, error) {
 }
 
 func parseSSHHost(host string) (user, addr string, err error) {
+	// Strip ssh:// prefix
+	host = strings.TrimPrefix(host, "ssh://")
 	user = "root"
 	addr = host
 	if strings.Contains(host, "@") {
@@ -223,30 +209,44 @@ func parseSSHHost(host string) (user, addr string, err error) {
 func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	var authMethods []gossh.AuthMethod
 
-	// Try SSH agent first
+	// Try SSH agent first — call Signers() eagerly so failures are visible
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.Dial("unix", sock); err == nil {
-			authMethods = append(authMethods, gossh.PublicKeysCallback(agent.NewClient(conn).Signers))
+			agentClient := agent.NewClient(conn)
+			if signers, err := agentClient.Signers(); err == nil && len(signers) > 0 {
+				authMethods = append(authMethods, gossh.PublicKeys(signers...))
+			}
 		}
 	}
 
-	// Try key file
-	if keyPath == "" {
+	// Load all available keys (explicit path or all standard ~/.ssh/ keys)
+	keyPaths := []string{}
+	if keyPath != "" {
+		keyPaths = []string{keyPath}
+	} else {
 		home, _ := os.UserHomeDir()
-		for _, k := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
-			p := home + "/.ssh/" + k
-			if _, err := os.Stat(p); err == nil {
-				keyPath = p
-				break
-			}
+		for _, k := range []string{"id_ed25519", "id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519_sk"} {
+			keyPaths = append(keyPaths, home+"/.ssh/"+k)
 		}
 	}
-	if keyPath != "" {
-		if key, err := os.ReadFile(keyPath); err == nil {
-			if signer, err := gossh.ParsePrivateKey(key); err == nil {
-				authMethods = append(authMethods, gossh.PublicKeys(signer))
-			}
+	var signers []gossh.Signer
+	for _, p := range keyPaths {
+		key, err := os.ReadFile(p)
+		if err != nil {
+			continue // key doesn't exist, skip
 		}
+		signer, err := gossh.ParsePrivateKey(key)
+		if err != nil {
+			continue // passphrase-protected or unreadable, skip (agent handles it)
+		}
+		signers = append(signers, signer)
+	}
+	if len(signers) > 0 {
+		authMethods = append(authMethods, gossh.PublicKeys(signers...))
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH auth methods available — ensure SSH agent is running (eval $(ssh-agent)) or use --ssh-key with an unencrypted key")
 	}
 
 	cfg := &gossh.ClientConfig{
@@ -264,7 +264,7 @@ func sshRunClient(client *gossh.Client, script string) (string, error) {
 		return "", err
 	}
 	defer sess.Close()
-	out, err := sess.CombinedOutput(script)
+	out, err := sess.CombinedOutput("bash -c " + shellescape(script))
 	return string(out), err
 }
 
@@ -272,4 +272,8 @@ func randomHex32() string {
 	b := make([]byte, 16)
 	io.ReadFull(rand.Reader, b)
 	return fmt.Sprintf("%x", b)
+}
+
+func shellescape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

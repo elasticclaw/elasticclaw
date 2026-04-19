@@ -15,6 +15,8 @@ var (
 	hubDBPath      string
 	hubToken       string
 	hubClawToken   string
+	hubUIPassword     string
+	hubNoWebUI     bool
 )
 
 var hubCmd = &cobra.Command{
@@ -38,14 +40,23 @@ func init() {
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().StringVar(&hubUIPassword, "ui-token", "", "web UI login password (default: value from hub.yaml ui_password, or 'admin')")
+	hubCmd.Flags().BoolVar(&hubNoWebUI, "no-web-ui", false, "disable embedded web UI (use when running Next.js dev server separately)")
 }
 
 func runHub(cmd *cobra.Command, args []string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// Use /var/lib/elasticclaw/ when system config exists (/etc/elasticclaw/hub.yaml),
+	// otherwise fall back to ~/.elasticclaw/ for local dev.
+	var dir string
+	if _, err := os.Stat("/etc/elasticclaw/hub.yaml"); err == nil {
+		dir = "/var/lib/elasticclaw"
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir = filepath.Join(home, ".elasticclaw")
 	}
-	dir := filepath.Join(home, ".elasticclaw")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -70,24 +81,30 @@ func runHub(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// CLI flag overrides yaml for ui_password
+	if hubUIPassword != "" {
+		hubCfg.UIPassword = hubUIPassword
+	}
+
 	hub.Version = Version // propagate build-time version for bridge download URL
 	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}
 
-	if hubToken != "" {
-		if hubClawToken == "" {
-			return fmt.Errorf("--claw-token is required when --token is set")
-		}
-		tenantID, err := s.Provision(hubToken, hubClawToken)
-		if err != nil {
+	// Provision tenant from CLI flags or hub.yaml (whichever is set)
+	provToken := hubToken
+	if provToken == "" {
+		provToken = hubCfg.Token
+	}
+	provClawToken := hubClawToken
+	if provClawToken == "" {
+		provClawToken = hubCfg.ClawToken
+	}
+	if provToken != "" && provClawToken != "" {
+		if _, err := s.Provision(provToken, provClawToken); err != nil {
 			return fmt.Errorf("failed to provision tenant: %w", err)
 		}
-		fmt.Printf("Tenant provisioned: %s\n", tenantID)
-		fmt.Printf("  User token:  %s\n", hubToken)
-		fmt.Printf("  Claw token:  %s\n", hubClawToken)
-		fmt.Println()
 	}
 
 	fmt.Printf("ElasticClaw Hub\n")
@@ -137,5 +154,5 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	return s.Run()
+	return s.Run(hub.RunOptions{NoWebUI: hubNoWebUI})
 }

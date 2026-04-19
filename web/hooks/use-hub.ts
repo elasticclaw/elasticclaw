@@ -133,18 +133,16 @@ export function useHub(selectedClawId: string | null): HubState {
     })
   }, [])
 
-  const refreshClaws = useCallback(async () => {
+  const refreshClaws = useCallback(async (): Promise<void> => {
     try {
       const apiClaws = await fetchClaws()
       mergeClaws(apiClaws)
       setHubError(null)
       setLoading(false)
-      return apiClaws
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setHubError(msg)
       setLoading(false)
-      return []
     }
   }, [mergeClaws])
 
@@ -270,11 +268,7 @@ export function useHub(selectedClawId: string | null): HubState {
     if (!cfg) return
 
     // Initial fetch + eager-load all message histories
-    refreshClaws().then((apiClaws) => {
-      for (const ac of apiClaws) {
-        loadMessages(ac.id)
-      }
-    })
+    refreshClaws().then(() => {})
 
     // Poll every 30s
     pollIntervalRef.current = setInterval(refreshClaws, 30_000)

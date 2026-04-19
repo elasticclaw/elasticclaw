@@ -17,10 +17,12 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "elasticclaw",
-	Short: "Control plane for provisioning and managing OpenClaw agents",
-	Long: `ElasticClaw provisions trusted OpenClaw agents from versioned templates,
+	Use:          "elasticclaw",
+	Short:        "Control plane for provisioning and managing OpenClaw agents",
+	Long:         `ElasticClaw provisions trusted OpenClaw agents from versioned templates,
 runs them on pluggable providers, and binds each one to scoped, short-lived identity.`,
+	SilenceUsage: true,  // don't print usage on error
+	SilenceErrors: true, // errors printed by Execute() below
 }
 
 func Execute() {

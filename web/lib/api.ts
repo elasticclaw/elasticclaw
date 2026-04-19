@@ -1,30 +1,43 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
+import { getHubUrl, setHubUrl } from "./hub-url"
 
-// Token is resolved once and cached — fetched from /api/hub-config on first use
+// Token is resolved once and cached.
+// Priority: sessionStorage (set on login) > /api/hub-config (proxy to hub)
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
-let _hubUrl: string | null = null
 
 export function resolveToken(): Promise<string> {
-  if (_token !== null) return Promise.resolve(_token)
+  if (_token) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
 
   if (typeof window === "undefined") {
-    // Server-side
-    _token = process.env.HUB_TOKEN || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
+    // Server-side: no token (hub is the authority)
+    _token = ""
     return Promise.resolve(_token)
   }
 
-  _tokenPromise = fetch("/api/hub-config")
+  // Check sessionStorage first (set by login page)
+  const stored = sessionStorage.getItem("ec_hub_token")
+  if (stored) {
+    _token = stored
+    return Promise.resolve(_token)
+  }
+
+  // Fall back to hub-config proxy (supports dev mode with Next.js)
+  const hubUrl = getHubUrl()
+  const hubConfigUrl = hubUrl ? `${hubUrl}/api/hub-config` : "/api/hub-config"
+
+  _tokenPromise = fetch(hubConfigUrl, {
+    headers: { Authorization: `Bearer ${sessionStorage.getItem("ec_hub_token") || ""}` }
+  })
     .then((r) => r.json())
     .then((d) => {
       _token = d.token || ""
-      _hubUrl = d.hubUrl || null
       return _token!
     })
     .catch(() => {
-      _token = process.env.NEXT_PUBLIC_HUB_TOKEN || ""
-      return _token!
+      _token = ""
+      return ""
     })
 
   return _tokenPromise
@@ -32,7 +45,11 @@ export function resolveToken(): Promise<string> {
 
 // Sync getter — returns cached token or empty string; call resolveToken() first
 function getTokenSync(): string {
-  return _token || process.env.NEXT_PUBLIC_HUB_TOKEN || ""
+  if (_token) return _token
+  if (typeof window !== "undefined") {
+    return sessionStorage.getItem("ec_hub_token") || ""
+  }
+  return ""
 }
 
 // Pre-fetch token on module load (client-side)
@@ -42,13 +59,13 @@ if (typeof window !== "undefined") {
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
-  const url = `/hub${path}`
+  const hubBase = getHubUrl()
+  const url = hubBase ? `${hubBase}${path}` : `/hub${path}`
   const res = await fetch(url, {
     ...options,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
-      "ngrok-skip-browser-warning": "true", // skip ngrok interstitial in dev
       ...options?.headers,
     },
   })
@@ -92,15 +109,15 @@ export async function killClaw(id: string): Promise<void> {
 
 export function getHubWsUrl(): string {
   const token = getTokenSync()
-  // Use the browser's own origin so WebSocket goes through Caddy/reverse proxy
-  // Caddy routes /api/ws* → hub:8080
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  const hub = getHubUrl() || window.location.origin
+  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
   return `${wsBase}/api/ws?token=${encodeURIComponent(token)}`
 }
 
 export function getTerminalWsUrl(clawId: string): string {
   const token = getTokenSync()
-  const wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+  const hub = getHubUrl() || window.location.origin
+  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
   return `${wsBase}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
 }
 
@@ -116,6 +133,9 @@ export function saveConfig(_hubUrl: string, _token: string) {
 export function clearConfig() {
   _token = null
   _tokenPromise = null
+  if (typeof window !== "undefined") {
+    sessionStorage.removeItem("ec_hub_token")
+  }
 }
 
 export function getConfig() {
@@ -125,7 +145,7 @@ export function getConfig() {
   }
 }
 
-export async function patchClaw(clawId: string, patch: { tags?: string[]; color?: string }): Promise<void> {
+export async function patchClaw(clawId: string, patch: { name?: string; tags?: string[]; color?: string }): Promise<void> {
   await apiFetch(`/api/claws/${clawId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),

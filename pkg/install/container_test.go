@@ -84,7 +84,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 		Version:   "v0.0.3",
 		Token:     "test-hub-token-abc",
 		ClawToken: "test-claw-token-def",
-		UIToken:   "test-ui-token-ghi",
+		UIPassword: "test-ui-password-ghi",
 	}
 
 	// Helper to run a script and fail the test on error
@@ -133,7 +133,6 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 %sCADDYEOF`, install.Caddyfile(params.Domain)))
 	assertFile("/etc/caddy/Caddyfile", "hub.test.example.com")
 	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:8080")
-	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:3000")
 	t.Log("✓ Caddyfile written correctly")
 
 	// ── Write systemd unit ────────────────────────────────────────────────────

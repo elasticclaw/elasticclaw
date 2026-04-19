@@ -14,7 +14,7 @@ var testParams = install.Params{
 	Version:   "v0.0.3",
 	Token:     "test-hub-token",
 	ClawToken: "test-claw-token",
-	UIToken:   "test-ui-token",
+	UIPassword: "test-ui-password",
 }
 
 // ── HubBinaryURL ─────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ func TestHubConfig(t *testing.T) {
 	assertContains(t, cfg, "hub.example.com", "domain in config")
 	assertContains(t, cfg, "test-hub-token", "hub token in config")
 	assertContains(t, cfg, "test-claw-token", "claw token in config")
-	assertContains(t, cfg, "test-ui-token", "ui token in config")
+	assertContains(t, cfg, "test-ui-password", "ui password in config")
 	assertContains(t, cfg, ":8080", "port in config")
 }
 
@@ -46,7 +46,7 @@ func TestHubConfig_DoesNotContainOtherTokens(t *testing.T) {
 	if !strings.Contains(cfg, "claw_token: test-claw-token") {
 		t.Error("claw_token field missing or wrong")
 	}
-	if !strings.Contains(cfg, "ui_token: test-ui-token") {
+	if !strings.Contains(cfg, "ui_password: test-ui-password") {
 		t.Error("ui_token field missing or wrong")
 	}
 }
@@ -67,51 +67,7 @@ func TestSystemdUnit(t *testing.T) {
 func TestCaddyfile(t *testing.T) {
 	cf := install.Caddyfile("hub.example.com")
 	assertContains(t, cf, "hub.example.com {", "domain block")
-	assertContains(t, cf, "reverse_proxy localhost:8080", "hub backend")
-	assertContains(t, cf, "reverse_proxy localhost:3000", "web UI backend")
-	assertContains(t, cf, "/api/claws", "claws route")
-	assertContains(t, cf, "/api/ws", "websocket route")
-	assertContains(t, cf, "/api/messages", "messages route")
-	assertContains(t, cf, "/claw/", "bridge route")
-}
-
-func TestCaddyfile_APIRouting(t *testing.T) {
-	cf := install.Caddyfile("hub.example.com")
-	// These must go to hub (8080), not web UI
-	hubRoutes := []string{"/api/claws", "/api/messages", "/api/ws", "/api/terminal", "/api/github", "/claw/"}
-	for _, route := range hubRoutes {
-		idx := strings.Index(cf, route)
-		if idx < 0 {
-			t.Errorf("route %s not found in Caddyfile", route)
-			continue
-		}
-		// Check that 8080 appears after this route (before the next handle block)
-		end := idx + 200
-		if end > len(cf) {
-			end = len(cf)
-		}
-		segment := cf[idx:end]
-		if !strings.Contains(segment, "localhost:8080") {
-			t.Errorf("route %s should proxy to :8080", route)
-		}
-	}
-	// These must go to web UI (3000)
-	webRoutes := []string{"/api/auth/", "/api/hub-config"}
-	for _, route := range webRoutes {
-		idx := strings.Index(cf, route)
-		if idx < 0 {
-			t.Errorf("route %s not found in Caddyfile", route)
-			continue
-		}
-		end2 := idx + 200
-		if end2 > len(cf) {
-			end2 = len(cf)
-		}
-		segment := cf[idx:end2]
-		if !strings.Contains(segment, "localhost:3000") {
-			t.Errorf("route %s should proxy to :3000", route)
-		}
-	}
+	assertContains(t, cf, "reverse_proxy localhost:8080", "single backend on 8080")
 }
 
 // ── Script generation ─────────────────────────────────────────────────────────
@@ -122,7 +78,7 @@ func TestScriptInstallBinary(t *testing.T) {
 	assertContains(t, s, "curl -fsSL", "curl download")
 	assertContains(t, s, "v0.0.3", "version in URL")
 	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
-	assertContains(t, s, "elasticclaw --version", "verify install")
+	assertContains(t, s, "elasticclaw-bin", "binary download")
 }
 
 func TestScriptWriteConfig(t *testing.T) {
@@ -140,17 +96,6 @@ func TestScriptInstallSystemd(t *testing.T) {
 	assertContains(t, s, "systemctl daemon-reload", "daemon reload")
 	assertContains(t, s, "systemctl enable elasticclaw", "enable service")
 	assertContains(t, s, "systemctl restart elasticclaw", "start service")
-}
-
-func TestScriptRunWebUI(t *testing.T) {
-	s := install.ScriptRunWebUI(testParams)
-	assertContains(t, s, "docker pull", "docker pull")
-	assertContains(t, s, "marc/elasticclaw-web:v0.0.3", "image tag with version")
-	assertContains(t, s, "ELASTICCLAW_HUB_TOKEN=test-hub-token", "hub token env")
-	assertContains(t, s, "ELASTICCLAW_UI_TOKEN=test-ui-token", "ui token env")
-	assertContains(t, s, "--restart=always", "restart policy")
-	assertContains(t, s, "--network=host", "host network")
-	assertContains(t, s, "elasticclaw-web", "container name")
 }
 
 func TestScriptWriteCaddyfile(t *testing.T) {
@@ -171,7 +116,6 @@ func TestScripts_Shellcheck(t *testing.T) {
 		"install_binary":   install.ScriptInstallBinary("v0.0.3"),
 		"write_config":     install.ScriptWriteConfig(testParams),
 		"install_systemd":  install.ScriptInstallSystemd(),
-		"run_web_ui":       install.ScriptRunWebUI(testParams),
 		"install_caddy":    install.ScriptInstallCaddy(),
 		"write_caddyfile":  install.ScriptWriteCaddyfile("hub.example.com"),
 	}

@@ -18,7 +18,7 @@ interface UseWindowedMessages {
   hasOlder: boolean
   loadingOlder: boolean
   loadOlder: () => Promise<void>
-  scrollRef: React.RefObject<HTMLDivElement>
+  scrollRef: React.RefObject<HTMLDivElement | null>
   onScroll: () => void
 }
 
@@ -40,7 +40,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
         if (msgs.length > 0) {
-          oldestTimestamp.current = msgs[0].timestamp
+          oldestTimestamp.current = msgs[0].timestamp instanceof Date ? msgs[0].timestamp.toISOString() : String(msgs[0].timestamp)
         }
         setHasOlder(apiMsgs.length >= PAGE_SIZE)
       })
@@ -66,7 +66,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
 
       setHasOlder(apiMsgs.length >= PAGE_SIZE)
       if (older.length > 0) {
-        oldestTimestamp.current = older[0].timestamp
+        oldestTimestamp.current = older[0].timestamp instanceof Date ? older[0].timestamp.toISOString() : String(older[0].timestamp)
       }
 
       setHistoricalMsgs((prev) => {
