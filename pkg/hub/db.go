@@ -35,6 +35,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN nix INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -81,6 +82,13 @@ func migrate(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
+
+	CREATE TABLE IF NOT EXISTS hub_templates (
+		name       TEXT PRIMARY KEY,
+		files      TEXT NOT NULL DEFAULT '{}',  -- JSON map of filename -> content
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
 	`)
 	return err
 }

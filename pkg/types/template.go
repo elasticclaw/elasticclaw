@@ -114,8 +114,38 @@ type HubConfig struct {
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 
 	// UIPassword is the password for the web UI. If not set, defaults to "admin".
-	// The hub validates this on /api/auth/login and returns a session token.
 	UIPassword string `yaml:"ui_password,omitempty"`
+
+	// Integrations holds external service configs (Linear, future: Shortcut, etc.)
+	Integrations *IntegrationsConfig `yaml:"integrations,omitempty"`
+
+	// Factories defines automation rules that spin up claws based on integration events.
+	Factories []*FactoryConfig `yaml:"factories,omitempty"`
+}
+
+// IntegrationsConfig holds configs for external integrations.
+type IntegrationsConfig struct {
+	Linear []*LinearIntegrationConfig `yaml:"linear,omitempty"`
+}
+
+// LinearIntegrationConfig holds credentials for one Linear workspace.
+type LinearIntegrationConfig struct {
+	Workspace     string `yaml:"workspace"`       // human label
+	Token         string `yaml:"token"`            // Linear API token (lin_api_...)
+	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
+}
+
+// FactoryConfig defines an automation rule that creates claws based on integration events.
+type FactoryConfig struct {
+	Name              string `yaml:"name"`
+	Integration       string `yaml:"integration"`        // "linear" (future: "shortcut", "github-issues")
+	Workspace         string `yaml:"workspace"`          // matches integrations.<type>[].workspace
+	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
+	TriggerStatus     string `yaml:"trigger_status"`     // entering this status → create claw
+	DoneStatus        string `yaml:"done_status,omitempty"`  // claw moves issue here when done
+	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
+	Template          string `yaml:"template"`           // template name (must be pushed to hub)
+	NamePattern       string `yaml:"name_pattern,omitempty"` // claw name pattern, e.g. "{issue_id}"
 }
 
 type ProviderConfig struct {

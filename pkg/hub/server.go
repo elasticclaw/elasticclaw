@@ -124,6 +124,13 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
+
+	// Template store
+	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
+	mux.HandleFunc("/api/templates/{name}", s.withWebAuth(s.handleTemplateDetail))
+
+	// Integration webhooks (signature-validated, no session auth)
+	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)

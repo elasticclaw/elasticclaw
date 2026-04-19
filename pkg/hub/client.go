@@ -232,3 +232,23 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	}
 	return resp["tenant_id"], nil
 }
+
+// PushTemplate uploads a template to the hub's template store.
+func (c *Client) PushTemplate(name string, files map[string]string) error {
+	body := map[string]interface{}{
+		"name":  name,
+		"files": files,
+	}
+	_, err := c.do(context.Background(), "POST", "/api/templates", body)
+	return err
+}
+
+// ListHubTemplates returns the templates stored on the hub.
+func (c *Client) ListHubTemplates(ctx context.Context) ([]map[string]string, error) {
+	data, err := c.do(ctx, "GET", "/api/templates", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result []map[string]string
+	return result, json.Unmarshal(data, &result)
+}
