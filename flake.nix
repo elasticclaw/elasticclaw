@@ -18,6 +18,7 @@
             gotools
             golangci-lint
             git       # required for go VCS stamping during build
+            shellcheck # shell script linting (used in test suite)
           ];
 
           shellHook = ''

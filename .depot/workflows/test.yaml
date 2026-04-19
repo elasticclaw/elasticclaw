@@ -25,6 +25,12 @@ jobs:
       - name: Bootstrap script tests (with shellcheck)
         run: go test -v ./pkg/hub/ -run TestBootstrap
 
+      - name: Install script tests (with shellcheck)
+        run: go test -v ./pkg/install/ -run Test
+
+      - name: Install container integration test
+        run: ELASTICCLAW_INSTALL_TESTS=1 go test -tags integration -v ./pkg/install/ -run TestInstall_Container -timeout 5m
+
   build:
     name: Build
     runs-on: depot-ubuntu-24.04
