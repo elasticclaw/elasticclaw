@@ -2009,6 +2009,8 @@ func randomHex(n int) string {
 // clawHubURL returns the URL claws should use to connect back.
 // Uses public_url if set, otherwise falls back to url.
 func (s *Server) clawHubURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.hubCfg.PublicURL != "" {
 		return s.hubCfg.PublicURL
 	}

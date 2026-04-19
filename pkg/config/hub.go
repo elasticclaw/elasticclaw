@@ -35,19 +35,26 @@ func LoadHubConfig() (*types.HubConfig, error) {
 // SaveHubConfig writes hub config to ~/.elasticclaw/hub.yaml.
 // ActiveHubConfigPath returns the path of the hub.yaml that was loaded.
 // Used to save config changes back to the right file.
-func ActiveHubConfigPath() string {
+// Returns an error if no path can be determined.
+func ActiveHubConfigPath() (string, error) {
 	for _, p := range hubConfigPaths() {
 		if _, err := os.Stat(p); err == nil {
-			return p
+			return p, nil
 		}
 	}
 	// Default: ~/.elasticclaw/hub.yaml
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".elasticclaw", "hub.yaml")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine hub config path: %w", err)
+	}
+	return filepath.Join(home, ".elasticclaw", "hub.yaml"), nil
 }
 
 func SaveHubConfig(cfg *types.HubConfig) error {
-	path := ActiveHubConfigPath()
+	path, err := ActiveHubConfigPath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
