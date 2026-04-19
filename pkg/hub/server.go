@@ -307,7 +307,30 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	} {
 		mime.AddExtensionType(ext, mimeType)
 	}
-	fileServer := http.FileServer(http.FS(staticFS))
+	// Wrap file server to serve index.html for directory requests
+	// (needed for Next.js static export with trailingSlash: true)
+	rawFS := http.FileServer(http.FS(staticFS))
+	fileServer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "" || p == "/" {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/index.html"
+			rawFS.ServeHTTP(w, r2)
+			return
+		}
+		f, err := staticFS.Open(strings.TrimPrefix(p, "/"))
+		if err == nil {
+			stat, serr := f.Stat()
+			f.Close()
+			if serr == nil && stat.IsDir() {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = strings.TrimRight(p, "/") + "/index.html"
+				rawFS.ServeHTTP(w, r2)
+				return
+			}
+		}
+		rawFS.ServeHTTP(w, r)
+	})
 
 	// Auth gate for the web UI files
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
