@@ -46,9 +46,10 @@ type GitHubAppView struct {
 // SettingsPatch is the request body for PATCH /api/settings.
 // Only non-nil fields are updated.
 type SettingsPatch struct {
-	LLMKeys   map[string]string         `json:"llmKeys,omitempty"`
-	Providers map[string]ProviderPatch  `json:"providers,omitempty"`
-	GitHub    []GitHubAppPatch          `json:"github,omitempty"`
+	LLMKeys    map[string]string         `json:"llmKeys,omitempty"`
+	Providers  map[string]ProviderPatch  `json:"providers,omitempty"`
+	GitHub     []GitHubAppPatch          `json:"github,omitempty"`
+	UIPassword string                    `json:"uiPassword,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -218,6 +219,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			apps = append(apps, app)
 		}
 		s.hubCfg.GitHubApps = apps
+	}
+
+	// UI password
+	if patch.UIPassword != "" {
+		s.hubCfg.UIPassword = patch.UIPassword
 	}
 
 	// Save to disk

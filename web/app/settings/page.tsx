@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
-type Section = "runtimes" | "llm" | "github"
+type Section = "runtimes" | "llm" | "github" | "security"
 
 interface SettingsData {
   llmKeys: Record<string, string>
@@ -82,6 +82,7 @@ export default function SettingsPage() {
     { id: "runtimes", label: "Sandbox Runtimes", icon: Cpu },
     { id: "llm", label: "LLM Keys", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
+    { id: "security", label: "Security", icon: Shield },
   ]
 
   return (
@@ -127,6 +128,9 @@ export default function SettingsPage() {
           )}
           {settings && section === "github" && (
             <GitHubSection settings={settings} onSave={save} saving={saving} />
+          )}
+          {section === "security" && (
+            <SecuritySection onSave={save} saving={saving} />
           )}
         </main>
       </div>
@@ -334,6 +338,42 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
             Add App
           </Button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function SecuritySection({ onSave, saving }: { onSave: (p: object) => void; saving: boolean }) {
+  const [current, setCurrent] = useState("")
+  const [newPw, setNewPw] = useState("")
+  const [confirm, setConfirm] = useState("")
+  const [err, setErr] = useState("")
+
+  function handleSave() {
+    setErr("")
+    if (newPw.length < 8) { setErr("Password must be at least 8 characters"); return }
+    if (newPw !== confirm) { setErr("Passwords don't match"); return }
+    onSave({ uiPassword: newPw })
+    setCurrent(""); setNewPw(""); setConfirm("")
+  }
+
+  return (
+    <div>
+      <h2 className="text-base font-semibold mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-6">Change the web UI login password.</p>
+      <div className="border border-border rounded-lg p-5 max-w-sm space-y-3">
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
+          <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+          <Input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
+        </div>
+        {err && <p className="text-xs text-red-500">{err}</p>}
+        <Button size="sm" disabled={saving || !newPw || !confirm} onClick={handleSave}>
+          Change Password
+        </Button>
       </div>
     </div>
   )

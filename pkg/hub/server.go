@@ -174,6 +174,9 @@ func (s *Server) Run(opts ...RunOptions) error {
 	}
 
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
+	if s.hubCfg.UIPassword == "" {
+		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
+	}
 	return http.ListenAndServe(s.addr, corsMiddleware(mux))
 }
 
