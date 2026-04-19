@@ -245,6 +245,8 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 const webSessionHeader = "X-Elasticclaw-Session"
 
 func (s *Server) resolveUIPassword() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.hubCfg.UIPassword != "" {
 		return s.hubCfg.UIPassword
 	}
@@ -1277,6 +1279,7 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 	// Step 2b: Patch OpenClaw config with model + LLM API keys
 	anthropicKey := env["ANTHROPIC_API_KEY"]
 	defaultModel := env["OPENCLAW_DEFAULT_MODEL"]
+	s.mu.RLock()
 	if defaultModel == "" {
 		defaultModel = s.hubCfg.DefaultModel
 	}
@@ -1284,15 +1287,14 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		defaultModel = "anthropic/claude-sonnet-4-6"
 	}
 	if anthropicKey == "" {
-		s.mu.RLock()
 		for k, v := range s.hubCfg.LLMKeys {
 			if k == "anthropic" {
 				anthropicKey = v
 				break
 			}
 		}
-		s.mu.RUnlock()
 	}
+	s.mu.RUnlock()
 	if anthropicKey != "" {
 		configPatch := fmt.Sprintf(`
 export HOME=/home/daytona; python3 - <<'PYEOF'
@@ -1833,18 +1835,20 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	s.mu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys)
 	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
 	s.mu.RUnlock()
 
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
-		ClawToken:       s.hubCfg.ClawToken,
+		ClawToken:       clawToken,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
-		HubCfg:          s.hubCfg,
+		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
