@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -265,26 +264,16 @@ func sshRunClient(client *gossh.Client, script string) (string, error) {
 		return "", err
 	}
 	defer sess.Close()
-	// Request a PTY so restricted shells allow command execution
-	if ptyErr := sess.RequestPty("xterm", 40, 80, gossh.TerminalModes{
-		gossh.ECHO: 0,
-	}); ptyErr != nil {
-		// PTY not available, try without
-	}
-	// Pipe script to bash stdin so multi-line scripts work with any shell
-	sess.Stdin = strings.NewReader(script + "\nexit\n")
-	var buf bytes.Buffer
-	sess.Stdout = &buf
-	sess.Stderr = &buf
-	err = sess.Shell()
-	if err == nil {
-		err = sess.Wait()
-	}
-	return buf.String(), err
+	out, err := sess.CombinedOutput("bash -c " + shellescape(script))
+	return string(out), err
 }
 
 func randomHex32() string {
 	b := make([]byte, 16)
 	io.ReadFull(rand.Reader, b)
 	return fmt.Sprintf("%x", b)
+}
+
+func shellescape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
