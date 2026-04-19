@@ -4,8 +4,7 @@ const isDev = process.env.NODE_ENV === "development"
 const nextConfig = {
   // Static export for production (embedded in Go binary).
   // In dev (npm run dev), skip static export so route handlers + middleware work.
-  ...(isDev ? {} : { output: "export" }),
-  trailingSlash: true,
+  ...(isDev ? {} : { output: "export", trailingSlash: true }),
   images: {
     unoptimized: true,
   },
