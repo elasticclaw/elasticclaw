@@ -9,10 +9,9 @@ import "fmt"
 type Params struct {
 	Domain       string
 	Version      string
-	WebImage     string // override Docker image; defaults to marc/elasticclaw-web:<version>
 	Token        string
 	ClawToken    string
-	UIToken      string
+	UIPassword   string
 	AnthropicKey string // optional; adds llm_keys to hub.yaml if set
 }
 
@@ -22,15 +21,6 @@ func HubBinaryURL(version string) string {
 		"https://github.com/elasticclaw/elasticclaw/releases/download/%s/elasticclaw-linux-amd64",
 		version,
 	)
-}
-
-// WebImageTag returns the Docker image tag for the web UI.
-// Defaults to :latest when version is empty or "dev".
-func WebImageTag(version string) string {
-	if version == "" || version == "dev" {
-		return "marc/elasticclaw-web:latest"
-	}
-	return fmt.Sprintf("marc/elasticclaw-web:%s", version)
 }
 
 // HubConfig returns the hub.yaml config file content.
@@ -43,9 +33,9 @@ func HubConfig(p Params) string {
 public_url: https://%s
 token: %s
 claw_token: %s
-ui_token: %s
+ui_password: %s
 address: :8080%s
-`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIToken, llmKeys)
+`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIPassword, llmKeys)
 }
 
 // SystemdUnit returns the systemd unit file for the hub service.
@@ -68,44 +58,11 @@ WantedBy=multi-user.target
 }
 
 // Caddyfile returns the Caddyfile config for the given domain.
+// The hub now serves both the web UI and API on a single port (8080),
+// so Caddy simply reverse proxies everything to it.
 func Caddyfile(domain string) string {
 	return fmt.Sprintf(`%s {
-	handle /api/login {
-		reverse_proxy localhost:8080
-	}
-	handle /api/auth/* {
-		reverse_proxy localhost:3000
-	}
-	handle /api/hub-config {
-		reverse_proxy localhost:3000
-	}
-	handle /api/claws* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/messages* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/ws* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/terminal* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/github* {
-		reverse_proxy localhost:8080
-	}
-	handle /api/debug* {
-		reverse_proxy localhost:8080
-	}
-	handle /hub/* {
-		reverse_proxy localhost:8080
-	}
-	handle /claw/* {
-		reverse_proxy localhost:8080
-	}
-	handle {
-		reverse_proxy localhost:3000
-	}
+	reverse_proxy localhost:8080
 }
 `, domain)
 }
@@ -154,23 +111,4 @@ func ScriptWriteCaddyfile(domain string) string {
 %sCADDYEOF
 sudo mv /tmp/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl reload caddy || sudo systemctl restart caddy`, Caddyfile(domain))
-}
-
-// ScriptRunWebUI returns the shell script to pull and start the web UI Docker container.
-func ScriptRunWebUI(p Params) string {
-	image := p.WebImage
-	if image == "" {
-		image = WebImageTag(p.Version)
-	}
-	return fmt.Sprintf(`sudo docker stop elasticclaw-web 2>/dev/null || true
-sudo docker rm elasticclaw-web 2>/dev/null || true
-sudo docker pull %s
-sudo docker run -d \
-  --name elasticclaw-web \
-  --restart=always \
-  --network=host \
-  -e ELASTICCLAW_HUB_URL=http://localhost:8080 \
-  -e ELASTICCLAW_HUB_TOKEN=%s \
-  -e ELASTICCLAW_UI_TOKEN=%s \
-  %s`, image, p.Token, p.UIToken, image)
 }

@@ -22,7 +22,7 @@ var installCmd = &cobra.Command{
 	Short: "Install ElasticClaw on a remote server",
 	Long: `Install and configure ElasticClaw on a remote VPS.
 
-Installs the hub binary, web UI (Docker), Caddy reverse proxy with TLS,
+Installs the hub binary (with embedded web UI), Caddy reverse proxy with TLS,
 and systemd service — fully configured and ready to use.
 
   elasticclaw install \
@@ -31,7 +31,6 @@ and systemd service — fully configured and ready to use.
 
 Prerequisites:
   - SSH access to the server (key-based auth)
-  - Docker installed on the server
   - DNS A record for --domain pointing to the server IP`,
 	RunE: runInstall,
 }
@@ -42,7 +41,7 @@ var (
 	installSSHKey  string
 	installVersion string
 	installToken        string
-	installUIToken      string
+	installUIPassword   string
 	installAnthropicKey string
 )
 
@@ -53,10 +52,9 @@ func init() {
 	installCmd.Flags().StringVar(&installSSHKey, "ssh-key", "", "Path to SSH private key (default: SSH agent or ~/.ssh/id_rsa)")
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
-	installCmd.Flags().StringVar(&installUIToken, "ui-token", "", "Web UI login password (default: randomly generated)")
+	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
 	installCmd.Flags().StringVar(&installAnthropicKey, "anthropic-key", "", "Anthropic API key for LLM access (sk-ant-...) — can also be set after install")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
-	installCmd.Flags().String("web-image", "", "Override web UI Docker image (default: marc/elasticclaw-web:<version>)")
 	installCmd.MarkFlagRequired("host")
 	installCmd.MarkFlagRequired("domain")
 }
@@ -79,7 +77,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if token == "" {
 		token = randomHex32()
 	}
-	uiToken := installUIToken
+	uiToken := installUIPassword
 	if uiToken == "" {
 		uiToken = randomHex32()
 	}
@@ -92,15 +90,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Scanln(&anthropicKey)
 	}
 
-	webImage, _ := cmd.Flags().GetString("web-image")
-
 	params := install.Params{
 		Domain:       installDomain,
 		Version:      version,
-		WebImage:     webImage,
 		Token:        token,
 		ClawToken:    clawToken,
-		UIToken:      uiToken,
+		UIPassword:   uiToken,
 		AnthropicKey: anthropicKey,
 	}
 
@@ -145,7 +140,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		{"Installing hub binary", install.ScriptInstallBinary(version)},
 		{"Writing hub config", install.ScriptWriteConfig(params)},
 		{"Installing systemd service", install.ScriptInstallSystemd()},
-		{"Starting web UI", install.ScriptRunWebUI(params)},
 	}
 	skipCaddy, _ := cmd.Flags().GetBool("skip-caddy")
 	if !skipCaddy {

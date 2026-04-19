@@ -84,7 +84,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 		Version:   "v0.0.3",
 		Token:     "test-hub-token-abc",
 		ClawToken: "test-claw-token-def",
-		UIToken:   "test-ui-token-ghi",
+		UIPassword: "test-ui-password-ghi",
 	}
 
 	// Helper to run a script and fail the test on error
