@@ -29,6 +29,7 @@ interface SettingsData {
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
+    webhookSecretSet?: boolean
   }>
 }
 
@@ -468,22 +469,19 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
   const [editWorkspace, setEditWorkspace] = useState("")
   const [editToken, setEditToken] = useState("")
-  const [editSecret, setEditSecret] = useState("")
   const [newWorkspace, setNewWorkspace] = useState("")
   const [newToken, setNewToken] = useState("")
-  const [newSecret, setNewSecret] = useState("")
 
   const startEdit = (i: number) => {
     setEditingIdx(i)
     setEditWorkspace(linear[i].workspace)
     setEditToken("")
-    setEditSecret("")
   }
 
   const saveEdit = () => {
     if (editingIdx === null) return
     const updated = linear.map((li, i) => i === editingIdx
-      ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}), ...(editSecret ? { webhookSecret: editSecret } : {}) }
+      ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}) }
       : { workspace: li.workspace }
     )
     onSave({ integrations: { linear: updated } })
@@ -518,10 +516,6 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                       <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
                       <Input type="password" value={editToken} onChange={e => setEditToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_... (leave blank to keep)" />
                     </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
-                      <Input type="password" value={editSecret} onChange={e => setEditSecret(e.target.value)} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
-                    </div>
                     <div className="flex gap-2">
                       <Button size="sm" disabled={saving || !editWorkspace} onClick={saveEdit}>Save</Button>
                       <Button size="sm" variant="outline" onClick={() => setEditingIdx(null)}>Cancel</Button>
@@ -536,8 +530,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                     <div>
                       <p className="text-sm font-medium">{li.workspace}</p>
                       <p className="text-xs text-muted-foreground">
-                        Token: {li.tokenSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">✗</span>}
-                        {" · Webhook secret: "}{li.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">✗</span>}
+                        Token: {li.tokenSet ? <span className="text-green-500">✓ set</span> : <span className="text-amber-500">✗ not set</span>}
                       </p>
                     </div>
                     <Button size="sm" variant="outline" onClick={() => startEdit(i)}>Edit</Button>
@@ -557,14 +550,10 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
             <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
             <Input type="password" value={newToken} onChange={e => setNewToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_..." />
           </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
-            <Input type="password" value={newSecret} onChange={e => setNewSecret(e.target.value)} className="h-8 text-sm" placeholder="whsec_..." />
-          </div>
           <Button size="sm" disabled={saving || !newWorkspace || !newToken}
             onClick={() => {
-              onSave({ integrations: { linear: [...linear, { workspace: newWorkspace, token: newToken, ...(newSecret ? { webhookSecret: newSecret } : {}) }] } })
-              setNewWorkspace(""); setNewToken(""); setNewSecret("")
+              onSave({ integrations: { linear: [...linear, { workspace: newWorkspace, token: newToken }] } })
+              setNewWorkspace(""); setNewToken("")
             }}>
             Add Linear Workspace
           </Button>
@@ -577,6 +566,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 interface FactoryFormData {
   name: string; workspace: string; team: string
   triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
+  webhookSecret: string
 }
 
 function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
@@ -587,9 +577,11 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
     if (!webhookUrl) return
     navigator.clipboard.writeText(webhookUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
   }
+  const [editingFactory, setEditingFactory] = useState<number | null>(null)
+  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "" })
   const [form, setForm] = useState<FactoryFormData>({
     name: "", workspace: "", team: "", triggerStatus: "Ready for Agent",
-    doneStatus: "In Review", terminateOnLeave: true, template: "base"
+    doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: ""
   })
 
   const workspaces = settings.integrations?.linear?.map(l => l.workspace) || []
@@ -627,19 +619,65 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
       {factories.length > 0 && (
         <div className="space-y-2 mb-6">
           {factories.map((f, i) => (
-            <div key={i} className="border border-border rounded-lg p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">{f.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → template: {f.template}
-                  </p>
+            <div key={i}>
+              {editingFactory === i ? (
+                <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
+                  <h4 className="text-sm font-semibold">Edit: {f.name}</h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                      <Input value={editForm.name} onChange={e => setEditForm(p => ({...p, name: e.target.value}))} className="h-8 text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+                      <Input value={editForm.team} onChange={e => setEditForm(p => ({...p, team: e.target.value}))} className="h-8 text-sm" placeholder="ELA" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
+                      <Input value={editForm.triggerStatus} onChange={e => setEditForm(p => ({...p, triggerStatus: e.target.value}))} className="h-8 text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Done status</label>
+                      <Input value={editForm.doneStatus} onChange={e => setEditForm(p => ({...p, doneStatus: e.target.value}))} className="h-8 text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Template</label>
+                      <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
+                      <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" disabled={saving} onClick={() => {
+                      const { webhookSecret, ...rest } = editForm
+                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(webhookSecret ? { webhookSecret } : {}) } : x)
+                      onSave({ factories: updated })
+                      setEditingFactory(null)
+                    }}>Save</Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditingFactory(null)}>Cancel</Button>
+                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive ml-auto" disabled={saving}
+                      onClick={() => { onSave({ factories: factories.filter((_, j) => j !== i) }); setEditingFactory(null) }}>
+                      Remove
+                    </Button>
+                  </div>
                 </div>
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
-                  onClick={() => onSave({ factories: factories.filter((_, j) => j !== i) })}>
-                  Remove
-                </Button>
-              </div>
+              ) : (
+                <div className="border border-border rounded-lg p-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">{f.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → {f.template}
+                      {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => {
+                    setEditingFactory(i)
+                    setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "" })
+                  }}>Edit</Button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -681,10 +719,15 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
           <input type="checkbox" checked={form.terminateOnLeave} onChange={e => update("terminateOnLeave", e.target.checked)} />
           Terminate claw when issue leaves trigger status
         </label>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
+          <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
+        </div>
         <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
           onClick={() => {
-            onSave({ factories: [...factories, { ...form, integration: "linear" }] })
-            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base" })
+            const { webhookSecret, ...rest } = form
+            onSave({ factories: [...factories, { ...rest, integration: "linear", ...(webhookSecret ? { webhookSecret } : {}) }] })
+            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "" })
           }}>
           Add Factory
         </Button>
