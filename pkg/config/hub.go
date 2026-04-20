@@ -33,13 +33,25 @@ func LoadHubConfig() (*types.HubConfig, error) {
 		if err != nil {
 			// Check if this is a type error on llm_keys (old format vs new format)
 			if typeErr, ok := err.(*yaml.TypeError); ok {
-				// If the error mentions llm_keys, try migrating old format
 				errMsg := typeErr.Error()
+				// Only attempt migration if the error ONLY mentions llm_keys and no other fields
 				if bytes.Contains([]byte(errMsg), []byte("llm_keys")) {
-					// Try to migrate and re-parse
-					if migrateErr := migrateOldLLMKeys(cfg, data); migrateErr == nil {
-						// Successfully migrated, cfg is now populated
-						return cfg, nil
+					// Parse the type error to check if it only contains llm_keys errors
+					// yaml.TypeError.Errors contains a slice of error strings
+					hasOtherErrors := false
+					for _, errLine := range typeErr.Errors {
+						if !bytes.Contains([]byte(errLine), []byte("llm_keys")) {
+							hasOtherErrors = true
+							break
+						}
+					}
+					// Only migrate if all errors are llm_keys related
+					if !hasOtherErrors {
+						// Try to migrate and re-parse
+						if migrateErr := migrateOldLLMKeys(cfg, data); migrateErr == nil {
+							// Successfully migrated, cfg is now populated
+							return cfg, nil
+						}
 					}
 				}
 			}
@@ -253,7 +265,7 @@ func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) error {
 	if err := yaml.Unmarshal(raw, &legacy); err != nil || len(legacy.LLMKeys) == 0 {
 		return err
 	}
-	
+
 	// Sort providers to ensure deterministic default selection
 	var providers []string
 	for provider := range legacy.LLMKeys {
@@ -264,7 +276,7 @@ func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) error {
 	if len(providers) == 0 {
 		return nil
 	}
-	
+
 	// Use lexicographic ordering for deterministic behavior
 	for i := 0; i < len(providers); i++ {
 		for j := i + 1; j < len(providers); j++ {
@@ -273,7 +285,7 @@ func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) error {
 			}
 		}
 	}
-	
+
 	// First provider in sorted order becomes default
 	for i, provider := range providers {
 		cfg.LLMKeys = append(cfg.LLMKeys, &types.LLMKeyConfig{

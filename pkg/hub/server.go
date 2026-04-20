@@ -556,9 +556,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, req.LLMKey, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1880,6 +1880,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		log.Printf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
 	}
 	log.Printf("[bootstrap] claw %s nix=%d", clawID[:8], nixEnabled)
+	// Read llm_key selection
+	var llmKeyName string
+	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
@@ -1914,8 +1917,8 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	gatewayPassword := randomHex(16)
 
 	s.mu.RLock()
-	// Inject all configured LLM keys — OpenClaw picks the right one based on the default_model provider.
-	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys)
+	// Inject all configured LLM keys, prioritizing the selected key if specified
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
@@ -2141,14 +2144,28 @@ func buildLinearEnv(token string) string {
 }
 
 // buildLLMKeyEnv converts llm_keys slice to shell env var export lines.
+// If selectedKeyName is non-empty, the selected key is prioritized over default keys.
 // All keys are exported so each claw has access to whichever provider it needs.
-func buildLLMKeyEnv(keys []*types.LLMKeyConfig) string {
+func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	if len(keys) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	seen := map[string]bool{}
-	// First pass: export default keys
+
+	// First pass: export the selected key if specified
+	if selectedKeyName != "" {
+		for _, k := range keys {
+			if k.Name == selectedKeyName {
+				envVar := k.EnvVarName()
+				seen[envVar] = true
+				fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
+				break
+			}
+		}
+	}
+
+	// Second pass: export default keys for providers not yet seen
 	for _, k := range keys {
 		if !k.Default {
 			continue
@@ -2160,7 +2177,7 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig) string {
 		seen[envVar] = true
 		fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
 	}
-	// Second pass: export non-default keys for providers not yet seen
+	// Third pass: export non-default keys for providers not yet seen
 	for _, k := range keys {
 		envVar := k.EnvVarName()
 		if seen[envVar] {
@@ -2178,12 +2195,12 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	if key == nil {
 		return hubCfg.DefaultModel
 	}
-	
+
 	// Check if hub's DefaultModel matches this key's provider
 	if hubCfg.DefaultModel != "" && strings.HasPrefix(hubCfg.DefaultModel, key.Provider+"/") {
 		return hubCfg.DefaultModel
 	}
-	
+
 	// Construct a provider-specific default model
 	switch key.Provider {
 	case "anthropic":

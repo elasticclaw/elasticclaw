@@ -327,6 +327,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const llmKeys = settings.llmKeys || []
   const [newName, setNewName] = useState("")
   const [newProvider, setNewProvider] = useState("anthropic")
+  const [newCustomProvider, setNewCustomProvider] = useState("")
   const [newKey, setNewKey] = useState("")
   const [newDefault, setNewDefault] = useState(false)
 
@@ -388,6 +389,13 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
             </select>
           </div>
         </div>
+        {newProvider === "other" && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Custom Provider Name</label>
+            <Input value={newCustomProvider} onChange={e => setNewCustomProvider(e.target.value)}
+              className="h-8 text-sm" placeholder="mistral" />
+          </div>
+        )}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
           <Input type="password" value={newKey} onChange={e => setNewKey(e.target.value)}
@@ -397,10 +405,11 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
           <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />
           Set as default key
         </label>
-        <Button size="sm" disabled={saving || !newName || !newKey}
+        <Button size="sm" disabled={saving || !newName || !newKey || (newProvider === "other" && !newCustomProvider)}
           onClick={() => {
-            onSave({ llmKeys: [{ name: newName, provider: newProvider, apiKey: newKey, default: newDefault }] })
-            setNewName(""); setNewKey(""); setNewDefault(false)
+            const actualProvider = newProvider === "other" ? newCustomProvider : newProvider
+            onSave({ llmKeys: [{ name: newName, provider: actualProvider, apiKey: newKey, default: newDefault }] })
+            setNewName(""); setNewKey(""); setNewDefault(false); setNewCustomProvider("")
           }}>
           Add Key
         </Button>
