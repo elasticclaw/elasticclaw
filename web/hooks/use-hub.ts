@@ -150,21 +150,32 @@ export function useHub(selectedClawId: string | null): HubState {
       const msgs = apiMsgs.map(mapApiMessage)
       setMessages((prev) => {
         const existing = prev[clawId] || []
-        const next = { ...prev, [clawId]: msgs }
+        
+        // Build a Set of existing message IDs for efficient lookup
+        const existingIds = new Set(existing.map((m) => m.id))
+        
+        // Find truly new messages (not in existing cache) by comparing IDs
+        const newMsgs = msgs.filter((m) => !existingIds.has(m.id))
+        
+        // Merge: keep existing messages, append only new ones
+        // This preserves richer cache data (up to 200 messages) instead of truncating to API limit (100)
+        const merged = [...existing, ...newMsgs]
+        
+        const next = { ...prev, [clawId]: merged }
         persistMessages(next)
-        // If we got new messages that weren't in state, bump unread for board view
-        if (msgs.length > existing.length) {
-          const newClawMsgs = msgs.slice(existing.length).filter((m) => m.role !== 'user' && m.role !== 'system')
-          if (newClawMsgs.length > 0) {
-            setClaws((prevClaws) =>
-              prevClaws.map((c) =>
-                c.id === clawId && selectedClawIdRef.current !== clawId
-                  ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
-                  : c
-              )
+        
+        // Bump unread count for new non-user/non-system messages when claw is not selected
+        const newClawMsgs = newMsgs.filter((m) => m.role !== 'user' && m.role !== 'system')
+        if (newClawMsgs.length > 0) {
+          setClaws((prevClaws) =>
+            prevClaws.map((c) =>
+              c.id === clawId && selectedClawIdRef.current !== clawId
+                ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
+                : c
             )
-          }
+          )
         }
+        
         return next
       })
     } catch (err) {
