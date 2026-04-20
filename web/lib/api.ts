@@ -69,6 +69,17 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
       ...options?.headers,
     },
   })
+  if (res.status === 401) {
+    // Token expired or invalid — clear it and redirect to login
+    clearConfig()
+    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login"
+      // Return a never-resolving promise to prevent the error from propagating
+      // and triggering the "Cannot reach hub" error screen before navigation completes
+      return new Promise(() => {})
+    }
+    throw new Error("session expired")
+  }
   if (!res.ok) {
     throw new Error(`API error ${res.status}: ${await res.text()}`)
   }
