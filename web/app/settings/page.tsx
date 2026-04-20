@@ -52,6 +52,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
+  const [version, setVersion] = useState("")
 
   const load = useCallback(async () => {
     try {
@@ -62,6 +63,15 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    const hubUrl = getHubUrl()
+    const token = sessionStorage.getItem("ec_hub_token") || ""
+    fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((d) => { if (d.version) setVersion(d.version) })
+      .catch(() => {})
+  }, [])
 
   async function save(patch: object) {
     setSaving(true)
@@ -98,7 +108,8 @@ export default function SettingsPage() {
 
       <div className="flex flex-1">
         {/* Left nav */}
-        <aside className="w-56 border-r border-border p-4 space-y-1">
+        <aside className="w-56 border-r border-border p-4 flex flex-col">
+          <div className="space-y-1 flex-1">
           {navItems.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -114,6 +125,12 @@ export default function SettingsPage() {
               {label}
             </button>
           ))}
+          </div>
+          {version && (
+            <p className="text-xs text-muted-foreground/50 px-3 pt-4 font-mono">
+              v{version}
+            </p>
+          )}
         </aside>
 
         {/* Content */}
