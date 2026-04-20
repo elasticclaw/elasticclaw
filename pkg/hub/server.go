@@ -948,7 +948,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				var chunk struct {
 					Content string `json:"content"`
 				}
-				if err := json.Unmarshal(payload, &chunk); err == nil && chunk.Content != "" {
+				// Note: do NOT filter empty/whitespace-only chunks — newlines and spaces
+				// arriving as standalone chunks must be preserved for correct formatting.
+				if err := json.Unmarshal(payload, &chunk); err == nil && len(chunk.Content) > 0 {
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type:    "chunk",
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
