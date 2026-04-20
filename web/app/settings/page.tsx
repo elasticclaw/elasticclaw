@@ -29,7 +29,7 @@ interface SettingsData {
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean
+    webhookSecretSet?: boolean; tags?: string[]; color?: string
   }>
 }
 
@@ -566,7 +566,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 interface FactoryFormData {
   name: string; workspace: string; team: string
   triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-  webhookSecret: string
+  webhookSecret: string; tags: string; color: string
 }
 
 function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
@@ -578,10 +578,10 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
     navigator.clipboard.writeText(webhookUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
   }
   const [editingFactory, setEditingFactory] = useState<number | null>(null)
-  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "" })
+  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "", tags: "", color: "" })
   const [form, setForm] = useState<FactoryFormData>({
     name: "", workspace: "", team: "", triggerStatus: "Ready for Agent",
-    doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: ""
+    doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
   })
 
   const workspaces = settings.integrations?.linear?.map(l => l.workspace) || []
@@ -648,11 +648,20 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                       <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
                       <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
                     </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
+                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder="linear, feature" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Color</label>
+                      <Input value={editForm.color} onChange={e => setEditForm(p => ({...p, color: e.target.value}))} className="h-8 text-sm" placeholder="teal, coral, amber…" />
+                    </div>
                   </div>
                   <div className="flex gap-2">
                     <Button size="sm" disabled={saving} onClick={() => {
-                      const { webhookSecret, ...rest } = editForm
-                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(webhookSecret ? { webhookSecret } : {}) } : x)
+                      const { webhookSecret, tags: tagsStr, color, ...rest } = editForm
+                      const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
+                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(webhookSecret ? { webhookSecret } : {}), tags, color } : x)
                       onSave({ factories: updated })
                       setEditingFactory(null)
                     }}>Save</Button>
@@ -676,7 +685,7 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                     <a href={`/factories/${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
-                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "" })
+                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "" })
                     }}>Edit</Button>
                   </div>
                 </div>
@@ -726,11 +735,22 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
           <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
           <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
+            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder="linear, feature" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Color</label>
+            <Input value={form.color} onChange={e => update("color", e.target.value)} className="h-8 text-sm" placeholder="teal, coral, amber…" />
+          </div>
+        </div>
         <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
           onClick={() => {
-            const { webhookSecret, ...rest } = form
-            onSave({ factories: [...factories, { ...rest, integration: "linear", ...(webhookSecret ? { webhookSecret } : {}) }] })
-            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "" })
+            const { webhookSecret, tags: tagsStr, color, ...rest } = form
+            const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
+            onSave({ factories: [...factories, { ...rest, integration: "linear", ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: "" })
           }}>
           Add Factory
         </Button>

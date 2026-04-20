@@ -38,16 +38,18 @@ type LinearIntegrationView struct {
 }
 
 type FactoryView struct {
-	Name             string `json:"name"`
-	Integration      string `json:"integration"`
-	Workspace        string `json:"workspace"`
-	Team             string `json:"team"`
-	TriggerStatus    string `json:"triggerStatus"`
-	DoneStatus       string `json:"doneStatus"`
-	TerminateOnLeave bool   `json:"terminateOnLeave"`
-	Template         string `json:"template"`
-	NamePattern      string `json:"namePattern"`
-	WebhookSecretSet bool   `json:"webhookSecretSet"`
+	Name             string   `json:"name"`
+	Integration      string   `json:"integration"`
+	Workspace        string   `json:"workspace"`
+	Team             string   `json:"team"`
+	TriggerStatus    string   `json:"triggerStatus"`
+	DoneStatus       string   `json:"doneStatus"`
+	TerminateOnLeave bool     `json:"terminateOnLeave"`
+	Template         string   `json:"template"`
+	NamePattern      string   `json:"namePattern"`
+	WebhookSecretSet bool     `json:"webhookSecretSet"`
+	Tags             []string `json:"tags"`
+	Color            string   `json:"color"`
 }
 
 type ProviderView struct {
@@ -92,16 +94,18 @@ type LinearIntegrationPatch struct {
 }
 
 type FactoryPatch struct {
-	Name             string `json:"name"`
-	Integration      string `json:"integration"`
-	Workspace        string `json:"workspace"`
-	Team             string `json:"team,omitempty"`
-	TriggerStatus    string `json:"triggerStatus"`
-	DoneStatus       string `json:"doneStatus,omitempty"`
-	TerminateOnLeave bool   `json:"terminateOnLeave"`
-	Template         string `json:"template"`
-	NamePattern      string `json:"namePattern,omitempty"`
-	WebhookSecret    string `json:"webhookSecret,omitempty"`
+	Name             string   `json:"name"`
+	Integration      string   `json:"integration"`
+	Workspace        string   `json:"workspace"`
+	Team             string   `json:"team,omitempty"`
+	TriggerStatus    string   `json:"triggerStatus"`
+	DoneStatus       string   `json:"doneStatus,omitempty"`
+	TerminateOnLeave bool     `json:"terminateOnLeave"`
+	Template         string   `json:"template"`
+	NamePattern      string   `json:"namePattern,omitempty"`
+	WebhookSecret    string   `json:"webhookSecret,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Color            string   `json:"color,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -222,6 +226,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Template:         f.Template,
 			NamePattern:      f.NamePattern,
 			WebhookSecretSet: f.WebhookSecret != "",
+			Tags:             f.Tags,
+			Color:            f.Color,
 		})
 	}
 	s.mu.RUnlock()
@@ -391,6 +397,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
 				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
+				Tags: fp.Tags, Color: fp.Color,
 			})
 		}
 		updatedCfg.Factories = factories

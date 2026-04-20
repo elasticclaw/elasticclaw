@@ -209,15 +209,27 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		env["LINEAR_API_KEY"] = linearToken
 	}
 
+	// Build tags — always include factory tag; merge with factory-configured tags
+	tags := []string{"factory:" + factory.Name}
+	for _, t := range factory.Tags {
+		if t != "factory:"+factory.Name {
+			tags = append(tags, t)
+		}
+	}
+	tagsJSON, _ := json.Marshal(tags)
+
+	// Color
+	clawColor := factory.Color
+
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, template_files, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON), issueID, now,
+		INSERT INTO claws(id, tenant_id, name, template, provider, template_files, linear_issue_id, tags, color, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON), issueID, string(tagsJSON), clawColor, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
