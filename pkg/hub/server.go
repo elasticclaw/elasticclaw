@@ -1922,7 +1922,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if hasGitHubApps2 && len(githubRepos) > 0 {
 		repoLines := ""
 		for _, r := range githubRepos {
-			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
+			repoLines += fmt.Sprintf("- `%s` (%s)\n", repoPath(r), r.Permissions)
 		}
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
@@ -2134,19 +2134,31 @@ func buildLLMKeyEnv(keys map[string]string) string {
 }
 
 // buildGitHubCloneScript returns shell lines that clone repos into the current directory.
+// repoPath returns the canonical repo path, accepting both 'repo' and 'repository' yaml keys.
+func repoPath(r types.GitHubRepoAccess) string {
+	if r.Repo != "" {
+		return r.Repo
+	}
+	return r.Repository
+}
+
 func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	if len(repos) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	for _, r := range repos {
-		parts := strings.SplitN(r.Repo, "/", 2)
-		repoName := r.Repo
+		rp := repoPath(r)
+		if rp == "" {
+			continue
+		}
+		parts := strings.SplitN(rp, "/", 2)
+		repoName := rp
 		if len(parts) == 2 {
 			repoName = parts[1]
 		}
-		fmt.Fprintf(&b, "if [ ! -d %q ]; then git clone https://github.com/%s %s && echo 'Cloned %s' || FAILED=1; else git -C %s pull --ff-only && echo 'Updated %s' || FAILED=1; fi\n",
-			repoName, r.Repo, repoName, r.Repo, repoName, r.Repo)
+		fmt.Fprintf(&b, "if [ ! -d %q ]; then git clone https://github.com/%s %s && echo 'Cloned %s'; else git -C %s pull --ff-only && echo 'Updated %s'; fi\n",
+			repoName, rp, repoName, rp, repoName, rp)
 	}
 	return b.String()
 }

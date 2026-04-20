@@ -60,6 +60,7 @@ type GitHubAppConfig struct {
 // GitHubRepoAccess specifies a repo and the permissions needed.
 type GitHubRepoAccess struct {
 	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo"
+	Repository  string `yaml:"repository"  json:"repository,omitempty"` // alias for Repo
 	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
 }
 
