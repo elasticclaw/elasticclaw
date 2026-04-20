@@ -265,6 +265,14 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
 	go func() {
+		// Guard: if the claw was deleted before provisioning started (e.g. issue
+		// immediately moved back out of trigger status), abort silently.
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus == "deleted" {
+			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			return
+		}
 		ctx := context.Background()
 		req := types.CreateClawRequest{
 			Name:         clawName,
@@ -277,7 +285,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		case "replicated":
 			if err := s.provisionReplicated(ctx, clawID, req, provCfg, env); err != nil {
 				log.Printf("[factory] provision failed for %s: %v", clawID, err)
-				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+				// Only mark error if not already deleted
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
 			}
 		}
 	}()

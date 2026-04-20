@@ -1653,10 +1653,18 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
-	// Store vm_id in the claw record for later operations (destroy, SSH, etc.)
+	// Store vm_id in the claw record — skip if already deleted (factory terminated mid-provision)
 	_, _ = s.db.Exec(
-		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=?`, vmID, clawID,
+		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=? AND status != 'deleted'`, vmID, clawID,
 	)
+	// If deleted, clean up the VM and bail
+	var currentStatus string
+	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+	if currentStatus == "deleted" {
+		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
+		_ = p.DeleteVM(ctx, vmID)
+		return fmt.Errorf("claw deleted mid-provision")
+	}
 
 	instanceType := req.InstanceType
 	if instanceType == "" {
