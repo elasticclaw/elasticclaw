@@ -141,7 +141,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue entering trigger status → create claw
-		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
+		if previousStatus != "" && strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
 			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""

@@ -659,6 +659,10 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                       <Input value={editForm.color} onChange={e => setEditForm(p => ({...p, color: e.target.value}))} className="h-8 text-sm" placeholder="teal, coral, amber…" />
                     </div>
                   </div>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" checked={editForm.terminateOnLeave} onChange={e => setEditForm(p => ({...p, terminateOnLeave: e.target.checked}))} />
+                    Terminate claw when issue leaves trigger status
+                  </label>
                   <div className="flex gap-2">
                     <Button size="sm" disabled={saving} onClick={() => {
                       const { webhookSecret, tags: tagsStr, color, originalName, ...rest } = editForm
