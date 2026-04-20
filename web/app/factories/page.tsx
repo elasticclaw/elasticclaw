@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
-import { useParams } from "next/navigation"
+import { useState, useEffect, useCallback, Suspense } from "react"
+import { useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
 import { Button } from "@/components/ui/button"
 import { ChevronLeft, RefreshCw, CheckCircle, XCircle, AlertCircle, Zap } from "lucide-react"
@@ -49,9 +49,9 @@ function formatTime(ts: string): string {
     " · " + d.toLocaleDateString([], { month: "short", day: "numeric" })
 }
 
-export default function FactoryEventsPage() {
-  const params = useParams<{ name: string }>()
-  const name = decodeURIComponent(params.name)
+function FactoryEventsContent() {
+  const searchParams = useSearchParams()
+  const name = searchParams.get("name") ?? ""
   const [events, setEvents] = useState<FactoryEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
@@ -146,5 +146,14 @@ export default function FactoryEventsPage() {
         )}
       </div>
     </div>
+  )
+}
+
+
+export default function FactoryEventsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-background flex items-center justify-center"><p className="text-sm text-muted-foreground animate-pulse">Loading…</p></div>}>
+      <FactoryEventsContent />
+    </Suspense>
   )
 }
