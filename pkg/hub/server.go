@@ -132,6 +132,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 
 	// Integration webhooks (signature-validated, no session auth)
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)

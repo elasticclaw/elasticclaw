@@ -89,6 +89,19 @@ func migrate(db *sql.DB) error {
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS factory_events (
+		id           TEXT PRIMARY KEY,
+		factory_name TEXT NOT NULL,
+		issue_id     TEXT NOT NULL,
+		issue_title  TEXT NOT NULL DEFAULT '',
+		prev_status  TEXT NOT NULL DEFAULT '',
+		new_status   TEXT NOT NULL DEFAULT '',
+		action       TEXT NOT NULL,  -- 'claw_created', 'claw_terminated', 'not_actionable'
+		claw_id      TEXT NOT NULL DEFAULT '',
+		detail       TEXT NOT NULL DEFAULT '',
+		created_at   DATETIME NOT NULL
+	);
 	`)
 	return err
 }

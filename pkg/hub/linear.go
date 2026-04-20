@@ -113,6 +113,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	teamKey := payload.Data.Team.Key
 	issueID := payload.Data.Identifier // e.g. "ELA-123"
 
+	matched := false
 	for _, factory := range s.hubCfg.Factories {
 		if factory.Integration != "linear" {
 			continue
@@ -123,16 +124,35 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 
 		// Issue entering trigger status → create claw
 		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
+			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
+			clawID := ""
 			if err := s.createClawForIssue(factory, payload); err != nil {
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
+			} else {
+				// Look up the newly created claw ID
+				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_created", clawID, "")
 			}
 		}
 
 		// Issue leaving trigger status → terminate claw
 		if factory.TerminateOnLeave && strings.EqualFold(previousStatus, factory.TriggerStatus) && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
+			matched = true
 			log.Printf("[factory:%s] issue %s left '%s' — terminating claw", factory.Name, issueID, factory.TriggerStatus)
 			s.terminateClawForIssue(issueID)
+			s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_terminated", "", "")
+		}
+	}
+
+	if !matched {
+		// Webhook received but no factory matched — log as not_actionable
+		for _, factory := range s.hubCfg.Factories {
+			if factory.Integration == "linear" {
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "not_actionable",
+					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
+			}
 		}
 	}
 }
@@ -419,4 +439,67 @@ func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
 	}
 	resp2.Body.Close()
 	return nil
+}
+
+// logFactoryEvent records a factory webhook event and prunes entries older than 4 hours.
+func (s *Server) logFactoryEvent(factoryName, issueID, issueTitle, prevStatus, newStatus, action, clawID, detail string) {
+	id := uuid.New().String()
+	_, _ = s.db.Exec(
+		`INSERT INTO factory_events(id,factory_name,issue_id,issue_title,prev_status,new_status,action,claw_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		id, factoryName, issueID, issueTitle, prevStatus, newStatus, action, clawID, detail, now(),
+	)
+	// Prune events older than 4 hours
+	_, _ = s.db.Exec(`DELETE FROM factory_events WHERE created_at < datetime('now', '-4 hours')`)
+}
+
+// handleFactoryEvents serves GET /api/factories/:name/events
+func (s *Server) handleFactoryEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Path: /api/factories/:name/events
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
+	if len(parts) < 2 || parts[1] != "events" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	factoryName := parts[0]
+
+	rows, err := s.db.Query(
+		`SELECT id, factory_name, issue_id, issue_title, prev_status, new_status, action, claw_id, detail, created_at
+		 FROM factory_events WHERE factory_name = ? ORDER BY created_at DESC LIMIT 200`,
+		factoryName,
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type FactoryEvent struct {
+		ID          string `json:"id"`
+		FactoryName string `json:"factoryName"`
+		IssueID     string `json:"issueId"`
+		IssueTitle  string `json:"issueTitle"`
+		PrevStatus  string `json:"prevStatus"`
+		NewStatus   string `json:"newStatus"`
+		Action      string `json:"action"`
+		ClawID      string `json:"clawId"`
+		Detail      string `json:"detail"`
+		CreatedAt   string `json:"createdAt"`
+	}
+
+	var events []FactoryEvent
+	for rows.Next() {
+		var e FactoryEvent
+		if err := rows.Scan(&e.ID, &e.FactoryName, &e.IssueID, &e.IssueTitle, &e.PrevStatus, &e.NewStatus, &e.Action, &e.ClawID, &e.Detail, &e.CreatedAt); err != nil {
+			continue
+		}
+		events = append(events, e)
+	}
+	if events == nil {
+		events = []FactoryEvent{}
+	}
+	jsonOK(w, events)
 }

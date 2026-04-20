@@ -672,10 +672,13 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                       {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
                     </p>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => {
-                    setEditingFactory(i)
-                    setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "" })
-                  }}>Edit</Button>
+                  <div className="flex items-center gap-2">
+                    <a href={`/factories/${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
+                    <Button size="sm" variant="outline" onClick={() => {
+                      setEditingFactory(i)
+                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "" })
+                    }}>Edit</Button>
+                  </div>
                 </div>
               )}
             </div>
