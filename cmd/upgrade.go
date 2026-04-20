@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,7 +26,7 @@ func init() {
 func runUpgrade(cmd *cobra.Command, args []string) error {
 	fmt.Println("Checking for updates...")
 
-	latest, err := fetchLatestVersion()
+	latest, err := latestGitHubRelease("elasticclaw", "elasticclaw")
 	if err != nil {
 		return fmt.Errorf("failed to check latest version: %w", err)
 	}
@@ -68,11 +67,13 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 
 	resp, err := http.Get(downloadURL)
 	if err != nil {
+		tmp.Close()
 		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		tmp.Close()
 		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
 
@@ -100,24 +101,6 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func fetchLatestVersion() (string, error) {
-	resp, err := http.Get("https://api.github.com/repos/elasticclaw/elasticclaw/releases/latest")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	var rel struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", err
-	}
-	if rel.TagName == "" {
-		return "", fmt.Errorf("no release found")
-	}
-	return rel.TagName, nil
-}
-
 func buildDownloadURL(version string) (string, error) {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -136,10 +119,6 @@ func buildDownloadURL(version string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported platform: %s/%s — download manually from https://github.com/elasticclaw/elasticclaw/releases", goos, goarch)
 	}
-
-	// Strip leading 'v' from version for asset name consistency
-	ver := strings.TrimPrefix(version, "v")
-	_ = ver // asset name uses full tag
 
 	return fmt.Sprintf(
 		"https://github.com/elasticclaw/elasticclaw/releases/download/%s/elasticclaw-%s",
