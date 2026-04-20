@@ -71,7 +71,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   })
   if (res.status === 401) {
     // Token expired or invalid — clear it and redirect to login
-    sessionStorage.removeItem("ec_hub_token")
+    clearConfig()
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       window.location.href = "/login"
     }
