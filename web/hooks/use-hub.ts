@@ -36,6 +36,7 @@ export interface HubState {
 export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
+  const messagesRef = useRef<Record<string, Message[]>>({})
   const [connected, setConnected] = useState(false)
   const { displayBuffers: streamingBuffers, pushChunk, finalize: finalizeTypewriter } = useTypewriter()
   const [configured, setConfigured] = useState(false)
@@ -81,6 +82,10 @@ export function useHub(selectedClawId: string | null): HubState {
   useEffect(() => {
     selectedClawIdRef.current = selectedClawId
   }, [selectedClawId])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
 
   // Load pinned state + message cache from localStorage on mount
   useEffect(() => {
@@ -149,9 +154,11 @@ export function useHub(selectedClawId: string | null): HubState {
       const apiMsgs = await fetchMessages(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
       
-      // Compute new messages and their count outside the state updater
-      let newClawMsgs: Message[] = []
-      
+      // Capture existing IDs before updating so we can diff outside the updater.
+      // React 18 batches state updates — side effects inside updaters are unreliable.
+      const existingIds = new Set((messagesRef.current[clawId] || []).map((m) => m.id))
+      const newClawMsgs = msgs.filter((m) => !existingIds.has(m.id) && m.role !== 'user' && m.role !== 'system')
+
       setMessages((prev) => {
         const existing = prev[clawId] || []
         // Merge API result with cached state:
@@ -166,16 +173,10 @@ export function useHub(selectedClawId: string | null): HubState {
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
-        
-        // Track new non-user/non-system messages for unread count update
-        newClawMsgs = newMsgs.filter((m) => m.role !== 'user' && m.role !== 'system')
-        
         return next
       })
-      
-      // Bump unread count for new non-user/non-system messages when claw is not selected
-      // This is outside the setMessages updater to avoid impure side effects
-      if (newClawMsgs.length > 0) {
+
+      if (newClawMsgs.length > 0 && selectedClawIdRef.current !== clawId) {
         setClaws((prevClaws) =>
           prevClaws.map((c) =>
             c.id === clawId && selectedClawIdRef.current !== clawId
