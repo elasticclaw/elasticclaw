@@ -143,10 +143,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("  Hub token:    %s\n", token)
 	fmt.Printf("  UI password:  %s\n", uiToken)
-	fmt.Printf("  Claw token:   %s  (used internally by claws)\n", clawToken)
 	fmt.Println()
 	fmt.Printf("  Login: elasticclaw login --hub https://%s --token %s\n", installDomain, token)
 	fmt.Printf("  Web UI: https://%s\n", installDomain)
+	if !skipCaddy {
+		fmt.Println()
+		fmt.Println("  ⏳ Caddy is obtaining a TLS certificate from Let's Encrypt.")
+		fmt.Println("     This may take a minute. If the site is unreachable, wait 60s and try again.")
+	}
 	fmt.Println()
 	fmt.Println("  Save these credentials — they won't be shown again.")
 

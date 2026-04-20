@@ -2108,7 +2108,7 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 		if len(parts) == 2 {
 			repoName = parts[1]
 		}
-		fmt.Fprintf(&b, "if [ ! -d %q ]; then git clone https://github.com/%s %s && echo 'Cloned %s'; else git -C %s pull --ff-only && echo 'Updated %s'; fi\n",
+		fmt.Fprintf(&b, "if [ ! -d %q ]; then git clone https://github.com/%s %s && echo 'Cloned %s' || FAILED=1; else git -C %s pull --ff-only && echo 'Updated %s' || FAILED=1; fi\n",
 			repoName, r.Repo, repoName, r.Repo, repoName, r.Repo)
 	}
 	return b.String()
@@ -2155,7 +2155,12 @@ echo "GitHub credential helper installed"
 # Clone repos — non-fatal: token may not be available until bridge connects
 # The agent can clone manually if this fails
 cd "$HOME/.openclaw/workspace" || true
-{ %s } || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
+(
+set +e
+FAILED=0
+%s
+exit $FAILED
+) || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
