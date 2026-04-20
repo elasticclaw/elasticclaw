@@ -54,10 +54,11 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	if existing != "" {
 		return
 	}
-	
-	// Get the current max comment ID to avoid flooding with historical comments
+
+	// Get the current max comment ID and head SHA to avoid flooding with historical data
 	token := s.resolveGitHubToken()
 	var maxCommentID int64
+	var headSHA string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
 		if err == nil {
@@ -70,11 +71,18 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 				}
 			}
 		}
+
+		prData, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", repo, prNumber), token)
+		if err == nil {
+			if headObj, ok := prData["head"].(map[string]interface{}); ok {
+				headSHA, _ = headObj["sha"].(string)
+			}
+		}
 	}
-	
+
 	_, _ = s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,created_at) VALUES(?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, now(),
+		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, headSHA, now(),
 	)
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
 }
