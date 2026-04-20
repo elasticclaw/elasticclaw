@@ -9,7 +9,7 @@ import (
 )
 
 func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
+	db, err := sql.Open("sqlite", path+"?_time_format=sqlite&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -66,7 +66,8 @@ func migrate(db *sql.DB) error {
 		linear_workspace TEXT NOT NULL DEFAULT '',
 		nix              INTEGER NOT NULL DEFAULT 0,
 		tags             TEXT NOT NULL DEFAULT '[]',
-		color            TEXT NOT NULL DEFAULT ''
+		color            TEXT NOT NULL DEFAULT '',
+		linear_issue_id  TEXT NOT NULL DEFAULT ''
 	);
 
 
@@ -88,6 +89,19 @@ func migrate(db *sql.DB) error {
 		files      TEXT NOT NULL DEFAULT '{}',  -- JSON map of filename -> content
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS factory_events (
+		id           TEXT PRIMARY KEY,
+		factory_name TEXT NOT NULL,
+		issue_id     TEXT NOT NULL,
+		issue_title  TEXT NOT NULL DEFAULT '',
+		prev_status  TEXT NOT NULL DEFAULT '',
+		new_status   TEXT NOT NULL DEFAULT '',
+		action       TEXT NOT NULL,  -- 'claw_created', 'claw_terminated', 'not_actionable'
+		claw_id      TEXT NOT NULL DEFAULT '',
+		detail       TEXT NOT NULL DEFAULT '',
+		created_at   DATETIME NOT NULL
 	);
 	`)
 	return err

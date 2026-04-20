@@ -132,6 +132,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 
 	// Integration webhooks (signature-validated, no session auth)
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -440,7 +441,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE tenant_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -1652,10 +1653,18 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
-	// Store vm_id in the claw record for later operations (destroy, SSH, etc.)
+	// Store vm_id in the claw record — skip if already deleted (factory terminated mid-provision)
 	_, _ = s.db.Exec(
-		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=?`, vmID, clawID,
+		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=? AND status != 'deleted'`, vmID, clawID,
 	)
+	// If deleted, clean up the VM and bail
+	var currentStatus string
+	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+	if currentStatus == "deleted" {
+		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
+		_ = p.DeleteVM(ctx, vmID)
+		return fmt.Errorf("claw deleted mid-provision")
+	}
 
 	instanceType := req.InstanceType
 	if instanceType == "" {
@@ -1708,7 +1717,7 @@ func (s *Server) syncReplicatedVMs() {
 		FROM claws
 		WHERE provider = 'replicated'
 		  AND provider_id != ''
-		  AND status NOT IN ('failed', 'error', 'offline')
+		  AND status NOT IN ('failed', 'error', 'offline', 'deleted')
 	`)
 	if err != nil {
 		log.Printf("pollProviderStatus: query error: %v", err)
@@ -1811,6 +1820,18 @@ func (s *Server) bridgeDownloadURL() string {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	// Bail immediately if claw was deleted while VM was spinning up
+	var checkStatus string
+	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&checkStatus)
+	if checkStatus == "deleted" {
+		log.Printf("[bootstrap] claw %s deleted before bootstrap, destroying VM %s", clawID[:8], vmID)
+		p, _ := newReplicatedProvider(cfg)
+		if p != nil {
+			_ = p.DeleteVM(context.Background(), vmID)
+		}
+		return
+	}
+
 	var filesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var files map[string]string

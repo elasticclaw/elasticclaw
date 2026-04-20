@@ -38,15 +38,18 @@ type LinearIntegrationView struct {
 }
 
 type FactoryView struct {
-	Name             string `json:"name"`
-	Integration      string `json:"integration"`
-	Workspace        string `json:"workspace"`
-	Team             string `json:"team"`
-	TriggerStatus    string `json:"triggerStatus"`
-	DoneStatus       string `json:"doneStatus"`
-	TerminateOnLeave bool   `json:"terminateOnLeave"`
-	Template         string `json:"template"`
-	NamePattern      string `json:"namePattern"`
+	Name             string   `json:"name"`
+	Integration      string   `json:"integration"`
+	Workspace        string   `json:"workspace"`
+	Team             string   `json:"team"`
+	TriggerStatus    string   `json:"triggerStatus"`
+	DoneStatus       string   `json:"doneStatus"`
+	TerminateOnLeave bool     `json:"terminateOnLeave"`
+	Template         string   `json:"template"`
+	NamePattern      string   `json:"namePattern"`
+	WebhookSecretSet bool     `json:"webhookSecretSet"`
+	Tags             []string `json:"tags"`
+	Color            string   `json:"color"`
 }
 
 type ProviderView struct {
@@ -85,21 +88,26 @@ type IntegrationsPatch struct {
 }
 
 type LinearIntegrationPatch struct {
-	Workspace     string `json:"workspace"`
-	Token         string `json:"token,omitempty"`
-	WebhookSecret string `json:"webhookSecret,omitempty"`
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	WebhookSecret     string `json:"webhookSecret,omitempty"`
 }
 
 type FactoryPatch struct {
-	Name             string `json:"name"`
-	Integration      string `json:"integration"`
-	Workspace        string `json:"workspace"`
-	Team             string `json:"team,omitempty"`
-	TriggerStatus    string `json:"triggerStatus"`
-	DoneStatus       string `json:"doneStatus,omitempty"`
-	TerminateOnLeave bool   `json:"terminateOnLeave"`
-	Template         string `json:"template"`
-	NamePattern      string `json:"namePattern,omitempty"`
+	Name             string   `json:"name"`
+	OriginalName     string   `json:"originalName,omitempty"`
+	Integration      string   `json:"integration"`
+	Workspace        string   `json:"workspace"`
+	Team             string   `json:"team,omitempty"`
+	TriggerStatus    string   `json:"triggerStatus"`
+	DoneStatus       string   `json:"doneStatus,omitempty"`
+	TerminateOnLeave bool     `json:"terminateOnLeave"`
+	Template         string   `json:"template"`
+	NamePattern      string   `json:"namePattern,omitempty"`
+	WebhookSecret    string   `json:"webhookSecret,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Color            string   `json:"color,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -219,6 +227,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			TerminateOnLeave: f.TerminateOnLeave,
 			Template:         f.Template,
 			NamePattern:      f.NamePattern,
+			WebhookSecretSet: f.WebhookSecret != "",
+			Tags:             f.Tags,
+			Color:            f.Color,
 		})
 	}
 	s.mu.RUnlock()
@@ -347,9 +358,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		for _, lp := range patch.Integrations.Linear {
 			li := &types.LinearIntegrationConfig{Workspace: lp.Workspace}
 			// Find existing to preserve secrets not being updated
+			// Use originalWorkspace if provided (for renames), otherwise use workspace
+			matchWorkspace := lp.Workspace
+			if lp.OriginalWorkspace != "" {
+				matchWorkspace = lp.OriginalWorkspace
+			}
 			if existingIntegrations != nil {
 				for _, existing := range existingIntegrations.Linear {
-					if existing.Workspace == lp.Workspace {
+					if existing.Workspace == matchWorkspace {
 						li.Token = existing.Token
 						li.WebhookSecret = existing.WebhookSecret
 						break
@@ -371,12 +387,29 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.Factories != nil {
 		var factories []*types.FactoryConfig
 		for _, fp := range patch.Factories {
+			// Preserve existing webhook secret if not being replaced
+			webhookSecret := fp.WebhookSecret
+			if webhookSecret == "" {
+				// Find existing factory by name and keep its secret
+				// Use originalName if provided (for renames), otherwise use name
+				matchName := fp.Name
+				if fp.OriginalName != "" {
+					matchName = fp.OriginalName
+				}
+				for _, existing := range s.hubCfg.Factories {
+					if existing.Name == matchName {
+						webhookSecret = existing.WebhookSecret
+						break
+					}
+				}
+			}
 			factories = append(factories, &types.FactoryConfig{
 				Name: fp.Name, Integration: fp.Integration,
 				Workspace: fp.Workspace, Team: fp.Team,
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
-				NamePattern: fp.NamePattern,
+				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
+				Tags: fp.Tags, Color: fp.Color,
 			})
 		}
 		updatedCfg.Factories = factories

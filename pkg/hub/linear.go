@@ -77,25 +77,43 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
-	if s.hubCfg.Integrations == nil {
-		return true // no integrations configured, accept all
+	hasAnySecret := false
+
+	// Check integration-level secrets
+	if s.hubCfg.Integrations != nil {
+		for _, li := range s.hubCfg.Integrations.Linear {
+			if li.WebhookSecret == "" {
+				continue
+			}
+			hasAnySecret = true
+			mac := hmac.New(sha256.New, []byte(li.WebhookSecret))
+			mac.Write(body)
+			expected := hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				return true
+			}
+		}
 	}
-	for _, li := range s.hubCfg.Integrations.Linear {
-		if li.WebhookSecret == "" {
-			continue
-		}
-		mac := hmac.New(sha256.New, []byte(li.WebhookSecret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
-			return true
+
+	// Check factory-level secrets
+	if s.hubCfg.Factories != nil {
+		for _, factory := range s.hubCfg.Factories {
+			if factory.Integration != "linear" || factory.WebhookSecret == "" {
+				continue
+			}
+			hasAnySecret = true
+			mac := hmac.New(sha256.New, []byte(factory.WebhookSecret))
+			mac.Write(body)
+			expected := hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				return true
+			}
 		}
 	}
-	// If secrets are configured but none matched, reject
-	for _, li := range s.hubCfg.Integrations.Linear {
-		if li.WebhookSecret != "" {
-			return false
-		}
+
+	// If any secrets are configured but none matched, reject
+	if hasAnySecret {
+		return false
 	}
 	return true // no secrets configured
 }
@@ -113,6 +131,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	teamKey := payload.Data.Team.Key
 	issueID := payload.Data.Identifier // e.g. "ELA-123"
 
+	matched := false
 	for _, factory := range s.hubCfg.Factories {
 		if factory.Integration != "linear" {
 			continue
@@ -122,17 +141,44 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue entering trigger status → create claw
-		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
+		if previousStatus != "" && strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
+			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
+			clawID := ""
 			if err := s.createClawForIssue(factory, payload); err != nil {
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
+			} else {
+				// Look up the newly created claw ID
+				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_created", clawID, "")
 			}
 		}
 
-		// Issue leaving trigger status → terminate claw
-		if factory.TerminateOnLeave && strings.EqualFold(previousStatus, factory.TriggerStatus) && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
-			log.Printf("[factory:%s] issue %s left '%s' — terminating claw", factory.Name, issueID, factory.TriggerStatus)
-			s.terminateClawForIssue(issueID)
+		// Issue leaving trigger status → terminate claw.
+		// Check DB for active claw created by this factory by matching factory tag.
+		if factory.TerminateOnLeave && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
+			var activeClaw string
+			_ = s.db.QueryRow(
+				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+				issueID,
+			).Scan(&activeClaw)
+			if activeClaw != "" {
+				matched = true
+				log.Printf("[factory:%s] issue %s moved to '%s' (not trigger) — terminating claw", factory.Name, issueID, currentStatus)
+				s.terminateClawForIssue(issueID)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_terminated", activeClaw, "terminated: issue left trigger status")
+			}
+		}
+	}
+
+	if !matched {
+		// Webhook received but no factory matched — log as not_actionable
+		for _, factory := range s.hubCfg.Factories {
+			if factory.Integration == "linear" && (factory.Team == "" || strings.EqualFold(factory.Team, teamKey)) {
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "not_actionable",
+					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
+			}
 		}
 	}
 }
@@ -189,15 +235,27 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		env["LINEAR_API_KEY"] = linearToken
 	}
 
+	// Build tags — always include factory tag; merge with factory-configured tags
+	tags := []string{"factory:" + factory.Name}
+	for _, t := range factory.Tags {
+		if t != "factory:"+factory.Name {
+			tags = append(tags, t)
+		}
+	}
+	tagsJSON, _ := json.Marshal(tags)
+
+	// Color
+	clawColor := factory.Color
+
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, template_files, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON), issueID, now,
+		INSERT INTO claws(id, tenant_id, name, template, provider, template_files, linear_issue_id, tags, color, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON), issueID, string(tagsJSON), clawColor, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
@@ -206,6 +264,14 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
 	go func() {
+		// Guard: if the claw was deleted before provisioning started (e.g. issue
+		// immediately moved back out of trigger status), abort silently.
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus == "deleted" {
+			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			return
+		}
 		ctx := context.Background()
 		req := types.CreateClawRequest{
 			Name:         clawName,
@@ -218,21 +284,27 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		case "replicated":
 			if err := s.provisionReplicated(ctx, clawID, req, provCfg, env); err != nil {
 				log.Printf("[factory] provision failed for %s: %v", clawID, err)
-				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+				// Only mark error if not already deleted
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
 			}
 		}
 	}()
 
 	log.Printf("[factory] created claw %s (%s) for Linear issue %s", clawName, clawID[:8], issueID)
+	// Notify connected dashboards immediately so the card appears without waiting for next poll
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
+	})
 	return nil
 }
 
 func (s *Server) terminateClawForIssue(issueID string) {
-	var clawID string
+	var clawID, tenantID string
 	if err := s.db.QueryRow(
-		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		`SELECT id, tenant_id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 		issueID,
-	).Scan(&clawID); err != nil {
+	).Scan(&clawID, &tenantID); err != nil {
 		return
 	}
 	log.Printf("[factory] terminating claw %s for issue %s", clawID[:8], issueID)
@@ -243,6 +315,11 @@ func (s *Server) terminateClawForIssue(issueID string) {
 	}
 	s.mu.Unlock()
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	// Notify dashboards so the card disappears immediately
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
 }
 
 func (s *Server) defaultProvider() string {
@@ -264,6 +341,13 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 		}
 	}
 	return ""
+}
+
+func escapeLikeWildcards(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func buildLinearContext(payload linearWebhookPayload) string {
@@ -419,4 +503,67 @@ func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
 	}
 	resp2.Body.Close()
 	return nil
+}
+
+// logFactoryEvent records a factory webhook event and prunes entries older than 4 hours.
+func (s *Server) logFactoryEvent(factoryName, issueID, issueTitle, prevStatus, newStatus, action, clawID, detail string) {
+	id := uuid.New().String()
+	_, _ = s.db.Exec(
+		`INSERT INTO factory_events(id,factory_name,issue_id,issue_title,prev_status,new_status,action,claw_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		id, factoryName, issueID, issueTitle, prevStatus, newStatus, action, clawID, detail, now(),
+	)
+	// Prune events older than 4 hours
+	_, _ = s.db.Exec(`DELETE FROM factory_events WHERE created_at < datetime('now', '-4 hours')`)
+}
+
+// handleFactoryEvents serves GET /api/factories/:name/events
+func (s *Server) handleFactoryEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Path: /api/factories/:name/events
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
+	if len(parts) < 2 || parts[1] != "events" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	factoryName := parts[0]
+
+	rows, err := s.db.Query(
+		`SELECT id, factory_name, issue_id, issue_title, prev_status, new_status, action, claw_id, detail, created_at
+		 FROM factory_events WHERE factory_name = ? ORDER BY created_at DESC LIMIT 200`,
+		factoryName,
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type FactoryEvent struct {
+		ID          string `json:"id"`
+		FactoryName string `json:"factoryName"`
+		IssueID     string `json:"issueId"`
+		IssueTitle  string `json:"issueTitle"`
+		PrevStatus  string `json:"prevStatus"`
+		NewStatus   string `json:"newStatus"`
+		Action      string `json:"action"`
+		ClawID      string `json:"clawId"`
+		Detail      string `json:"detail"`
+		CreatedAt   string `json:"createdAt"`
+	}
+
+	var events []FactoryEvent
+	for rows.Next() {
+		var e FactoryEvent
+		if err := rows.Scan(&e.ID, &e.FactoryName, &e.IssueID, &e.IssueTitle, &e.PrevStatus, &e.NewStatus, &e.Action, &e.ClawID, &e.Detail, &e.CreatedAt); err != nil {
+			continue
+		}
+		events = append(events, e)
+	}
+	if events == nil {
+		events = []FactoryEvent{}
+	}
+	jsonOK(w, events)
 }
