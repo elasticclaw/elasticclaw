@@ -343,13 +343,6 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 	return ""
 }
 
-func escapeLikeWildcards(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
-	return s
-}
-
 func buildLinearContext(payload linearWebhookPayload) string {
 	d := payload.Data
 	var b strings.Builder
