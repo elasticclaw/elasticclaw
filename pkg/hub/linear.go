@@ -137,12 +137,21 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			}
 		}
 
-		// Issue leaving trigger status → terminate claw
-		if factory.TerminateOnLeave && strings.EqualFold(previousStatus, factory.TriggerStatus) && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
-			matched = true
-			log.Printf("[factory:%s] issue %s left '%s' — terminating claw", factory.Name, issueID, factory.TriggerStatus)
-			s.terminateClawForIssue(issueID)
-			s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_terminated", "", "")
+		// Issue leaving trigger status → terminate claw.
+		// Check DB for active claw rather than relying solely on previousStatus
+		// (Linear sometimes sends empty previousStatus).
+		if factory.TerminateOnLeave && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
+			var activeClaw string
+			_ = s.db.QueryRow(
+				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+				issueID,
+			).Scan(&activeClaw)
+			if activeClaw != "" {
+				matched = true
+				log.Printf("[factory:%s] issue %s moved to '%s' (not trigger) — terminating claw", factory.Name, issueID, currentStatus)
+				s.terminateClawForIssue(issueID)
+				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_terminated", activeClaw, "terminated: issue left trigger status")
+			}
 		}
 	}
 
