@@ -153,8 +153,22 @@ export function useHub(selectedClawId: string | null): HubState {
       const apiMsgs = await fetchMessages(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
       setMessages((prev) => {
+        const existing = prev[clawId] || []
         const next = { ...prev, [clawId]: msgs }
         persistMessages(next)
+        // If we got new messages that weren't in state, bump unread for board view
+        if (msgs.length > existing.length) {
+          const newClawMsgs = msgs.slice(existing.length).filter((m) => m.role !== 'user' && m.role !== 'system')
+          if (newClawMsgs.length > 0) {
+            setClaws((prevClaws) =>
+              prevClaws.map((c) =>
+                c.id === clawId && selectedClawIdRef.current !== clawId
+                  ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
+                  : c
+              )
+            )
+          }
+        }
         return next
       })
     } catch (err) {
