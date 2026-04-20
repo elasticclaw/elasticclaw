@@ -265,6 +265,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}()
 
 	log.Printf("[factory] created claw %s (%s) for Linear issue %s", clawName, clawID[:8], issueID)
+	// Notify connected dashboards immediately so the card appears without waiting for next poll
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
+	})
 	return nil
 }
 

@@ -299,7 +299,7 @@ export function useHub(selectedClawId: string | null): HubState {
     refreshClaws().then(() => {})
 
     // Poll every 30s
-    pollIntervalRef.current = setInterval(refreshClaws, 30_000)
+    pollIntervalRef.current = setInterval(refreshClaws, 10_000)
 
     // Wait for token then connect WS
     resolveToken().then(() => connectWebSocket())
