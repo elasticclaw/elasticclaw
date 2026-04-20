@@ -9,7 +9,27 @@ interface MarkdownContentProps {
   className?: string
 }
 
+/**
+ * Normalize agent output so ReactMarkdown can parse it correctly.
+ * Agents often produce numbered lists without blank lines between items,
+ * or jam multiple list items onto one line separated by patterns like "1. ... 2. ..."
+ */
+function normalizeMarkdown(content: string): string {
+  return content
+    // Insert newline before numbered list items that follow non-newline content
+    // e.g. "done**2. Next step" → "done\n\n**2. Next step"
+    .replace(/([^\n])(\*{0,2}\d+\.\s)/g, (_, before, item) => `${before}\n\n${item}`)
+    // Insert newline before bullet points jammed after content
+    .replace(/([^\n])(\*{0,2}[-*]\s)/g, (_, before, item) => `${before}\n\n${item}`)
+    // Ensure \n\n before headers if not already there
+    .replace(/([^\n])(#{1,3}\s)/g, (_, before, header) => `${before}\n\n${header}`)
+    // Collapse 3+ consecutive newlines to 2
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
+  const normalized = normalizeMarkdown(content)
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -84,7 +104,7 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
         em: ({ children }) => <em className="italic">{children}</em>,
       }}
     >
-      {content}
+      {normalized}
     </ReactMarkdown>
   )
 }
