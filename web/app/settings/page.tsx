@@ -469,6 +469,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
   const [editWorkspace, setEditWorkspace] = useState("")
   const [editToken, setEditToken] = useState("")
+  const [originalWorkspace, setOriginalWorkspace] = useState("")
   const [newWorkspace, setNewWorkspace] = useState("")
   const [newToken, setNewToken] = useState("")
 
@@ -476,12 +477,13 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     setEditingIdx(i)
     setEditWorkspace(linear[i].workspace)
     setEditToken("")
+    setOriginalWorkspace(linear[i].workspace)
   }
 
   const saveEdit = () => {
     if (editingIdx === null) return
     const updated = linear.map((li, i) => i === editingIdx
-      ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}) }
+      ? { workspace: editWorkspace, originalWorkspace, ...(editToken ? { token: editToken } : {}) }
       : { workspace: li.workspace }
     )
     onSave({ integrations: { linear: updated } })

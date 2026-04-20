@@ -77,25 +77,43 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
-	if s.hubCfg.Integrations == nil {
-		return true // no integrations configured, accept all
+	hasAnySecret := false
+
+	// Check integration-level secrets
+	if s.hubCfg.Integrations != nil {
+		for _, li := range s.hubCfg.Integrations.Linear {
+			if li.WebhookSecret == "" {
+				continue
+			}
+			hasAnySecret = true
+			mac := hmac.New(sha256.New, []byte(li.WebhookSecret))
+			mac.Write(body)
+			expected := hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				return true
+			}
+		}
 	}
-	for _, li := range s.hubCfg.Integrations.Linear {
-		if li.WebhookSecret == "" {
-			continue
-		}
-		mac := hmac.New(sha256.New, []byte(li.WebhookSecret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
-			return true
+
+	// Check factory-level secrets
+	if s.hubCfg.Factories != nil {
+		for _, factory := range s.hubCfg.Factories {
+			if factory.Integration != "linear" || factory.WebhookSecret == "" {
+				continue
+			}
+			hasAnySecret = true
+			mac := hmac.New(sha256.New, []byte(factory.WebhookSecret))
+			mac.Write(body)
+			expected := hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				return true
+			}
 		}
 	}
-	// If secrets are configured but none matched, reject
-	for _, li := range s.hubCfg.Integrations.Linear {
-		if li.WebhookSecret != "" {
-			return false
-		}
+
+	// If any secrets are configured but none matched, reject
+	if hasAnySecret {
+		return false
 	}
 	return true // no secrets configured
 }
@@ -138,13 +156,13 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue leaving trigger status → terminate claw.
-		// Check DB for active claw rather than relying solely on previousStatus
-		// (Linear sometimes sends empty previousStatus).
+		// Check DB for active claw created by this factory by matching factory tag.
 		if factory.TerminateOnLeave && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			var activeClaw string
 			_ = s.db.QueryRow(
-				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') AND tags LIKE ? LIMIT 1`,
 				issueID,
+				"%factory:"+factory.Name+"%",
 			).Scan(&activeClaw)
 			if activeClaw != "" {
 				matched = true
@@ -158,7 +176,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	if !matched {
 		// Webhook received but no factory matched — log as not_actionable
 		for _, factory := range s.hubCfg.Factories {
-			if factory.Integration == "linear" {
+			if factory.Integration == "linear" && (factory.Team == "" || strings.EqualFold(factory.Team, teamKey)) {
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "not_actionable",
 					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
 			}

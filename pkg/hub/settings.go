@@ -88,9 +88,10 @@ type IntegrationsPatch struct {
 }
 
 type LinearIntegrationPatch struct {
-	Workspace     string `json:"workspace"`
-	Token         string `json:"token,omitempty"`
-	WebhookSecret string `json:"webhookSecret,omitempty"`
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	WebhookSecret     string `json:"webhookSecret,omitempty"`
 }
 
 type FactoryPatch struct {
@@ -356,9 +357,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		for _, lp := range patch.Integrations.Linear {
 			li := &types.LinearIntegrationConfig{Workspace: lp.Workspace}
 			// Find existing to preserve secrets not being updated
+			// Use originalWorkspace if provided (for renames), otherwise use workspace
+			matchWorkspace := lp.Workspace
+			if lp.OriginalWorkspace != "" {
+				matchWorkspace = lp.OriginalWorkspace
+			}
 			if existingIntegrations != nil {
 				for _, existing := range existingIntegrations.Linear {
-					if existing.Workspace == lp.Workspace {
+					if existing.Workspace == matchWorkspace {
 						li.Token = existing.Token
 						li.WebhookSecret = existing.WebhookSecret
 						break
