@@ -159,11 +159,9 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		// Check DB for active claw created by this factory by matching factory tag.
 		if factory.TerminateOnLeave && !strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			var activeClaw string
-			escapedName := escapeLikeWildcards(factory.Name)
 			_ = s.db.QueryRow(
-				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') AND tags LIKE ? ESCAPE '\' LIMIT 1`,
+				`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 				issueID,
-				"%factory:"+escapedName+"%",
 			).Scan(&activeClaw)
 			if activeClaw != "" {
 				matched = true
