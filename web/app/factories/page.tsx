@@ -57,6 +57,7 @@ function FactoryEventsContent() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
 
   const load = useCallback(async () => {
+    if (!name) return
     setLoading(true)
     try {
       const hubUrl = getHubUrl()
@@ -74,9 +75,28 @@ function FactoryEventsContent() {
 
   // Auto-refresh every 30s
   useEffect(() => {
+    if (!name) return
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
-  }, [load])
+  }, [load, name])
+
+  if (!name) {
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="border-b border-border px-6 py-4 flex items-center gap-4">
+          <Button variant="ghost" size="icon" onClick={() => window.location.href = "/settings"}>
+            <ChevronLeft className="size-4" />
+          </Button>
+        </header>
+        <div className="max-w-3xl mx-auto px-6 py-8">
+          <div className="text-center py-16 space-y-2">
+            <p className="text-sm font-medium text-muted-foreground">Missing factory name</p>
+            <p className="text-xs text-muted-foreground">Please provide a factory name in the URL query parameter.</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-background">
