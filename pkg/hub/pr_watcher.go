@@ -14,13 +14,22 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
+	"nhooyr.io/websocket/wsjson"
 )
 
 var prURLRegex = regexp.MustCompile(`https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)`)
 
 // extractPRs finds GitHub PR URLs in a message body.
-func extractPRs(content string) []struct{ repo string; number int; url string } {
-	var results []struct{ repo string; number int; url string }
+func extractPRs(content string) []struct {
+	repo   string
+	number int
+	url    string
+} {
+	var results []struct {
+		repo   string
+		number int
+		url    string
+	}
 	seen := map[string]bool{}
 	for _, m := range prURLRegex.FindAllStringSubmatch(content, -1) {
 		url := m[0]
@@ -29,7 +38,11 @@ func extractPRs(content string) []struct{ repo string; number int; url string } 
 		}
 		seen[url] = true
 		num, _ := strconv.Atoi(m[2])
-		results = append(results, struct{ repo string; number int; url string }{m[1], num, url})
+		results = append(results, struct {
+			repo   string
+			number int
+			url    string
+		}{m[1], num, url})
 	}
 	return results
 }
@@ -67,12 +80,12 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id           string
-	clawID       string
-	repo         string
-	prNumber     int
-	prURL        string
-	lastCISHA    string
+	id            string
+	clawID        string
+	repo          string
+	prNumber      int
+	prURL         string
+	lastCISHA     string
 	lastCommentID int64
 }
 
@@ -90,8 +103,8 @@ func (s *Server) pollAllPRs() {
 	defer rows.Close()
 
 	type row struct {
-		pr           clawPR
-		autoFixCI    bool
+		pr            clawPR
+		autoFixCI     bool
 		autoFixBugbot bool
 	}
 	var prs []row
@@ -152,8 +165,12 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 	if err != nil {
 		return
 	}
-	headSHA, _ := prData["head"].(map[string]interface{})["sha"].(string)
-	if headSHA == "" || headSHA == pr.lastCISHA {
+	headObj, ok := prData["head"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	headSHA, ok := headObj["sha"].(string)
+	if !ok || headSHA == "" || headSHA == pr.lastCISHA {
 		return // no new commits
 	}
 
@@ -165,18 +182,27 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 
 	checkRuns, _ := checksData["check_runs"].([]interface{})
 	var failures []string
+	allCompleted := true
 	for _, cr := range checkRuns {
 		run, _ := cr.(map[string]interface{})
+		status, _ := run["status"].(string)
 		conclusion, _ := run["conclusion"].(string)
 		name, _ := run["name"].(string)
+
+		if status != "completed" || conclusion == "" {
+			allCompleted = false
+		}
+
 		if conclusion == "failure" || conclusion == "timed_out" {
 			detailsURL, _ := run["details_url"].(string)
 			failures = append(failures, fmt.Sprintf("**%s** — [view logs](%s)", name, detailsURL))
 		}
 	}
 
-	// Update last CI SHA
-	_, _ = s.db.Exec(`UPDATE claw_prs SET last_ci_sha=? WHERE id=?`, headSHA, pr.id)
+	// Only update SHA if all checks have completed or if we found failures
+	if len(failures) > 0 || allCompleted {
+		_, _ = s.db.Exec(`UPDATE claw_prs SET last_ci_sha=? WHERE id=?`, headSHA, pr.id)
+	}
 
 	if len(failures) == 0 {
 		return
@@ -242,18 +268,26 @@ func (s *Server) checkBugbotComments(pr clawPR, token string) {
 // and forwards it over the WS connection (if connected) so the agent sees it.
 // Skips injection if the claw is currently streaming a response.
 func (s *Server) injectUserMessage(clawID, content string) {
+	s.injectUserMessageWithRetry(clawID, content, 0)
+}
+
+func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount int) {
 	// Don't interrupt a response in progress
 	s.mu.RLock()
 	cc, connected := s.claws[clawID]
 	streaming := connected && cc.streamingBuf.Len() > 0
 	s.mu.RUnlock()
 	if streaming {
-		log.Printf("[pr-watcher] claw %s is streaming, delaying injection", clawID[:8])
-		// Retry once after 30s
-		go func() {
-			time.Sleep(30 * time.Second)
-			s.injectUserMessage(clawID, content)
-		}()
+		if retryCount < 1 {
+			log.Printf("[pr-watcher] claw %s is streaming, delaying injection", clawID[:8])
+			// Retry once after 30s
+			go func() {
+				time.Sleep(30 * time.Second)
+				s.injectUserMessageWithRetry(clawID, content, retryCount+1)
+			}()
+		} else {
+			log.Printf("[pr-watcher] claw %s still streaming after retry, dropping message", clawID[:8])
+		}
 		return
 	}
 
@@ -278,12 +312,10 @@ func (s *Server) injectUserMessage(clawID, content string) {
 	cc, ok := s.claws[clawID]
 	s.mu.RUnlock()
 	if ok {
-		msg := map[string]interface{}{
-			"type":    "message",
-			"payload": map[string]string{"role": "user", "content": content},
-		}
-		data, _ := json.Marshal(msg)
-		_ = cc.conn.Write(cc.conn.CloseRead(nil), 1, data)
+		_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{
+			Type:    "message",
+			Payload: map[string]string{"role": "user", "content": content},
+		})
 	}
 
 	// Broadcast to dashboard
@@ -365,6 +397,15 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	tenantID := tenantFromCtx(r)
+
+	// Verify claw belongs to tenant
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&exists); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
 	rows, err := s.db.Query(
 		`SELECT id, repo, pr_number, pr_url, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
 		clawID,
@@ -397,9 +438,11 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 
 // handleClawSettings reads/writes per-claw settings (auto_fix_ci, auto_fix_bugbot).
 func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, clawID string) {
+	tenantID := tenantFromCtx(r)
+
 	if r.Method == http.MethodGet {
 		var autoCI, autoBugbot int
-		if err := s.db.QueryRow(`SELECT auto_fix_ci, auto_fix_bugbot FROM claws WHERE id=?`, clawID).
+		if err := s.db.QueryRow(`SELECT auto_fix_ci, auto_fix_bugbot FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).
 			Scan(&autoCI, &autoBugbot); err != nil {
 			http.Error(w, "claw not found", http.StatusNotFound)
 			return
@@ -421,14 +464,14 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 			if *body.AutoFixCI {
 				v = 1
 			}
-			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_ci=? WHERE id=?`, v, clawID)
+			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_ci=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
 		}
 		if body.AutoFixBugbot != nil {
 			v := 0
 			if *body.AutoFixBugbot {
 				v = 1
 			}
-			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_bugbot=? WHERE id=?`, v, clawID)
+			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_bugbot=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
 		}
 		jsonOK(w, map[string]bool{"ok": true})
 		return

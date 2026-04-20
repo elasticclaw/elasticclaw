@@ -177,6 +177,76 @@ function ClawCardBack({ claw }: { claw: Claw }) {
 
   return (
     <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-4">
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Purpose
+        </h3>
+        <p className="text-sm text-foreground leading-relaxed">
+          {claw.description || "No description provided for this claw."}
+        </p>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Template
+        </h3>
+        <p className="text-sm font-mono text-foreground">
+          {claw.template}
+        </p>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Status
+        </h3>
+        <div className="flex items-center gap-2">
+          <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
+          <span className="text-sm text-foreground capitalize">{claw.status}</span>
+          {claw.isStreaming && (
+            <span className="text-xs text-green-500">(streaming)</span>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Context Usage
+        </h3>
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <ContextProgressBar usage={claw.contextUsage} size="sm" />
+          </div>
+          <span className="text-sm font-mono text-foreground">{claw.contextUsage}%</span>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Uptime
+        </h3>
+        <p className="text-sm font-mono text-foreground">
+          {formatUptime(claw.uptime)}
+        </p>
+      </div>
+
+      {claw.tags.length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+            Tags
+          </h3>
+          <div className="flex flex-wrap gap-1.5">
+            {claw.tags.map((tag) => (
+              <span
+                key={tag}
+                className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {prs.length > 0 && (
         <div>
           <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Pull Requests</h3>
