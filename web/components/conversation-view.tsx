@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl } from "@/lib/api"
@@ -135,6 +135,30 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
   )
 }
 
+function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
+  clawName: string
+  open: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Kill {clawName}?</DialogTitle>
+          <DialogDescription>
+            This will terminate the claw and destroy the VM. Any unsaved work will be lost.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button variant="destructive" onClick={onConfirm}>Kill</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function ClawBoardCard({ 
   claw, 
   messages,
@@ -154,6 +178,7 @@ function ClawBoardCard({
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
   const [showTerminal, setShowTerminal] = useState(false)
+  const [confirmKill, setConfirmKill] = useState(false)
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
@@ -533,7 +558,7 @@ function ClawBoardCard({
                 className="flex-1"
                 onClick={(e) => {
                   e.stopPropagation()
-                  onKill()
+                  setConfirmKill(true)
                 }}
               >
                 <Trash2 className="size-3 mr-1.5" />
@@ -544,6 +569,7 @@ function ClawBoardCard({
         </div>
       </div>
     </div>
+    <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill() }} onCancel={() => setConfirmKill(false)} />
     {/* Terminal dialog — outside perspective container to avoid stacking context clipping */}
     {claw.ssh_host && (
       <Dialog open={showTerminal} onOpenChange={setShowTerminal}>
@@ -671,6 +697,7 @@ function ClawChatView({
 }) {
   const [input, setInput] = useState("")
   const [terminalOpen, setTerminalOpen] = useState(false)
+  const [confirmKill, setConfirmKill] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -756,7 +783,7 @@ function ClawChatView({
               <RotateCcw className="size-3.5 mr-1.5" />
               New Session
             </Button>
-            <Button variant="destructive" size="sm" onClick={onKill}>Kill</Button>
+            <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
           </div>
         </div>
       </header>
@@ -827,6 +854,8 @@ function ClawChatView({
           </Button>
         </form>
       </div>
+
+      <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill() }} onCancel={() => setConfirmKill(false)} />
 
       {/* Terminal dialog */}
       {claw.ssh_host && (
