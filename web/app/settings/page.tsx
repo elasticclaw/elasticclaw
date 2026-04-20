@@ -465,9 +465,30 @@ function SecuritySection({ onSave, saving }: { onSave: (p: object) => void; savi
 }
 function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const linear = settings.integrations?.linear || []
-  const [workspace, setWorkspace] = useState("")
-  const [token, setToken] = useState("")
-  const [secret, setSecret] = useState("")
+  const [editingIdx, setEditingIdx] = useState<number | null>(null)
+  const [editWorkspace, setEditWorkspace] = useState("")
+  const [editToken, setEditToken] = useState("")
+  const [editSecret, setEditSecret] = useState("")
+  const [newWorkspace, setNewWorkspace] = useState("")
+  const [newToken, setNewToken] = useState("")
+  const [newSecret, setNewSecret] = useState("")
+
+  const startEdit = (i: number) => {
+    setEditingIdx(i)
+    setEditWorkspace(linear[i].workspace)
+    setEditToken("")
+    setEditSecret("")
+  }
+
+  const saveEdit = () => {
+    if (editingIdx === null) return
+    const updated = linear.map((li, i) => i === editingIdx
+      ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}), ...(editSecret ? { webhookSecret: editSecret } : {}) }
+      : { workspace: li.workspace }
+    )
+    onSave({ integrations: { linear: updated } })
+    setEditingIdx(null)
+  }
 
   return (
     <div className="space-y-6">
@@ -484,39 +505,66 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         {linear.length > 0 && (
           <div className="mb-4 space-y-2">
             {linear.map((li, i) => (
-              <div key={i} className="border border-border rounded-lg p-3 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">{li.workspace}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Token: {li.tokenSet ? "✓" : "✗"} · Webhook secret: {li.webhookSecretSet ? "✓" : "✗"}
-                  </p>
-                </div>
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
-                  onClick={() => onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } })}>
-                  Remove
-                </Button>
+              <div key={i}>
+                {editingIdx === i ? (
+                  <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
+                    <h4 className="text-sm font-semibold">Edit: {li.workspace}</h4>
+                    <p className="text-xs text-muted-foreground">Leave token/secret blank to keep existing values.</p>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+                      <Input value={editWorkspace} onChange={e => setEditWorkspace(e.target.value)} className="h-8 text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                      <Input type="password" value={editToken} onChange={e => setEditToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_... (leave blank to keep)" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
+                      <Input type="password" value={editSecret} onChange={e => setEditSecret(e.target.value)} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" disabled={saving || !editWorkspace} onClick={saveEdit}>Save</Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditingIdx(null)}>Cancel</Button>
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive ml-auto" disabled={saving}
+                        onClick={() => { onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } }); setEditingIdx(null) }}>
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="border border-border rounded-lg p-3 flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">{li.workspace}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Token: {li.tokenSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">✗</span>}
+                        {" · Webhook secret: "}{li.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">✗</span>}
+                      </p>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => startEdit(i)}>Edit</Button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
         )}
         <div className="border border-border rounded-lg p-4 space-y-3">
-          <p className="text-xs text-muted-foreground">Add a Linear workspace to enable factory automation.</p>
+          <p className="text-xs text-muted-foreground font-medium">Add a Linear workspace</p>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-            <Input value={workspace} onChange={e => setWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
+            <Input value={newWorkspace} onChange={e => setNewWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-            <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_..." />
+            <Input type="password" value={newToken} onChange={e => setNewToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_..." />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
-            <Input type="password" value={secret} onChange={e => setSecret(e.target.value)} className="h-8 text-sm" placeholder="Used to validate incoming webhooks" />
+            <Input type="password" value={newSecret} onChange={e => setNewSecret(e.target.value)} className="h-8 text-sm" placeholder="whsec_..." />
           </div>
-          <Button size="sm" disabled={saving || !workspace || !token}
+          <Button size="sm" disabled={saving || !newWorkspace || !newToken}
             onClick={() => {
-              onSave({ integrations: { linear: [...linear, { workspace, token, webhookSecret: secret || undefined }] } })
-              setWorkspace(""); setToken(""); setSecret("")
+              onSave({ integrations: { linear: [...linear, { workspace: newWorkspace, token: newToken, ...(newSecret ? { webhookSecret: newSecret } : {}) }] } })
+              setNewWorkspace(""); setNewToken(""); setNewSecret("")
             }}>
             Add Linear Workspace
           </Button>
