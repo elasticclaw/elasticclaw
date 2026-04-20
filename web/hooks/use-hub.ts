@@ -260,20 +260,25 @@ export function useHub(selectedClawId: string | null): HubState {
           })
         } else if (type === "claw_status") {
           const { claw_id, status } = payload
-          setClaws((prev) =>
-            prev.map((c) =>
-              c.id === claw_id
-                ? { ...c, status: mapApiStatus(status), isStreaming: status !== "connected" ? false : c.isStreaming }
-                : c
+          if (status === "deleted") {
+            // Remove immediately — don't wait for next poll
+            setClaws((prev) => prev.filter((c) => c.id !== claw_id))
+          } else {
+            setClaws((prev) =>
+              prev.map((c) =>
+                c.id === claw_id
+                  ? { ...c, status: mapApiStatus(status), isStreaming: status !== "connected" ? false : c.isStreaming }
+                  : c
+              )
             )
-          )
-          // If a new claw came online that we don't know about, refresh
-          setClaws((prev) => {
-            if (!prev.find((c) => c.id === claw_id)) {
-              refreshClaws()
-            }
-            return prev
-          })
+            // If a new claw came online that we don't know about, refresh
+            setClaws((prev) => {
+              if (!prev.find((c) => c.id === claw_id)) {
+                refreshClaws()
+              }
+              return prev
+            })
+          }
         } else if (type === "claw_error") {
           const { claw_id, error } = payload
           console.warn(`Claw ${claw_id} error:`, error)

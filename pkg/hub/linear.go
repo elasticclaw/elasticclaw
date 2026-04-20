@@ -274,11 +274,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 }
 
 func (s *Server) terminateClawForIssue(issueID string) {
-	var clawID string
+	var clawID, tenantID string
 	if err := s.db.QueryRow(
-		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		`SELECT id, tenant_id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 		issueID,
-	).Scan(&clawID); err != nil {
+	).Scan(&clawID, &tenantID); err != nil {
 		return
 	}
 	log.Printf("[factory] terminating claw %s for issue %s", clawID[:8], issueID)
@@ -289,6 +289,11 @@ func (s *Server) terminateClawForIssue(issueID string) {
 	}
 	s.mu.Unlock()
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	// Notify dashboards so the card disappears immediately
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
 }
 
 func (s *Server) defaultProvider() string {
