@@ -568,7 +568,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 interface FactoryFormData {
   name: string; workspace: string; team: string
   triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-  webhookSecret: string; tags: string; color: string
+  webhookSecret: string; tags: string; color: string; originalName?: string
 }
 
 function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
@@ -580,7 +580,7 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
     navigator.clipboard.writeText(webhookUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
   }
   const [editingFactory, setEditingFactory] = useState<number | null>(null)
-  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "", tags: "", color: "" })
+  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "", tags: "", color: "", originalName: "" })
   const [form, setForm] = useState<FactoryFormData>({
     name: "", workspace: "", team: "", triggerStatus: "Ready for Agent",
     doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
@@ -661,9 +661,9 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                   </div>
                   <div className="flex gap-2">
                     <Button size="sm" disabled={saving} onClick={() => {
-                      const { webhookSecret, tags: tagsStr, color, ...rest } = editForm
+                      const { webhookSecret, tags: tagsStr, color, originalName, ...rest } = editForm
                       const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
-                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(webhookSecret ? { webhookSecret } : {}), tags, color } : x)
+                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(originalName ? { originalName } : {}), ...(webhookSecret ? { webhookSecret } : {}), tags, color } : x)
                       onSave({ factories: updated })
                       setEditingFactory(null)
                     }}>Save</Button>
@@ -687,7 +687,7 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                     <a href={`/factories/${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
-                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "" })
+                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "", originalName: f.name })
                     }}>Edit</Button>
                   </div>
                 </div>

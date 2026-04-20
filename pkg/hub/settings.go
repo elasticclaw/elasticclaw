@@ -96,6 +96,7 @@ type LinearIntegrationPatch struct {
 
 type FactoryPatch struct {
 	Name             string   `json:"name"`
+	OriginalName     string   `json:"originalName,omitempty"`
 	Integration      string   `json:"integration"`
 	Workspace        string   `json:"workspace"`
 	Team             string   `json:"team,omitempty"`
@@ -390,8 +391,13 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			webhookSecret := fp.WebhookSecret
 			if webhookSecret == "" {
 				// Find existing factory by name and keep its secret
+				// Use originalName if provided (for renames), otherwise use name
+				matchName := fp.Name
+				if fp.OriginalName != "" {
+					matchName = fp.OriginalName
+				}
 				for _, existing := range s.hubCfg.Factories {
-					if existing.Name == fp.Name {
+					if existing.Name == matchName {
 						webhookSecret = existing.WebhookSecret
 						break
 					}
