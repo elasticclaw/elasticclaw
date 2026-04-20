@@ -688,7 +688,7 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a href={`/factories/${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
+                    <a href={`/factories?name=${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
                       setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "", originalName: f.name })

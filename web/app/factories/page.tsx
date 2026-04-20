@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
-import { useParams } from "next/navigation"
+import { useState, useEffect, useCallback, Suspense } from "react"
+import { useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
 import { Button } from "@/components/ui/button"
 import { ChevronLeft, RefreshCw, CheckCircle, XCircle, AlertCircle, Zap } from "lucide-react"
@@ -49,14 +49,15 @@ function formatTime(ts: string): string {
     " · " + d.toLocaleDateString([], { month: "short", day: "numeric" })
 }
 
-export default function FactoryEventsPage() {
-  const params = useParams<{ name: string }>()
-  const name = decodeURIComponent(params.name)
+function FactoryEventsContent() {
+  const searchParams = useSearchParams()
+  const name = searchParams.get("name") ?? ""
   const [events, setEvents] = useState<FactoryEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
 
   const load = useCallback(async () => {
+    if (!name) return
     setLoading(true)
     try {
       const hubUrl = getHubUrl()
@@ -74,9 +75,28 @@ export default function FactoryEventsPage() {
 
   // Auto-refresh every 30s
   useEffect(() => {
+    if (!name) return
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
-  }, [load])
+  }, [load, name])
+
+  if (!name) {
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="border-b border-border px-6 py-4 flex items-center gap-4">
+          <Button variant="ghost" size="icon" onClick={() => window.location.href = "/settings"}>
+            <ChevronLeft className="size-4" />
+          </Button>
+        </header>
+        <div className="max-w-3xl mx-auto px-6 py-8">
+          <div className="text-center py-16 space-y-2">
+            <p className="text-sm font-medium text-muted-foreground">Missing factory name</p>
+            <p className="text-xs text-muted-foreground">Please provide a factory name in the URL query parameter.</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -146,5 +166,14 @@ export default function FactoryEventsPage() {
         )}
       </div>
     </div>
+  )
+}
+
+
+export default function FactoryEventsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-background flex items-center justify-center"><p className="text-sm text-muted-foreground animate-pulse">Loading…</p></div>}>
+      <FactoryEventsContent />
+    </Suspense>
   )
 }
