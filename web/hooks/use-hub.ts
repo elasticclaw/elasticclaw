@@ -154,24 +154,16 @@ export function useHub(selectedClawId: string | null): HubState {
       
       setMessages((prev) => {
         const existing = prev[clawId] || []
-        
-        // Filter out optimistic messages before merging to prevent duplicates
-        // Optimistic messages will be replaced by real ones from the API or send()
-        const nonOptimistic = existing.filter((m) => !m.id.startsWith("opt-"))
-        
-        // Build a Set of existing message IDs for efficient lookup
-        const existingIds = new Set(nonOptimistic.map((m) => m.id))
-        
-        // Find truly new messages (not in existing cache) by comparing IDs
-        const newMsgs = msgs.filter((m) => !existingIds.has(m.id))
-        
-        // Merge: keep non-optimistic messages, append only new ones
-        // This preserves richer cache data (up to 200 messages) instead of truncating to API limit (100)
-        const merged = [...nonOptimistic, ...newMsgs]
-        
-        // Sort merged messages by timestamp to ensure chronological order
+        // Merge API result with cached state:
+        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
+        // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
+        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-'))
+        const apiIds = new Set(msgs.map((m) => m.id))
+        const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
+        const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
+          !msgs.some((r) => r.content === m.content && r.role === m.role))
+        const merged = [...msgs, ...cachedOnly, ...inflight]
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-        
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
         
