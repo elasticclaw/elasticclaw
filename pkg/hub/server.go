@@ -2148,10 +2148,23 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig) string {
 	}
 	var b strings.Builder
 	seen := map[string]bool{}
+	// First pass: export default keys
+	for _, k := range keys {
+		if !k.Default {
+			continue
+		}
+		envVar := k.EnvVarName()
+		if seen[envVar] {
+			continue
+		}
+		seen[envVar] = true
+		fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
+	}
+	// Second pass: export non-default keys for providers not yet seen
 	for _, k := range keys {
 		envVar := k.EnvVarName()
 		if seen[envVar] {
-			continue // first key for a given provider wins
+			continue
 		}
 		seen[envVar] = true
 		fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
@@ -2183,6 +2196,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
 		return "deepseek/deepseek-chat"
+	case "moonshot":
+		return "moonshot/moonshot-v1-8k"
 	default:
 		// Fall back to hub default even if provider doesn't match
 		return hubCfg.DefaultModel

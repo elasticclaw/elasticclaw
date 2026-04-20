@@ -126,8 +126,6 @@ type HubConfig struct {
 	// LLMKeys is a list of named LLM API keys. One can be marked default:true.
 	// Legacy flat map {"anthropic": "sk-..."} is still accepted for backwards compat.
 	LLMKeys    []*LLMKeyConfig   `yaml:"llm_keys,omitempty"`
-	// LLMKeysLegacy is the old flat map format — populated by custom unmarshal.
-	LLMKeysLegacy map[string]string `yaml:"-"`
 	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
 	Linear []*LinearConfig `yaml:"linear,omitempty"`
 

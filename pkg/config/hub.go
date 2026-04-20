@@ -45,7 +45,7 @@ func LoadHubConfig() (*types.HubConfig, error) {
 			}
 			return nil, fmt.Errorf("failed to parse hub config %s: %w", path, err)
 		}
-		// Backwards compat: old flat map format {provider: key} stored in LLMKeysLegacy
+		// Backwards compat: migrate old flat map format {provider: key} to new llm_keys slice
 		migrateOldLLMKeys(cfg, data)
 		return cfg, nil
 	}
