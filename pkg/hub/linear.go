@@ -140,8 +140,10 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			continue
 		}
 
-		// Issue entering trigger status → create claw
-		if previousStatus != "" && strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
+		// Issue entering trigger status → create claw.
+		// Don't rely on previousStatus — Linear sometimes omits it.
+		// The 1:1 DB guard in createClawForIssue handles duplicate prevention.
+		if strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
