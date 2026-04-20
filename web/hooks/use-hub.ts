@@ -42,8 +42,6 @@ export function useHub(selectedClawId: string | null): HubState {
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
 
-  // Track which claws have had messages loaded from API
-  const loadedMessages = useRef<Set<string>>(new Set())
   // Track pinned state from localStorage
   const pinnedRef = useRef<Record<string, boolean>>({})
 
@@ -147,8 +145,6 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [mergeClaws])
 
   const loadMessages = useCallback(async (clawId: string) => {
-    if (loadedMessages.current.has(clawId)) return
-    loadedMessages.current.add(clawId)
     try {
       const apiMsgs = await fetchMessages(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
@@ -358,7 +354,7 @@ export function useHub(selectedClawId: string | null): HubState {
       persistMessages(next)
       return next
     })
-    loadedMessages.current.delete(clawId)
+
   }, [persistMessages])
 
   return {
