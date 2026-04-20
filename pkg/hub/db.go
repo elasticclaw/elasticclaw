@@ -36,6 +36,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_ci INTEGER NOT NULL DEFAULT 1`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_bugbot INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
@@ -69,6 +71,8 @@ func migrate(db *sql.DB) error {
 		tags             TEXT NOT NULL DEFAULT '[]',
 		color            TEXT NOT NULL DEFAULT '',
 		linear_issue_id  TEXT NOT NULL DEFAULT '',
+		auto_fix_ci      INTEGER NOT NULL DEFAULT 1,
+		auto_fix_bugbot  INTEGER NOT NULL DEFAULT 1,
 		llm_key          TEXT NOT NULL DEFAULT ''
 	);
 
@@ -91,6 +95,17 @@ func migrate(db *sql.DB) error {
 		files      TEXT NOT NULL DEFAULT '{}',  -- JSON map of filename -> content
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS claw_prs (
+		id          TEXT PRIMARY KEY,
+		claw_id     TEXT NOT NULL REFERENCES claws(id),
+		repo        TEXT NOT NULL,  -- e.g. "owner/repo"
+		pr_number   INTEGER NOT NULL,
+		pr_url      TEXT NOT NULL UNIQUE,
+		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
+		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot comment ID seen
+		created_at  DATETIME NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS factory_events (
