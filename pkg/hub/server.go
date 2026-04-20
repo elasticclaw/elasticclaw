@@ -537,9 +537,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		s.mu.RLock()
 		for _, k := range s.hubCfg.LLMKeys {
 			if k.Name == req.LLMKey {
-				// Use hub DefaultModel but ensure the right provider is selected
-				// by looking for a match; fall back to hub default
-				defaultModel = s.hubCfg.DefaultModel
+				// Use the key's provider to derive a model
+				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
 				break
 			}
 		}
@@ -2160,18 +2159,34 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig) string {
 	return b.String()
 }
 
-// resolveDefaultModel returns the effective model: template key's model > hub default.
-func resolveDefaultModelForKey(hubCfg *types.HubConfig, llmKey string) string {
-	if llmKey == "" {
+// resolveDefaultModelForKey returns the effective model for a given LLM key.
+// If the hub's default model matches the key's provider, use it; otherwise construct a provider-specific default.
+func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig) string {
+	if key == nil {
 		return hubCfg.DefaultModel
 	}
-	for _, k := range hubCfg.LLMKeys {
-		if k.Name == llmKey {
-			// If no explicit default_model set, use this provider's default
-			return hubCfg.DefaultModel
-		}
+	
+	// Check if hub's DefaultModel matches this key's provider
+	if hubCfg.DefaultModel != "" && strings.HasPrefix(hubCfg.DefaultModel, key.Provider+"/") {
+		return hubCfg.DefaultModel
 	}
-	return hubCfg.DefaultModel
+	
+	// Construct a provider-specific default model
+	switch key.Provider {
+	case "anthropic":
+		return "anthropic/claude-sonnet-4-6"
+	case "openai":
+		return "openai/gpt-4o"
+	case "fireworks":
+		return "fireworks/llama-v3p3-70b-instruct"
+	case "groq":
+		return "groq/llama-3.3-70b-versatile"
+	case "deepseek":
+		return "deepseek/deepseek-chat"
+	default:
+		// Fall back to hub default even if provider doesn't match
+		return hubCfg.DefaultModel
+	}
 }
 
 // buildGitHubCloneScript returns shell lines that clone repos into the current directory.
