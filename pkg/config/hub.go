@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,7 +127,7 @@ func downloadTemplate(name, dest string) error {
 	fetched := 0
 	for _, f := range files {
 		url := fmt.Sprintf("%s/%s/%s", TemplateRegistryRawBase, name, f)
-		
+
 		// Use net/http to fetch
 		resp, err := httpGet(url)
 		if err != nil || resp.StatusCode != 200 {
@@ -164,11 +165,26 @@ func LoadTemplateConfig(templateDir string) (*types.TemplateConfig, error) {
 		return nil, fmt.Errorf("template config not found at %s: %w", path, err)
 	}
 	cfg := &types.TemplateConfig{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse template config: %w", err)
+	// Use strict decoder so unknown fields produce an error rather than being silently ignored.
+	// This catches typos like 'repository' instead of 'repo', 'instance-type' vs 'instance_type', etc.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		// Treat EOF (empty file) as valid empty config to allow provider validation to fire
+		if err != io.EOF {
+			return nil, fmt.Errorf("invalid elasticclaw-config.yaml: %w", err)
+		}
 	}
 	if cfg.Provider == "" {
-		return nil, fmt.Errorf("template config must specify a provider")
+		return nil, fmt.Errorf("elasticclaw-config.yaml must specify a provider (e.g. provider: replicated)")
+	}
+	// Validate github repos
+	if cfg.GitHub != nil {
+		for i, r := range cfg.GitHub.Repos {
+			if r.Repo == "" {
+				return nil, fmt.Errorf("elasticclaw-config.yaml: github.repos[%d] is missing 'repo' field (e.g. repo: owner/repo)", i)
+			}
+		}
 	}
 	return cfg, nil
 }
