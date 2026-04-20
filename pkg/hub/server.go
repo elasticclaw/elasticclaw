@@ -125,6 +125,13 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
+
+	// Template store
+	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
+	mux.HandleFunc("/api/templates/{name}", s.withWebAuth(s.handleTemplateDetail))
+
+	// Integration webhooks (signature-validated, no session auth)
+	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -865,8 +872,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.claws, clawID)
 		s.mu.Unlock()
-		_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
-		s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus != "completed" && currentStatus != "deleted" {
+			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
+		}
 		log.Printf("[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
 	}()
 
@@ -988,6 +999,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				// Check for [DONE] signal from a factory-created claw
+				if strings.Contains(hm.Content, "[DONE]") {
+					go s.handleClawDoneSignal(clawID)
+				}
 			} else if msg.Type == "http_proxy_req" {
 				// Proxy an HTTP request from the bridge to the hub's internal API.
 				// This allows tools in the sandbox to reach hub APIs without a public URL.

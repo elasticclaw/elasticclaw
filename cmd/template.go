@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -235,17 +238,45 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if len(found) == 0 {
+	// Check hub-stored templates
+	var hubTemplates []string
+	if h, _, err := config.ResolveHub(profile); err == nil {
+		client := hub.NewClient(h.URL, h.Token)
+		if hubTmpls, err := client.ListHubTemplates(context.Background()); err == nil {
+			for _, t := range hubTmpls {
+				if name, ok := t["name"]; ok {
+					hubTemplates = append(hubTemplates, name)
+				}
+			}
+		}
+	}
+
+	if len(found) == 0 && len(hubTemplates) == 0 {
 		fmt.Println("No templates found.")
 		fmt.Println()
 		fmt.Println("Create one with:")
 		fmt.Println("  elasticclaw template create <name>")
+		fmt.Println("Push to hub with:")
+		fmt.Println("  elasticclaw template push <name>")
 		return nil
 	}
 
-	fmt.Printf("%-20s  %-12s  %s\n", "NAME", "PROVIDER", "LOCATION")
-	for _, t := range found {
-		fmt.Printf("%-20s  %-12s  %s\n", t.name, t.provider, t.dir)
+	if len(found) > 0 {
+		fmt.Println("Local templates:")
+		fmt.Printf("  %-20s  %-12s  %s\n", "NAME", "PROVIDER", "LOCATION")
+		for _, t := range found {
+			fmt.Printf("  %-20s  %-12s  %s\n", t.name, t.provider, t.dir)
+		}
+	}
+
+	if len(hubTemplates) > 0 {
+		if len(found) > 0 {
+			fmt.Println()
+		}
+		fmt.Println("Hub templates (available for factories):")
+		for _, name := range hubTemplates {
+			fmt.Printf("  %-20s  hub\n", name)
+		}
 	}
 	return nil
 }
