@@ -47,6 +47,7 @@ type FactoryView struct {
 	TerminateOnLeave bool   `json:"terminateOnLeave"`
 	Template         string `json:"template"`
 	NamePattern      string `json:"namePattern"`
+	WebhookSecretSet bool   `json:"webhookSecretSet"`
 }
 
 type ProviderView struct {
@@ -100,6 +101,7 @@ type FactoryPatch struct {
 	TerminateOnLeave bool   `json:"terminateOnLeave"`
 	Template         string `json:"template"`
 	NamePattern      string `json:"namePattern,omitempty"`
+	WebhookSecret    string `json:"webhookSecret,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -219,6 +221,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			TerminateOnLeave: f.TerminateOnLeave,
 			Template:         f.Template,
 			NamePattern:      f.NamePattern,
+			WebhookSecretSet: f.WebhookSecret != "",
 		})
 	}
 	s.mu.RUnlock()
@@ -371,12 +374,23 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.Factories != nil {
 		var factories []*types.FactoryConfig
 		for _, fp := range patch.Factories {
+			// Preserve existing webhook secret if not being replaced
+			webhookSecret := fp.WebhookSecret
+			if webhookSecret == "" {
+				// Find existing factory by name and keep its secret
+				for _, existing := range s.hubCfg.Factories {
+					if existing.Name == fp.Name {
+						webhookSecret = existing.WebhookSecret
+						break
+					}
+				}
+			}
 			factories = append(factories, &types.FactoryConfig{
 				Name: fp.Name, Integration: fp.Integration,
 				Workspace: fp.Workspace, Team: fp.Team,
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
-				NamePattern: fp.NamePattern,
+				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
 			})
 		}
 		updatedCfg.Factories = factories
