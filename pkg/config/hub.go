@@ -127,7 +127,7 @@ func downloadTemplate(name, dest string) error {
 	fetched := 0
 	for _, f := range files {
 		url := fmt.Sprintf("%s/%s/%s", TemplateRegistryRawBase, name, f)
-		
+
 		// Use net/http to fetch
 		resp, err := httpGet(url)
 		if err != nil || resp.StatusCode != 200 {
@@ -170,7 +170,10 @@ func LoadTemplateConfig(templateDir string) (*types.TemplateConfig, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("invalid elasticclaw-config.yaml: %w", err)
+		// Treat EOF (empty file) as valid empty config to allow provider validation to fire
+		if err != io.EOF {
+			return nil, fmt.Errorf("invalid elasticclaw-config.yaml: %w", err)
+		}
 	}
 	if cfg.Provider == "" {
 		return nil, fmt.Errorf("elasticclaw-config.yaml must specify a provider (e.g. provider: replicated)")
