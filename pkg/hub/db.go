@@ -66,7 +66,8 @@ func migrate(db *sql.DB) error {
 		linear_workspace TEXT NOT NULL DEFAULT '',
 		nix              INTEGER NOT NULL DEFAULT 0,
 		tags             TEXT NOT NULL DEFAULT '[]',
-		color            TEXT NOT NULL DEFAULT ''
+		color            TEXT NOT NULL DEFAULT '',
+		linear_issue_id  TEXT NOT NULL DEFAULT ''
 	);
 
 
