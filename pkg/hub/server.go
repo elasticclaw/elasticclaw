@@ -1717,7 +1717,7 @@ func (s *Server) syncReplicatedVMs() {
 		FROM claws
 		WHERE provider = 'replicated'
 		  AND provider_id != ''
-		  AND status NOT IN ('failed', 'error', 'offline')
+		  AND status NOT IN ('failed', 'error', 'offline', 'deleted')
 	`)
 	if err != nil {
 		log.Printf("pollProviderStatus: query error: %v", err)
@@ -1820,6 +1820,18 @@ func (s *Server) bridgeDownloadURL() string {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	// Bail immediately if claw was deleted while VM was spinning up
+	var checkStatus string
+	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&checkStatus)
+	if checkStatus == "deleted" {
+		log.Printf("[bootstrap] claw %s deleted before bootstrap, destroying VM %s", clawID[:8], vmID)
+		p, _ := newReplicatedProvider(cfg)
+		if p != nil {
+			_ = p.DeleteVM(context.Background(), vmID)
+		}
+		return
+	}
+
 	var filesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var files map[string]string
