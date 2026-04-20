@@ -69,7 +69,7 @@ export default function SettingsPage() {
     const token = sessionStorage.getItem("ec_hub_token") || ""
     fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.json())
-      .then((d) => { if (d.version) setVersion(d.version) })
+      .then((d) => { setVersion(d.version || "unknown") })
       .catch(() => {})
   }, [])
 
@@ -104,6 +104,7 @@ export default function SettingsPage() {
           <ChevronLeft className="size-4" />
         </Button>
         <h1 className="text-lg font-semibold">Settings</h1>
+        {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
