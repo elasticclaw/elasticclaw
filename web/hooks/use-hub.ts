@@ -148,6 +148,10 @@ export function useHub(selectedClawId: string | null): HubState {
     try {
       const apiMsgs = await fetchMessages(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
+      
+      // Compute new messages and their count outside the state updater
+      let newClawMsgs: Message[] = []
+      
       setMessages((prev) => {
         const existing = prev[clawId] || []
         
@@ -161,23 +165,29 @@ export function useHub(selectedClawId: string | null): HubState {
         // This preserves richer cache data (up to 200 messages) instead of truncating to API limit (100)
         const merged = [...existing, ...newMsgs]
         
+        // Sort merged messages by timestamp to ensure chronological order
+        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+        
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
         
-        // Bump unread count for new non-user/non-system messages when claw is not selected
-        const newClawMsgs = newMsgs.filter((m) => m.role !== 'user' && m.role !== 'system')
-        if (newClawMsgs.length > 0) {
-          setClaws((prevClaws) =>
-            prevClaws.map((c) =>
-              c.id === clawId && selectedClawIdRef.current !== clawId
-                ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
-                : c
-            )
-          )
-        }
+        // Track new non-user/non-system messages for unread count update
+        newClawMsgs = newMsgs.filter((m) => m.role !== 'user' && m.role !== 'system')
         
         return next
       })
+      
+      // Bump unread count for new non-user/non-system messages when claw is not selected
+      // This is outside the setMessages updater to avoid impure side effects
+      if (newClawMsgs.length > 0) {
+        setClaws((prevClaws) =>
+          prevClaws.map((c) =>
+            c.id === clawId && selectedClawIdRef.current !== clawId
+              ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
+              : c
+          )
+        )
+      }
     } catch (err) {
       console.warn(`Failed to load messages for ${clawId}:`, err)
     }
