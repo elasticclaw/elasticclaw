@@ -106,9 +106,9 @@ export default function SettingsPage() {
         <h1 className="text-lg font-semibold">Settings</h1>
       </header>
 
-      <div className="flex flex-1">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
-        <aside className="w-56 border-r border-border p-4 flex flex-col">
+        <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
           <div className="space-y-1 flex-1">
           {navItems.map(({ id, label, icon: Icon }) => (
             <button
@@ -134,7 +134,7 @@ export default function SettingsPage() {
         </aside>
 
         {/* Content */}
-        <main className="flex-1 p-8 max-w-2xl">
+        <main className="flex-1 overflow-y-auto p-8 max-w-2xl">
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
