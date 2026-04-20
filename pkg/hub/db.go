@@ -102,10 +102,11 @@ func migrate(db *sql.DB) error {
 		claw_id     TEXT NOT NULL REFERENCES claws(id),
 		repo        TEXT NOT NULL,  -- e.g. "owner/repo"
 		pr_number   INTEGER NOT NULL,
-		pr_url      TEXT NOT NULL UNIQUE,
+		pr_url      TEXT NOT NULL,
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot comment ID seen
-		created_at  DATETIME NOT NULL
+		created_at  DATETIME NOT NULL,
+		UNIQUE(claw_id, pr_url)
 	);
 
 	CREATE TABLE IF NOT EXISTS factory_events (

@@ -50,13 +50,31 @@ func extractPRs(content string) []struct {
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
 	var existing string
-	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE pr_url=?`, prURL).Scan(&existing)
+	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		return
 	}
+	
+	// Get the current max comment ID to avoid flooding with historical comments
+	token := s.resolveGitHubToken()
+	var maxCommentID int64
+	if token != "" {
+		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
+		if err == nil {
+			for _, c := range commentsData {
+				comment, _ := c.(map[string]interface{})
+				idF, _ := comment["id"].(float64)
+				id := int64(idF)
+				if id > maxCommentID {
+					maxCommentID = id
+				}
+			}
+		}
+	}
+	
 	_, _ = s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, repo, prNumber, prURL, now(),
+		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,created_at) VALUES(?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, now(),
 	)
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
 }
