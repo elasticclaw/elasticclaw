@@ -36,14 +36,13 @@ export interface HubState {
 export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
+  const messagesRef = useRef<Record<string, Message[]>>({})
   const [connected, setConnected] = useState(false)
   const { displayBuffers: streamingBuffers, pushChunk, finalize: finalizeTypewriter } = useTypewriter()
   const [configured, setConfigured] = useState(false)
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
 
-  // Track which claws have had messages loaded from API
-  const loadedMessages = useRef<Set<string>>(new Set())
   // Track pinned state from localStorage
   const pinnedRef = useRef<Record<string, boolean>>({})
 
@@ -83,6 +82,10 @@ export function useHub(selectedClawId: string | null): HubState {
   useEffect(() => {
     selectedClawIdRef.current = selectedClawId
   }, [selectedClawId])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
 
   // Load pinned state + message cache from localStorage on mount
   useEffect(() => {
@@ -147,16 +150,41 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [mergeClaws])
 
   const loadMessages = useCallback(async (clawId: string) => {
-    if (loadedMessages.current.has(clawId)) return
-    loadedMessages.current.add(clawId)
     try {
       const apiMsgs = await fetchMessages(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
+      
+      // Capture existing IDs before updating so we can diff outside the updater.
+      // React 18 batches state updates — side effects inside updaters are unreliable.
+      const existingIds = new Set((messagesRef.current[clawId] || []).map((m) => m.id))
+      const newClawMsgs = msgs.filter((m) => !existingIds.has(m.id) && m.role !== 'user' && m.role !== 'system')
+
       setMessages((prev) => {
-        const next = { ...prev, [clawId]: msgs }
+        const existing = prev[clawId] || []
+        // Merge API result with cached state:
+        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
+        // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
+        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-'))
+        const apiIds = new Set(msgs.map((m) => m.id))
+        const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
+        const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
+          !msgs.some((r) => r.content === m.content && r.role === m.role))
+        const merged = [...msgs, ...cachedOnly, ...inflight]
+        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+        const next = { ...prev, [clawId]: merged }
         persistMessages(next)
         return next
       })
+
+      if (newClawMsgs.length > 0 && selectedClawIdRef.current !== clawId) {
+        setClaws((prevClaws) =>
+          prevClaws.map((c) =>
+            c.id === clawId && selectedClawIdRef.current !== clawId
+              ? { ...c, unreadCount: c.unreadCount + newClawMsgs.length }
+              : c
+          )
+        )
+      }
     } catch (err) {
       console.warn(`Failed to load messages for ${clawId}:`, err)
     }
@@ -305,7 +333,17 @@ export function useHub(selectedClawId: string | null): HubState {
     pushChunk(clawId, "")
 
     try {
-      await apiSendMessage(clawId, content.trim())
+      const sent = await apiSendMessage(clawId, content.trim())
+      // Replace the optimistic message with the real one from the DB
+      // so it survives cache persistence (opt- IDs are filtered out)
+      const realMsg = mapApiMessage(sent)
+      setMessages((prev) => {
+        const msgs = prev[clawId] || []
+        const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)
+        const next = { ...prev, [clawId]: replaced }
+        persistMessages(next)
+        return next
+      })
       // WS events will handle the response (chunk/message)
     } catch (err) {
       console.error("Failed to send message:", err)
@@ -334,7 +372,7 @@ export function useHub(selectedClawId: string | null): HubState {
       persistMessages(next)
       return next
     })
-    loadedMessages.current.delete(clawId)
+
   }, [persistMessages])
 
   return {

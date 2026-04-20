@@ -52,6 +52,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
+  const [version, setVersion] = useState("")
 
   const load = useCallback(async () => {
     try {
@@ -62,6 +63,15 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    const hubUrl = getHubUrl()
+    const token = sessionStorage.getItem("ec_hub_token") || ""
+    fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((d) => { setVersion(d.version || "unknown") })
+      .catch(() => {})
+  }, [])
 
   async function save(patch: object) {
     setSaving(true)
@@ -87,18 +97,20 @@ export default function SettingsPage() {
   ]
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <header className="border-b border-border px-6 py-4 flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
           <ChevronLeft className="size-4" />
         </Button>
         <h1 className="text-lg font-semibold">Settings</h1>
+        {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
-      <div className="flex flex-1">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
-        <aside className="w-56 border-r border-border p-4 space-y-1">
+        <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
+          <div className="space-y-1 flex-1">
           {navItems.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -114,10 +126,16 @@ export default function SettingsPage() {
               {label}
             </button>
           ))}
+          </div>
+          {version && (
+            <p className="text-xs text-muted-foreground/50 px-3 pt-4 font-mono">
+              v{version}
+            </p>
+          )}
         </aside>
 
         {/* Content */}
-        <main className="flex-1 p-8 max-w-2xl">
+        <main className="flex-1 overflow-y-auto p-8 max-w-2xl">
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 

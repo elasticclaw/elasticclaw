@@ -217,7 +217,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             onTagsChange={handleTagsChange}
           />
           {/* Color picker */}
-          <div className="relative flex-shrink-0" data-color-picker>
+          <div className="relative flex-shrink-0 ml-auto" data-color-picker>
             <button
               ref={colorDotRef}
               onClick={() => {

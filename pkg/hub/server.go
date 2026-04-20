@@ -398,8 +398,9 @@ func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
 		hubURL = "http://localhost:8080"
 	}
 	jsonOK(w, map[string]interface{}{
-		"token":  token,
-		"hubUrl": hubURL,
+		"token":   token,
+		"hubUrl":  hubURL,
+		"version": Version,
 	})
 }
 
