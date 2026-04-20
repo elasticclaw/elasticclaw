@@ -155,15 +155,19 @@ export function useHub(selectedClawId: string | null): HubState {
       setMessages((prev) => {
         const existing = prev[clawId] || []
         
+        // Filter out optimistic messages before merging to prevent duplicates
+        // Optimistic messages will be replaced by real ones from the API or send()
+        const nonOptimistic = existing.filter((m) => !m.id.startsWith("opt-"))
+        
         // Build a Set of existing message IDs for efficient lookup
-        const existingIds = new Set(existing.map((m) => m.id))
+        const existingIds = new Set(nonOptimistic.map((m) => m.id))
         
         // Find truly new messages (not in existing cache) by comparing IDs
         const newMsgs = msgs.filter((m) => !existingIds.has(m.id))
         
-        // Merge: keep existing messages, append only new ones
+        // Merge: keep non-optimistic messages, append only new ones
         // This preserves richer cache data (up to 200 messages) instead of truncating to API limit (100)
-        const merged = [...existing, ...newMsgs]
+        const merged = [...nonOptimistic, ...newMsgs]
         
         // Sort merged messages by timestamp to ensure chronological order
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
