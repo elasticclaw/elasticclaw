@@ -97,7 +97,7 @@ export default function SettingsPage() {
   ]
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <header className="border-b border-border px-6 py-4 flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
