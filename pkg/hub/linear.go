@@ -141,9 +141,9 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 
 		// Issue entering trigger status → create claw.
-		// Don't rely on previousStatus — Linear sometimes omits it.
-		// The 1:1 DB guard in createClawForIssue handles duplicate prevention.
-		if strings.EqualFold(currentStatus, factory.TriggerStatus) {
+		// Only create when transitioning into the trigger status (not already in it).
+		// When previousStatus is empty (Linear omits it), EqualFold returns false, so the guard passes.
+		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
 			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
