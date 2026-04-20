@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect, useCallback } from "react"
+import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
 import { SpawnModal } from "@/components/spawn-modal"
@@ -126,12 +126,17 @@ export default function Home() {
     )
   }, [pinnedClaws, activeTagFilters])
 
-  // On mount, if a claw was already selected (restored from localStorage),
-  // eagerly load its messages from the API — handleSelectClaw won't fire on refresh.
+    // Eagerly load messages for all claws once the claw list is first available.
+  // Covers: initial load, refresh, navigating back from /settings.
+  // Board cards are passive — they never trigger loadMessages themselves.
+  const boardLoadedRef = useRef(false)
   useEffect(() => {
-    if (selectedClawId) hub.loadMessages(selectedClawId)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // run once on mount
+    if (boardLoadedRef.current || claws.length === 0) return
+    boardLoadedRef.current = true
+    for (const c of claws) {
+      hub.loadMessages(c.id)
+    }
+  }, [claws]) // re-runs when claws first populate
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
