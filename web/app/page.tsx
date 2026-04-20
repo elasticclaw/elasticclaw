@@ -126,6 +126,13 @@ export default function Home() {
     )
   }, [pinnedClaws, activeTagFilters])
 
+  // On mount, if a claw was already selected (restored from localStorage),
+  // eagerly load its messages from the API — handleSelectClaw won't fire on refresh.
+  useEffect(() => {
+    if (selectedClawId) hub.loadMessages(selectedClawId)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // run once on mount
+
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {

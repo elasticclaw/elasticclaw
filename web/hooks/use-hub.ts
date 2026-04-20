@@ -305,7 +305,17 @@ export function useHub(selectedClawId: string | null): HubState {
     pushChunk(clawId, "")
 
     try {
-      await apiSendMessage(clawId, content.trim())
+      const sent = await apiSendMessage(clawId, content.trim())
+      // Replace the optimistic message with the real one from the DB
+      // so it survives cache persistence (opt- IDs are filtered out)
+      const realMsg = mapApiMessage(sent)
+      setMessages((prev) => {
+        const msgs = prev[clawId] || []
+        const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)
+        const next = { ...prev, [clawId]: replaced }
+        persistMessages(next)
+        return next
+      })
       // WS events will handle the response (chunk/message)
     } catch (err) {
       console.error("Failed to send message:", err)
