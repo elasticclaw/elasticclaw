@@ -1,5 +1,36 @@
 package types
 
+import "strings"
+
+// LLMKeyConfig represents a named LLM API key entry in hub.yaml.
+type LLMKeyConfig struct {
+	Name     string `yaml:"name"     json:"name"`     // unique label, e.g. "anthropic-prod"
+	Provider string `yaml:"provider" json:"provider"` // e.g. "anthropic", "fireworks", "moonshot"
+	APIKey   string `yaml:"api_key"  json:"-"`        // the actual key (never exposed in API)
+	Default  bool   `yaml:"default"  json:"default"`  // use when no llm_key specified
+}
+
+// EnvVarName returns the environment variable name for this provider's API key.
+func (k *LLMKeyConfig) EnvVarName() string {
+	switch k.Provider {
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "fireworks":
+		return "FIREWORKS_API_KEY"
+	case "moonshot":
+		return "MOONSHOT_API_KEY"
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "groq":
+		return "GROQ_API_KEY"
+	case "deepseek":
+		return "DEEPSEEK_API_KEY"
+	default:
+		// Generic: PROVIDER_API_KEY uppercased
+		return strings.ToUpper(k.Provider) + "_API_KEY"
+	}
+}
+
 // TemplateConfig is the elasticclaw-config.yaml inside a template directory.
 type TemplateConfig struct {
 	Provider     string            `yaml:"provider"`
@@ -10,6 +41,9 @@ type TemplateConfig struct {
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string                `yaml:"default_model,omitempty"`
+	// LLMKey specifies which named LLM key (from hub.yaml llm_keys) to use.
+	// Omit to use the hub default key.
+	LLMKey string                     `yaml:"llm_key,omitempty"`
 	// Snapshot is the Daytona snapshot name (e.g. "daytona-medium", "daytona-large").
 	// Overrides hub providers.daytona.default_snapshot.
 	Snapshot string                    `yaml:"snapshot,omitempty"`
@@ -89,8 +123,11 @@ type HubConfig struct {
 	// DefaultModel is the model used by all claws unless overridden in the template.
 	// Format: provider/model, e.g. anthropic/claude-sonnet-4-6
 	DefaultModel string            `yaml:"default_model,omitempty"`
-	// LLMKeys is a flat map of provider name to API key, e.g. {"anthropic": "sk-ant-..."}
-	LLMKeys map[string]string      `yaml:"llm_keys,omitempty"`
+	// LLMKeys is a list of named LLM API keys. One can be marked default:true.
+	// Legacy flat map {"anthropic": "sk-..."} is still accepted for backwards compat.
+	LLMKeys    []*LLMKeyConfig   `yaml:"llm_keys,omitempty"`
+	// LLMKeysLegacy is the old flat map format — populated by custom unmarshal.
+	LLMKeysLegacy map[string]string `yaml:"-"`
 	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
 	Linear []*LinearConfig `yaml:"linear,omitempty"`
 
@@ -190,6 +227,9 @@ type CreateClawRequest struct {
 	TTL          string            `json:"ttl,omitempty"`
 	// DefaultModel overrides hub default model for this claw (from template config).
 	DefaultModel string                `json:"default_model,omitempty"`
+	// LLMKey is the name of the LLM key from hub.yaml to use for this claw.
+	// When set and DefaultModel is empty, the hub resolves the model from the key.
+	LLMKey string                     `json:"llm_key,omitempty"`
 	Snapshot     string                `json:"snapshot,omitempty"`
 	Files        map[string]string     `json:"files"`
 	Env          map[string]string     `json:"env,omitempty"`

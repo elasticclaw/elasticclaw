@@ -16,10 +16,18 @@ type SettingsStatus struct {
 	HasGitHub   bool `json:"hasGitHub"`
 }
 
+// LLMKeyView is the masked view of a named LLM key.
+type LLMKeyView struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	KeySet   bool   `json:"keySet"`
+	Default  bool   `json:"default"`
+}
+
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys       map[string]bool         `json:"llmKeys"`
+	LLMKeys       []LLMKeyView            `json:"llmKeys"`
 	Providers     map[string]ProviderView `json:"providers"`
 	GitHub        []GitHubAppView         `json:"github"`
 	SSHPublicKeys []string                `json:"sshPublicKeys"`
@@ -73,8 +81,17 @@ type GitHubAppView struct {
 
 // SettingsPatch is the request body for PATCH /api/settings.
 // Only non-nil fields are updated.
+// LLMKeyPatch adds/updates a named LLM key. Set APIKey to "" to remove.
+type LLMKeyPatch struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider,omitempty"`
+	APIKey   string `json:"apiKey,omitempty"`
+	Default  *bool  `json:"default,omitempty"`
+	Delete   bool   `json:"delete,omitempty"`
+}
+
 type SettingsPatch struct {
-	LLMKeys       map[string]string        `json:"llmKeys,omitempty"`
+	LLMKeys       []LLMKeyPatch            `json:"llmKeys,omitempty"`
 	Providers     map[string]ProviderPatch `json:"providers,omitempty"`
 	GitHub        []GitHubAppPatch         `json:"github,omitempty"`
 	UIPassword    string                   `json:"uiPassword,omitempty"`
@@ -160,15 +177,20 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view := SettingsView{
-		LLMKeys:   make(map[string]bool),
 		Providers: make(map[string]ProviderView),
 		GitHub:    []GitHubAppView{},
 	}
 
 	s.mu.RLock()
-	// LLM keys — boolean flag only
-	for provider, key := range s.hubCfg.LLMKeys {
-		view.LLMKeys[provider] = key != ""
+	// LLM keys — mask actual key values
+	view.LLMKeys = []LLMKeyView{}
+	for _, k := range s.hubCfg.LLMKeys {
+		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
+			Name:     k.Name,
+			Provider: k.Provider,
+			KeySet:   k.APIKey != "",
+			Default:  k.Default,
+		})
 	}
 
 	// Providers
@@ -250,25 +272,55 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
 
-	// LLM keys
-	if patch.LLMKeys != nil {
-		if updatedCfg.LLMKeys == nil {
-			updatedCfg.LLMKeys = make(map[string]string)
-		} else {
-			// Deep copy the map
-			newKeys := make(map[string]string, len(updatedCfg.LLMKeys))
-			for k, v := range updatedCfg.LLMKeys {
-				newKeys[k] = v
-			}
-			updatedCfg.LLMKeys = newKeys
+	// LLM keys — upsert/delete by name
+	if len(patch.LLMKeys) > 0 {
+		// Deep copy existing keys
+		existing := make([]*types.LLMKeyConfig, len(updatedCfg.LLMKeys))
+		for i, k := range updatedCfg.LLMKeys {
+			copy := *k
+			existing[i] = &copy
 		}
-		for k, v := range patch.LLMKeys {
-			if v == "" {
-				delete(updatedCfg.LLMKeys, k)
-			} else {
-				updatedCfg.LLMKeys[k] = v
+		for _, kp := range patch.LLMKeys {
+			if kp.Delete {
+				// Remove by name
+				filtered := existing[:0]
+				for _, k := range existing {
+					if k.Name != kp.Name {
+						filtered = append(filtered, k)
+					}
+				}
+				existing = filtered
+				continue
+			}
+			// Find existing by name
+			var found *types.LLMKeyConfig
+			for _, k := range existing {
+				if k.Name == kp.Name {
+					found = k
+					break
+				}
+			}
+			if found == nil {
+				found = &types.LLMKeyConfig{Name: kp.Name}
+				existing = append(existing, found)
+			}
+			if kp.Provider != "" {
+				found.Provider = kp.Provider
+			}
+			if kp.APIKey != "" {
+				found.APIKey = kp.APIKey
+			}
+			if kp.Default != nil {
+				// Clear other defaults
+				if *kp.Default {
+					for _, k := range existing {
+						k.Default = false
+					}
+				}
+				found.Default = *kp.Default
 			}
 		}
+		updatedCfg.LLMKeys = existing
 	}
 
 	// Providers

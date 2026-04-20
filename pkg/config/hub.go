@@ -32,6 +32,8 @@ func LoadHubConfig() (*types.HubConfig, error) {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse hub config %s: %w", path, err)
 		}
+		// Backwards compat: old flat map format {provider: key} stored in LLMKeysLegacy
+		migrateOldLLMKeys(cfg, data)
 		return cfg, nil
 	}
 	return &types.HubConfig{}, nil
@@ -221,4 +223,34 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// migrateOldLLMKeys converts old flat map {provider: key} yaml format to the new named slice.
+// Old format: llm_keys:\n  anthropic: sk-...
+// New format: llm_keys:\n  - name: anthropic\n    provider: anthropic\n    api_key: sk-...
+func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) {
+	// If we already have new-format keys, nothing to do
+	if len(cfg.LLMKeys) > 0 {
+		return
+	}
+	// Try to parse as the old flat map
+	var legacy struct {
+		LLMKeys map[string]string `yaml:"llm_keys"`
+	}
+	if err := yaml.Unmarshal(raw, &legacy); err != nil || len(legacy.LLMKeys) == 0 {
+		return
+	}
+	first := true
+	for provider, key := range legacy.LLMKeys {
+		if key == "" {
+			continue
+		}
+		cfg.LLMKeys = append(cfg.LLMKeys, &types.LLMKeyConfig{
+			Name:     provider,
+			Provider: provider,
+			APIKey:   key,
+			Default:  first,
+		})
+		first = false
+	}
 }

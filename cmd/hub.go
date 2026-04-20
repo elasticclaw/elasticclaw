@@ -7,6 +7,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -71,13 +72,22 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load hub config: %w", err)
 	}
 
-	// Apply LLM keys from env
+	// Apply LLM keys from env — backward compat: if ANTHROPIC_API_KEY set and no anthropic key configured, add it
 	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-		if hubCfg.LLMKeys == nil {
-			hubCfg.LLMKeys = map[string]string{}
+		hasAnthropicKey := false
+		for _, k := range hubCfg.LLMKeys {
+			if k.Provider == "anthropic" {
+				hasAnthropicKey = true
+				break
+			}
 		}
-		if hubCfg.LLMKeys["anthropic"] == "" {
-			hubCfg.LLMKeys["anthropic"] = apiKey
+		if !hasAnthropicKey {
+			hubCfg.LLMKeys = append(hubCfg.LLMKeys, &types.LLMKeyConfig{
+				Name:     "anthropic",
+				Provider: "anthropic",
+				APIKey:   apiKey,
+				Default:  len(hubCfg.LLMKeys) == 0,
+			})
 		}
 	}
 
