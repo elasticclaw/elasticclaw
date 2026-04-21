@@ -104,8 +104,8 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate HMAC signature if any factory has a webhook_secret configured.
-	// Shortcut sends: Shortcut-Signature: sha256=<hex>
-	sig := r.Header.Get("Shortcut-Signature")
+	// Shortcut sends: Payload-Signature: sha256=<hex>
+	sig := r.Header.Get("Payload-Signature")
 	if !s.validateShortcutSignature(body, sig) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
