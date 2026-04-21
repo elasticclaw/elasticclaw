@@ -356,13 +356,26 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			InstanceType: instanceType,
 			ProviderName: "ec-" + clawID[:8],
 		}
+		// Convert string files to []byte for providers that need it
+		fileBytes := make(map[string][]byte, len(templateFiles))
+		for k, v := range templateFiles {
+			fileBytes[k] = []byte(v)
+		}
+
+		var provErr error
 		switch provider {
 		case "replicated":
-			if err := s.provisionReplicated(ctx, clawID, req, provCfg, env); err != nil {
-				log.Printf("[factory] provision failed for %s: %v", clawID, err)
-				// Only mark error if not already deleted
-				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
-			}
+			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		case "daytona":
+			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+		case "vercel":
+			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		default:
+			provErr = fmt.Errorf("unsupported provider: %s", provider)
+		}
+		if provErr != nil {
+			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
 		}
 	}()
 
