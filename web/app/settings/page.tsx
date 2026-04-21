@@ -973,7 +973,10 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           onClick={() => {
             const { webhookSecret, tags: tagsStr, color, ...rest } = form
             const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
-            onSave({ factories: [...factories, { ...rest, integration: "linear", ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            // Determine integration type from selected workspace
+            const selectedWorkspace = workspaces.find(w => w.value === form.workspace)
+            const integration = selectedWorkspace?.label.startsWith("Shortcut:") ? "shortcut" : "linear"
+            onSave({ factories: [...factories, { ...rest, integration, ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
             setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: "" })
           }}>
           Add Factory

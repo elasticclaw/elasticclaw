@@ -40,9 +40,33 @@ type shortcutChange struct {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+func (s *Server) validateShortcutWebhook() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	if s.hubCfg.Integrations == nil {
+		return false
+	}
+	
+	// Validate that at least one Shortcut integration with a token is configured
+	for _, sc := range s.hubCfg.Integrations.Shortcut {
+		if sc.Token != "" {
+			return true
+		}
+	}
+	
+	return false
+}
+
 func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Validate that at least one Shortcut integration is configured
+	if !s.validateShortcutWebhook() {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 

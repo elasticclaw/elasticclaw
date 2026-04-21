@@ -613,15 +613,21 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 }
 
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
-	// Extract team key from issue ID (e.g. "ELA" from "ELA-123")
+	// Extract team key from issue ID (e.g. "ELA" from "ELA-123", "sc" from "sc-123")
 	parts := strings.SplitN(issueID, "-", 2)
 	if len(parts) != 2 {
 		return nil
 	}
 	teamKey := parts[0]
 
+	// Determine expected integration type based on issue ID format
+	expectedIntegration := "linear"
+	if strings.EqualFold(teamKey, "sc") {
+		expectedIntegration = "shortcut"
+	}
+
 	for _, factory := range s.hubCfg.Factories {
-		if factory.Integration != "linear" {
+		if factory.Integration != expectedIntegration {
 			continue
 		}
 		if factory.Team == "" || strings.EqualFold(factory.Team, teamKey) {
