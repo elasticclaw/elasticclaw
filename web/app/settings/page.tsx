@@ -105,6 +105,16 @@ export default function SettingsPage() {
     }
   }
 
+  // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
+  async function saveSilent(patch: object) {
+    try {
+      await patchSettings(patch)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed")
+    }
+  }
+
   const navItems: { id: Section; label: string; icon: React.ElementType }[] = [
     { id: "runtimes", label: "Sandbox Runtimes", icon: Cpu },
     { id: "llm", label: "LLM Keys", icon: Key },
@@ -173,7 +183,7 @@ export default function SettingsPage() {
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "factories" && (
-            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} saving={saving} />
+            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} onSaveSilent={saveSilent} saving={saving} />
           )}
         </main>
       </div>
@@ -639,7 +649,8 @@ interface FactoryFormData {
   webhookSecret: string; tags: string; color: string; originalName?: string
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; onSaveSilent: (p: object) => void; saving: boolean }) {
+  const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
   const [copied, setCopied] = useState(false)
   const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
@@ -759,22 +770,31 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    {/* Toggle switch */}
+                    {/* Toggle switch — uses silent save to avoid global 'Saved' banner */}
+                    {savedFactory === f.name && (
+                      <span className="text-xs text-green-500">✓</span>
+                    )}
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         const enabled = !(f.enabled ?? true)
                         const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
-                        onSave({ factories: updated })
+                        setSavedFactory(f.name)
+                        setTimeout(() => setSavedFactory(null), 1500)
+                        onSaveSilent({ factories: updated })
                       }}
                       className={cn(
-                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200",
-                        (f.enabled ?? true) ? "bg-primary" : "bg-muted-foreground/30"
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
+                        (f.enabled ?? true)
+                          ? "bg-primary border-2 border-transparent"
+                          : "bg-transparent border-2 border-muted-foreground/40"
                       )}
                       title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
                     >
                       <span className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transform transition-transform duration-200",
-                        (f.enabled ?? true) ? "translate-x-4" : "translate-x-0"
+                        "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
+                        (f.enabled ?? true)
+                          ? "bg-white translate-x-4"
+                          : "bg-muted-foreground/50 translate-x-0"
                       )} />
                     </button>
                     <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
