@@ -201,6 +201,72 @@ func TestBootstrapScript_ShebangPresent(t *testing.T) {
 	}
 }
 
+func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
+	cases := []struct {
+		name       string
+		provider   string
+		envVar     string
+		authChoice string
+		flagName   string
+	}{
+		{
+			name:       "openai",
+			provider:   "openai",
+			envVar:     "OPENAI_API_KEY",
+			authChoice: "openai-api-key",
+			flagName:   "--openai-api-key",
+		},
+		{
+			name:       "groq",
+			provider:   "groq",
+			envVar:     "GROQ_API_KEY",
+			authChoice: "groq-api-key",
+			flagName:   "--groq-api-key",
+		},
+		{
+			name:       "deepseek",
+			provider:   "deepseek",
+			envVar:     "DEEPSEEK_API_KEY",
+			authChoice: "deepseek-api-key",
+			flagName:   "--deepseek-api-key",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := []*types.LLMKeyConfig{
+				{Name: tc.name + "-key", Provider: tc.provider, Default: true},
+			}
+			flags := buildOnboardFlags(keys, "")
+			assertContains(t, flags, "--auth-choice "+tc.authChoice, "provider auth choice")
+			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`}"`, "provider api key flag")
+			assertNotContains(t, flags, "anthropic-api-key", "should not fallback to anthropic")
+		})
+	}
+}
+
+func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "openai-main", Provider: "openai", Default: true},
+		{Name: "groq-main", Provider: "groq"},
+		{Name: "deepseek-main", Provider: "deepseek"},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "openai-main")
+
+	assertContains(t, snippet, `'openai': {`, "openai provider entry")
+	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "openai baseUrl")
+	assertContains(t, snippet, "{'id': 'gpt-4o',      'name': 'GPT-4o'}", "openai models")
+
+	assertContains(t, snippet, `'groq': {`, "groq provider entry")
+	assertContains(t, snippet, "'baseUrl': 'https://api.groq.com/openai/v1'", "groq baseUrl")
+	assertContains(t, snippet, "{'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}", "groq models")
+
+	assertContains(t, snippet, `'deepseek': {`, "deepseek provider entry")
+	assertContains(t, snippet, "'baseUrl': 'https://api.deepseek.com/v1'", "deepseek baseUrl")
+	assertContains(t, snippet, "{'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}", "deepseek models")
+}
+
 // ── Shellcheck test ───────────────────────────────────────────────────────────
 
 func TestBootstrapScript_Shellcheck(t *testing.T) {
