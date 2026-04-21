@@ -137,6 +137,10 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		if factory.Integration != "linear" {
 			continue
 		}
+		// Skip disabled factories
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
 		if factory.Team != "" && !strings.EqualFold(factory.Team, teamKey) {
 			continue
 		}

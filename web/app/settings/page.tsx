@@ -36,7 +36,7 @@ interface SettingsData {
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean; tags?: string[]; color?: string
+    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean
   }>
 }
 
@@ -747,15 +747,29 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                   </div>
                 </div>
               ) : (
-                <div className="border border-border rounded-lg p-4 flex items-center justify-between">
+                <div className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
                   <div>
-                    <p className="text-sm font-medium">{f.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium">{f.name}</p>
+                      {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
+                    </div>
                     <p className="text-xs text-muted-foreground">
                       {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → {f.template}
                       {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 cursor-pointer" title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}>
+                      <span className="text-xs text-muted-foreground">{(f.enabled ?? true) ? "On" : "Off"}</span>
+                      <input type="checkbox" checked={f.enabled ?? true}
+                        onChange={e => {
+                          const enabled = e.target.checked
+                          const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
+                          onSave({ factories: updated })
+                        }}
+                        className="size-3.5 accent-primary"
+                      />
+                    </label>
                     <a href={`/factories?name=${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
