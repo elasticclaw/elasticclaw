@@ -877,7 +877,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Upsert claw
 	_, _ = s.db.Exec(
 		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template, status=excluded.status, last_seen=excluded.last_seen`,
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
+		 status=CASE WHEN claws.status='idle' THEN claws.status ELSE excluded.status END,
+		 last_seen=excluded.last_seen`,
 		clawID, tenantID, rp.Name, rp.Template, initialStatus(rp.GatewayReady), now(), now(),
 	)
 
