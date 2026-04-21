@@ -47,6 +47,12 @@ type TemplateConfig struct {
 	// Snapshot is the Daytona snapshot name (e.g. "daytona-medium", "daytona-large").
 	// Overrides hub providers.daytona.default_snapshot.
 	Snapshot string                    `yaml:"snapshot,omitempty"`
+	// AutoWatchCI enables automatic CI failure detection and injection for claws created
+	// from this template. Defaults to true when omitted.
+	AutoWatchCI *bool `yaml:"auto_watch_ci,omitempty"`
+	// AutoWatchBugbot enables automatic bugbot comment detection and injection.
+	// Defaults to true when omitted.
+	AutoWatchBugbot *bool `yaml:"auto_watch_bugbot,omitempty"`
 	// GitHub specifies GitHub repos this template's claw needs access to.
 	GitHub  *GitHubTemplateConfig  `yaml:"github,omitempty"`
 	// Linear specifies which Linear workspace this template's claw should use.
@@ -237,6 +243,8 @@ type CreateClawRequest struct {
 	Nix          bool                  `json:"nix,omitempty"`
 	Tags         []string              `json:"tags,omitempty"`
 	Color        string                `json:"color,omitempty"`
+	AutoWatchCI     *bool             `json:"auto_watch_ci,omitempty"`
+	AutoWatchBugbot *bool             `json:"auto_watch_bugbot,omitempty"`
 	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).
 	// Never set by the CLI; Name is the display name.
 	ProviderName string                `json:"provider_name,omitempty"`
