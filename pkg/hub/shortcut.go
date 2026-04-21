@@ -124,7 +124,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			oldStateName := s.shortcutStateName(token, oldStateID) // only fetched when needed for logging
 
 			// Issue entering trigger status → create claw
-			if strings.EqualFold(newStateName, factory.TriggerStatus) {
+			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
 				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
 				if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)

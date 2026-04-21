@@ -118,9 +118,10 @@ type IntegrationsPatch struct {
 }
 
 type ShortcutIntegrationPatch struct {
-	Workspace string `json:"workspace"`
-	Token     string `json:"token,omitempty"`
-	Delete    bool   `json:"delete,omitempty"`
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	Delete            bool   `json:"delete,omitempty"`
 }
 
 type LinearIntegrationPatch struct {
@@ -488,8 +489,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			sc := &types.ShortcutIntegrationConfig{Workspace: sp.Workspace}
+			matchWorkspace := sp.Workspace
+			if sp.OriginalWorkspace != "" {
+				matchWorkspace = sp.OriginalWorkspace
+			}
 			for _, ex := range existing {
-				if ex.Workspace == sp.Workspace {
+				if ex.Workspace == matchWorkspace {
 					sc.Token = ex.Token
 					break
 				}

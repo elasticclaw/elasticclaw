@@ -683,7 +683,7 @@ function ShortcutIntegrationsBlock({ settings, onSave, saving }: { settings: Set
                   <div className="flex gap-2">
                     <Button size="sm" disabled={saving || !editWorkspace} onClick={() => {
                       const patch = shortcut.map((x, j) => j === i
-                        ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}) }
+                        ? { workspace: editWorkspace, originalWorkspace: sc.workspace, ...(editToken ? { token: editToken } : {}) }
                         : { workspace: x.workspace }
                       )
                       onSave({ integrations: { shortcut: patch } })
