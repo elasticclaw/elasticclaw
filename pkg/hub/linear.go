@@ -613,7 +613,25 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 }
 
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
-	// Extract team key from issue ID (e.g. "ELA" from "ELA-123", "sc" from "sc-123")
+	// First, try to find the factory that created this claw by looking up the factory tag
+	var tagsJSON string
+	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
+		var tags []string
+		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+			for _, tag := range tags {
+				if strings.HasPrefix(tag, "factory:") {
+					factoryName := strings.TrimPrefix(tag, "factory:")
+					for _, factory := range s.hubCfg.Factories {
+						if factory.Name == factoryName {
+							return factory
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: Extract team key from issue ID (e.g. "ELA" from "ELA-123", "sc" from "sc-123")
 	parts := strings.SplitN(issueID, "-", 2)
 	if len(parts) != 2 {
 		return nil

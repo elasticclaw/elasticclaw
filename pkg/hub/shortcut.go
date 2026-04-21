@@ -18,19 +18,19 @@ import (
 // ── Webhook payload types ─────────────────────────────────────────────────────
 
 type shortcutWebhookPayload struct {
-	ID         string                        `json:"id"`
-	Actions    []shortcutAction              `json:"actions"`
-	ChangedAt  string                        `json:"changed_at"`
+	ID        string           `json:"id"`
+	Actions   []shortcutAction `json:"actions"`
+	ChangedAt string           `json:"changed_at"`
 }
 
 type shortcutAction struct {
-	ID             int64                          `json:"id"`
-	EntityType     string                         `json:"entity_type"` // "story"
-	Action         string                         `json:"action"`      // "update", "create"
-	Name           string                         `json:"name"`
-	AppURL         string                         `json:"app_url"`
-	Description    string                         `json:"description"`
-	Changes        map[string]shortcutChange      `json:"changes"`
+	ID          int64                     `json:"id"`
+	EntityType  string                    `json:"entity_type"` // "story"
+	Action      string                    `json:"action"`      // "update", "create"
+	Name        string                    `json:"name"`
+	AppURL      string                    `json:"app_url"`
+	Description string                    `json:"description"`
+	Changes     map[string]shortcutChange `json:"changes"`
 }
 
 type shortcutChange struct {
@@ -43,18 +43,18 @@ type shortcutChange struct {
 func (s *Server) validateShortcutWebhook() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	if s.hubCfg.Integrations == nil {
 		return false
 	}
-	
+
 	// Validate that at least one Shortcut integration with a token is configured
 	for _, sc := range s.hubCfg.Integrations.Shortcut {
 		if sc.Token != "" {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -194,6 +194,19 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("template %q not found: %w", factory.Template, err)
 	}
 
+	// Parse elasticclaw-config.yaml from the template files (if present) so we
+	// honour provider settings like nix, github repos, default_model, instance_type, etc.
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		var parseErr error
+		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
+			// Non-fatal — continue with defaults
+			tmplCfg = nil
+		}
+	}
+
 	// Inject BOOTSTRAP.md and CONTEXT.md
 	ctx := buildShortcutContext(action, storyID)
 	templateFiles["BOOTSTRAP.md"] = ctx
@@ -209,11 +222,10 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
+	// Find provider: template config > hub default
 	provider := s.defaultProvider()
-	if factory.Template != "" {
-		if tCfg, _ := s.loadTemplateCfgForFactory(factory); tCfg != nil && tCfg.Provider != "" {
-			provider = tCfg.Provider
-		}
+	if tmplCfg != nil && tmplCfg.Provider != "" {
+		provider = tmplCfg.Provider
 	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")
@@ -229,6 +241,47 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 
+	// Resolve template config fields (from elasticclaw-config.yaml if present).
+	// Factory-level overrides (color, tags) take precedence over template config.
+	var (
+		instanceType    string
+		defaultModel    string
+		llmKey          string
+		nixEnabled      int
+		githubRepos     []types.GitHubRepoAccess
+		linearWorkspace string
+	)
+	if tmplCfg != nil {
+		instanceType = tmplCfg.InstanceType
+		defaultModel = tmplCfg.DefaultModel
+		llmKey = tmplCfg.LLMKey
+		if tmplCfg.Nix {
+			nixEnabled = 1
+		}
+		if tmplCfg.GitHub != nil {
+			githubRepos = tmplCfg.GitHub.Repos
+		}
+		if tmplCfg.Linear != nil {
+			linearWorkspace = tmplCfg.Linear.Workspace
+		}
+	}
+	// Resolve default model: template > llm_key lookup > hub default
+	if defaultModel == "" && llmKey != "" {
+		s.mu.RLock()
+		for _, k := range s.hubCfg.LLMKeys {
+			if k.Name == llmKey {
+				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				break
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if defaultModel == "" {
+		s.mu.RLock()
+		defaultModel = s.hubCfg.DefaultModel
+		s.mu.RUnlock()
+	}
+
 	tags := mergeTags(factory.Template, factory.Tags, nil)
 	hasfactory := false
 	for _, t := range tags {
@@ -242,14 +295,23 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	tagsJSON, _ := json.Marshal(tags)
 
+	// Color: factory overrides template config
+	clawColor := factory.Color
+	if clawColor == "" && tmplCfg != nil {
+		clawColor = tmplCfg.Color
+	}
+
+	githubReposJSON, _ := json.Marshal(githubRepos)
+
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
+	now := now()
 
-	_, err = s.db.Exec(
-		`INSERT INTO claws(id,tenant_id,name,template,provider,template_files,linear_issue_id,tags,color,status,created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON),
-		storyID, string(tagsJSON), factory.Color, now(),
+	_, err = s.db.Exec(`
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, linear_issue_id, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
+		string(githubReposJSON), linearWorkspace, nixEnabled, string(tagsJSON), clawColor, llmKey, storyID, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
@@ -258,6 +320,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	req := types.CreateClawRequest{
 		Name: clawName, TemplateName: factory.Template,
 		Provider: provider, Files: templateFiles, Env: env,
+		InstanceType: instanceType,
 		ProviderName: "ec-" + clawID[:8],
 	}
 
