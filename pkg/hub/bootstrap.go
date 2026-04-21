@@ -37,6 +37,7 @@ type BootstrapParams struct {
 	LinearEnv      string // pre-built export line
 	RelayEnv       string // pre-built export lines
 	ProviderConfig string // python snippet to configure models.providers
+	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
 
 // buildOpenClawProviderConfig returns a python snippet that writes the correct
@@ -221,7 +222,7 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   openclaw onboard \
     --non-interactive --accept-risk \
     --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon 2>/dev/null || true
+    --skip-daemon %s 2>/dev/null || true
   %s
 fi
 
@@ -309,10 +310,52 @@ fi
 `,
 		p.DefaultModel, p.GatewayPassword, p.LLMKeyEnv, p.LinearEnv,
 		buildNixInstall(p.Nix),
+		p.OnboardFlags,
 		p.ProviderConfig,
 		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.RelayEnv, p.DefaultModel, p.LLMKeyEnv,
 		credHelper,
 	)
+}
+
+// buildOnboardFlags returns the --auth-choice flags for openclaw onboard
+// based on the active LLM key (selected > default > first).
+func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	var active *types.LLMKeyConfig
+	for _, k := range keys {
+		if k.Name == selectedKeyName {
+			active = k
+			break
+		}
+	}
+	if active == nil {
+		for _, k := range keys {
+			if k.Default {
+				active = k
+				break
+			}
+		}
+	}
+	if active == nil && len(keys) > 0 {
+		active = keys[0]
+	}
+	if active == nil {
+		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+	}
+	envVar := active.EnvVarName()
+	switch active.Provider {
+	case "anthropic":
+		return fmt.Sprintf(`--auth-choice anthropic-api-key --anthropic-api-key "${%s:-placeholder}"`, envVar)
+	case "fireworks":
+		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s}"`, envVar)
+	case "openai":
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s}"`, envVar)
+	case "groq":
+		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s}"`, envVar)
+	case "deepseek":
+		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s}"`, envVar)
+	default:
+		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+	}
 }
