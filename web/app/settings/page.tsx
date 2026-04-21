@@ -36,7 +36,7 @@ interface SettingsData {
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean; tags?: string[]; color?: string
+    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean
   }>
 }
 
@@ -102,6 +102,16 @@ export default function SettingsPage() {
       setError(e instanceof Error ? e.message : "Save failed")
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
+  async function saveSilent(patch: object) {
+    try {
+      await patchSettings(patch)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed")
     }
   }
 
@@ -174,7 +184,7 @@ export default function SettingsPage() {
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "factories" && (
-            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} saving={saving} />
+            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} onSaveSilent={saveSilent} saving={saving} />
           )}
           {section === "templates" && (
             <TemplatesSection />
@@ -643,7 +653,8 @@ interface FactoryFormData {
   webhookSecret: string; tags: string; color: string; originalName?: string
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; onSaveSilent: (p: object) => void; saving: boolean }) {
+  const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
   const [copied, setCopied] = useState(false)
   const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
@@ -751,16 +762,46 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                   </div>
                 </div>
               ) : (
-                <div className="border border-border rounded-lg p-4 flex items-center justify-between">
+                <div className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
                   <div>
-                    <p className="text-sm font-medium">{f.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium">{f.name}</p>
+                      {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
+                    </div>
                     <p className="text-xs text-muted-foreground">
                       {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → {f.template}
                       {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a href={`/factories?name=${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
+                    {/* Toggle switch — uses silent save to avoid global 'Saved' banner */}
+                    {savedFactory === f.name && (
+                      <span className="text-xs text-green-500">✓</span>
+                    )}
+                    <button
+                      onClick={async () => {
+                        const enabled = !(f.enabled ?? true)
+                        const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
+                        setSavedFactory(f.name)
+                        setTimeout(() => setSavedFactory(null), 1500)
+                        onSaveSilent({ factories: updated })
+                      }}
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
+                        (f.enabled ?? true)
+                          ? "bg-green-600 border-2 border-transparent"
+                          : "bg-transparent border-2 border-muted-foreground/40"
+                      )}
+                      title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
+                    >
+                      <span className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
+                        (f.enabled ?? true)
+                          ? "bg-white translate-x-4"
+                          : "bg-muted-foreground/50 translate-x-0"
+                      )} />
+                    </button>
+                    <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
                       setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "", originalName: f.name })

@@ -45,6 +45,11 @@ type LinearIntegrationView struct {
 	WebhookSecretSet bool   `json:"webhookSecretSet"`
 }
 
+// isFactoryEnabled returns true if the factory is enabled (nil = enabled by default).
+func isFactoryEnabled(f *types.FactoryConfig) bool {
+	return f.Enabled == nil || *f.Enabled
+}
+
 type FactoryView struct {
 	Name             string   `json:"name"`
 	Integration      string   `json:"integration"`
@@ -58,6 +63,7 @@ type FactoryView struct {
 	WebhookSecretSet bool     `json:"webhookSecretSet"`
 	Tags             []string `json:"tags"`
 	Color            string   `json:"color"`
+	Enabled          bool     `json:"enabled"`
 }
 
 type ProviderView struct {
@@ -125,6 +131,7 @@ type FactoryPatch struct {
 	WebhookSecret    string   `json:"webhookSecret,omitempty"`
 	Tags             []string `json:"tags,omitempty"`
 	Color            string   `json:"color,omitempty"`
+	Enabled          *bool    `json:"enabled,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -252,6 +259,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			WebhookSecretSet: f.WebhookSecret != "",
 			Tags:             f.Tags,
 			Color:            f.Color,
+			Enabled:          isFactoryEnabled(f),
 		})
 	}
 	s.mu.RUnlock()
@@ -461,7 +469,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
 				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
-				Tags: fp.Tags, Color: fp.Color,
+				Tags: fp.Tags, Color: fp.Color, Enabled: fp.Enabled,
 			})
 		}
 		updatedCfg.Factories = factories

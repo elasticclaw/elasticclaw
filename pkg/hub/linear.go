@@ -137,6 +137,10 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		if factory.Integration != "linear" {
 			continue
 		}
+		// Skip disabled factories
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
 		if factory.Team != "" && !strings.EqualFold(factory.Team, teamKey) {
 			continue
 		}
@@ -178,7 +182,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	if !matched {
 		// Webhook received but no factory matched — log as not_actionable
 		for _, factory := range s.hubCfg.Factories {
-			if factory.Integration == "linear" && (factory.Team == "" || strings.EqualFold(factory.Team, teamKey)) {
+			if factory.Integration == "linear" && (factory.Enabled == nil || *factory.Enabled) && (factory.Team == "" || strings.EqualFold(factory.Team, teamKey)) {
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "not_actionable",
 					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
 			}
@@ -255,11 +259,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
 	// Factory-level overrides (color, tags) take precedence over template config.
 	var (
-		instanceType   string
-		defaultModel   string
-		llmKey         string
-		nixEnabled     int
-		githubRepos    []types.GitHubRepoAccess
+		instanceType    string
+		defaultModel    string
+		llmKey          string
+		nixEnabled      int
+		githubRepos     []types.GitHubRepoAccess
 		linearWorkspace string
 	)
 	if tmplCfg != nil {

@@ -173,6 +173,7 @@ type LinearIntegrationConfig struct {
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
+	Enabled           *bool  `yaml:"enabled,omitempty"`  // nil = true (default on); set false to pause
 	Integration       string `yaml:"integration"`        // "linear" (future: "shortcut", "github-issues")
 	Workspace         string `yaml:"workspace"`          // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
