@@ -61,14 +61,6 @@ func (k *LLMKeyConfig) EnvVarName() string {
 		return "ANTHROPIC_API_KEY"
 	case "fireworks":
 		return "FIREWORKS_API_KEY"
-	case "moonshot":
-		return "MOONSHOT_API_KEY"
-	case "openai":
-		return "OPENAI_API_KEY"
-	case "groq":
-		return "GROQ_API_KEY"
-	case "deepseek":
-		return "DEEPSEEK_API_KEY"
 	default:
 		// Generic: PROVIDER_API_KEY uppercased
 		return strings.ToUpper(k.Provider) + "_API_KEY"

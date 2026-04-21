@@ -333,13 +333,22 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 
 const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
-  { value: "fireworks",  label: "Fireworks",   placeholder: "fw-..." },
-  { value: "moonshot",   label: "Moonshot (Kimi)", placeholder: "sk-..." },
-  { value: "openai",     label: "OpenAI",      placeholder: "sk-..." },
-  { value: "groq",       label: "Groq",        placeholder: "gsk_..." },
-  { value: "deepseek",   label: "DeepSeek",    placeholder: "sk-..." },
-  { value: "other",      label: "Other",       placeholder: "" },
+  { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
+  { value: "other",      label: "Other",      placeholder: "" },
 ]
+
+const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
+  anthropic: [
+    { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+    { id: "anthropic/claude-opus-4-5",   name: "Claude Opus 4.5" },
+    { id: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+  ],
+  fireworks: [
+    { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2" },
+    { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B" },
+    { id: "fireworks/accounts/fireworks/models/deepseek-v3",                name: "DeepSeek V3" },
+  ],
+}
 
 function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const llmKeys = settings.llmKeys || []
@@ -405,7 +414,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
-            <select value={newProvider} onChange={e => setNewProvider(e.target.value)}
+            <select value={newProvider} onChange={e => { setNewProvider(e.target.value); setNewDefaultModel("") }}
               className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
               {PROVIDER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
@@ -425,8 +434,21 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
         </div>
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
-          <Input value={newDefaultModel} onChange={e => setNewDefaultModel(e.target.value)}
-            className="h-8 text-sm" placeholder="e.g. fireworks/accounts/fireworks/models/kimi-k2p6" />
+          {PROVIDER_MODELS[newProvider] ? (
+            <select
+              value={newDefaultModel}
+              onChange={e => setNewDefaultModel(e.target.value)}
+              className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
+            >
+              <option value="">— use provider default —</option>
+              {PROVIDER_MODELS[newProvider].map(m => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          ) : (
+            <Input value={newDefaultModel} onChange={e => setNewDefaultModel(e.target.value)}
+              className="h-8 text-sm" placeholder="e.g. myprovider/model-name" />
+          )}
         </div>
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />

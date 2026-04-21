@@ -2249,16 +2249,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	switch key.Provider {
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
-	case "openai":
-		return "openai/gpt-4o"
 	case "fireworks":
 		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
-	case "groq":
-		return "groq/llama-3.3-70b-versatile"
-	case "deepseek":
-		return "deepseek/deepseek-chat"
-	case "moonshot":
-		return "moonshot/moonshot-v1-8k"
 	default:
 		// Fall back to hub default even if provider doesn't match
 		return hubCfg.DefaultModel
