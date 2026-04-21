@@ -863,10 +863,11 @@ function TemplatesSection() {
     try {
       const hubUrl = getHubUrl()
       const token = sessionStorage.getItem("ec_hub_token") || ""
-      await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
+      const res = await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       })
+      if (!res.ok) throw new Error(await res.text())
       await load()
     } catch {}
     setDeleting(null)
