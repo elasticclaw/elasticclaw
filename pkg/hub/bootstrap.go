@@ -2,6 +2,7 @@ package hub
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -32,9 +33,151 @@ type BootstrapParams struct {
 	GitHubRepos []types.GitHubRepoAccess
 
 	// Env injection
-	LLMKeyEnv   string // pre-built export lines
-	LinearEnv   string // pre-built export line
-	RelayEnv    string // pre-built export lines
+	LLMKeyEnv      string // pre-built export lines
+	LinearEnv      string // pre-built export line
+	RelayEnv       string // pre-built export lines
+	ProviderConfig string // python snippet to configure models.providers
+}
+
+// buildOpenClawProviderConfig returns a python snippet that writes the correct
+// models.providers config to ~/.openclaw/openclaw.json based on configured LLM keys.
+// selectedKeyName is used to pick the active key (falls back to default, then first).
+func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	if len(keys) == 0 {
+		// No keys configured — produce empty snippet
+		return ""
+	}
+
+	// Determine active key
+	var activeKey *types.LLMKeyConfig
+	for _, k := range keys {
+		if k.Name == selectedKeyName {
+			activeKey = k
+			break
+		}
+	}
+	if activeKey == nil {
+		for _, k := range keys {
+			if k.Default {
+				activeKey = k
+				break
+			}
+		}
+	}
+	if activeKey == nil {
+		activeKey = keys[0]
+	}
+	_ = activeKey // used implicitly via the provider list
+
+	// Build per-provider config entries.
+	// We emit an entry for every unique provider across all configured keys.
+	// If a provider appears multiple times we use the active key's entry if it matches,
+	// otherwise the first occurrence.
+	seen := map[string]bool{}
+	var providerLines []string
+
+	// Helper: build a single provider dict as a python literal.
+	buildEntry := func(k *types.LLMKeyConfig) string {
+		envVar := k.EnvVarName()
+		switch k.Provider {
+		case "anthropic":
+			return fmt.Sprintf(`'anthropic': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.anthropic.com',
+            'api': 'anthropic-messages',
+            'models': [
+                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
+                {'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages'},
+                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
+            ]
+        }`, envVar)
+		case "fireworks":
+			return fmt.Sprintf(`'fireworks': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.fireworks.ai/inference/v1',
+            'api': 'openai-chat-completions',
+            'models': [
+                {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2'},
+                {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B'},
+                {'id': 'accounts/fireworks/models/deepseek-v3',                'name': 'DeepSeek V3'}
+            ]
+        }`, envVar)
+		case "openai":
+			return fmt.Sprintf(`'openai': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.openai.com/v1',
+            'api': 'openai-chat-completions',
+            'models': [
+                {'id': 'gpt-4o',      'name': 'GPT-4o'},
+                {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini'}
+            ]
+        }`, envVar)
+		case "groq":
+			return fmt.Sprintf(`'groq': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.groq.com/openai/v1',
+            'api': 'openai-chat-completions',
+            'models': [
+                {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}
+            ]
+        }`, envVar)
+		case "deepseek":
+			return fmt.Sprintf(`'deepseek': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.deepseek.com/v1',
+            'api': 'openai-chat-completions',
+            'models': [
+                {'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}
+            ]
+        }`, envVar)
+		default:
+			return fmt.Sprintf(`'%s': {
+            'apiKey': os.environ.get('%s', ''),
+            'api': 'openai-chat-completions'
+        }`, k.Provider, envVar)
+		}
+	}
+
+	// Prioritize the active key's provider first
+	entry := buildEntry(activeKey)
+	seen[activeKey.Provider] = true
+	providerLines = append(providerLines, entry)
+
+	// Then remaining keys
+	for _, k := range keys {
+		if seen[k.Provider] {
+			continue
+		}
+		seen[k.Provider] = true
+		providerLines = append(providerLines, buildEntry(k))
+	}
+
+	providersDict := strings.Join(providerLines, ",\n        ")
+
+	return fmt.Sprintf(`python3 << 'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+try:
+    with open(path) as f:
+        config = json.load(f)
+except:
+    config = {}
+model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
+config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
+config['models'] = {
+    'providers': {
+        %s
+    }
+}
+config.setdefault('gateway', {})['bind'] = 'loopback'
+config['gateway']['port'] = 18789
+gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
+if gw_password:
+    config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
+with open(path, 'w') as f:
+    json.dump(config, f, indent=2)
+print('OpenClaw config patched')
+PYEOF`, providersDict)
 }
 
 // GenerateReplicatedBootstrapScript returns the bash script that bootstraps
@@ -75,14 +218,11 @@ echo "OpenClaw: $(openclaw --version)"
 mkdir -p "$HOME/.openclaw/workspace"
 if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   echo "Configuring OpenClaw..."
-  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-placeholder}"
   openclaw onboard \
     --non-interactive --accept-risk \
-    --auth-choice anthropic-api-key \
-    --anthropic-api-key "$ANTHROPIC_API_KEY" \
     --gateway-bind loopback --gateway-port 18789 \
     --skip-daemon 2>/dev/null || true
-  printf 'import json, os\npath = os.path.expanduser('"'"'~/.openclaw/openclaw.json'"'"')\ntry:\n    with open(path) as f:\n        config = json.load(f)\nexcept:\n    config = {}\nmodel = os.environ.get('"'"'OPENCLAW_DEFAULT_MODEL'"'"', '"'"'anthropic/claude-sonnet-4-6'"'"')\napiKey = os.environ.get('"'"'ANTHROPIC_API_KEY'"'"', '"'"'placeholder'"'"')\nconfig.setdefault('"'"'agents'"'"', {}).setdefault('"'"'defaults'"'"', {})['"'"'model'"'"'] = model\nconfig['"'"'models'"'"'] = {\n    '"'"'providers'"'"': {\n        '"'"'anthropic'"'"': {\n            '"'"'apiKey'"'"': apiKey,\n            '"'"'baseUrl'"'"': '"'"'https://api.anthropic.com'"'"',\n            '"'"'api'"'"': '"'"'anthropic-messages'"'"',\n            '"'"'models'"'"': [\n                {'"'"'id'"'"': '"'"'claude-sonnet-4-6'"'"', '"'"'name'"'"': '"'"'Claude Sonnet 4.6'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'},\n                {'"'"'id'"'"': '"'"'claude-opus-4-5'"'"', '"'"'name'"'"': '"'"'Claude Opus 4.5'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'},\n                {'"'"'id'"'"': '"'"'claude-sonnet-4-5'"'"', '"'"'name'"'"': '"'"'Claude Sonnet 4.5'"'"', '"'"'api'"'"': '"'"'anthropic-messages'"'"'}\n            ]\n        }\n    }\n}\nconfig.setdefault('"'"'gateway'"'"', {})['"'"'bind'"'"'] = '"'"'loopback'"'"'\nconfig['"'"'gateway'"'"']['"'"'port'"'"'] = 18789\ngw_password = os.environ.get('"'"'ELASTICCLAW_GATEWAY_PASSWORD'"'"', '"'"''"'"')\nif gw_password:\n    config['"'"'gateway'"'"']['"'"'auth'"'"'] = {'"'"'mode'"'"': '"'"'password'"'"', '"'"'password'"'"': gw_password}\nwith open(path, '"'"'w'"'"') as f:\n    json.dump(config, f, indent=2)\nprint('"'"'OpenClaw config patched'"'"')\n' | python3
+  %s
 fi
 
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
@@ -169,6 +309,7 @@ fi
 `,
 		p.DefaultModel, p.GatewayPassword, p.LLMKeyEnv, p.LinearEnv,
 		buildNixInstall(p.Nix),
+		p.ProviderConfig,
 		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.RelayEnv, p.DefaultModel, p.LLMKeyEnv,

@@ -57,6 +57,13 @@ func ActiveHubConfigPath() (string, error) {
 	return filepath.Join(home, ".elasticclaw", "hub.yaml"), nil
 }
 
+// hubConfigForSave is a serialization wrapper that includes LLMKeys (which is
+// tagged yaml:"-" in HubConfig to avoid double-parsing conflicts).
+type hubConfigForSave struct {
+	*types.HubConfig `yaml:",inline"`
+	LLMKeys          []*types.LLMKeyConfig `yaml:"llm_keys,omitempty"`
+}
+
 func SaveHubConfig(cfg *types.HubConfig) error {
 	path, err := ActiveHubConfigPath()
 	if err != nil {
@@ -65,7 +72,7 @@ func SaveHubConfig(cfg *types.HubConfig) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(hubConfigForSave{HubConfig: cfg, LLMKeys: cfg.LLMKeys})
 	if err != nil {
 		return err
 	}
