@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
-type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories"
+type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "templates"
 
 interface LLMKeyView {
   name: string
@@ -112,6 +112,7 @@ export default function SettingsPage() {
     { id: "security", label: "Security", icon: Shield },
     { id: "integrations", label: "Integrations", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
+    { id: "templates", label: "Templates", icon: LayoutTemplate },
   ]
 
   return (
@@ -174,6 +175,9 @@ export default function SettingsPage() {
           )}
           {settings && section === "factories" && (
             <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} saving={saving} />
+          )}
+          {section === "templates" && (
+            <TemplatesSection />
           )}
         </main>
       </div>
@@ -829,6 +833,92 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
           Add Factory
         </Button>
       </div>
+    </div>
+  )
+}
+
+function TemplatesSection() {
+  const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])
+  const [loading, setLoading] = useState(true)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/templates`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) setTemplates(await res.json())
+    } catch {}
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const handleDelete = async (name: string) => {
+    setDeleting(name)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      await load()
+    } catch {}
+    setDeleting(null)
+    setConfirmDelete(null)
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Templates</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Templates pushed to the hub and available for claw creation.
+          Push new templates with <code className="bg-muted px-1 rounded text-xs">elasticclaw template push</code>.
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground animate-pulse">Loading…</p>
+      ) : templates.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No templates pushed yet. Use <code className="bg-muted px-1 rounded text-xs">elasticclaw template push &lt;name&gt;</code> to add one.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {templates.map((t) => (
+            <div key={t.name} className="border border-border rounded-lg p-4 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-mono font-medium">{t.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  Updated {new Date(t.updatedAt).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
+                </p>
+              </div>
+              {confirmDelete === t.name ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Delete {t.name}?</span>
+                  <Button size="sm" variant="destructive" disabled={deleting === t.name}
+                    onClick={() => handleDelete(t.name)}>
+                    {deleting === t.name ? "Deleting…" : "Delete"}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>Cancel</Button>
+                </div>
+              ) : (
+                <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive"
+                  onClick={() => setConfirmDelete(t.name)}>
+                  <Trash2 className="size-3.5" />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
