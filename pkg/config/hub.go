@@ -28,10 +28,8 @@ func LoadHubConfig() (*types.HubConfig, error) {
 			}
 			return nil, fmt.Errorf("failed to read hub config %s: %w", path, err)
 		}
-		// Parse hub config with auto-migration of legacy llm_keys flat map format.
-		// Strategy: parse without llm_keys first, then handle llm_keys separately.
-		cfg, err := parseHubConfig(data)
-		if err != nil {
+		cfg := &types.HubConfig{}
+		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse hub config %s: %w", path, err)
 		}
 		return cfg, nil
@@ -57,13 +55,6 @@ func ActiveHubConfigPath() (string, error) {
 	return filepath.Join(home, ".elasticclaw", "hub.yaml"), nil
 }
 
-// hubConfigForSave is a serialization wrapper that includes LLMKeys (which is
-// tagged yaml:"-" in HubConfig to avoid double-parsing conflicts).
-type hubConfigForSave struct {
-	*types.HubConfig `yaml:",inline"`
-	LLMKeys          []*types.LLMKeyConfig `yaml:"llm_keys,omitempty"`
-}
-
 func SaveHubConfig(cfg *types.HubConfig) error {
 	path, err := ActiveHubConfigPath()
 	if err != nil {
@@ -72,7 +63,7 @@ func SaveHubConfig(cfg *types.HubConfig) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(hubConfigForSave{HubConfig: cfg, LLMKeys: cfg.LLMKeys})
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
@@ -256,97 +247,4 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 	return files, nil
 }
 
-// migrateOldLLMKeys converts old flat map {provider: key} yaml format to the new named slice.
-// Old format: llm_keys:\n  anthropic: sk-...
-// New format: llm_keys:\n  - name: anthropic\n    provider: anthropic\n    api_key: sk-...
-// parseHubConfig parses hub.yaml handling both old flat-map llm_keys and new named-slice format.
-func parseHubConfig(data []byte) (*types.HubConfig, error) {
-	// Use a temporary type with llm_keys as a raw yaml.Node to handle both formats.
-	type hubConfigRaw struct {
-		types.HubConfig `yaml:",inline"`
-		LLMKeysRaw      yaml.Node `yaml:"llm_keys"`
-	}
 
-	// Zero out the LLMKeys field in HubConfig so inline doesn't conflict
-	var raw hubConfigRaw
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	cfg := &raw.HubConfig
-	cfg.LLMKeys = nil // will be populated below
-
-	// Try to decode llm_keys as new slice format first
-	if raw.LLMKeysRaw.Kind != 0 {
-		var newFormat []*types.LLMKeyConfig
-		if err := raw.LLMKeysRaw.Decode(&newFormat); err == nil {
-			cfg.LLMKeys = newFormat
-		} else {
-			// Fall back to old flat map format
-			var oldFormat map[string]string
-			if err2 := raw.LLMKeysRaw.Decode(&oldFormat); err2 == nil {
-				var providers []string
-				for p, k := range oldFormat {
-					if k != "" {
-						providers = append(providers, p)
-					}
-				}
-				for i, p := range providers {
-					cfg.LLMKeys = append(cfg.LLMKeys, &types.LLMKeyConfig{
-						Name:     p,
-						Provider: p,
-						APIKey:   oldFormat[p],
-						Default:  i == 0,
-					})
-				}
-			} else {
-				return nil, fmt.Errorf("llm_keys: expected list of {name,provider,api_key} or flat map {provider: key}: %w", err2)
-			}
-		}
-	}
-	return cfg, nil
-}
-
-func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) error {
-	// If we already have new-format keys, nothing to do
-	if len(cfg.LLMKeys) > 0 {
-		return nil
-	}
-	// Try to parse as the old flat map
-	var legacy struct {
-		LLMKeys map[string]string `yaml:"llm_keys"`
-	}
-	if err := yaml.Unmarshal(raw, &legacy); err != nil || len(legacy.LLMKeys) == 0 {
-		return err
-	}
-
-	// Sort providers to ensure deterministic default selection
-	var providers []string
-	for provider := range legacy.LLMKeys {
-		if legacy.LLMKeys[provider] != "" {
-			providers = append(providers, provider)
-		}
-	}
-	if len(providers) == 0 {
-		return nil
-	}
-
-	// Use lexicographic ordering for deterministic behavior
-	for i := 0; i < len(providers); i++ {
-		for j := i + 1; j < len(providers); j++ {
-			if providers[i] > providers[j] {
-				providers[i], providers[j] = providers[j], providers[i]
-			}
-		}
-	}
-
-	// First provider in sorted order becomes default
-	for i, provider := range providers {
-		cfg.LLMKeys = append(cfg.LLMKeys, &types.LLMKeyConfig{
-			Name:     provider,
-			Provider: provider,
-			APIKey:   legacy.LLMKeys[provider],
-			Default:  i == 0,
-		})
-	}
-	return nil
-}

@@ -1,6 +1,12 @@
 package types
 
-import "strings"
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
 
 // LLMKeyConfig represents a named LLM API key entry in hub.yaml.
 type LLMKeyConfig struct {
@@ -8,6 +14,43 @@ type LLMKeyConfig struct {
 	Provider string `yaml:"provider" json:"provider"` // e.g. "anthropic", "fireworks", "moonshot"
 	APIKey   string `yaml:"api_key"  json:"-"`        // the actual key (never exposed in API)
 	Default  bool   `yaml:"default"  json:"default"`  // use when no llm_key specified
+}
+
+// LLMKeysList is a custom YAML type that handles both the legacy flat-map format
+// and the current named-slice format for llm_keys in hub.yaml.
+type LLMKeysList []*LLMKeyConfig
+
+func (l *LLMKeysList) UnmarshalYAML(value *yaml.Node) error {
+	// Try new slice format first
+	var slice []*LLMKeyConfig
+	if err := value.Decode(&slice); err == nil {
+		*l = slice
+		return nil
+	}
+	// Fall back to old flat map format: {provider: apiKey}
+	var flat map[string]string
+	if err := value.Decode(&flat); err != nil {
+		return fmt.Errorf("llm_keys: expected list of {name,provider,api_key} or flat map {provider: key}: %w", err)
+	}
+	// Sort providers for deterministic ordering
+	providers := make([]string, 0, len(flat))
+	for p, k := range flat {
+		if k != "" {
+			providers = append(providers, p)
+		}
+	}
+	sort.Strings(providers)
+	result := make([]*LLMKeyConfig, len(providers))
+	for i, p := range providers {
+		result[i] = &LLMKeyConfig{
+			Name:     p,
+			Provider: p,
+			APIKey:   flat[p],
+			Default:  i == 0,
+		}
+	}
+	*l = result
+	return nil
 }
 
 // EnvVarName returns the environment variable name for this provider's API key.
@@ -140,7 +183,7 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a list of named LLM API keys. One can be marked default:true.
 	// Legacy flat map {"anthropic": "sk-..."} is still accepted for backwards compat.
-	LLMKeys    []*LLMKeyConfig   `yaml:"-"` // populated by parseHubConfig in pkg/config
+	LLMKeys    LLMKeysList   `yaml:"llm_keys,omitempty"`
 	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
 	Linear []*LinearConfig `yaml:"linear,omitempty"`
 
