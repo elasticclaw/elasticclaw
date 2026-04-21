@@ -162,8 +162,9 @@ func (s *Server) pollAllPRs() {
 	}
 }
 
-// resolveGitHubToken returns a GitHub App installation token for PR polling.
-func (s *Server) resolveGitHubToken() string {
+// resolveGitHubTokenWithRepos is a shared helper that resolves a GitHub App installation token
+// with optional repo-scoped access.
+func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	s.mu.RLock()
 	cfg := s.hubCfg
 	s.mu.RUnlock()
@@ -175,13 +176,24 @@ func (s *Server) resolveGitHubToken() string {
 		if err != nil {
 			continue
 		}
-		token, _, err := provider.InstallationToken(context.Background(), 0, nil)
+		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
 			continue
 		}
 		return token
 	}
 	return ""
+}
+
+// resolveGitHubTokenForRepo returns a GitHub App installation token scoped to the given repo.
+// Use this for private repos — an unscoped token won't have read access.
+func (s *Server) resolveGitHubTokenForRepo(repo string) string {
+	return s.resolveGitHubTokenWithRepos([]RepoAccess{{Repo: repo, Permissions: "read"}})
+}
+
+// resolveGitHubToken returns a GitHub App installation token for PR polling.
+func (s *Server) resolveGitHubToken() string {
+	return s.resolveGitHubTokenWithRepos(nil)
 }
 
 // checkCIFailures polls PR check runs and injects a message on new failures.
