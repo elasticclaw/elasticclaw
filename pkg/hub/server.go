@@ -958,8 +958,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
-							res, _ := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
-							if rows, _ := res.RowsAffected(); rows > 0 {
+							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
+							var rowsUpdated int64
+							if execErr == nil { rowsUpdated, _ = res.RowsAffected() }
+							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
