@@ -162,3 +162,26 @@ export async function patchClaw(clawId: string, patch: { name?: string; tags?: s
     body: JSON.stringify(patch),
   })
 }
+
+export interface ClawPR {
+  id: string
+  repo: string
+  prNumber: number
+  url: string
+  createdAt: string
+}
+
+export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
+  return apiFetch<ClawPR[]>(`/api/claws/${clawId}/prs`)
+}
+
+export async function fetchClawAutoSettings(clawId: string): Promise<{ autoFixCI: boolean; autoFixBugbot: boolean }> {
+  return apiFetch(`/api/claws/${clawId}/settings`)
+}
+
+export async function patchClawAutoSettings(clawId: string, patch: { autoFixCI?: boolean; autoFixBugbot?: boolean }): Promise<void> {
+  await apiFetch(`/api/claws/${clawId}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  })
+}

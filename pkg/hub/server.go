@@ -96,6 +96,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
+	srv.startPRWatcher()
 
 	return srv, nil
 }
@@ -138,6 +139,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
+	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -683,6 +685,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Delete messages first (FK constraint)
 		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
 		_, err := s.db.Exec(`DELETE FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db delete error for claw %s: %v", clawID, err)
@@ -1024,6 +1027,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(hm.Content, "[DONE]") {
 					go s.handleClawDoneSignal(clawID)
 				}
+				// Detect and store any PR URLs mentioned by the agent
+				go s.scanMessageForPRs(clawID, hm.Content)
 			} else if msg.Type == "http_proxy_req" {
 				// Proxy an HTTP request from the bridge to the hub's internal API.
 				// This allows tools in the sandbox to reach hub APIs without a public URL.

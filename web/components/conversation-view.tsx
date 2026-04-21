@@ -12,7 +12,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
 import dynamic from "next/dynamic"
 
 const XTerminal = dynamic(
@@ -156,6 +156,129 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function ClawCardBack({ claw }: { claw: Claw }) {
+  const [prs, setPrs] = useState<ClawPR[]>([])
+  const [autoFixCI, setAutoFixCI] = useState(true)
+  const [autoFixBugbot, setAutoFixBugbot] = useState(true)
+
+  useEffect(() => {
+    fetchClawPRs(claw.id).then(setPrs).catch(() => {})
+    fetchClawAutoSettings(claw.id).then(s => { setAutoFixCI(s.autoFixCI); setAutoFixBugbot(s.autoFixBugbot) }).catch(() => {})
+  }, [claw.id])
+
+  const toggle = async (key: "autoFixCI" | "autoFixBugbot", value: boolean) => {
+    if (key === "autoFixCI") setAutoFixCI(value)
+    else setAutoFixBugbot(value)
+    await patchClawAutoSettings(claw.id, { [key]: value }).catch(() => {})
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-4">
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Purpose
+        </h3>
+        <p className="text-sm text-foreground leading-relaxed">
+          {claw.description || "No description provided for this claw."}
+        </p>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Template
+        </h3>
+        <p className="text-sm font-mono text-foreground">
+          {claw.template}
+        </p>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Status
+        </h3>
+        <div className="flex items-center gap-2">
+          <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
+          <span className="text-sm text-foreground capitalize">{claw.status}</span>
+          {claw.isStreaming && (
+            <span className="text-xs text-green-500">(streaming)</span>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Context Usage
+        </h3>
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <ContextProgressBar usage={claw.contextUsage} size="sm" />
+          </div>
+          <span className="text-sm font-mono text-foreground">{claw.contextUsage}%</span>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          Uptime
+        </h3>
+        <p className="text-sm font-mono text-foreground">
+          {formatUptime(claw.uptime)}
+        </p>
+      </div>
+
+      {claw.tags.length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+            Tags
+          </h3>
+          <div className="flex flex-wrap gap-1.5">
+            {claw.tags.map((tag) => (
+              <span
+                key={tag}
+                className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {prs.length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Pull Requests</h3>
+          <div className="space-y-1.5">
+            {prs.map(pr => (
+              <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-2 text-xs text-blue-400 hover:underline">
+                <span className="font-mono text-muted-foreground">#{pr.prNumber}</span>
+                <span className="truncate">{pr.repo}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Auto Actions</h3>
+        <div className="space-y-2">
+          <label className="flex items-center justify-between gap-2 cursor-pointer">
+            <span className="text-xs text-foreground">Fix CI failures automatically</span>
+            <input type="checkbox" checked={autoFixCI} onChange={e => toggle("autoFixCI", e.target.checked)}
+              className="size-3.5 accent-primary" />
+          </label>
+          <label className="flex items-center justify-between gap-2 cursor-pointer">
+            <span className="text-xs text-foreground">Resolve bugbot comments automatically</span>
+            <input type="checkbox" checked={autoFixBugbot} onChange={e => toggle("autoFixBugbot", e.target.checked)}
+              className="size-3.5 accent-primary" />
+          </label>
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-2">When on, the hub injects a message when CI fails or bugbot comments appear on a PR.</p>
+      </div>
+    </div>
   )
 }
 
@@ -455,79 +578,7 @@ function ClawBoardCard({
           </div>
 
           {/* Bot info content */}
-          <div className="flex-1 overflow-y-auto scrollbar-hide p-4">
-            <div className="space-y-4">
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                  Purpose
-                </h3>
-                <p className="text-sm text-foreground leading-relaxed">
-                  {claw.description || "No description provided for this claw."}
-                </p>
-              </div>
-
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                  Template
-                </h3>
-                <p className="text-sm font-mono text-foreground">
-                  {claw.template}
-                </p>
-              </div>
-
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                  Status
-                </h3>
-                <div className="flex items-center gap-2">
-                  <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
-                  <span className="text-sm text-foreground capitalize">{claw.status}</span>
-                  {claw.isStreaming && (
-                    <span className="text-xs text-green-500">(streaming)</span>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                  Context Usage
-                </h3>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1">
-                    <ContextProgressBar usage={claw.contextUsage} size="sm" />
-                  </div>
-                  <span className="text-sm font-mono text-foreground">{claw.contextUsage}%</span>
-                </div>
-              </div>
-
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                  Uptime
-                </h3>
-                <p className="text-sm font-mono text-foreground">
-                  {formatUptime(claw.uptime)}
-                </p>
-              </div>
-
-              {Object.keys(claw.tags).length > 0 && (
-                <div>
-                  <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                    Tags
-                  </h3>
-                  <div className="flex flex-wrap gap-1.5">
-                    {claw.tags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+          <ClawCardBack claw={claw} />
 
           {/* Footer */}
           <div className="p-3 border-t border-border space-y-2">
