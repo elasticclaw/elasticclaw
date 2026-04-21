@@ -361,7 +361,12 @@ func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount i
 
 // githubAPI makes a GET request to the GitHub API and returns parsed JSON.
 func githubAPI(path, token string) (map[string]interface{}, error) {
-	req, _ := http.NewRequest("GET", "https://api.github.com/"+path, nil)
+	return githubAPIWithBase("https://api.github.com", path, token)
+}
+
+// githubAPIWithBase is like githubAPI but against a custom base URL (for testing).
+func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, error) {
+	req, _ := http.NewRequest("GET", baseURL+"/"+path, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

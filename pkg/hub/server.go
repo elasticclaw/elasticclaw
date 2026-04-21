@@ -40,6 +40,9 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
+
+	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
+	githubBaseURL string
 }
 
 type clawConn struct {

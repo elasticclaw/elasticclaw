@@ -466,9 +466,14 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 		return true, "[factory] `[DONE]` received with no PR URLs. Please open a PR on a feature branch and resend:\n```\n[DONE] https://github.com/org/repo/pull/N\n```"
 	}
 
+	base := s.githubBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+
 	var problems []string
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.number), ghToken)
+		data, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.number), ghToken)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("- could not fetch %s: %v", pr.url, err))
 			continue
