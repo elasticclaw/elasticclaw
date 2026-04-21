@@ -894,6 +894,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": initialStatus(rp.GatewayReady)}})
 
+	// If gateway is already ready on connect (common for factory claws where bootstrap
+	// completes before bridge registers), fire the wake message immediately.
+	if cc.gatewayReady {
+		go s.sendWakeMessage(cc, clawID)
+	}
+
 	// Read loop — claw sends messages back to users
 	defer func() {
 		s.mu.Lock()
@@ -947,17 +953,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 							})
 							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-							// Send a silent wake message to trigger an intro response.
-							// Not stored in DB — invisible to user, just wakes the agent.
-							go func(c *clawConn) {
-								wakeMsg := types.HubMessage{
-									ID:      uuid.New().String(),
-									ClawID:  clawID,
-									Role:    "system",
-									Content: "Introduce yourself briefly and let the user know you're ready to help.",
-								}
-								_ = wsjson.Write(context.Background(), c.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
-							}(cc)
+							go s.sendWakeMessage(cc, clawID)
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
 							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
@@ -1847,6 +1843,25 @@ func (s *Server) bridgeDownloadURL() string {
 
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
+// sendWakeMessage sends a silent system message to wake the agent.
+// For factory claws (those with a linear_issue_id), it sends a task-specific prompt.
+// Not stored in DB — invisible to the user but triggers the agent to respond.
+func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
+	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
+	var issueID string
+	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
+	if issueID != "" {
+		wakeContent = "Read your BOOTSTRAP.md file to understand the task. Then explore the codebase, plan your approach, and begin working on it. Reply with a brief summary of what you found and your plan."
+	}
+	wakeMsg := types.HubMessage{
+		ID:      uuid.New().String(),
+		ClawID:  clawID,
+		Role:    "system",
+		Content: wakeContent,
+	}
+	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+}
+
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
