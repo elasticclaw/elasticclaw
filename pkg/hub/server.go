@@ -1994,7 +1994,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		RelayEnv:        relayEnv,
-		ProviderConfig:  buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyName),
+		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()
