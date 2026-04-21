@@ -121,13 +121,18 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			}
 
 			newStateName := s.shortcutStateName(token, newStateID)
-			oldStateName := s.shortcutStateName(token, oldStateID)
+			oldStateName := s.shortcutStateName(token, oldStateID) // only fetched when needed for logging
 
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) {
 				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
 				if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
+					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
+				} else {
+					var clawID string
+					_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
+					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
 				}
 			}
 
@@ -141,7 +146,10 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				if activeClaw != "" {
 					log.Printf("[factory:%s] story %s left trigger — terminating claw", factory.Name, storyID)
 					s.terminateClawForIssue(storyID)
-					_ = oldStateName // suppress unused
+					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_terminated", activeClaw, "")
+				} else {
+					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "not_actionable",
+						"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", oldStateName, newStateName, factory.TriggerStatus))
 				}
 			}
 		}
@@ -340,6 +348,8 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = s.provisionReplicated(context.Background(), clawID, req, provCfg, env)
 		case "daytona":
 			provErr = s.provisionDaytona(context.Background(), clawID, req, provCfg, fileBytes, env)
+		case "vercel":
+			provErr = s.provisionVercel(context.Background(), clawID, req, provCfg, fileBytes, env)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
@@ -476,16 +486,4 @@ func toInt64(v interface{}) int64 {
 		return int64(x)
 	}
 	return 0
-}
-
-// loadTemplateCfgForFactory is a helper to load template config for a factory (shared with linear.go).
-func (s *Server) loadTemplateCfgForFactory(factory *types.FactoryConfig) (*types.TemplateConfig, error) {
-	files, err := s.resolveTemplateFiles(factory.Template)
-	if err != nil {
-		return nil, err
-	}
-	if cfgContent, ok := files["elasticclaw-config.yaml"]; ok {
-		return config.ParseTemplateConfig([]byte(cfgContent))
-	}
-	return nil, nil
 }

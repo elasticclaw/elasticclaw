@@ -467,7 +467,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if patch.Integrations != nil && len(patch.Integrations.Shortcut) > 0 {
+	if patch.Integrations != nil && patch.Integrations.Shortcut != nil {
 		// Deep copy IntegrationsConfig to avoid mutating live config
 		var existingIntegrations *types.IntegrationsConfig
 		if updatedCfg.Integrations != nil {
