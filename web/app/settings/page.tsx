@@ -785,7 +785,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                       className={cn(
                         "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
                         (f.enabled ?? true)
-                          ? "bg-primary border-2 border-transparent"
+                          ? "bg-green-600 border-2 border-transparent"
                           : "bg-transparent border-2 border-muted-foreground/40"
                       )}
                       title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
