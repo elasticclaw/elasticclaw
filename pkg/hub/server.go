@@ -874,14 +874,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		clawID = uuid.New().String()
 	}
 
-	// Upsert claw
-	_, _ = s.db.Exec(
+	// Upsert claw and keep terminal/watching states sticky across reconnects.
+	desiredStatus := initialStatus(rp.GatewayReady)
+	currentStatus := desiredStatus
+	_ = s.db.QueryRow(
 		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
-		 status=CASE WHEN claws.status='idle' THEN claws.status ELSE excluded.status END,
-		 last_seen=excluded.last_seen`,
-		clawID, tenantID, rp.Name, rp.Template, initialStatus(rp.GatewayReady), now(), now(),
-	)
+		 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
+		 last_seen=excluded.last_seen
+		 RETURNING status`,
+		clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),
+	).Scan(&currentStatus)
+	if currentStatus == "deleted" {
+		conn.Close(websocket.StatusPolicyViolation, "claw deleted")
+		return
+	}
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady)}
 	s.mu.Lock()
@@ -894,11 +901,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
 
 	// Broadcast initial status to user sessions
-	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": initialStatus(rp.GatewayReady)}})
+	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
 	// If gateway is already ready on connect (common for factory claws where bootstrap
 	// completes before bridge registers), fire the wake message immediately.
-	if cc.gatewayReady {
+	if cc.gatewayReady && currentStatus == "connected" {
 		go s.sendWakeMessage(cc, clawID)
 	}
 
@@ -951,13 +958,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
-							_, _ = s.db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, clawID)
-							s.broadcastToUsers(tenantID, types.WSMessage{
-								Type:    "claw_status",
-								Payload: map[string]string{"claw_id": clawID, "status": "connected"},
-							})
-							log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-							go s.sendWakeMessage(cc, clawID)
+							res, _ := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
+							if rows, _ := res.RowsAffected(); rows > 0 {
+								s.broadcastToUsers(tenantID, types.WSMessage{
+									Type:    "claw_status",
+									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
+								})
+								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
+								go s.sendWakeMessage(cc, clawID)
+							}
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
 							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
