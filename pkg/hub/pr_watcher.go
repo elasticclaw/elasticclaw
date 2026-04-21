@@ -118,7 +118,7 @@ type clawPR struct {
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
-		       cl.auto_fix_ci, cl.auto_fix_bugbot
+		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -132,13 +132,14 @@ func (s *Server) pollAllPRs() {
 		pr            clawPR
 		autoFixCI     bool
 		autoFixBugbot bool
+		clawStatus    string
 	}
 	var prs []row
 	for rows.Next() {
 		var r row
 		var ciInt, bugbotInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt); err != nil {
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt, &r.clawStatus); err != nil {
 			continue
 		}
 		r.autoFixCI = ciInt == 1
@@ -159,8 +160,8 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		// Always check if PR is merged/closed — if so, terminate the claw
-		if s.checkPRMerged(r.pr, token) {
+		// Only check if PR is merged/closed for idle claws (factory claws that sent [DONE])
+		if r.clawStatus == "idle" && s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
