@@ -759,18 +759,25 @@ function FactoriesSection({ hubUrl, settings, onSave, saving }: { hubUrl: string
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1.5 cursor-pointer" title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}>
-                      <span className="text-xs text-muted-foreground">{(f.enabled ?? true) ? "On" : "Off"}</span>
-                      <input type="checkbox" checked={f.enabled ?? true}
-                        onChange={e => {
-                          const enabled = e.target.checked
-                          const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
-                          onSave({ factories: updated })
-                        }}
-                        className="size-3.5 accent-primary"
-                      />
-                    </label>
-                    <a href={`/factories?name=${encodeURIComponent(f.name)}`} className="text-xs text-primary hover:underline whitespace-nowrap">Activity</a>
+                    {/* Toggle switch */}
+                    <button
+                      onClick={() => {
+                        const enabled = !(f.enabled ?? true)
+                        const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
+                        onSave({ factories: updated })
+                      }}
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200",
+                        (f.enabled ?? true) ? "bg-primary" : "bg-muted-foreground/30"
+                      )}
+                      title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
+                    >
+                      <span className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transform transition-transform duration-200",
+                        (f.enabled ?? true) ? "translate-x-4" : "translate-x-0"
+                      )} />
+                    </button>
+                    <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
                     <Button size="sm" variant="outline" onClick={() => {
                       setEditingFactory(i)
                       setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "", originalName: f.name })
