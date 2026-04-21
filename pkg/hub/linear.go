@@ -489,9 +489,9 @@ func buildLinearContext(payload linearWebhookPayload) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
-	// Get the linear_issue_id for this claw
-	var issueID string
-	if err := s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id = ?`, clawID).Scan(&issueID); err != nil || issueID == "" {
+	// Get the linear_issue_id and tenant for this claw
+	var issueID, tenantID string
+	if err := s.db.QueryRow(`SELECT linear_issue_id, tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
 		return // not a factory claw
 	}
 
@@ -551,14 +551,24 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		}
 	}
 
-	// Mark claw as completed
-	_, _ = s.db.Exec(`UPDATE claws SET status='completed' WHERE id=?`, clawID)
-	s.mu.Lock()
-	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, "factory: claw signaled done")
-		delete(s.claws, clawID)
+	// Keep the claw running — it stays connected to watch for CI failures,
+	// bugbot comments, and PR events. The claw will be terminated when the
+	// PR is merged or closed (polled by checkPRMerged).
+	// Just mark it as 'watching' so the UI shows it differently.
+	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
+	if err != nil {
+		return
 	}
-	s.mu.Unlock()
+	rowsAffected, err := res.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		return
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
+	})
+	// Notify the claw it's in watch mode
+	s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged or closed.")
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.

@@ -60,10 +60,10 @@ export function parseTagsFromName(name: string): Record<string, string> {
 }
 
 /**
- * Compute uptime in seconds from created_at if status is connected.
+ * Compute uptime in seconds from created_at if status is connected or idle.
  */
 export function computeUptime(apiClaw: ApiClaw): number {
-  if (apiClaw.status !== "connected") return 0
+  if (apiClaw.status !== "connected" && apiClaw.status !== "idle") return 0
   try {
     const created = new Date(apiClaw.created_at).getTime()
     const now = Date.now()
@@ -77,6 +77,8 @@ export function mapApiStatus(status: ApiClaw["status"]): ClawStatus {
   switch (status) {
     case "connected":
       return "connected"
+    case "idle":
+      return "idle"
     case "provisioning":
     case "starting":
       return "provisioning"

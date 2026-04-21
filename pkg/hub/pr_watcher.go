@@ -118,7 +118,7 @@ type clawPR struct {
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
-		       cl.auto_fix_ci, cl.auto_fix_bugbot
+		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -132,13 +132,14 @@ func (s *Server) pollAllPRs() {
 		pr            clawPR
 		autoFixCI     bool
 		autoFixBugbot bool
+		clawStatus    string
 	}
 	var prs []row
 	for rows.Next() {
 		var r row
 		var ciInt, bugbotInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt); err != nil {
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt, &r.clawStatus); err != nil {
 			continue
 		}
 		r.autoFixCI = ciInt == 1
@@ -152,7 +153,18 @@ func (s *Server) pollAllPRs() {
 		return
 	}
 
+	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
+		// Skip PRs for claws that were already terminated in this poll
+		if terminatedClaws[r.pr.clawID] {
+			continue
+		}
+
+		// Only check if PR is merged/closed for idle claws (factory claws that sent [DONE])
+		if r.clawStatus == "idle" && s.checkPRMerged(r.pr, token) {
+			terminatedClaws[r.pr.clawID] = true
+			continue // claw is being terminated, skip other checks
+		}
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
@@ -520,4 +532,60 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 		return
 	}
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// checkPRMerged checks if a tracked PR is merged or closed.
+// If so, terminates the claw and returns true.
+func (s *Server) checkPRMerged(pr clawPR, token string) bool {
+	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
+	if tokenForPR == "" {
+		tokenForPR = token
+	}
+	data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
+	if err != nil {
+		return false
+	}
+	state, _ := data["state"].(string)
+	merged, _ := data["merged"].(bool)
+
+	if state != "closed" && !merged {
+		return false // still open
+	}
+
+	// PR is merged or closed — terminate the claw
+	clawID := pr.clawID
+	var tenantID string
+	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
+		return false
+	}
+
+	action := "merged"
+	if !merged {
+		action = "closed"
+	}
+	log.Printf("[pr-watcher] PR %s#%d %s — terminating claw %s", pr.repo, pr.prNumber, action, clawID[:8])
+
+	var providerID, provider string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
+
+	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.conn.Close(1000, fmt.Sprintf("factory: PR %s", action))
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
+
+	if providerID != "" {
+		go s.terminateVM(provider, providerID)
+	}
+
+	return true
 }
