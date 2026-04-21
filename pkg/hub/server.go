@@ -2231,8 +2231,12 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return hubCfg.DefaultModel
 	}
 
-	// Use per-key default model if set
+	// Use per-key default model if set; normalize to include provider prefix
 	if key.DefaultModel != "" {
+		prefix := key.Provider + "/"
+		if !strings.HasPrefix(key.DefaultModel, prefix) {
+			return prefix + key.DefaultModel
+		}
 		return key.DefaultModel
 	}
 
@@ -2248,7 +2252,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "openai":
 		return "openai/gpt-4o"
 	case "fireworks":
-		return "fireworks/llama-v3p3-70b-instruct"
+		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
