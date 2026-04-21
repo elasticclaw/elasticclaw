@@ -563,7 +563,12 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 
 	var problems []string
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		data, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.number), ghToken)
+		// Use a repo-scoped token so private repos are accessible
+		tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
+		if tokenForPR == "" {
+			tokenForPR = ghToken // fallback to unscoped
+		}
+		data, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.number), tokenForPR)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("- could not fetch %s: %v", pr.url, err))
 			continue

@@ -162,6 +162,30 @@ func (s *Server) pollAllPRs() {
 	}
 }
 
+// resolveGitHubTokenForRepo returns a GitHub App installation token scoped to the given repo.
+// Use this for private repos — an unscoped token won't have read access.
+func (s *Server) resolveGitHubTokenForRepo(repo string) string {
+	s.mu.RLock()
+	cfg := s.hubCfg
+	s.mu.RUnlock()
+	if len(cfg.GitHubApps) == 0 {
+		return ""
+	}
+	repoAccess := []RepoAccess{{Repo: repo, Permissions: "read"}}
+	for _, appCfg := range cfg.GitHubApps {
+		provider, err := NewGitHubTokenProvider(appCfg)
+		if err != nil {
+			continue
+		}
+		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
+		if err != nil {
+			continue
+		}
+		return token
+	}
+	return ""
+}
+
 // resolveGitHubToken returns a GitHub App installation token for PR polling.
 func (s *Server) resolveGitHubToken() string {
 	s.mu.RLock()
