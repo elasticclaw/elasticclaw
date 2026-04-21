@@ -223,8 +223,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	}
 
-	// Inject CONTEXT.md with issue details
-	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
+	// Inject issue context as BOOTSTRAP.md (picked up by standard AGENTS.md first-run flow)
+	// and as CONTEXT.md for persistent reference after bootstrap is deleted.
+	issueContext := buildLinearContext(payload)
+	templateFiles["BOOTSTRAP.md"] = issueContext
+	templateFiles["CONTEXT.md"] = issueContext
 
 	// Determine claw name
 	clawName := issueID // e.g. "ELA-123"
@@ -445,8 +448,8 @@ func escapeLikeWildcards(s string) string {
 func buildLinearContext(payload linearWebhookPayload) string {
 	d := payload.Data
 	var b strings.Builder
-	b.WriteString("# CONTEXT.md - Issue Context\n\n")
-	b.WriteString("This claw was automatically created by ElasticClaw to work on a Linear issue.\n\n")
+	b.WriteString("# Issue Context\n\n")
+	b.WriteString("This claw was automatically created by a factory to work on a Linear issue. Read this, understand the task, then get to work.\n\n")
 	b.WriteString(fmt.Sprintf("## Issue: %s\n\n", d.Identifier))
 	b.WriteString(fmt.Sprintf("**Title:** %s\n\n", d.Title))
 	if d.URL != "" {
@@ -461,8 +464,11 @@ func buildLinearContext(payload linearWebhookPayload) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n---\n\n")
-	b.WriteString("Read this file first. Understand the issue. Then look at the codebase and implement it.\n")
-	b.WriteString("When done: move the Linear issue to the configured done status using the Linear API, then signal done.\n")
+	b.WriteString("## Instructions\n\n")
+	b.WriteString("1. Read this file fully\n")
+	b.WriteString("2. Explore the codebase\n")
+	b.WriteString("3. Implement the feature/fix described above\n")
+	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
 	return b.String()
 }
 
