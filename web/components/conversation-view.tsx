@@ -1116,8 +1116,12 @@ export function ConversationView({
               <img
                 src="/mascot.jpg"
                 alt="ElasticClaw mascot"
-                className="w-64 h-64 object-contain select-none pointer-events-none"
-                style={{ mixBlendMode: "lighten", opacity: 0.85 }}
+                className="w-64 h-64 object-cover select-none pointer-events-none"
+                style={{
+                  borderRadius: "50%",
+                  WebkitMaskImage: "radial-gradient(circle, black 55%, transparent 75%)",
+                  maskImage: "radial-gradient(circle, black 55%, transparent 75%)",
+                }}
                 draggable={false}
               />
               <div className="space-y-2">
