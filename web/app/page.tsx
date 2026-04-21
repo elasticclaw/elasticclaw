@@ -283,6 +283,7 @@ export default function Home() {
         onNewSessionForClaw={handleNewSessionForClaw}
         onSelectClaw={handleSelectClaw}
         onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+        onReorderClaws={reorderClaws}
         loading={loading}
         hubError={hubError}
       />
