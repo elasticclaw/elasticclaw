@@ -350,7 +350,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				found.Default = *kp.Default
 			}
-			found.DefaultModel = kp.DefaultModel
+			if kp.DefaultModel != "" {
+				found.DefaultModel = kp.DefaultModel
+			}
 		}
 		updatedCfg.LLMKeys = existing
 	}
