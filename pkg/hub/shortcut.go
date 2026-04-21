@@ -248,6 +248,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
+	if token != "" {
+		env["SHORTCUT_API_KEY"] = token
+	}
 
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
 	// Factory-level overrides (color, tags) take precedence over template config.
