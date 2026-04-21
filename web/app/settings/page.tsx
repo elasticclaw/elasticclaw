@@ -107,11 +107,15 @@ export default function SettingsPage() {
 
   // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
   async function saveSilent(patch: object) {
+    setSaving(true)
+    setError("")
     try {
       await patchSettings(patch)
       await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed")
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -775,6 +779,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                       <span className="text-xs text-green-500">✓</span>
                     )}
                     <button
+                      disabled={saving}
                       onClick={async () => {
                         const enabled = !(f.enabled ?? true)
                         const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
