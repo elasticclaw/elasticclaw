@@ -556,7 +556,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	clawID := pr.clawID
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
-		return true
+		return false
 	}
 
 	action := "merged"

@@ -527,7 +527,14 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// bugbot comments, and PR events. The claw will be terminated when the
 	// PR is merged or closed (polled by checkPRMerged).
 	// Just mark it as 'watching' so the UI shows it differently.
-	_, _ = s.db.Exec(`UPDATE claws SET status='idle' WHERE id=?`, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
+	if err != nil {
+		return
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		return
+	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
