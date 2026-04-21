@@ -1116,12 +1116,8 @@ export function ConversationView({
               <img
                 src="/mascot.jpg"
                 alt="ElasticClaw mascot"
-<<<<<<< HEAD
-                className="w-64 h-64 object-contain opacity-80 select-none pointer-events-none"
-=======
                 className="w-64 h-64 object-contain select-none pointer-events-none"
                 style={{ mixBlendMode: "lighten", opacity: 0.85 }}
->>>>>>> d475207 (fix: mascot mix-blend-mode lighten to remove white background on dark theme)
                 draggable={false}
               />
               <div className="space-y-2">
