@@ -474,9 +474,9 @@ func buildLinearContext(payload linearWebhookPayload) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
-	// Get the linear_issue_id for this claw
-	var issueID string
-	if err := s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id = ?`, clawID).Scan(&issueID); err != nil || issueID == "" {
+	// Get the linear_issue_id and tenant for this claw
+	var issueID, tenantID string
+	if err := s.db.QueryRow(`SELECT linear_issue_id, tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
 		return // not a factory claw
 	}
 
@@ -523,14 +523,27 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		}
 	}
 
-	// Mark claw as completed
-	_, _ = s.db.Exec(`UPDATE claws SET status='completed' WHERE id=?`, clawID)
+	// Mark as deleted and destroy the VM so the bridge can't reconnect
+	var providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
 		cc.conn.Close(1000, "factory: claw signaled done")
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+	// Broadcast deletion so dashboard card disappears
+	if tenantID != "" {
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type:    "claw_status",
+			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+		})
+	}
+	// Destroy the VM so the bridge process terminates and can't reconnect
+	if providerID != "" {
+		go s.terminateReplicatedVM(providerID)
+	}
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.
