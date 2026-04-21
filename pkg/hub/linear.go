@@ -268,6 +268,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		nixEnabled      int
 		githubRepos     []types.GitHubRepoAccess
 		linearWorkspace string
+		autoFixCI       int = 1
+		autoFixBugbot   int = 1
 	)
 	if tmplCfg != nil {
 		instanceType = tmplCfg.InstanceType
@@ -281,6 +283,13 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 		if tmplCfg.Linear != nil {
 			linearWorkspace = tmplCfg.Linear.Workspace
+		}
+		// Template can opt out of auto-watching; default is on (1)
+		if tmplCfg.AutoWatchCI != nil && !*tmplCfg.AutoWatchCI {
+			autoFixCI = 0
+		}
+		if tmplCfg.AutoWatchBugbot != nil && !*tmplCfg.AutoWatchBugbot {
+			autoFixBugbot = 0
 		}
 	}
 	// Resolve default model: template > llm_key lookup > hub default
@@ -329,10 +338,10 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	now := now()
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, string(tagsJSON), clawColor, llmKey, issueID, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
