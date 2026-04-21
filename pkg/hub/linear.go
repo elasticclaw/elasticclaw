@@ -238,8 +238,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
-	// Find provider from factory or hub config default
+	// Find provider: template config > hub default
 	provider := s.defaultProvider()
+	if tmplCfg != nil && tmplCfg.Provider != "" {
+		provider = tmplCfg.Provider
+	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")
 	}
