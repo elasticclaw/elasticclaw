@@ -256,6 +256,12 @@ func (c *Client) ListHubTemplates(ctx context.Context) ([]map[string]string, err
 	return result, json.Unmarshal(data, &result)
 }
 
+// DeleteHubTemplate removes a pushed template from the hub.
+func (c *Client) DeleteHubTemplate(ctx context.Context, name string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/api/templates/"+name, nil)
+	return err
+}
+
 // GetHubTemplate fetches the files for a single pushed hub template.
 func (c *Client) GetHubTemplate(ctx context.Context, name string) (map[string]string, error) {
 	data, err := c.do(ctx, http.MethodGet, "/api/templates/"+name, nil)

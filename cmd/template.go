@@ -40,9 +40,10 @@ Example:
 }
 
 var templateListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List available templates",
-	RunE:  runTemplateList,
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List available templates",
+	RunE:    runTemplateList,
 }
 
 var (
