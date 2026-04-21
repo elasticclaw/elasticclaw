@@ -517,14 +517,27 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return
 	}
 
-	// Move Linear issue to done_status if configured
+	// Move the issue to done_status if configured
 	if factory.DoneStatus != "" {
-		linearToken := s.resolveLinearTokenForFactory(factory)
-		if linearToken != "" {
-			if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
-				log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
-			} else {
-				log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
+		if strings.HasPrefix(issueID, "sc-") {
+			// Shortcut story
+			scToken := s.resolveShortcutToken(factory.Workspace)
+			if scToken != "" {
+				if err := moveShortcutStory(scToken, issueID, factory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, factory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved story %s to '%s'", issueID, factory.DoneStatus)
+				}
+			}
+		} else {
+			// Linear issue
+			linearToken := s.resolveLinearTokenForFactory(factory)
+			if linearToken != "" {
+				if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
+				}
 			}
 		}
 	}

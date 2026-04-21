@@ -32,6 +32,7 @@ interface SettingsData {
   sshPublicKeys: string[]
   integrations?: {
     linear?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
+    shortcut?: Array<{ workspace: string; tokenSet: boolean }>
   }
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
@@ -643,6 +644,91 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
           </Button>
         </div>
       </div>
+
+      {/* Shortcut */}
+      <ShortcutIntegrationsBlock settings={settings} onSave={onSave} saving={saving} />
+    </div>
+  )
+}
+
+function ShortcutIntegrationsBlock({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const shortcut = settings.integrations?.shortcut || []
+  const [editingIdx, setEditingIdx] = useState<number | null>(null)
+  const [editWorkspace, setEditWorkspace] = useState("")
+  const [editToken, setEditToken] = useState("")
+  const [newWorkspace, setNewWorkspace] = useState("")
+  const [newToken, setNewToken] = useState("")
+
+  return (
+    <div>
+      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 mt-6">
+        <span className="size-4 text-[#F4603C]">⚡</span> Shortcut
+      </h3>
+      {shortcut.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {shortcut.map((sc, i) => (
+            <div key={i}>
+              {editingIdx === i ? (
+                <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
+                  <h4 className="text-sm font-semibold">Edit: {sc.workspace}</h4>
+                  <p className="text-xs text-muted-foreground">Leave token blank to keep existing.</p>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+                    <Input value={editWorkspace} onChange={e => setEditWorkspace(e.target.value)} className="h-8 text-sm" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                    <Input type="password" value={editToken} onChange={e => setEditToken(e.target.value)} className="h-8 text-sm" placeholder="(leave blank to keep)" />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" disabled={saving || !editWorkspace} onClick={() => {
+                      const patch = shortcut.map((x, j) => j === i
+                        ? { workspace: editWorkspace, ...(editToken ? { token: editToken } : {}) }
+                        : { workspace: x.workspace }
+                      )
+                      onSave({ integrations: { shortcut: patch } })
+                      setEditingIdx(null)
+                    }}>Save</Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditingIdx(null)}>Cancel</Button>
+                    <Button size="sm" variant="ghost" className="text-destructive ml-auto" disabled={saving}
+                      onClick={() => { onSave({ integrations: { shortcut: shortcut.filter((_, j) => j !== i).map(x => ({ workspace: x.workspace })) } }); setEditingIdx(null) }}>
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="border border-border rounded-lg p-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">{sc.workspace}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Token: {sc.tokenSet ? <span className="text-green-500">✓ set</span> : <span className="text-amber-500">✗ not set</span>}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => { setEditingIdx(i); setEditWorkspace(sc.workspace); setEditToken("") }}>Edit</Button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="border border-border rounded-lg p-4 space-y-3">
+        <p className="text-xs text-muted-foreground font-medium">Add a Shortcut workspace</p>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+          <Input value={newWorkspace} onChange={e => setNewWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+          <Input type="password" value={newToken} onChange={e => setNewToken(e.target.value)} className="h-8 text-sm" placeholder="Shortcut API token" />
+        </div>
+        <Button size="sm" disabled={saving || !newWorkspace || !newToken}
+          onClick={() => {
+            onSave({ integrations: { shortcut: [...shortcut.map(x => ({ workspace: x.workspace })), { workspace: newWorkspace, token: newToken }] } })
+            setNewWorkspace(""); setNewToken("")
+          }}>
+          Add Shortcut Workspace
+        </Button>
+      </div>
     </div>
   )
 }
@@ -669,7 +755,10 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
     doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
   })
 
-  const workspaces = settings.integrations?.linear?.map(l => l.workspace) || []
+  const workspaces = [
+    ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: l.workspace })) || []),
+    ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: s.workspace })) || []),
+  ]
 
   function update(k: keyof FactoryFormData, v: string | boolean) {
     setForm(prev => ({ ...prev, [k]: v }))
@@ -684,12 +773,11 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </p>
       </div>
 
-      {/* Webhook URL */}
-      <div className="border border-border rounded-lg p-5 space-y-3">
-        <h3 className="text-sm font-medium">Linear Webhook URL</h3>
-        <p className="text-xs text-muted-foreground">
-          Paste into <strong>Linear → Settings → API → Webhooks</strong> and subscribe to <strong>Issue</strong> events.
-        </p>
+      {/* Webhook URLs */}
+      <div className="border border-border rounded-lg p-5 space-y-4">
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">Linear Webhook URL</h3>
+          <p className="text-xs text-muted-foreground">Paste into <strong>Linear → Settings → API → Webhooks</strong>, subscribe to <strong>Issue</strong> events.</p>
         <div className="flex items-center gap-2">
           <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
             {webhookUrl || "Loading…"}
@@ -698,6 +786,23 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
             {copied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
             <span className="ml-1.5">{copied ? "Copied" : "Copy"}</span>
           </Button>
+        </div>
+        </div>
+        {/* Shortcut webhook */}
+        <div className="space-y-2 pt-3 border-t border-border">
+          <h3 className="text-sm font-medium">Shortcut Webhook URL</h3>
+          <p className="text-xs text-muted-foreground">Use Shortcut's API to register this webhook: <code className="bg-muted px-1 rounded text-xs">POST /api/v3/webhooks</code> with this URL.</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
+              {hubUrl ? `${hubUrl}/api/integrations/shortcut/webhook` : "Loading…"}
+            </code>
+            <Button variant="outline" size="sm" className="shrink-0" onClick={() => {
+              if (hubUrl) navigator.clipboard.writeText(`${hubUrl}/api/integrations/shortcut/webhook`)
+            }} disabled={!hubUrl}>
+              <Copy className="size-3.5" />
+              <span className="ml-1.5">Copy</span>
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -822,11 +927,11 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
             <Input value={form.name} onChange={e => update("name", e.target.value)} className="h-8 text-sm" placeholder="ELA feature work" />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Linear workspace</label>
+            <label className="text-xs text-muted-foreground mb-1 block">Workspace</label>
             <select value={form.workspace} onChange={e => update("workspace", e.target.value)}
               className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
               <option value="">Select workspace</option>
-              {workspaces.map(w => <option key={w} value={w}>{w}</option>)}
+              {workspaces.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
             </select>
           </div>
           <div>
