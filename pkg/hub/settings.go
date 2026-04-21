@@ -96,12 +96,12 @@ type GitHubAppView struct {
 // Only non-nil fields are updated.
 // LLMKeyPatch adds/updates a named LLM key. Set APIKey to "" to remove.
 type LLMKeyPatch struct {
-	Name         string `json:"name"`
-	Provider     string `json:"provider,omitempty"`
-	APIKey       string `json:"apiKey,omitempty"`
-	Default      *bool  `json:"default,omitempty"`
-	Delete       bool   `json:"delete,omitempty"`
-	DefaultModel string `json:"defaultModel,omitempty"`
+	Name         string  `json:"name"`
+	Provider     string  `json:"provider,omitempty"`
+	APIKey       string  `json:"apiKey,omitempty"`
+	Default      *bool   `json:"default,omitempty"`
+	Delete       bool    `json:"delete,omitempty"`
+	DefaultModel *string `json:"defaultModel,omitempty"`
 }
 
 type SettingsPatch struct {
@@ -350,8 +350,8 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				found.Default = *kp.Default
 			}
-			if kp.DefaultModel != "" {
-				found.DefaultModel = kp.DefaultModel
+			if kp.DefaultModel != nil {
+				found.DefaultModel = *kp.DefaultModel
 			}
 		}
 		updatedCfg.LLMKeys = existing
