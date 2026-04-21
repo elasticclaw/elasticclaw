@@ -28,37 +28,12 @@ func LoadHubConfig() (*types.HubConfig, error) {
 			}
 			return nil, fmt.Errorf("failed to read hub config %s: %w", path, err)
 		}
-		cfg := &types.HubConfig{}
-		err = yaml.Unmarshal(data, cfg)
+		// Parse hub config with auto-migration of legacy llm_keys flat map format.
+		// Strategy: parse without llm_keys first, then handle llm_keys separately.
+		cfg, err := parseHubConfig(data)
 		if err != nil {
-			// Check if this is a type error on llm_keys (old format vs new format)
-			if typeErr, ok := err.(*yaml.TypeError); ok {
-				errMsg := typeErr.Error()
-				// Only attempt migration if the error ONLY mentions llm_keys and no other fields
-				if bytes.Contains([]byte(errMsg), []byte("llm_keys")) {
-					// Parse the type error to check if it only contains llm_keys errors
-					// yaml.TypeError.Errors contains a slice of error strings
-					hasOtherErrors := false
-					for _, errLine := range typeErr.Errors {
-						if !bytes.Contains([]byte(errLine), []byte("llm_keys")) {
-							hasOtherErrors = true
-							break
-						}
-					}
-					// Only migrate if all errors are llm_keys related
-					if !hasOtherErrors {
-						// Try to migrate and re-parse
-						if migrateErr := migrateOldLLMKeys(cfg, data); migrateErr == nil {
-							// Successfully migrated, cfg is now populated
-							return cfg, nil
-						}
-					}
-				}
-			}
 			return nil, fmt.Errorf("failed to parse hub config %s: %w", path, err)
 		}
-		// Backwards compat: migrate old flat map format {provider: key} to new llm_keys slice
-		migrateOldLLMKeys(cfg, data)
 		return cfg, nil
 	}
 	return &types.HubConfig{}, nil
@@ -253,6 +228,53 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 // migrateOldLLMKeys converts old flat map {provider: key} yaml format to the new named slice.
 // Old format: llm_keys:\n  anthropic: sk-...
 // New format: llm_keys:\n  - name: anthropic\n    provider: anthropic\n    api_key: sk-...
+// parseHubConfig parses hub.yaml handling both old flat-map llm_keys and new named-slice format.
+func parseHubConfig(data []byte) (*types.HubConfig, error) {
+	// Use a temporary type with llm_keys as a raw yaml.Node to handle both formats.
+	type hubConfigRaw struct {
+		types.HubConfig `yaml:",inline"`
+		LLMKeysRaw      yaml.Node `yaml:"llm_keys"`
+	}
+
+	// Zero out the LLMKeys field in HubConfig so inline doesn't conflict
+	var raw hubConfigRaw
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	cfg := &raw.HubConfig
+	cfg.LLMKeys = nil // will be populated below
+
+	// Try to decode llm_keys as new slice format first
+	if raw.LLMKeysRaw.Kind != 0 {
+		var newFormat []*types.LLMKeyConfig
+		if err := raw.LLMKeysRaw.Decode(&newFormat); err == nil {
+			cfg.LLMKeys = newFormat
+		} else {
+			// Fall back to old flat map format
+			var oldFormat map[string]string
+			if err2 := raw.LLMKeysRaw.Decode(&oldFormat); err2 == nil {
+				var providers []string
+				for p, k := range oldFormat {
+					if k != "" {
+						providers = append(providers, p)
+					}
+				}
+				for i, p := range providers {
+					cfg.LLMKeys = append(cfg.LLMKeys, &types.LLMKeyConfig{
+						Name:     p,
+						Provider: p,
+						APIKey:   oldFormat[p],
+						Default:  i == 0,
+					})
+				}
+			} else {
+				return nil, fmt.Errorf("llm_keys: expected list of {name,provider,api_key} or flat map {provider: key}: %w", err2)
+			}
+		}
+	}
+	return cfg, nil
+}
+
 func migrateOldLLMKeys(cfg *types.HubConfig, raw []byte) error {
 	// If we already have new-format keys, nothing to do
 	if len(cfg.LLMKeys) > 0 {

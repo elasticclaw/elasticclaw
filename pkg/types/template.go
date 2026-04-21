@@ -125,7 +125,7 @@ type HubConfig struct {
 	DefaultModel string            `yaml:"default_model,omitempty"`
 	// LLMKeys is a list of named LLM API keys. One can be marked default:true.
 	// Legacy flat map {"anthropic": "sk-..."} is still accepted for backwards compat.
-	LLMKeys    []*LLMKeyConfig   `yaml:"llm_keys,omitempty"`
+	LLMKeys    []*LLMKeyConfig   `yaml:"-"` // populated by parseHubConfig in pkg/config
 	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
 	Linear []*LinearConfig `yaml:"linear,omitempty"`
 
@@ -240,3 +240,4 @@ type CreateClawRequest struct {
 	// Never set by the CLI; Name is the display name.
 	ProviderName string                `json:"provider_name,omitempty"`
 }
+
