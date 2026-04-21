@@ -1116,7 +1116,7 @@ export function ConversationView({
               <img
                 src="/mascot.png"
                 alt="ElasticClaw mascot"
-                className="w-72 h-72 object-contain select-none pointer-events-none opacity-80"
+                className="w-72 h-72 object-contain select-none pointer-events-none opacity-90"
                 draggable={false}
               />
               <div className="space-y-2">
