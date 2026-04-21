@@ -1114,14 +1114,9 @@ export function ConversationView({
           {sortedClaws.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
               <img
-                src="/mascot.jpg"
+                src="/mascot.png"
                 alt="ElasticClaw mascot"
-                className="w-64 h-64 object-cover select-none pointer-events-none"
-                style={{
-                  borderRadius: "50%",
-                  WebkitMaskImage: "radial-gradient(circle, black 55%, transparent 75%)",
-                  maskImage: "radial-gradient(circle, black 55%, transparent 75%)",
-                }}
+                className="w-72 h-72 object-contain select-none pointer-events-none opacity-90"
                 draggable={false}
               />
               <div className="space-y-2">
