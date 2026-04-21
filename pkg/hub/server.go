@@ -531,14 +531,34 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
 
+	// Resolve default model: explicit > llm_key lookup > hub default
+	defaultModel := req.DefaultModel
+	if defaultModel == "" && req.LLMKey != "" {
+		s.mu.RLock()
+		for _, k := range s.hubCfg.LLMKeys {
+			if k.Name == req.LLMKey {
+				// Use the key's provider to derive a model
+				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				break
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if defaultModel == "" {
+		s.mu.RLock()
+		defaultModel = s.hubCfg.DefaultModel
+		s.mu.RUnlock()
+	}
+	req.DefaultModel = defaultModel
+
 	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, req.LLMKey, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1324,9 +1344,9 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		defaultModel = "anthropic/claude-sonnet-4-6"
 	}
 	if anthropicKey == "" {
-		for k, v := range s.hubCfg.LLMKeys {
-			if k == "anthropic" {
-				anthropicKey = v
+		for _, k := range s.hubCfg.LLMKeys {
+			if k.Provider == "anthropic" && k.APIKey != "" {
+				anthropicKey = k.APIKey
 				break
 			}
 		}
@@ -1860,6 +1880,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		log.Printf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
 	}
 	log.Printf("[bootstrap] claw %s nix=%d", clawID[:8], nixEnabled)
+	// Read llm_key selection
+	var llmKeyName string
+	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
@@ -1894,7 +1917,8 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	gatewayPassword := randomHex(16)
 
 	s.mu.RLock()
-	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys)
+	// Inject all configured LLM keys, prioritizing the selected key if specified
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
@@ -2119,18 +2143,82 @@ func buildLinearEnv(token string) string {
 	return fmt.Sprintf("export LINEAR_API_KEY=%q", token)
 }
 
-// buildLLMKeyEnv converts the llm_keys map to shell env var lines for the bootstrap script.
-// e.g. {"anthropic": "sk-ant-..."} -> "  ANTHROPIC_API_KEY=\"sk-ant-...\" \\\n"
-func buildLLMKeyEnv(keys map[string]string) string {
+// buildLLMKeyEnv converts llm_keys slice to shell env var export lines.
+// If selectedKeyName is non-empty, the selected key is prioritized over default keys.
+// All keys are exported so each claw has access to whichever provider it needs.
+func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	if len(keys) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	for provider, key := range keys {
-		envVar := strings.ToUpper(provider) + "_API_KEY"
-		fmt.Fprintf(&b, "export %s=%q\n", envVar, key)
+	seen := map[string]bool{}
+
+	// First pass: export the selected key if specified
+	if selectedKeyName != "" {
+		for _, k := range keys {
+			if k.Name == selectedKeyName {
+				envVar := k.EnvVarName()
+				seen[envVar] = true
+				fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
+				break
+			}
+		}
+	}
+
+	// Second pass: export default keys for providers not yet seen
+	for _, k := range keys {
+		if !k.Default {
+			continue
+		}
+		envVar := k.EnvVarName()
+		if seen[envVar] {
+			continue
+		}
+		seen[envVar] = true
+		fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
+	}
+	// Third pass: export non-default keys for providers not yet seen
+	for _, k := range keys {
+		envVar := k.EnvVarName()
+		if seen[envVar] {
+			continue
+		}
+		seen[envVar] = true
+		fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
 	}
 	return b.String()
+}
+
+// resolveDefaultModelForKey returns the effective model for a given LLM key.
+// If the hub's default model matches the key's provider, use it; otherwise construct a provider-specific default.
+func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig) string {
+	if key == nil {
+		return hubCfg.DefaultModel
+	}
+
+	// Check if hub's DefaultModel matches this key's provider
+	if hubCfg.DefaultModel != "" && strings.HasPrefix(hubCfg.DefaultModel, key.Provider+"/") {
+		return hubCfg.DefaultModel
+	}
+
+	// Construct a provider-specific default model
+	switch key.Provider {
+	case "anthropic":
+		return "anthropic/claude-sonnet-4-6"
+	case "openai":
+		return "openai/gpt-4o"
+	case "fireworks":
+		return "fireworks/llama-v3p3-70b-instruct"
+	case "groq":
+		return "groq/llama-3.3-70b-versatile"
+	case "deepseek":
+		return "deepseek/deepseek-chat"
+	case "moonshot":
+		return "moonshot/moonshot-v1-8k"
+	default:
+		// Fall back to hub default even if provider doesn't match
+		return hubCfg.DefaultModel
+	}
 }
 
 // buildGitHubCloneScript returns shell lines that clone repos into the current directory.

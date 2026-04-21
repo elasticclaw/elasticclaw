@@ -9,8 +9,15 @@ import { cn } from "@/lib/utils"
 
 type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories"
 
+interface LLMKeyView {
+  name: string
+  provider: string
+  keySet: boolean
+  default: boolean
+}
+
 interface SettingsData {
-  llmKeys: Record<string, boolean>
+  llmKeys: LLMKeyView[]
   providers: Record<string, {
     type: string
     enabled: boolean
@@ -306,45 +313,106 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   )
 }
 
+const PROVIDER_OPTIONS = [
+  { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
+  { value: "fireworks",  label: "Fireworks",   placeholder: "fw-..." },
+  { value: "moonshot",   label: "Moonshot (Kimi)", placeholder: "sk-..." },
+  { value: "openai",     label: "OpenAI",      placeholder: "sk-..." },
+  { value: "groq",       label: "Groq",        placeholder: "gsk_..." },
+  { value: "deepseek",   label: "DeepSeek",    placeholder: "sk-..." },
+  { value: "other",      label: "Other",       placeholder: "" },
+]
+
 function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
-  const providers = [
-    { id: "anthropic", label: "Anthropic", placeholder: "sk-ant-..." },
-  ]
-  const [keys, setKeys] = useState<Record<string, string>>({})
+  const llmKeys = settings.llmKeys || []
+  const [newName, setNewName] = useState("")
+  const [newProvider, setNewProvider] = useState("anthropic")
+  const [newCustomProvider, setNewCustomProvider] = useState("")
+  const [newKey, setNewKey] = useState("")
+  const [newDefault, setNewDefault] = useState(false)
+
+  const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
+  const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
 
   return (
     <div>
       <h2 className="text-base font-semibold mb-1">LLM Keys</h2>
-      <p className="text-sm text-muted-foreground mb-6">API keys injected into claws at bootstrap time.</p>
-      <div className="space-y-4">
-        {providers.map(({ id, label, placeholder }) => (
-          <div key={id} className="border border-border rounded-lg p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-medium text-sm">{label}</h3>
-              {settings.llmKeys?.[id] && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Set</span>}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                placeholder={settings.llmKeys?.[id] ? "••••••••••• (set)" : placeholder}
-                value={keys[id] || ""}
-                onChange={e => setKeys(prev => ({ ...prev, [id]: e.target.value }))}
-                className="h-8 text-sm flex-1"
-              />
-              <Button size="sm" disabled={saving || !keys[id]} onClick={() => {
-                onSave({ llmKeys: { [id]: keys[id] } })
-                setKeys(prev => ({ ...prev, [id]: "" }))
-              }}>
-                Save
-              </Button>
-              {settings.llmKeys?.[id] && (
-                <Button size="sm" variant="outline" disabled={saving} onClick={() => onSave({ llmKeys: { [id]: "" } })}>
+      <p className="text-sm text-muted-foreground mb-6">
+        Named API keys injected into claws at bootstrap. The default key's model is used unless overridden by the template.
+      </p>
+
+      {/* Existing keys */}
+      {llmKeys.length > 0 && (
+        <div className="space-y-2 mb-6">
+          {llmKeys.map((k) => (
+            <div key={k.name} className="border border-border rounded-lg p-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">{k.name}</span>
+                  <span className="text-xs text-muted-foreground">{providerLabel(k.provider)}</span>
+                  {k.default && <span className="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded">default</span>}
+                  {k.keySet
+                    ? <span className="text-xs text-green-500">✓ set</span>
+                    : <span className="text-xs text-amber-500">✗ not set</span>}
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {!k.default && (
+                  <Button size="sm" variant="outline" disabled={saving}
+                    onClick={() => onSave({ llmKeys: [{ name: k.name, default: true }] })}>
+                    Set default
+                  </Button>
+                )}
+                <Button size="sm" variant="ghost" className="text-destructive" disabled={saving}
+                  onClick={() => onSave({ llmKeys: [{ name: k.name, delete: true }] })}>
                   Remove
                 </Button>
-              )}
+              </div>
             </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add new key */}
+      <div className="border border-border rounded-lg p-4 space-y-3">
+        <p className="text-xs font-medium text-muted-foreground">Add key</p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+            <Input value={newName} onChange={e => setNewName(e.target.value)} className="h-8 text-sm" placeholder="anthropic-prod" />
           </div>
-        ))}
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
+            <select value={newProvider} onChange={e => setNewProvider(e.target.value)}
+              className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+              {PROVIDER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        </div>
+        {newProvider === "other" && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Custom Provider Name</label>
+            <Input value={newCustomProvider} onChange={e => setNewCustomProvider(e.target.value)}
+              className="h-8 text-sm" placeholder="mistral" />
+          </div>
+        )}
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
+          <Input type="password" value={newKey} onChange={e => setNewKey(e.target.value)}
+            className="h-8 text-sm" placeholder={providerPlaceholder(newProvider)} />
+        </div>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />
+          Set as default key
+        </label>
+        <Button size="sm" disabled={saving || !newName || !newKey || (newProvider === "other" && !newCustomProvider)}
+          onClick={() => {
+            const actualProvider = newProvider === "other" ? newCustomProvider : newProvider
+            onSave({ llmKeys: [{ name: newName, provider: actualProvider, apiKey: newKey, default: newDefault }] })
+            setNewName(""); setNewKey(""); setNewDefault(false); setNewCustomProvider("")
+          }}>
+          Add Key
+        </Button>
       </div>
     </div>
   )
