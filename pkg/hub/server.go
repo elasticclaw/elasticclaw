@@ -2253,6 +2253,11 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return hubCfg.DefaultModel
 	}
 
+	// Use per-key default model if set
+	if key.DefaultModel != "" {
+		return key.DefaultModel
+	}
+
 	// Check if hub's DefaultModel matches this key's provider
 	if hubCfg.DefaultModel != "" && strings.HasPrefix(hubCfg.DefaultModel, key.Provider+"/") {
 		return hubCfg.DefaultModel
