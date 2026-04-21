@@ -238,8 +238,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
-	// Find provider from factory or hub config default
+	// Find provider: template config > hub default
 	provider := s.defaultProvider()
+	if tmplCfg != nil && tmplCfg.Provider != "" {
+		provider = tmplCfg.Provider
+	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")
 	}
@@ -297,12 +300,18 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		s.mu.RUnlock()
 	}
 
-	// Build tags — always include factory tag; merge with factory-configured tags
-	tags := []string{"factory:" + factory.Name}
-	for _, t := range factory.Tags {
-		if t != "factory:"+factory.Name {
-			tags = append(tags, t)
+	// Build tags — always include template:<name> and factory:<name>; merge with factory-configured tags
+	tags := mergeTags(factory.Template, factory.Tags, nil)
+	// Ensure factory:<name> is also present
+	hasfactory := false
+	for _, t := range tags {
+		if t == "factory:"+factory.Name {
+			hasfactory = true
+			break
 		}
+	}
+	if !hasfactory {
+		tags = append(tags, "factory:"+factory.Name)
 	}
 	tagsJSON, _ := json.Marshal(tags)
 
@@ -350,13 +359,26 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			InstanceType: instanceType,
 			ProviderName: "ec-" + clawID[:8],
 		}
+		// Convert string files to []byte for providers that need it
+		fileBytes := make(map[string][]byte, len(templateFiles))
+		for k, v := range templateFiles {
+			fileBytes[k] = []byte(v)
+		}
+
+		var provErr error
 		switch provider {
 		case "replicated":
-			if err := s.provisionReplicated(ctx, clawID, req, provCfg, env); err != nil {
-				log.Printf("[factory] provision failed for %s: %v", clawID, err)
-				// Only mark error if not already deleted
-				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
-			}
+			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		case "daytona":
+			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+		case "vercel":
+			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		default:
+			provErr = fmt.Errorf("unsupported provider: %s", provider)
+		}
+		if provErr != nil {
+			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
 		}
 	}()
 
