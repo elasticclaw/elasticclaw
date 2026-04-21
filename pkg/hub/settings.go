@@ -36,7 +36,13 @@ type SettingsView struct {
 }
 
 type IntegrationsView struct {
-	Linear []LinearIntegrationView `json:"linear"`
+	Linear   []LinearIntegrationView   `json:"linear"`
+	Shortcut []ShortcutIntegrationView `json:"shortcut"`
+}
+
+type ShortcutIntegrationView struct {
+	Workspace string `json:"workspace"`
+	TokenSet  bool   `json:"tokenSet"`
 }
 
 type LinearIntegrationView struct {
@@ -107,7 +113,15 @@ type SettingsPatch struct {
 }
 
 type IntegrationsPatch struct {
-	Linear []LinearIntegrationPatch `json:"linear,omitempty"`
+	Linear   []LinearIntegrationPatch   `json:"linear,omitempty"`
+	Shortcut []ShortcutIntegrationPatch `json:"shortcut,omitempty"`
+}
+
+type ShortcutIntegrationPatch struct {
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	Delete            bool   `json:"delete,omitempty"`
 }
 
 type LinearIntegrationPatch struct {
@@ -232,8 +246,14 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Integrations
-	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}}
+	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}, Shortcut: []ShortcutIntegrationView{}}
 	if s.hubCfg.Integrations != nil {
+		for _, sc := range s.hubCfg.Integrations.Shortcut {
+			view.Integrations.Shortcut = append(view.Integrations.Shortcut, ShortcutIntegrationView{
+				Workspace: sc.Workspace,
+				TokenSet:  sc.Token != "",
+			})
+		}
 		for _, li := range s.hubCfg.Integrations.Linear {
 			view.Integrations.Linear = append(view.Integrations.Linear, LinearIntegrationView{
 				Workspace:        li.Workspace,
@@ -441,6 +461,50 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			linears = append(linears, li)
 		}
 		updatedCfg.Integrations.Linear = linears
+
+		// Preserve existing Shortcut integrations not in patch
+		if existingIntegrations != nil {
+			updatedCfg.Integrations.Shortcut = existingIntegrations.Shortcut
+		}
+	}
+
+	if patch.Integrations != nil && patch.Integrations.Shortcut != nil {
+		// Deep copy IntegrationsConfig to avoid mutating live config
+		var existingIntegrations *types.IntegrationsConfig
+		if updatedCfg.Integrations != nil {
+			existingIntegrations = updatedCfg.Integrations
+		}
+		if updatedCfg.Integrations == nil {
+			updatedCfg.Integrations = &types.IntegrationsConfig{}
+		} else {
+			updatedCfg.Integrations = &types.IntegrationsConfig{
+				Linear:   existingIntegrations.Linear,
+				Shortcut: existingIntegrations.Shortcut,
+			}
+		}
+		existing := updatedCfg.Integrations.Shortcut
+		var shortcuts []*types.ShortcutIntegrationConfig
+		for _, sp := range patch.Integrations.Shortcut {
+			if sp.Delete {
+				continue
+			}
+			sc := &types.ShortcutIntegrationConfig{Workspace: sp.Workspace}
+			matchWorkspace := sp.Workspace
+			if sp.OriginalWorkspace != "" {
+				matchWorkspace = sp.OriginalWorkspace
+			}
+			for _, ex := range existing {
+				if ex.Workspace == matchWorkspace {
+					sc.Token = ex.Token
+					break
+				}
+			}
+			if sp.Token != "" {
+				sc.Token = sp.Token
+			}
+			shortcuts = append(shortcuts, sc)
+		}
+		updatedCfg.Integrations.Shortcut = shortcuts
 	}
 
 	// Factories (full replace)

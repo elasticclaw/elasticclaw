@@ -178,7 +178,14 @@ type HubConfig struct {
 
 // IntegrationsConfig holds configs for external integrations.
 type IntegrationsConfig struct {
-	Linear []*LinearIntegrationConfig `yaml:"linear,omitempty"`
+	Linear    []*LinearIntegrationConfig    `yaml:"linear,omitempty"`
+	Shortcut  []*ShortcutIntegrationConfig  `yaml:"shortcut,omitempty"`
+}
+
+// ShortcutIntegrationConfig holds credentials for one Shortcut workspace.
+type ShortcutIntegrationConfig struct {
+	Workspace string `yaml:"workspace"`       // human label
+	Token     string `yaml:"token"`            // Shortcut API token
 }
 
 // LinearIntegrationConfig holds credentials for one Linear workspace.
@@ -192,7 +199,7 @@ type LinearIntegrationConfig struct {
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
 	Enabled           *bool  `yaml:"enabled,omitempty"`  // nil = true (default on); set false to pause
-	Integration       string `yaml:"integration"`        // "linear" (future: "shortcut", "github-issues")
+	Integration       string `yaml:"integration"`        // "linear" or "shortcut"
 	Workspace         string `yaml:"workspace"`          // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
 	TriggerStatus     string `yaml:"trigger_status"`     // entering this status → create claw

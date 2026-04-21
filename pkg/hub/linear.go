@@ -526,14 +526,27 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return
 	}
 
-	// Move Linear issue to done_status if configured
+	// Move the issue to done_status if configured
 	if factory.DoneStatus != "" {
-		linearToken := s.resolveLinearTokenForFactory(factory)
-		if linearToken != "" {
-			if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
-				log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
-			} else {
-				log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
+		if strings.HasPrefix(issueID, "sc-") {
+			// Shortcut story
+			scToken := s.resolveShortcutToken(factory.Workspace)
+			if scToken != "" {
+				if err := moveShortcutStory(scToken, issueID, factory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, factory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved story %s to '%s'", issueID, factory.DoneStatus)
+				}
+			}
+		} else {
+			// Linear issue
+			linearToken := s.resolveLinearTokenForFactory(factory)
+			if linearToken != "" {
+				if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
+				}
 			}
 		}
 	}
@@ -609,15 +622,39 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 }
 
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
-	// Extract team key from issue ID (e.g. "ELA" from "ELA-123")
+	// First, try to find the factory that created this claw by looking up the factory tag
+	var tagsJSON string
+	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
+		var tags []string
+		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+			for _, tag := range tags {
+				if strings.HasPrefix(tag, "factory:") {
+					factoryName := strings.TrimPrefix(tag, "factory:")
+					for _, factory := range s.hubCfg.Factories {
+						if factory.Name == factoryName {
+							return factory
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: Extract team key from issue ID (e.g. "ELA" from "ELA-123", "sc" from "sc-123")
 	parts := strings.SplitN(issueID, "-", 2)
 	if len(parts) != 2 {
 		return nil
 	}
 	teamKey := parts[0]
 
+	// Determine expected integration type based on issue ID format
+	expectedIntegration := "linear"
+	if teamKey == "sc" {
+		expectedIntegration = "shortcut"
+	}
+
 	for _, factory := range s.hubCfg.Factories {
-		if factory.Integration != "linear" {
+		if factory.Integration != expectedIntegration {
 			continue
 		}
 		if factory.Team == "" || strings.EqualFold(factory.Team, teamKey) {
