@@ -907,7 +907,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
-		if currentStatus != "completed" && currentStatus != "deleted" {
+		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
+		// and is watching for PR merge; deleted means it's being cleaned up.
+		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" {
 			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
@@ -2556,6 +2558,41 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// terminateVM terminates a provider VM by type and ID.
+func (s *Server) terminateVM(provider, vmID string) {
+	if vmID == "" {
+		return
+	}
+	switch provider {
+	case "replicated":
+		s.terminateReplicatedVM(vmID)
+	case "daytona":
+		s.terminateDaytonaVM(vmID)
+	default:
+		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
+	}
+}
+
+// terminateDaytonaVM destroys a Daytona workspace by ID.
+func (s *Server) terminateDaytonaVM(workspaceID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["daytona"]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	p, err := newDaytonaProvider(cfg)
+	if err != nil {
+		log.Printf("terminateDaytonaVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), workspaceID, false); err != nil {
+		log.Printf("terminateDaytonaVM: failed to destroy workspace %s: %v", workspaceID, err)
+		return
+	}
+	log.Printf("Daytona workspace %s terminated", workspaceID)
 }
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.

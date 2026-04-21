@@ -564,8 +564,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	log.Printf("[pr-watcher] PR %s#%d %s — terminating claw %s", pr.repo, pr.prNumber, action, clawID[:8])
 
-	var providerID string
-	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
+	var providerID, provider string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
@@ -583,7 +583,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	})
 
 	if providerID != "" {
-		go s.terminateReplicatedVM(providerID)
+		go s.terminateVM(provider, providerID)
 	}
 
 	return true
