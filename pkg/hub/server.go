@@ -1368,11 +1368,13 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 	var llmKeyNameDaytona string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
 	s.mu.RLock()
+	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	s.mu.RUnlock()
 	onboardCmd := fmt.Sprintf(
-		"export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1 || true",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1 || true",
+		llmKeyEnvDaytona,
 		onboardFlags,
 	)
 	if err := exec("onboard openclaw", 2*time.Minute, onboardCmd); err != nil {
@@ -1381,7 +1383,7 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 
 	// Step 2b: Patch OpenClaw config with dynamic provider model list
 	if providerConfigScript != "" {
-		configPatch := "export HOME=/home/daytona; " + providerConfigScript
+		configPatch := "export HOME=/home/daytona; " + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 			log.Printf("[daytona] warning: failed to configure model: %v", err)
 		}
