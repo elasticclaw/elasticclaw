@@ -1025,7 +1025,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
-					go s.handleClawDoneSignal(clawID)
+					go s.handleClawDoneSignal(clawID, hm.Content)
 				}
 				// Detect and store any PR URLs mentioned by the agent
 				go s.scanMessageForPRs(clawID, hm.Content)

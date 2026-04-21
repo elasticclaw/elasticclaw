@@ -379,8 +379,11 @@ func buildLinearContext(payload linearWebhookPayload) string {
 // Avoid collision with existing now() function
 
 // handleClawDoneSignal is called when a claw sends a message containing [DONE].
-// Finds the matching factory config and moves the Linear issue to done_status.
-func (s *Server) handleClawDoneSignal(clawID string) {
+// It parses PR URLs from the message, validates them via the GitHub API, stores
+// them in claw_prs, then moves the Linear issue and terminates the claw.
+// If no valid open PRs are found (and a GH App is configured), it injects an
+// error message back so the claw can retry.
+func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Get the linear_issue_id for this claw
 	var issueID string
 	if err := s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id = ?`, clawID).Scan(&issueID); err != nil || issueID == "" {
@@ -388,6 +391,29 @@ func (s *Server) handleClawDoneSignal(clawID string) {
 	}
 
 	log.Printf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
+
+	// Extract PR URLs from the [DONE] line.
+	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
+	prURLs := extractDonePRURLs(rawMessage)
+
+	// Validate PRs via GitHub API if we have a token.
+	ghToken := s.resolveGitHubToken()
+	if ghToken != "" {
+		if rejected, reason := s.validateDonePRs(clawID, prURLs, ghToken); rejected {
+			// Nudge the claw to fix and retry — do not terminate.
+			s.injectUserMessage(clawID, reason)
+			return
+		}
+	} else if len(prURLs) == 0 {
+		// No GH App configured, but still require at least one PR URL in the signal.
+		s.injectUserMessage(clawID, "[factory] `[DONE]` received with no PR URLs. Please open a PR and resend: `[DONE] https://github.com/org/repo/pull/N`")
+		return
+	}
+
+	// Store all validated PRs (idempotent).
+	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
+		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+	}
 
 	// Find the factory config for this issue
 	factory := s.findFactoryForIssue(issueID)
@@ -415,6 +441,56 @@ func (s *Server) handleClawDoneSignal(clawID string) {
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+}
+
+// extractDonePRURLs parses PR URLs from a [DONE] message.
+// It finds the [DONE] token and returns all github.com PR URLs that follow it on the same line.
+func extractDonePRURLs(message string) []string {
+	for _, line := range strings.Split(message, "\n") {
+		if idx := strings.Index(line, "[DONE]"); idx >= 0 {
+			rest := line[idx+len("[DONE]"):]
+			var urls []string
+			for _, pr := range extractPRs(rest) {
+				urls = append(urls, pr.url)
+			}
+			return urls
+		}
+	}
+	return nil
+}
+
+// validateDonePRs checks that every PR URL in the [DONE] signal refers to an open PR.
+// Returns (true, reason) if validation fails and the claw should be nudged to retry.
+func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string) (rejected bool, reason string) {
+	if len(prURLs) == 0 {
+		return true, "[factory] `[DONE]` received with no PR URLs. Please open a PR on a feature branch and resend:\n```\n[DONE] https://github.com/org/repo/pull/N\n```"
+	}
+
+	var problems []string
+	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
+		data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.number), ghToken)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("- could not fetch %s: %v", pr.url, err))
+			continue
+		}
+		state, _ := data["state"].(string)
+		if state != "open" {
+			if state == "" {
+				problems = append(problems, fmt.Sprintf("- PR not found: %s", pr.url))
+			} else {
+				problems = append(problems, fmt.Sprintf("- PR is `%s` (expected `open`): %s", state, pr.url))
+			}
+		}
+	}
+
+	if len(problems) == 0 {
+		return false, ""
+	}
+
+	return true, fmt.Sprintf(
+		"[factory] `[DONE]` rejected — PR validation failed:\n%s\n\nFix the issue and resend `[DONE] <pr-url>`.",
+		strings.Join(problems, "\n"),
+	)
 }
 
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {

@@ -118,13 +118,17 @@ factories:
 - `not_actionable` events still logged (for debugging wrong status names, etc.)
 
 ### Done signal
-Agent sends `[DONE]` as a chat message → hub detects → moves Linear issue → terminates claw.
-Add to agent template AGENTS.md:
-```markdown
-When your task is complete, send exactly:
-[DONE]
-This closes the Linear issue and terminates this session.
+Agent sends `[DONE] <pr-url> [<pr-url2> ...]` as a chat message → hub validates PRs are open via GitHub API → stores in `claw_prs` table → moves Linear issue → terminates claw.
+
+Format:
 ```
+[DONE] https://github.com/org/repo/pull/123
+```
+Multiple repos:
+```
+[DONE] https://github.com/org/repo/pull/123 https://github.com/org/other/pull/45
+```
+If no valid open PRs are provided, the hub rejects the signal and injects an error message so the claw can retry.
 
 ---
 

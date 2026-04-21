@@ -110,8 +110,17 @@ internal/webui/         Embed package for web UI binary
 
 ## When You're Done with a Linear Issue
 
-Send exactly this message:
+1. Make sure all changes are committed on a feature branch (never commit directly to main)
+2. Open a PR on GitHub
+3. Send exactly this message with all PR URLs space-separated after `[DONE]`:
+
 ```
-[DONE]
+[DONE] https://github.com/org/repo/pull/123
 ```
-This signals the factory engine to move the Linear issue to the done status and terminate this claw.
+
+For work spanning multiple repos:
+```
+[DONE] https://github.com/org/repo/pull/123 https://github.com/org/other-repo/pull/45
+```
+
+The factory engine will validate that all PRs are open, record them, move the Linear issue to done, and terminate this claw. If validation fails you'll receive an error message — fix the issue and resend `[DONE] <url>`.
