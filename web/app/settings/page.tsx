@@ -755,6 +755,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
     doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
   })
 
+  const formIntegration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
   const workspaces = [
     ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: `linear:${l.workspace}` })) || []),
     ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: `shortcut:${s.workspace}` })) || []),
@@ -818,10 +819,12 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                       <label className="text-xs text-muted-foreground mb-1 block">Name</label>
                       <Input value={editForm.name} onChange={e => setEditForm(p => ({...p, name: e.target.value}))} className="h-8 text-sm" />
                     </div>
+                    {f.integration !== "shortcut" && (
                     <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+                      <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
                       <Input value={editForm.team} onChange={e => setEditForm(p => ({...p, team: e.target.value}))} className="h-8 text-sm" placeholder="ELA" />
                     </div>
+                    )}
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
                       <Input value={editForm.triggerStatus} onChange={e => setEditForm(p => ({...p, triggerStatus: e.target.value}))} className="h-8 text-sm" />
@@ -834,10 +837,12 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                       <label className="text-xs text-muted-foreground mb-1 block">Template</label>
                       <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
                     </div>
+                    {f.integration !== "shortcut" && (
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
                       <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
                     </div>
+                    )}
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
                       <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder="linear, feature" />
@@ -934,10 +939,12 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
               {workspaces.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
             </select>
           </div>
+          {formIntegration === "linear" && (
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+            <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
             <Input value={form.team} onChange={e => update("team", e.target.value)} className="h-8 text-sm" placeholder="ELA" />
           </div>
+          )}
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Template (push to hub first)</label>
             <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base" />
@@ -955,10 +962,12 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           <input type="checkbox" checked={form.terminateOnLeave} onChange={e => update("terminateOnLeave", e.target.checked)} />
           Terminate claw when issue leaves trigger status
         </label>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
-          <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
-        </div>
+        {formIntegration === "linear" && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
+            <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
