@@ -40,6 +40,24 @@ type BootstrapParams struct {
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
 
+// resolveActiveKey selects the active key by selected name, then default, then first.
+func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
+	for _, k := range keys {
+		if k.Name == selectedKeyName {
+			return k
+		}
+	}
+	for _, k := range keys {
+		if k.Default {
+			return k
+		}
+	}
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return nil
+}
+
 // buildOpenClawProviderConfig returns a python snippet that writes the correct
 // models.providers config to ~/.openclaw/openclaw.json based on configured LLM keys.
 // selectedKeyName is used to pick the active key (falls back to default, then first).
@@ -50,24 +68,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	}
 
 	// Determine active key
-	var activeKey *types.LLMKeyConfig
-	for _, k := range keys {
-		if k.Name == selectedKeyName {
-			activeKey = k
-			break
-		}
-	}
-	if activeKey == nil {
-		for _, k := range keys {
-			if k.Default {
-				activeKey = k
-				break
-			}
-		}
-	}
-	if activeKey == nil {
-		activeKey = keys[0]
-	}
+	activeKey := resolveActiveKey(keys, selectedKeyName)
 	_ = activeKey // used implicitly via the provider list
 
 	// Build per-provider config entries.
@@ -322,24 +323,7 @@ fi
 // buildOnboardFlags returns the --auth-choice flags for openclaw onboard
 // based on the active LLM key (selected > default > first).
 func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) string {
-	var active *types.LLMKeyConfig
-	for _, k := range keys {
-		if k.Name == selectedKeyName {
-			active = k
-			break
-		}
-	}
-	if active == nil {
-		for _, k := range keys {
-			if k.Default {
-				active = k
-				break
-			}
-		}
-	}
-	if active == nil && len(keys) > 0 {
-		active = keys[0]
-	}
+	active := resolveActiveKey(keys, selectedKeyName)
 	if active == nil {
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
