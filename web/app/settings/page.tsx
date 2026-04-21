@@ -90,7 +90,7 @@ export default function SettingsPage() {
       .catch(() => {})
   }, [])
 
-  async function save(patch: object) {
+  async function save(patch: object): Promise<boolean> {
     setSaving(true)
     setError("")
     setSuccess("")
@@ -99,8 +99,10 @@ export default function SettingsPage() {
       setSuccess("Saved")
       await load()
       setTimeout(() => setSuccess(""), 2000)
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed")
+      return false
     } finally {
       setSaving(false)
     }
@@ -739,7 +741,7 @@ interface FactoryFormData {
   webhookSecret: string; tags: string; color: string; originalName?: string
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; onSaveSilent: (p: object) => void; saving: boolean }) {
+function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const [generatedSecret, setGeneratedSecret] = useState<string>(() => {
     // Generate a random hex secret for Shortcut webhook signing
@@ -1036,7 +1038,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           </div>
         </div>
         <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
-          onClick={() => {
+          onClick={async () => {
             const { webhookSecret, tags: tagsStr, color, ...rest } = form
             const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
             // Determine integration type from workspace value prefix
@@ -1044,7 +1046,8 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
             const workspaceName = form.workspace.includes(":") ? form.workspace.split(":")[1] : form.workspace
             // For Shortcut, use the generated secret (user copies it to their webhook registration)
             const effectiveSecret = integration === "shortcut" ? generatedSecret : webhookSecret
-            onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(effectiveSecret ? { webhookSecret: effectiveSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            const saved = await onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(effectiveSecret ? { webhookSecret: effectiveSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            if (!saved) return
             // Regenerate secret for next Shortcut factory
             const newBytes = new Uint8Array(32); crypto.getRandomValues(newBytes)
             setGeneratedSecret(Array.from(newBytes).map(b => b.toString(16).padStart(2, "0")).join(""))
