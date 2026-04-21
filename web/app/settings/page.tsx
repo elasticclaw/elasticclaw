@@ -90,7 +90,7 @@ export default function SettingsPage() {
       .catch(() => {})
   }, [])
 
-  async function save(patch: object) {
+  async function save(patch: object): Promise<boolean> {
     setSaving(true)
     setError("")
     setSuccess("")
@@ -99,8 +99,10 @@ export default function SettingsPage() {
       setSuccess("Saved")
       await load()
       setTimeout(() => setSuccess(""), 2000)
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed")
+      return false
     } finally {
       setSaving(false)
     }
@@ -739,9 +741,28 @@ interface FactoryFormData {
   webhookSecret: string; tags: string; color: string; originalName?: string
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => void; onSaveSilent: (p: object) => void; saving: boolean }) {
+function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
+  const [generatedSecret, setGeneratedSecret] = useState<string>(() => {
+    // Generate a random hex secret for Shortcut webhook signing
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")
+  })
+  const [secretCopied, setSecretCopied] = useState(false)
+  const copySecret = () => {
+    navigator.clipboard.writeText(generatedSecret).then(() => { setSecretCopied(true); setTimeout(() => setSecretCopied(false), 2000) })
+  }
   const factories = settings.factories || []
+  const [availableTemplates, setAvailableTemplates] = useState<string[]>([])
+  useEffect(() => {
+    const hubUrl = getHubUrl()
+    const token = sessionStorage.getItem("ec_hub_token") || ""
+    fetch(`${hubUrl}/api/templates`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then((d: Array<{ name: string }>) => setAvailableTemplates(d.map(t => t.name)))
+      .catch(() => {})
+  }, [])
   const [copied, setCopied] = useState(false)
   const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
   const handleCopy = () => {
@@ -755,12 +776,17 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
     doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
   })
 
+  const formIntegration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
   const workspaces = [
     ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: `linear:${l.workspace}` })) || []),
     ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: `shortcut:${s.workspace}` })) || []),
   ]
 
   function update(k: keyof FactoryFormData, v: string | boolean) {
+    if (k === "workspace" && typeof v === "string" && v.startsWith("shortcut:")) {
+      setForm(prev => ({ ...prev, workspace: v, team: "", webhookSecret: "" }))
+      return
+    }
     setForm(prev => ({ ...prev, [k]: v }))
   }
 
@@ -769,7 +795,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
       <div>
         <h2 className="text-base font-semibold mb-1">Factories</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Automation rules that spin up claws when Linear issues enter a status.
+          Automatically spawn and terminate claws based on issue tracker events.
         </p>
       </div>
 
@@ -818,10 +844,12 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                       <label className="text-xs text-muted-foreground mb-1 block">Name</label>
                       <Input value={editForm.name} onChange={e => setEditForm(p => ({...p, name: e.target.value}))} className="h-8 text-sm" />
                     </div>
+                    {f.integration !== "shortcut" && (
                     <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+                      <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
                       <Input value={editForm.team} onChange={e => setEditForm(p => ({...p, team: e.target.value}))} className="h-8 text-sm" placeholder="ELA" />
                     </div>
+                    )}
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
                       <Input value={editForm.triggerStatus} onChange={e => setEditForm(p => ({...p, triggerStatus: e.target.value}))} className="h-8 text-sm" />
@@ -832,15 +860,31 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Template</label>
-                      <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
+                      {availableTemplates.length > 0 ? (
+                        <select value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))}
+                          className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+                          <option value="">Select template</option>
+                          {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      ) : (
+                        <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
+                      )}
                     </div>
+                    {f.integration === "shortcut" ? (
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
+                      <p className="text-xs text-muted-foreground mb-1">{f.webhookSecretSet ? "Set — enter a new value to rotate it." : "Not set — enter a value to set it."}</p>
+                      <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="(generate a new secret or leave blank to keep)" />
+                    </div>
+                    ) : (
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
                       <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
                     </div>
+                    )}
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder="linear, feature" />
+                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder={f.integration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Color</label>
@@ -934,13 +978,23 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
               {workspaces.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
             </select>
           </div>
+          {formIntegration === "linear" && (
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Team key</label>
+            <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
             <Input value={form.team} onChange={e => update("team", e.target.value)} className="h-8 text-sm" placeholder="ELA" />
           </div>
+          )}
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Template (push to hub first)</label>
-            <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base" />
+            <label className="text-xs text-muted-foreground mb-1 block">Template</label>
+            {availableTemplates.length > 0 ? (
+              <select value={form.template} onChange={e => update("template", e.target.value)}
+                className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+                <option value="">Select template</option>
+                {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            ) : (
+              <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base (push templates first)" />
+            )}
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
@@ -955,14 +1009,28 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           <input type="checkbox" checked={form.terminateOnLeave} onChange={e => update("terminateOnLeave", e.target.checked)} />
           Terminate claw when issue leaves trigger status
         </label>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
-          <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
-        </div>
+        {formIntegration === "linear" ? (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
+            <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
+          </div>
+        ) : (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1.5 block">Webhook Signing Secret</label>
+            <p className="text-xs text-muted-foreground mb-2">Copy this secret and include it as <code className="bg-muted px-1 rounded">secret</code> when registering your Shortcut webhook.</p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate select-all">{generatedSecret}</code>
+              <Button variant="outline" size="sm" className="shrink-0" onClick={copySecret}>
+                {secretCopied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                <span className="ml-1.5">{secretCopied ? "Copied" : "Copy"}</span>
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder="linear, feature" />
+            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder={formIntegration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Color</label>
@@ -970,13 +1038,19 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           </div>
         </div>
         <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
-          onClick={() => {
+          onClick={async () => {
             const { webhookSecret, tags: tagsStr, color, ...rest } = form
             const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
             // Determine integration type from workspace value prefix
             const integration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
             const workspaceName = form.workspace.includes(":") ? form.workspace.split(":")[1] : form.workspace
-            onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            // For Shortcut, use the generated secret (user copies it to their webhook registration)
+            const effectiveSecret = integration === "shortcut" ? generatedSecret : webhookSecret
+            const saved = await onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(effectiveSecret ? { webhookSecret: effectiveSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            if (!saved) return
+            // Regenerate secret for next Shortcut factory
+            const newBytes = new Uint8Array(32); crypto.getRandomValues(newBytes)
+            setGeneratedSecret(Array.from(newBytes).map(b => b.toString(16).padStart(2, "0")).join(""))
             setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: "" })
           }}>
           Add Factory

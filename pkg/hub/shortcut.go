@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +43,30 @@ type shortcutChange struct {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+// validateShortcutSignature checks HMAC-SHA256 against factory webhook secrets.
+func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
+	// Strip sha256= prefix if present
+	sig = strings.TrimPrefix(sig, "sha256=")
+	s.mu.RLock()
+	factories := s.hubCfg.Factories
+	s.mu.RUnlock()
+	hasSecrets := false
+	for _, f := range factories {
+		if f.Integration != "shortcut" || f.WebhookSecret == "" {
+			continue
+		}
+		hasSecrets = true
+		mac := hmac.New(sha256.New, []byte(f.WebhookSecret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
+		}
+	}
+	// If no secrets configured, accept all (open webhook)
+	return !hasSecrets
+}
+
 func (s *Server) validateShortcutWebhook() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -73,6 +100,14 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+
+	// Validate HMAC signature if any factory has a webhook_secret configured.
+	// Shortcut sends: Payload-Signature: sha256=<hex>
+	sig := r.Header.Get("Payload-Signature")
+	if !s.validateShortcutSignature(body, sig) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
 
