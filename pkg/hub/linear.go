@@ -523,27 +523,17 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		}
 	}
 
-	// Mark as deleted and destroy the VM so the bridge can't reconnect
-	var providerID string
-	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-	s.mu.Lock()
-	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, "factory: claw signaled done")
-		delete(s.claws, clawID)
-	}
-	s.mu.Unlock()
-	// Broadcast deletion so dashboard card disappears
-	if tenantID != "" {
-		s.broadcastToUsers(tenantID, types.WSMessage{
-			Type:    "claw_status",
-			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
-		})
-	}
-	// Destroy the VM so the bridge process terminates and can't reconnect
-	if providerID != "" {
-		go s.terminateReplicatedVM(providerID)
-	}
+	// Keep the claw running — it stays connected to watch for CI failures,
+	// bugbot comments, and PR events. The claw will be terminated when the
+	// PR is merged or closed (polled by checkPRMerged).
+	// Just mark it as 'watching' so the UI shows it differently.
+	_, _ = s.db.Exec(`UPDATE claws SET status='idle' WHERE id=?`, clawID)
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
+	})
+	// Notify the claw it's in watch mode
+	s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged or closed.")
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.

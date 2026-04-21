@@ -153,6 +153,10 @@ func (s *Server) pollAllPRs() {
 	}
 
 	for _, r := range prs {
+		// Always check if PR is merged/closed — if so, terminate the claw
+		if s.checkPRMerged(r.pr, token) {
+			continue // claw is being terminated, skip other checks
+		}
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
@@ -520,4 +524,62 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 		return
 	}
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// checkPRMerged checks if a tracked PR is merged or closed.
+// If so, terminates the claw and returns true.
+func (s *Server) checkPRMerged(pr clawPR, token string) bool {
+	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
+	if tokenForPR == "" {
+		tokenForPR = token
+	}
+	data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
+	if err != nil {
+		return false
+	}
+	state, _ := data["state"].(string)
+	merged, _ := data["merged"].(bool)
+
+	if state != "closed" && !merged {
+		return false // still open
+	}
+
+	// PR is merged or closed — terminate the claw
+	var clawID, tenantID string
+	if err := s.db.QueryRow(`SELECT claw_id FROM claw_prs WHERE id=?`, pr.id).Scan(&clawID); err != nil {
+		return true
+	}
+	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
+		return true
+	}
+
+	action := "merged"
+	if !merged {
+		action = "closed"
+	}
+	log.Printf("[pr-watcher] PR %s#%d %s — terminating claw %s", pr.repo, pr.prNumber, action, clawID[:8])
+
+	var providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
+
+	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.conn.Close(1000, fmt.Sprintf("factory: PR %s", action))
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
+
+	if providerID != "" {
+		go s.terminateReplicatedVM(providerID)
+	}
+
+	return true
 }
