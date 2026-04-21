@@ -987,7 +987,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.gatewayReady = true
 							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
 							var rowsUpdated int64
-							if execErr == nil { rowsUpdated, _ = res.RowsAffected() }
+							if execErr == nil {
+								rowsUpdated, _ = res.RowsAffected()
+							}
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
@@ -1377,6 +1379,8 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 	var llmKeyNameDaytona string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
 	s.mu.RLock()
+	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
@@ -1392,7 +1396,7 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 
 	// Step 2b: Patch OpenClaw config with dynamic provider model list
 	if providerConfigScript != "" {
-		configPatch := "export HOME=/home/daytona; " + llmKeyEnvDaytona + providerConfigScript
+		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 			log.Printf("[daytona] warning: failed to configure model: %v", err)
 		}
@@ -2249,8 +2253,16 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	switch key.Provider {
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
+	case "openai":
+		return "openai/gpt-4o"
 	case "fireworks":
 		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
+	case "groq":
+		return "groq/llama-3.3-70b-versatile"
+	case "deepseek":
+		return "deepseek/deepseek-chat"
+	case "moonshot":
+		return "moonshot/moonshot-v1-8k"
 	default:
 		// Fall back to hub default even if provider doesn't match
 		return hubCfg.DefaultModel
