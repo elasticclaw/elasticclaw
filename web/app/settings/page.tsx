@@ -861,7 +861,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                     )}
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder="linear, feature" />
+                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder={f.integration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Color</label>
@@ -999,7 +999,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder="linear, feature" />
+            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder={formIntegration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Color</label>
