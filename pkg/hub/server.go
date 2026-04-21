@@ -1851,7 +1851,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	var issueID string
 	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
 	if issueID != "" {
-		wakeContent = "Read your BOOTSTRAP.md file to understand the task. Then explore the codebase, plan your approach, and begin working on it. Reply with a brief summary of what you found and your plan."
+		wakeContent = "Read your BOOTSTRAP.md now. Then immediately start working on the task — do not ask for permission or confirmation. Explore the codebase, implement the change, and report back with what you did."
 	}
 	wakeMsg := types.HubMessage{
 		ID:      uuid.New().String(),
