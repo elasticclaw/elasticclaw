@@ -152,9 +152,16 @@ func (s *Server) pollAllPRs() {
 		return
 	}
 
+	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
+		// Skip PRs for claws that were already terminated in this poll
+		if terminatedClaws[r.pr.clawID] {
+			continue
+		}
+
 		// Always check if PR is merged/closed — if so, terminate the claw
 		if s.checkPRMerged(r.pr, token) {
+			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
 		if r.autoFixCI {
