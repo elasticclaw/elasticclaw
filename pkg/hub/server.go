@@ -544,22 +544,31 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
 
-	// Resolve default model: explicit > llm_key lookup > hub default
+	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
-	if defaultModel == "" && req.LLMKey != "" {
+	if defaultModel == "" {
 		s.mu.RLock()
+		var activeKey *types.LLMKeyConfig
 		for _, k := range s.hubCfg.LLMKeys {
 			if k.Name == req.LLMKey {
-				// Use the key's provider to derive a model
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				activeKey = k
 				break
 			}
 		}
-		s.mu.RUnlock()
-	}
-	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
+		// If no explicit key selected, fall back to the default key
+		if activeKey == nil {
+			for _, k := range s.hubCfg.LLMKeys {
+				if k.Default {
+					activeKey = k
+					break
+				}
+			}
+		}
+		if activeKey != nil {
+			defaultModel = resolveDefaultModelForKey(s.hubCfg, activeKey)
+		} else {
+			defaultModel = s.hubCfg.DefaultModel
+		}
 		s.mu.RUnlock()
 	}
 	req.DefaultModel = defaultModel
