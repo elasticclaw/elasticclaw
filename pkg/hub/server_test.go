@@ -41,7 +41,7 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			key: &types.LLMKeyConfig{
 				Provider: "fireworks",
 			},
-			expectedModel: "fireworks/llama-v3p3-70b-instruct",
+			expectedModel: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",
 		},
 		{
 			name: "unknown provider - fall back to hub default",
