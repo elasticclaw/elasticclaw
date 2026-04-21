@@ -545,10 +545,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 
 	// PR is merged or closed — terminate the claw
-	var clawID, tenantID string
-	if err := s.db.QueryRow(`SELECT claw_id FROM claw_prs WHERE id=?`, pr.id).Scan(&clawID); err != nil {
-		return true
-	}
+	clawID := pr.clawID
+	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
 		return true
 	}

@@ -38,7 +38,7 @@ export interface ApiClaw {
   id: string
   name: string
   template: string
-  status: "connected" | "offline" | "provisioning" | "starting" | "error"
+  status: "connected" | "offline" | "provisioning" | "starting" | "error" | "idle"
   last_seen: string
   created_at: string
   tenant_id: string
