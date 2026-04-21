@@ -297,12 +297,18 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		s.mu.RUnlock()
 	}
 
-	// Build tags — always include factory tag; merge with factory-configured tags
-	tags := []string{"factory:" + factory.Name}
-	for _, t := range factory.Tags {
-		if t != "factory:"+factory.Name {
-			tags = append(tags, t)
+	// Build tags — always include template:<name> and factory:<name>; merge with factory-configured tags
+	tags := mergeTags(factory.Template, factory.Tags, nil)
+	// Ensure factory:<name> is also present
+	hasfactory := false
+	for _, t := range tags {
+		if t == "factory:"+factory.Name {
+			hasfactory = true
+			break
 		}
+	}
+	if !hasfactory {
+		tags = append(tags, "factory:"+factory.Name)
 	}
 	tagsJSON, _ := json.Marshal(tags)
 
