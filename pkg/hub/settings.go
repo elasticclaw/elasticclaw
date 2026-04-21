@@ -18,10 +18,11 @@ type SettingsStatus struct {
 
 // LLMKeyView is the masked view of a named LLM key.
 type LLMKeyView struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	KeySet   bool   `json:"keySet"`
-	Default  bool   `json:"default"`
+	Name         string `json:"name"`
+	Provider     string `json:"provider"`
+	KeySet       bool   `json:"keySet"`
+	Default      bool   `json:"default"`
+	DefaultModel string `json:"defaultModel,omitempty"`
 }
 
 // SettingsView is the redacted view of hub config for the settings page.
@@ -95,11 +96,12 @@ type GitHubAppView struct {
 // Only non-nil fields are updated.
 // LLMKeyPatch adds/updates a named LLM key. Set APIKey to "" to remove.
 type LLMKeyPatch struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider,omitempty"`
-	APIKey   string `json:"apiKey,omitempty"`
-	Default  *bool  `json:"default,omitempty"`
-	Delete   bool   `json:"delete,omitempty"`
+	Name         string  `json:"name"`
+	Provider     string  `json:"provider,omitempty"`
+	APIKey       string  `json:"apiKey,omitempty"`
+	Default      *bool   `json:"default,omitempty"`
+	Delete       bool    `json:"delete,omitempty"`
+	DefaultModel *string `json:"defaultModel,omitempty"`
 }
 
 type SettingsPatch struct {
@@ -207,10 +209,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view.LLMKeys = []LLMKeyView{}
 	for _, k := range s.hubCfg.LLMKeys {
 		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
-			Name:     k.Name,
-			Provider: k.Provider,
-			KeySet:   k.APIKey != "",
-			Default:  k.Default,
+			Name:         k.Name,
+			Provider:     k.Provider,
+			KeySet:       k.APIKey != "",
+			Default:      k.Default,
+			DefaultModel: k.DefaultModel,
 		})
 	}
 
@@ -346,6 +349,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				found.Default = *kp.Default
+			}
+			if kp.DefaultModel != nil {
+				found.DefaultModel = *kp.DefaultModel
 			}
 		}
 		updatedCfg.LLMKeys = existing

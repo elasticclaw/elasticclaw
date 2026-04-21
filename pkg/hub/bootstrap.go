@@ -95,7 +95,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 			return fmt.Sprintf(`'fireworks': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.fireworks.ai/inference/v1',
-            'api': 'openai-chat-completions',
+            'api': 'openai-completions',
             'models': [
                 {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2'},
                 {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B'},
@@ -106,7 +106,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 			return fmt.Sprintf(`'openai': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.openai.com/v1',
-            'api': 'openai-chat-completions',
+            'api': 'openai-completions',
             'models': [
                 {'id': 'gpt-4o',      'name': 'GPT-4o'},
                 {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini'}
@@ -116,7 +116,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 			return fmt.Sprintf(`'groq': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.groq.com/openai/v1',
-            'api': 'openai-chat-completions',
+            'api': 'openai-completions',
             'models': [
                 {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}
             ]
@@ -125,7 +125,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 			return fmt.Sprintf(`'deepseek': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.deepseek.com/v1',
-            'api': 'openai-chat-completions',
+            'api': 'openai-completions',
             'models': [
                 {'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}
             ]
@@ -133,7 +133,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 		default:
 			return fmt.Sprintf(`'%s': {
             'apiKey': os.environ.get('%s', ''),
-            'api': 'openai-chat-completions'
+            'api': 'openai-completions'
         }`, k.Provider, envVar)
 		}
 	}

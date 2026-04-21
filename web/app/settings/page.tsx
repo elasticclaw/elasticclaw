@@ -14,6 +14,7 @@ interface LLMKeyView {
   provider: string
   keySet: boolean
   default: boolean
+  defaultModel?: string
 }
 
 interface SettingsData {
@@ -347,6 +348,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [newCustomProvider, setNewCustomProvider] = useState("")
   const [newKey, setNewKey] = useState("")
   const [newDefault, setNewDefault] = useState(false)
+  const [newDefaultModel, setNewDefaultModel] = useState("")
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
@@ -372,6 +374,9 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                     ? <span className="text-xs text-green-500">✓ set</span>
                     : <span className="text-xs text-amber-500">✗ not set</span>}
                 </div>
+                {k.defaultModel && (
+                  <p className="text-xs text-muted-foreground mt-0.5 truncate">model: {k.defaultModel}</p>
+                )}
               </div>
               <div className="flex gap-2 shrink-0">
                 {!k.default && (
@@ -418,6 +423,11 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
           <Input type="password" value={newKey} onChange={e => setNewKey(e.target.value)}
             className="h-8 text-sm" placeholder={providerPlaceholder(newProvider)} />
         </div>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
+          <Input value={newDefaultModel} onChange={e => setNewDefaultModel(e.target.value)}
+            className="h-8 text-sm" placeholder="e.g. fireworks/accounts/fireworks/models/kimi-k2p6" />
+        </div>
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />
           Set as default key
@@ -425,8 +435,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
         <Button size="sm" disabled={saving || !newName || !newKey || (newProvider === "other" && !newCustomProvider)}
           onClick={() => {
             const actualProvider = newProvider === "other" ? newCustomProvider : newProvider
-            onSave({ llmKeys: [{ name: newName, provider: actualProvider, apiKey: newKey, default: newDefault }] })
-            setNewName(""); setNewKey(""); setNewDefault(false); setNewCustomProvider("")
+            onSave({ llmKeys: [{ name: newName, provider: actualProvider, apiKey: newKey, default: newDefault, defaultModel: newDefaultModel || undefined }] })
+            setNewName(""); setNewKey(""); setNewDefault(false); setNewCustomProvider(""); setNewDefaultModel("")
           }}>
           Add Key
         </Button>
