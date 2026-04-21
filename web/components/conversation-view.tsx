@@ -1113,7 +1113,12 @@ export function ConversationView({
         <div className="flex-1 relative min-h-0">
           {sortedClaws.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
-              <img src="/icon.svg" alt="ElasticClaw" className="size-20 opacity-20" />
+              <img
+                src="/mascot.jpg"
+                alt="ElasticClaw mascot"
+                className="w-64 h-64 object-contain opacity-80 select-none pointer-events-none"
+                draggable={false}
+              />
               <div className="space-y-2">
                 <p className="text-lg font-medium text-muted-foreground">No claws running</p>
                 <p className="text-sm text-muted-foreground/70 max-w-sm">
