@@ -752,6 +752,15 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
     navigator.clipboard.writeText(generatedSecret).then(() => { setSecretCopied(true); setTimeout(() => setSecretCopied(false), 2000) })
   }
   const factories = settings.factories || []
+  const [availableTemplates, setAvailableTemplates] = useState<string[]>([])
+  useEffect(() => {
+    const hubUrl = getHubUrl()
+    const token = sessionStorage.getItem("ec_hub_token") || ""
+    fetch(`${hubUrl}/api/templates`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then((d: Array<{ name: string }>) => setAvailableTemplates(d.map(t => t.name)))
+      .catch(() => {})
+  }, [])
   const [copied, setCopied] = useState(false)
   const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
   const handleCopy = () => {
@@ -845,7 +854,15 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                     </div>
                     <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Template</label>
-                      <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
+                      {availableTemplates.length > 0 ? (
+                        <select value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))}
+                          className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+                          <option value="">Select template</option>
+                          {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      ) : (
+                        <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
+                      )}
                     </div>
                     {f.integration === "shortcut" ? (
                     <div>
@@ -962,8 +979,16 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           </div>
           )}
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Template (push to hub first)</label>
-            <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base" />
+            <label className="text-xs text-muted-foreground mb-1 block">Template</label>
+            {availableTemplates.length > 0 ? (
+              <select value={form.template} onChange={e => update("template", e.target.value)}
+                className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
+                <option value="">Select template</option>
+                {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            ) : (
+              <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base (push templates first)" />
+            )}
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
