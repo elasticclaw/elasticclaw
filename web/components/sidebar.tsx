@@ -13,15 +13,35 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type { Claw } from "@/lib/types"
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+} from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable"
+import { CSS } from "@dnd-kit/utilities"
+import { useState } from "react"
 
 type TagFilter = string
 
 interface SidebarProps {
   claws: Claw[]
   pinnedClaws: Claw[]
+  allClawIds: string[]
   selectedClawId: string | null
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
+  onReorderClaws: (ids: string[]) => void
   onSpawn: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
@@ -34,12 +54,48 @@ interface SidebarProps {
   onToggleCollapse: () => void
 }
 
+/** Thin wrapper that gives ClawCard sortable DnD powers */
+function SortableClawCard({
+  claw,
+  isSelected,
+  onClick,
+  onTogglePin,
+}: {
+  claw: Claw
+  isSelected: boolean
+  onClick: () => void
+  onTogglePin: (e: React.MouseEvent) => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: claw.id })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+    cursor: isDragging ? "grabbing" : undefined,
+  }
+
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      <ClawCard
+        claw={claw}
+        isSelected={isSelected}
+        onClick={onClick}
+        onTogglePin={onTogglePin}
+      />
+    </div>
+  )
+}
+
 export function Sidebar({
   claws,
   pinnedClaws,
+  allClawIds,
   selectedClawId,
   onSelectClaw,
   onTogglePin,
+  onReorderClaws,
   onSpawn,
   searchQuery,
   onSearchChange,
@@ -52,8 +108,53 @@ export function Sidebar({
   onToggleCollapse,
 }: SidebarProps) {
   const tagKeys = allTags
+  const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
 
-  // Merge pinned + unpinned for collapsed view
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        // Require 6px movement before drag starts — lets clicks pass through
+        distance: 6,
+      },
+    })
+  )
+
+  function handleDragStart(event: DragStartEvent) {
+    const allVisible = [...pinnedClaws, ...claws]
+    const found = allVisible.find((c) => c.id === event.active.id)
+    setActiveDragClaw(found ?? null)
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveDragClaw(null)
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+
+    // Figure out which list the drag happened in (pinned vs main)
+    const inPinned = pinnedClaws.some((c) => c.id === active.id)
+    const targetInPinned = pinnedClaws.some((c) => c.id === over.id)
+
+    if (inPinned !== targetInPinned) return // don't allow crossing sections
+
+    if (inPinned) {
+      // Reorder within pinned — update full order accounting for the pinned move
+      const pinnedIds = pinnedClaws.map((c) => c.id)
+      const oldIdx = pinnedIds.indexOf(active.id as string)
+      const newIdx = pinnedIds.indexOf(over.id as string)
+      const reordered = arrayMove(pinnedIds, oldIdx, newIdx)
+      const unpinnedIds = allClawIds.filter((id) => !pinnedIds.includes(id))
+      onReorderClaws([...reordered, ...unpinnedIds])
+    } else {
+      const unpinnedIds = claws.map((c) => c.id)
+      const oldIdx = unpinnedIds.indexOf(active.id as string)
+      const newIdx = unpinnedIds.indexOf(over.id as string)
+      const reordered = arrayMove(unpinnedIds, oldIdx, newIdx)
+      const pinnedIds = pinnedClaws.map((c) => c.id)
+      onReorderClaws([...pinnedIds, ...reordered])
+    }
+  }
+
+  // Merge pinned + unpinned for collapsed view (order already applied by parent)
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
 
   if (isCollapsed) {
@@ -196,61 +297,93 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* Pinned Section */}
-      {pinnedClaws.length > 0 && !searchQuery && (
-        <div className="border-b border-border">
-          <div className="flex items-center gap-1.5 px-4 py-2">
-            <Pin className="size-3 text-muted-foreground" />
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Pinned
-            </span>
-          </div>
-          <div className="px-2 pb-2">
-            {pinnedClaws.map((claw) => (
-              <ClawCard
-                key={claw.id}
-                claw={claw}
-                isSelected={claw.id === selectedClawId}
-                onClick={() => onSelectClaw(claw.id)}
-                onTogglePin={(e) => {
-                  e.stopPropagation()
-                  onTogglePin(claw.id)
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      <ScrollArea className="flex-1 scrollbar-hide">
-        <div className="p-2">
-          {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
-            <div className="flex items-center gap-1.5 px-2 py-2">
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+      >
+        {/* Pinned Section */}
+        {pinnedClaws.length > 0 && !searchQuery && (
+          <div className="border-b border-border">
+            <div className="flex items-center gap-1.5 px-4 py-2">
+              <Pin className="size-3 text-muted-foreground" />
               <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                All Claws
+                Pinned
               </span>
             </div>
-          )}
-          {claws.length === 0 && pinnedClaws.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-8">
-              No claws found
-            </p>
-          ) : (
-            claws.map((claw) => (
+            <div className="px-2 pb-2">
+              <SortableContext
+                items={pinnedClaws.map((c) => c.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                {pinnedClaws.map((claw) => (
+                  <SortableClawCard
+                    key={claw.id}
+                    claw={claw}
+                    isSelected={claw.id === selectedClawId}
+                    onClick={() => onSelectClaw(claw.id)}
+                    onTogglePin={(e) => {
+                      e.stopPropagation()
+                      onTogglePin(claw.id)
+                    }}
+                  />
+                ))}
+              </SortableContext>
+            </div>
+          </div>
+        )}
+
+        <ScrollArea className="flex-1 scrollbar-hide">
+          <div className="p-2">
+            {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
+              <div className="flex items-center gap-1.5 px-2 py-2">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  All Claws
+                </span>
+              </div>
+            )}
+            {claws.length === 0 && pinnedClaws.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No claws found
+              </p>
+            ) : (
+              <SortableContext
+                items={claws.map((c) => c.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                {claws.map((claw) => (
+                  <SortableClawCard
+                    key={claw.id}
+                    claw={claw}
+                    isSelected={claw.id === selectedClawId}
+                    onClick={() => onSelectClaw(claw.id)}
+                    onTogglePin={(e) => {
+                      e.stopPropagation()
+                      onTogglePin(claw.id)
+                    }}
+                  />
+                ))}
+              </SortableContext>
+            )}
+          </div>
+        </ScrollArea>
+
+        {/* Drag overlay — ghost card that follows the cursor */}
+        <DragOverlay>
+          {activeDragClaw ? (
+            <div className="opacity-90 shadow-xl">
               <ClawCard
-                key={claw.id}
-                claw={claw}
-                isSelected={claw.id === selectedClawId}
-                onClick={() => onSelectClaw(claw.id)}
-                onTogglePin={(e) => {
-                  e.stopPropagation()
-                  onTogglePin(claw.id)
-                }}
+                claw={activeDragClaw}
+                isSelected={activeDragClaw.id === selectedClawId}
+                onClick={() => {}}
+                onTogglePin={() => {}}
+                showPinButton={false}
               />
-            ))
-          )}
-        </div>
-      </ScrollArea>
+            </div>
+          ) : null}
+        </DragOverlay>
+      </DndContext>
 
       {/* Logout + Settings */}
       <div className="p-2 border-t border-border">

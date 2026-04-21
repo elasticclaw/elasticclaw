@@ -27,7 +27,7 @@ export default function Home() {
 
   const hub = useHub(selectedClawId)
 
-  const { claws: rawClaws, messages, streamingBuffers, loading, hubError } = hub
+  const { claws: rawClaws, messages, streamingBuffers, loading, hubError, reorderClaws } = hub
 
   // Derive isStreaming from the live typewriter buffers so it stays true
   // while the typewriter is still draining (even after final WS message arrives)
@@ -254,6 +254,7 @@ export default function Home() {
       <Sidebar
         claws={filteredClaws}
         pinnedClaws={filteredPinnedClaws}
+        allClawIds={claws.map((c) => c.id)}
         selectedClawId={selectedClawId}
         onSelectClaw={handleSelectClaw}
         onTogglePin={handleTogglePin}
@@ -267,6 +268,7 @@ export default function Home() {
         onClearTagFilters={handleClearTagFilters}
         isCollapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onReorderClaws={reorderClaws}
       />
       <ConversationView
         claw={selectedClaw}
@@ -281,6 +283,7 @@ export default function Home() {
         onNewSessionForClaw={handleNewSessionForClaw}
         onSelectClaw={handleSelectClaw}
         onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+        onReorderClaws={reorderClaws}
         loading={loading}
         hubError={hubError}
       />

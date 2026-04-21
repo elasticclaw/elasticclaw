@@ -31,10 +31,29 @@ export interface HubState {
   setPinned: (clawId: string, pinned: boolean) => void
   setUnreadCount: (clawId: string, count: number) => void
   refreshClaws: () => Promise<void>
+  reorderClaws: (ids: string[]) => void
+}
+
+const ORDER_KEY = "elasticclaw_claw_order"
+
+function loadSavedOrder(): string[] {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function saveOrder(ids: string[]) {
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(ids))
+  } catch {}
 }
 
 export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
+  const orderRef = useRef<string[]>([])
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const messagesRef = useRef<Record<string, Message[]>>({})
   const [connected, setConnected] = useState(false)
@@ -87,12 +106,13 @@ export function useHub(selectedClawId: string | null): HubState {
     messagesRef.current = messages
   }, [messages])
 
-  // Load pinned state + message cache from localStorage on mount
+  // Load pinned state + message cache + order from localStorage on mount
   useEffect(() => {
     try {
       const saved = localStorage.getItem("elasticclaw_pinned")
       if (saved) pinnedRef.current = JSON.parse(saved)
     } catch {}
+    orderRef.current = loadSavedOrder()
     loadCachedMessages()
   }, [loadCachedMessages])
 
@@ -117,22 +137,39 @@ export function useHub(selectedClawId: string | null): HubState {
     )
   }, [])
 
-  // Merge fresh API claws into state, preserving UI-only fields
+  // Reorder claws — accepts new ordered list of IDs and persists it
+  const reorderClaws = useCallback((ids: string[]) => {
+    orderRef.current = ids
+    saveOrder(ids)
+    setClaws((prev) => {
+      const map = new Map(prev.map((c) => [c.id, c]))
+      const ordered = ids.map((id) => map.get(id)).filter((c): c is Claw => !!c)
+      const rest = prev.filter((c) => !ids.includes(c.id))
+      return [...ordered, ...rest]
+    })
+  }, [])
+
+  // Merge fresh API claws into state, preserving UI-only fields (including order)
   const mergeClaws = useCallback((apiClaws: ApiClaw[]) => {
     setClaws((prev) => {
       const prevMap = new Map(prev.map((c) => [c.id, c]))
-      const next: Claw[] = apiClaws.map((ac) => {
+      const mapped: Claw[] = apiClaws.map((ac) => {
         const existing = prevMap.get(ac.id)
         return mapApiClaw(ac, {
           unreadCount: existing?.unreadCount ?? 0,
           isStreaming: existing?.isStreaming ?? false,
           pinned: pinnedRef.current[ac.id] ?? false,
           tags: existing?.tags,
-          // Update uptime live
           uptime: computeUptime(ac),
         })
       })
-      return next
+      // Re-apply saved order
+      const order = orderRef.current
+      if (order.length === 0) return mapped
+      const map = new Map(mapped.map((c) => [c.id, c]))
+      const ordered = order.map((id) => map.get(id)).filter((c): c is Claw => !!c)
+      const unordered = mapped.filter((c) => !order.includes(c.id))
+      return [...ordered, ...unordered]
     })
   }, [])
 
@@ -395,5 +432,6 @@ export function useHub(selectedClawId: string | null): HubState {
     setPinned,
     setUnreadCount,
     refreshClaws,
+    reorderClaws,
   }
 }

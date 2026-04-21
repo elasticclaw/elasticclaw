@@ -1,7 +1,24 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical } from "lucide-react"
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+} from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  horizontalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable"
+import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
 import { COLOR_CLASSES } from "@/lib/mappers"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
@@ -35,6 +52,7 @@ interface ConversationViewProps {
   onNewSessionForClaw: (clawId: string) => void
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
+  onReorderClaws: (ids: string[]) => void
 }
 
 function formatUptime(seconds: number): string {
@@ -289,6 +307,7 @@ function ClawBoardCard({
   onSendMessage,
   onNewSession,
   onKill,
+  dragHandleProps,
 }: { 
   claw: Claw
   messages: Message[]
@@ -296,6 +315,7 @@ function ClawBoardCard({
   onSendMessage: (content: string) => void
   onNewSession: () => void
   onKill: () => void
+  dragHandleProps?: React.HTMLAttributes<HTMLElement>
 }) {
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -378,6 +398,15 @@ function ClawBoardCard({
           {/* Header - clickable to open full view */}
           <div className="p-3 border-b border-border">
             <div className="flex items-center gap-2 mb-1">
+              {/* Drag handle */}
+              <span
+                {...dragHandleProps}
+                className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors shrink-0 -ml-1"
+                title="Drag to reorder"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="size-3.5" />
+              </span>
               <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
               <button
                 onClick={isPending ? undefined : onClick}
@@ -639,6 +668,47 @@ function ClawBoardCard({
       </Dialog>
     )}
     </>
+  )
+}
+
+/** Sortable wrapper for ClawBoardCard */
+function SortableClawBoardCard({
+  claw,
+  messages,
+  onClick,
+  onSendMessage,
+  onNewSession,
+  onKill,
+}: {
+  claw: Claw
+  messages: Message[]
+  onClick: () => void
+  onSendMessage: (content: string) => void
+  onNewSession: () => void
+  onKill: () => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: claw.id })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.35 : 1,
+    height: "100%",
+  }
+
+  return (
+    <div ref={setNodeRef} style={style} className="h-full">
+      <ClawBoardCard
+        claw={claw}
+        messages={messages}
+        onClick={onClick}
+        onSendMessage={onSendMessage}
+        onNewSession={onNewSession}
+        onKill={onKill}
+        dragHandleProps={{ ...attributes, ...listeners }}
+      />
+    </div>
   )
 }
 
@@ -948,8 +1018,31 @@ export function ConversationView({
   onNewSessionForClaw,
   onSelectClaw,
   onDeselectClaw,
+  onReorderClaws,
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
+  const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    })
+  )
+
+  function handleBoardDragStart(event: DragStartEvent) {
+    const found = allClaws.find((c) => c.id === event.active.id)
+    setActiveDragClaw(found ?? null)
+  }
+
+  function handleBoardDragEnd(event: DragEndEvent) {
+    setActiveDragClaw(null)
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const ids = allClaws.map((c) => c.id)
+    const oldIdx = ids.indexOf(active.id as string)
+    const newIdx = ids.indexOf(over.id as string)
+    onReorderClaws(arrayMove(ids, oldIdx, newIdx))
+  }
 
   // On initial load, scroll board to leftmost active card
   useEffect(() => {
@@ -987,12 +1080,8 @@ export function ConversationView({
   }
 
   if (!claw) {
-    // Stable order: sort by creation time (newest first) — never changes on state updates
-    const sortedClaws = [...allClaws].sort((a, b) => {
-      const ta = a.created_at ? new Date(a.created_at).getTime() : 0
-      const tb = b.created_at ? new Date(b.created_at).getTime() : 0
-      return tb - ta
-    })
+    // Use the hub-maintained order (respects user drag preference + falls back to API order)
+    const sortedClaws = allClaws
 
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
@@ -1047,23 +1136,51 @@ export function ConversationView({
             <ChevronLeft className="size-4" />
           </Button>
 
-          <div
-            ref={boardRef}
-            className="flex gap-4 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
-            style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleBoardDragStart}
+            onDragEnd={handleBoardDragEnd}
           >
-            {sortedClaws.map((c) => (
-              <ClawBoardCard
-                key={c.id}
-                claw={c}
-                messages={(allMessages && allMessages[c.id]) || []}
-                onClick={() => onSelectClaw(c.id)}
-                onSendMessage={(content) => onSendMessageToClaw(c.id, content)}
-                onNewSession={() => onNewSessionForClaw(c.id)}
-                onKill={() => onKillClaw(c.id)}
-              />
-            ))}
-          </div>
+            <SortableContext
+              items={sortedClaws.map((c) => c.id)}
+              strategy={horizontalListSortingStrategy}
+            >
+              <div
+                ref={boardRef}
+                className="flex gap-4 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
+                style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+              >
+                {sortedClaws.map((c) => (
+                  <SortableClawBoardCard
+                    key={c.id}
+                    claw={c}
+                    messages={(allMessages && allMessages[c.id]) || []}
+                    onClick={() => onSelectClaw(c.id)}
+                    onSendMessage={(content) => onSendMessageToClaw(c.id, content)}
+                    onNewSession={() => onNewSessionForClaw(c.id)}
+                    onKill={() => onKillClaw(c.id)}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+
+            {/* Ghost card following cursor during drag */}
+            <DragOverlay>
+              {activeDragClaw ? (
+                <div className="opacity-90 shadow-2xl h-full" style={{ width: 320 }}>
+                  <ClawBoardCard
+                    claw={activeDragClaw}
+                    messages={(allMessages && allMessages[activeDragClaw.id]) || []}
+                    onClick={() => {}}
+                    onSendMessage={() => {}}
+                    onNewSession={() => {}}
+                    onKill={() => {}}
+                  />
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
 
           <Button
             variant="ghost"

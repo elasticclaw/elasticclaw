@@ -179,6 +179,11 @@ Settings API: `GET/PATCH /api/settings` — reads/writes hub.yaml live (restarts
 ### General
 - `elasticclaw hub upgrade` — upgrades remote hub binary via SSH (done, in feat/upgrade-command)
 - `elasticclaw upgrade` — upgrades local CLI binary (done)
+- Drag-and-drop claw reordering — done in PR #26 (feat/claw-drag-reorder)
+  - Sidebar list: `@dnd-kit/sortable` + `SortableClawCard`, 6px activation threshold
+  - Board cards: horizontal DnD via `SortableClawBoardCard`, grip handle in card header
+  - Order persisted to `localStorage` (`elasticclaw_claw_order`), re-applied on every `mergeClaws()` poll
+  - Sidebar and board share the same order — `reorderClaws()` in `useHub`, wired through `page.tsx`
 - Template registry at `github.com/elasticclaw/elasticclaw-templates`
 - Relay: test with Caddy directly on VPS (Cloudflare idle timeout blocks WS)
 - Bootstrap test that executes via stdin (catches bash-specific syntax issues)
