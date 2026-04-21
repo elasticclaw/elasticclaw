@@ -159,6 +159,30 @@ func downloadTemplate(name, dest string) error {
 	return nil
 }
 
+// ParseTemplateConfig parses elasticclaw-config.yaml content from raw bytes.
+// Used by the hub factory engine when the config is already loaded as a string
+// (e.g. from the hub DB template store) rather than from the filesystem.
+// Returns nil, nil when data is empty — caller treats missing config as "use defaults".
+func ParseTemplateConfig(data []byte) (*types.TemplateConfig, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
+	cfg := &types.TemplateConfig{}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("invalid elasticclaw-config.yaml: %w", err)
+	}
+	if cfg.GitHub != nil {
+		for i, r := range cfg.GitHub.Repos {
+			if r.Repo == "" {
+				return nil, fmt.Errorf("elasticclaw-config.yaml: github.repos[%d] is missing 'repo' field", i)
+			}
+		}
+	}
+	return cfg, nil
+}
+
 // LoadTemplateConfig reads elasticclaw-config.yaml from a template directory.
 func LoadTemplateConfig(templateDir string) (*types.TemplateConfig, error) {
 	path := filepath.Join(templateDir, "elasticclaw-config.yaml")

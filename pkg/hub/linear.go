@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
@@ -204,6 +205,20 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("template %q not found: %w", factory.Template, err)
 	}
 
+	// Parse elasticclaw-config.yaml from the template files (if present) so we
+	// honour provider settings like nix, github repos, default_model, instance_type, etc.
+	// This mirrors what the CLI does via config.LoadTemplateConfig before calling CreateClaw.
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		var parseErr error
+		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
+			// Non-fatal — continue with defaults
+			tmplCfg = nil
+		}
+	}
+
 	// Inject CONTEXT.md with issue details
 	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
 
@@ -237,6 +252,47 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		env["LINEAR_API_KEY"] = linearToken
 	}
 
+	// Resolve template config fields (from elasticclaw-config.yaml if present).
+	// Factory-level overrides (color, tags) take precedence over template config.
+	var (
+		instanceType   string
+		defaultModel   string
+		llmKey         string
+		nixEnabled     int
+		githubRepos    []types.GitHubRepoAccess
+		linearWorkspace string
+	)
+	if tmplCfg != nil {
+		instanceType = tmplCfg.InstanceType
+		defaultModel = tmplCfg.DefaultModel
+		llmKey = tmplCfg.LLMKey
+		if tmplCfg.Nix {
+			nixEnabled = 1
+		}
+		if tmplCfg.GitHub != nil {
+			githubRepos = tmplCfg.GitHub.Repos
+		}
+		if tmplCfg.Linear != nil {
+			linearWorkspace = tmplCfg.Linear.Workspace
+		}
+	}
+	// Resolve default model: template > llm_key lookup > hub default
+	if defaultModel == "" && llmKey != "" {
+		s.mu.RLock()
+		for _, k := range s.hubCfg.LLMKeys {
+			if k.Name == llmKey {
+				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				break
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if defaultModel == "" {
+		s.mu.RLock()
+		defaultModel = s.hubCfg.DefaultModel
+		s.mu.RUnlock()
+	}
+
 	// Build tags — always include factory tag; merge with factory-configured tags
 	tags := []string{"factory:" + factory.Name}
 	for _, t := range factory.Tags {
@@ -246,8 +302,13 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 	tagsJSON, _ := json.Marshal(tags)
 
-	// Color
+	// Color: factory overrides template config
 	clawColor := factory.Color
+	if clawColor == "" && tmplCfg != nil {
+		clawColor = tmplCfg.Color
+	}
+
+	githubReposJSON, _ := json.Marshal(githubRepos)
 
 	// Insert claw record
 	clawID := uuid.New().String()
@@ -255,9 +316,10 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	now := now()
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, template_files, linear_issue_id, tags, color, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,'provisioning',?)`,
-		clawID, tenantID, clawName, factory.Template, provider, string(filesJSON), issueID, string(tagsJSON), clawColor, now,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, linear_issue_id, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
+		string(githubReposJSON), linearWorkspace, nixEnabled, string(tagsJSON), clawColor, llmKey, issueID, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
@@ -281,6 +343,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			Provider:     provider,
 			Files:        templateFiles,
 			Env:          env,
+			InstanceType: instanceType,
+			ProviderName: "ec-" + clawID[:8],
 		}
 		switch provider {
 		case "replicated":
