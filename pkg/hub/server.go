@@ -406,6 +406,11 @@ func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
 		hubURL = s.hubCfg.PublicURL
 	}
 	token := s.hubCfg.Token
+	var appName, logoURL string
+	if s.hubCfg.Branding != nil {
+		appName = s.hubCfg.Branding.AppName
+		logoURL = s.hubCfg.Branding.LogoURL
+	}
 	s.mu.RUnlock()
 	if hubURL == "" {
 		hubURL = "http://localhost:8080"
@@ -414,6 +419,8 @@ func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
 		"token":   token,
 		"hubUrl":  hubURL,
 		"version": Version,
+		"appName": appName,
+		"logoUrl": logoURL,
 	})
 }
 

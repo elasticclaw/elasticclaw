@@ -31,6 +31,7 @@ import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
 import dynamic from "next/dynamic"
+import { useBranding } from "@/hooks/use-branding"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -1022,6 +1023,7 @@ export function ConversationView({
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
+  const { logoUrl } = useBranding()
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -1114,8 +1116,8 @@ export function ConversationView({
           {sortedClaws.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
               <img
-                src="/mascot.png"
-                alt="ElasticClaw mascot"
+                src={logoUrl || "/mascot.png"}
+                alt="mascot"
                 className="w-72 h-72 object-contain select-none pointer-events-none opacity-90"
                 draggable={false}
               />
