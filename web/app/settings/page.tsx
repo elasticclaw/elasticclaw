@@ -781,6 +781,10 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   ]
 
   function update(k: keyof FactoryFormData, v: string | boolean) {
+    if (k === "workspace" && typeof v === "string" && v.startsWith("shortcut:")) {
+      setForm(prev => ({ ...prev, workspace: v, team: "", webhookSecret: "" }))
+      return
+    }
     setForm(prev => ({ ...prev, [k]: v }))
   }
 
