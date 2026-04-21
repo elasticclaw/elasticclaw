@@ -110,6 +110,15 @@ type GitHubTemplateConfig struct {
 
 // HubConfig is used in two contexts:
 //   - ~/.elasticclaw/hub.yaml: CLI connection + full server config
+// BrandingConfig controls white-label appearance of the web UI.
+type BrandingConfig struct {
+	// AppName replaces "ElasticClaw" in the top-left header and page title.
+	AppName string `yaml:"app_name,omitempty" json:"appName,omitempty"`
+	// LogoURL is a URL to an externally-hosted image used as the empty-state mascot.
+	// Replaces the default lobster mascot PNG.
+	LogoURL string `yaml:"logo_url,omitempty" json:"logoUrl,omitempty"`
+}
+
 type HubConfig struct {
 	// CLI connection fields
 	URL   string `yaml:"url"`
@@ -156,6 +165,9 @@ type HubConfig struct {
 
 	// UIPassword is the password for the web UI. If not set, defaults to "admin".
 	UIPassword string `yaml:"ui_password,omitempty"`
+
+	// Branding allows white-labeling the web UI.
+	Branding *BrandingConfig `yaml:"branding,omitempty"`
 
 	// Integrations holds external service configs (Linear, future: Shortcut, etc.)
 	Integrations *IntegrationsConfig `yaml:"integrations,omitempty"`

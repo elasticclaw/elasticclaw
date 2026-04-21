@@ -1,6 +1,7 @@
 "use client"
 
 import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings } from "lucide-react"
+import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -108,6 +109,7 @@ export function Sidebar({
   onToggleCollapse,
 }: SidebarProps) {
   const tagKeys = allTags
+  const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
 
   const sensors = useSensors(
@@ -218,7 +220,7 @@ export function Sidebar({
     <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between p-4 border-b border-border">
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
-          ElasticClaw
+          {appName}
         </h1>
         <div className="flex items-center gap-1">
           <Button
