@@ -622,7 +622,7 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 
 	// Determine expected integration type based on issue ID format
 	expectedIntegration := "linear"
-	if strings.EqualFold(teamKey, "sc") {
+	if teamKey == "sc" {
 		expectedIntegration = "shortcut"
 	}
 

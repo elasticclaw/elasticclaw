@@ -756,8 +756,8 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   })
 
   const workspaces = [
-    ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: l.workspace })) || []),
-    ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: s.workspace })) || []),
+    ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: `linear:${l.workspace}` })) || []),
+    ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: `shortcut:${s.workspace}` })) || []),
   ]
 
   function update(k: keyof FactoryFormData, v: string | boolean) {
@@ -973,10 +973,10 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           onClick={() => {
             const { webhookSecret, tags: tagsStr, color, ...rest } = form
             const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
-            // Determine integration type from selected workspace
-            const selectedWorkspace = workspaces.find(w => w.value === form.workspace)
-            const integration = selectedWorkspace?.label.startsWith("Shortcut:") ? "shortcut" : "linear"
-            onSave({ factories: [...factories, { ...rest, integration, ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
+            // Determine integration type from workspace value prefix
+            const integration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
+            const workspaceName = form.workspace.includes(":") ? form.workspace.split(":")[1] : form.workspace
+            onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(webhookSecret ? { webhookSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
             setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: "" })
           }}>
           Add Factory

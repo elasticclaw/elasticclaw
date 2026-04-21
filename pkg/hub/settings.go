@@ -36,8 +36,8 @@ type SettingsView struct {
 }
 
 type IntegrationsView struct {
-	Linear    []LinearIntegrationView    `json:"linear"`
-	Shortcut  []ShortcutIntegrationView  `json:"shortcut"`
+	Linear   []LinearIntegrationView   `json:"linear"`
+	Shortcut []ShortcutIntegrationView `json:"shortcut"`
 }
 
 type ShortcutIntegrationView struct {
@@ -113,8 +113,8 @@ type SettingsPatch struct {
 }
 
 type IntegrationsPatch struct {
-	Linear    []LinearIntegrationPatch    `json:"linear,omitempty"`
-	Shortcut  []ShortcutIntegrationPatch  `json:"shortcut,omitempty"`
+	Linear   []LinearIntegrationPatch   `json:"linear,omitempty"`
+	Shortcut []ShortcutIntegrationPatch `json:"shortcut,omitempty"`
 }
 
 type ShortcutIntegrationPatch struct {
@@ -468,8 +468,18 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if patch.Integrations != nil && len(patch.Integrations.Shortcut) > 0 {
+		// Deep copy IntegrationsConfig to avoid mutating live config
+		var existingIntegrations *types.IntegrationsConfig
+		if updatedCfg.Integrations != nil {
+			existingIntegrations = updatedCfg.Integrations
+		}
 		if updatedCfg.Integrations == nil {
 			updatedCfg.Integrations = &types.IntegrationsConfig{}
+		} else {
+			updatedCfg.Integrations = &types.IntegrationsConfig{
+				Linear:   existingIntegrations.Linear,
+				Shortcut: existingIntegrations.Shortcut,
+			}
 		}
 		existing := updatedCfg.Integrations.Shortcut
 		var shortcuts []*types.ShortcutIntegrationConfig
