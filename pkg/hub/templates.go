@@ -21,22 +21,33 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTemplateDetail handles DELETE /api/templates/{name}.
+// handleTemplateDetail handles GET and DELETE /api/templates/{name}.
 func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
 		http.Error(w, "missing template name", http.StatusBadRequest)
 		return
 	}
-	if r.Method != http.MethodDelete {
+	switch r.Method {
+	case http.MethodGet:
+		files, err := s.loadHubTemplate(name)
+		if err != nil {
+			http.Error(w, "template not found", http.StatusNotFound)
+			return
+		}
+		jsonOK(w, map[string]interface{}{
+			"name":  name,
+			"files": files,
+		})
+	case http.MethodDelete:
+		if _, err := s.db.Exec(`DELETE FROM hub_templates WHERE name = ?`, name); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	if _, err := s.db.Exec(`DELETE FROM hub_templates WHERE name = ?`, name); err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
