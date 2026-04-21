@@ -37,6 +37,25 @@ type BootstrapParams struct {
 	LinearEnv      string // pre-built export line
 	RelayEnv       string // pre-built export lines
 	ProviderConfig string // python snippet to configure models.providers
+	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
+}
+
+// resolveActiveKey selects the active key by selected name, then default, then first.
+func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
+	for _, k := range keys {
+		if k.Name == selectedKeyName {
+			return k
+		}
+	}
+	for _, k := range keys {
+		if k.Default {
+			return k
+		}
+	}
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return nil
 }
 
 // buildOpenClawProviderConfig returns a python snippet that writes the correct
@@ -49,24 +68,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	}
 
 	// Determine active key
-	var activeKey *types.LLMKeyConfig
-	for _, k := range keys {
-		if k.Name == selectedKeyName {
-			activeKey = k
-			break
-		}
-	}
-	if activeKey == nil {
-		for _, k := range keys {
-			if k.Default {
-				activeKey = k
-				break
-			}
-		}
-	}
-	if activeKey == nil {
-		activeKey = keys[0]
-	}
+	activeKey := resolveActiveKey(keys, selectedKeyName)
 	_ = activeKey // used implicitly via the provider list
 
 	// Build per-provider config entries.
@@ -221,7 +223,7 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   openclaw onboard \
     --non-interactive --accept-risk \
     --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon 2>/dev/null || true
+    --skip-daemon %s 2>/dev/null || true
   %s
 fi
 
@@ -309,10 +311,35 @@ fi
 `,
 		p.DefaultModel, p.GatewayPassword, p.LLMKeyEnv, p.LinearEnv,
 		buildNixInstall(p.Nix),
+		p.OnboardFlags,
 		p.ProviderConfig,
 		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.RelayEnv, p.DefaultModel, p.LLMKeyEnv,
 		credHelper,
 	)
+}
+
+// buildOnboardFlags returns the --auth-choice flags for openclaw onboard
+// based on the active LLM key (selected > default > first).
+func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	active := resolveActiveKey(keys, selectedKeyName)
+	if active == nil {
+		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+	}
+	envVar := active.EnvVarName()
+	switch active.Provider {
+	case "anthropic":
+		return fmt.Sprintf(`--auth-choice anthropic-api-key --anthropic-api-key "${%s:-placeholder}"`, envVar)
+	case "fireworks":
+		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s}"`, envVar)
+	case "openai":
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s}"`, envVar)
+	case "groq":
+		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s}"`, envVar)
+	case "deepseek":
+		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s}"`, envVar)
+	default:
+		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+	}
 }

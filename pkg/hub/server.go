@@ -544,22 +544,31 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
 
-	// Resolve default model: explicit > llm_key lookup > hub default
+	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
-	if defaultModel == "" && req.LLMKey != "" {
+	if defaultModel == "" {
 		s.mu.RLock()
+		var activeKey *types.LLMKeyConfig
 		for _, k := range s.hubCfg.LLMKeys {
 			if k.Name == req.LLMKey {
-				// Use the key's provider to derive a model
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				activeKey = k
 				break
 			}
 		}
-		s.mu.RUnlock()
-	}
-	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
+		// If no explicit key selected, fall back to the default key
+		if activeKey == nil {
+			for _, k := range s.hubCfg.LLMKeys {
+				if k.Default {
+					activeKey = k
+					break
+				}
+			}
+		}
+		if activeKey != nil {
+			defaultModel = resolveDefaultModelForKey(s.hubCfg, activeKey)
+		} else {
+			defaultModel = s.hubCfg.DefaultModel
+		}
 		s.mu.RUnlock()
 	}
 	req.DefaultModel = defaultModel
@@ -978,7 +987,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.gatewayReady = true
 							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
 							var rowsUpdated int64
-							if execErr == nil { rowsUpdated, _ = res.RowsAffected() }
+							if execErr == nil {
+								rowsUpdated, _ = res.RowsAffected()
+							}
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
@@ -1364,67 +1375,37 @@ echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
 		return err
 	}
 
-	// Step 2: Onboard (configure OpenClaw)
-	if err := exec("onboard openclaw", 2*time.Minute,
-		"export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true"); err != nil {
+	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
+	var llmKeyNameDaytona string
+	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
+	s.mu.RLock()
+	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
+	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	s.mu.RUnlock()
+	onboardCmd := fmt.Sprintf(
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1 || true",
+		llmKeyEnvDaytona,
+		onboardFlags,
+	)
+	if err := exec("onboard openclaw", 2*time.Minute, onboardCmd); err != nil {
 		return err
 	}
 
-	// Step 2b: Patch OpenClaw config with model + LLM API keys
-	anthropicKey := env["ANTHROPIC_API_KEY"]
-	defaultModel := env["OPENCLAW_DEFAULT_MODEL"]
-	s.mu.RLock()
-	if defaultModel == "" {
-		defaultModel = s.hubCfg.DefaultModel
-	}
-	if defaultModel == "" {
-		defaultModel = "anthropic/claude-sonnet-4-6"
-	}
-	if anthropicKey == "" {
-		for _, k := range s.hubCfg.LLMKeys {
-			if k.Provider == "anthropic" && k.APIKey != "" {
-				anthropicKey = k.APIKey
-				break
-			}
-		}
-	}
-	s.mu.RUnlock()
-	if anthropicKey != "" {
-		configPatch := fmt.Sprintf(`
-export HOME=/home/daytona; python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-try:
-  with open(path) as f: cfg = json.load(f)
-except: cfg = {}
-cfg.setdefault('agents', {}).setdefault('defaults', {})['model'] = %q
-cfg['models'] = {
-  'providers': {
-    'anthropic': {
-      'apiKey': %q,
-      'baseUrl': 'https://api.anthropic.com',
-      'api': 'anthropic-messages',
-      'models': [
-        {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
-        {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'api': 'anthropic-messages'}
-      ]
-    }
-  }
-}
-cfg.setdefault('gateway', {})['bind'] = 'loopback'
-cfg['gateway']['port'] = 18789
-with open(path, 'w') as f: json.dump(cfg, f, indent=2)
-print('model config updated')
-PYEOF`, defaultModel, anthropicKey)
+	// Step 2b: Patch OpenClaw config with dynamic provider model list
+	if providerConfigScript != "" {
+		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 			log.Printf("[daytona] warning: failed to configure model: %v", err)
 		}
-		// Let openclaw self-heal any remaining config schema issues
-		_ = exec("openclaw doctor fix", 20*time.Second,
-			"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
-				"export PATH=$NVM_DIR/current/bin:$PATH; "+
-				"openclaw doctor --fix 2>&1 || true")
 	}
+	// Let openclaw self-heal any remaining config schema issues
+	_ = exec("openclaw doctor fix", 20*time.Second,
+		"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
+			"export PATH=$NVM_DIR/current/bin:$PATH; "+
+			"openclaw doctor --fix 2>&1 || true")
 
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
@@ -1995,6 +1976,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LinearEnv:       buildLinearEnv(linearToken),
 		RelayEnv:        relayEnv,
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()
@@ -2253,8 +2235,12 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return hubCfg.DefaultModel
 	}
 
-	// Use per-key default model if set
+	// Use per-key default model if set; normalize to include provider prefix
 	if key.DefaultModel != "" {
+		prefix := key.Provider + "/"
+		if !strings.HasPrefix(key.DefaultModel, prefix) {
+			return prefix + key.DefaultModel
+		}
 		return key.DefaultModel
 	}
 
@@ -2270,7 +2256,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "openai":
 		return "openai/gpt-4o"
 	case "fireworks":
-		return "fireworks/llama-v3p3-70b-instruct"
+		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
