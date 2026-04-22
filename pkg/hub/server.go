@@ -1843,16 +1843,21 @@ func (s *Server) syncReplicatedVMs() {
 			newStatus = "provisioning"
 		}
 
-		// Don't overwrite lifecycle statuses set by the hub (idle, connected, deleted, error)
-		protectedStatus := c.status == "idle" || c.status == "connected" || c.status == "deleted" || c.status == "error"
-		if newStatus != c.status && !(protectedStatus && newStatus == "starting") {
-			_, _ = s.db.Exec(`UPDATE claws SET status=? WHERE id=?`, newStatus, c.id)
-			log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
-				c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
-			s.broadcastToUsers(c.tenantID, types.WSMessage{
-				Type:    "claw_status",
-				Payload: map[string]string{"claw_id": c.id, "status": newStatus},
-			})
+		// Only overwrite provisioning/starting statuses — never clobber hub-managed
+		// statuses (idle, connected, deleted, error) which have higher semantic meaning.
+		// Use a conditional UPDATE so we race-safely check the current DB value.
+		if newStatus != c.status {
+			res, _ := s.db.Exec(
+				`UPDATE claws SET status=? WHERE id=? AND status IN ('provisioning','starting')`,
+				newStatus, c.id)
+			if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
+					c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
+				s.broadcastToUsers(c.tenantID, types.WSMessage{
+					Type:    "claw_status",
+					Payload: map[string]string{"claw_id": c.id, "status": newStatus},
+				})
+			}
 		}
 	}
 }
