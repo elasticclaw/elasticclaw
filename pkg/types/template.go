@@ -244,6 +244,7 @@ type FactoryConfig struct {
 	DoneStatus        string `yaml:"done_status,omitempty"`  // claw moves issue here when done
 	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
 	Template          string `yaml:"template"`           // template name (must be pushed to hub)
+	Provider          string `yaml:"provider,omitempty"` // override the default provider for this factory
 	NamePattern       string   `yaml:"name_pattern,omitempty"` // claw name pattern, e.g. "{issue_id}"
 	WebhookSecret     string   `yaml:"webhook_secret,omitempty"` // HMAC-SHA256 secret for validating webhooks
 	Tags              []string `yaml:"tags,omitempty"`          // tags applied to created claws
@@ -259,6 +260,9 @@ type FactoryConfig struct {
 }
 
 type ProviderConfig struct {
+	// Type identifies the provider kind (e.g. "noop" for tests).
+	Type string `yaml:"type,omitempty"`
+
 	// Daytona
 	APIURL string `yaml:"api_url,omitempty"`
 	APIKey string `yaml:"api_key,omitempty"`

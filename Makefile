@@ -46,6 +46,9 @@ install:
 test:
 	go test -v ./...
 
+test-factory: ## Run factory integration tests
+	go test -v -tags integration -timeout 60s ./pkg/hub/... -run TestFactory
+
 # Run only bootstrap unit tests (fast, no infra needed)
 test-bootstrap:
 	go test -v ./pkg/hub/ -run TestBootstrap

@@ -548,7 +548,11 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	if tokenForPR == "" {
 		tokenForPR = token
 	}
-	data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+	data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
 	if err != nil {
 		return false
 	}
@@ -571,6 +575,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		// Stop polling this closed PR so we only notify once.
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+		// Stop polling this closed PR so the claw doesn't get duplicate notifications.
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 		return false
 	}
 

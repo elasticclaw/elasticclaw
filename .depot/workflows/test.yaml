@@ -25,6 +25,9 @@ jobs:
       - name: Bootstrap script tests (with shellcheck)
         run: go test -v ./pkg/hub/ -run TestBootstrap
 
+      - name: Factory integration tests
+        run: make test-factory
+
       - name: Install script tests (with shellcheck)
         run: go test -v ./pkg/install/ -run Test
 

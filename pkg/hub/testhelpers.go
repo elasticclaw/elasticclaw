@@ -1,0 +1,75 @@
+//go:build !production
+
+package hub
+
+import (
+	"database/sql"
+	"net/http"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
+
+// NewTestServerWithConfig creates a Server for integration testing with mock backends.
+// Only call from tests. Uses the provided githubBaseURL and linearBaseURL to override
+// external API calls so tests can use httptest.Server instances.
+func NewTestServerWithConfig(t interface {
+	Helper()
+	Cleanup(func())
+}, cfg *types.HubConfig, githubBaseURL, linearBaseURL string) (*Server, *sql.DB) {
+	db, err := openDB(":memory:")
+	if err != nil {
+		panic("NewTestServerWithConfig: openDB: " + err.Error())
+	}
+	// Keep SQLite in-memory on a single connection so all goroutines see the same DB.
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	if cfg == nil {
+		cfg = &types.HubConfig{}
+	}
+
+	// Provision a default tenant for the test server
+	_, _ = db.Exec(
+		`INSERT OR IGNORE INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"test-tenant-id", "test", "test-token", cfg.ClawToken,
+	)
+
+	// Push an empty "elasticclaw" template so resolveTemplateFiles doesn't fail
+	for _, factory := range cfg.Factories {
+		if factory.Template != "" {
+			_, _ = db.Exec(
+				`INSERT OR IGNORE INTO hub_templates(name,files,created_at,updated_at) VALUES(?,?,datetime('now'),datetime('now'))`,
+				factory.Template, `{}`,
+			)
+		}
+	}
+
+	s := &Server{
+		db:            db,
+		hubCfg:        cfg,
+		claws:         make(map[string]*clawConn),
+		users:         make(map[string]*userConn),
+		githubBaseURL: githubBaseURL,
+		linearBaseURL: linearBaseURL,
+	}
+	// Register routes (same as Run but without serving web UI or starting relay)
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	s.mux = mux
+	return s, db
+}
+
+// Handler returns the server's HTTP handler (mux). Must be called after setupRoutes.
+func (s *Server) Handler() http.Handler {
+	return s.mux
+}
+
+// PollPRsForTest triggers an immediate PR poll (for testing without waiting for the ticker).
+func (s *Server) PollPRsForTest() {
+	s.pollAllPRs()
+}
+
+// StartPRWatcherForTest starts the PR watcher background goroutine.
+func (s *Server) StartPRWatcherForTest() {
+	s.startPRWatcher()
+}
