@@ -1865,7 +1865,12 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	var issueID string
 	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
 	if issueID != "" {
-		wakeContent = "Read your BOOTSTRAP.md now. Then immediately start working on the task — do not ask for permission or confirmation. Explore the codebase, implement the change, and report back with what you did."
+		wakeContent = `Read your BOOTSTRAP.md now. Then:
+1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
+2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
+3. If you hit something interesting or unexpected, say so.
+4. When you open a PR, summarize what you did and what the PR contains.
+5. Do NOT ask for permission at any point. Just work and keep the user informed.`
 	}
 	wakeMsg := types.HubMessage{
 		ID:      uuid.New().String(),

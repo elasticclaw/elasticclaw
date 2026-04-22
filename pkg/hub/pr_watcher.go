@@ -165,6 +165,13 @@ func (s *Server) pollAllPRs() {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
+		if r.clawStatus == "idle" {
+			var prCount int
+			if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE id=?`, r.pr.id).Scan(&prCount); err == nil && prCount == 0 {
+				// PR was removed while handling close/merge state, so skip follow-up checks.
+				continue
+			}
+		}
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
@@ -535,7 +542,7 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
-// If so, terminates the claw and returns true.
+// It terminates the claw only when merged, and returns true only in that case.
 func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
@@ -552,18 +559,23 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		return false // still open
 	}
 
-	// PR is merged or closed — terminate the claw
 	clawID := pr.clawID
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
 		return false
 	}
 
-	action := "merged"
-	if !merged {
-		action = "closed"
+	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
+	if state == "closed" && !merged {
+		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
+		// Stop polling this closed PR so we only notify once.
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
+		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+		return false
 	}
-	log.Printf("[pr-watcher] PR %s#%d %s — terminating claw %s", pr.repo, pr.prNumber, action, clawID[:8])
+
+	// PR was merged — terminate the claw.
+	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	var providerID, provider string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
@@ -573,7 +585,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, fmt.Sprintf("factory: PR %s", action))
+		cc.conn.Close(1000, "factory: PR merged")
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()

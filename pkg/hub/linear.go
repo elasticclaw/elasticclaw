@@ -552,8 +552,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 
 	// Keep the claw running — it stays connected to watch for CI failures,
-	// bugbot comments, and PR events. The claw will be terminated when the
-	// PR is merged or closed (polled by checkPRMerged).
+	// bugbot comments, and PR events. The claw is terminated when the PR is
+	// merged; if it is closed without merge, the claw is notified and decides
+	// what to do (polled by checkPRMerged).
 	// Just mark it as 'watching' so the UI shows it differently.
 	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
 	if err != nil {
@@ -568,7 +569,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
 	})
 	// Notify the claw it's in watch mode
-	s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged or closed.")
+	s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.")
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.
