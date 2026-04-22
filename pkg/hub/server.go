@@ -1770,13 +1770,14 @@ func (s *Server) syncReplicatedVMs() {
 		return
 	}
 
-	// Find claws provisioned on Replicated that aren't in a terminal state
+	// Find claws provisioned on Replicated that are still in a VM-managed state.
+	// Exclude hub-managed statuses (idle, connected) — those claws don't need VM polling.
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id, name, provider_id, status
 		FROM claws
 		WHERE provider = 'replicated'
 		  AND provider_id != ''
-		  AND status NOT IN ('failed', 'error', 'offline', 'deleted')
+		  AND status IN ('provisioning', 'starting')
 	`)
 	if err != nil {
 		log.Printf("pollProviderStatus: query error: %v", err)
