@@ -397,7 +397,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=?`, providerID, clawID)
+				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
