@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -391,9 +392,13 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		case "vercel":
 			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
 		case "noop":
-			// Test provider — skip provisioning, mark connected immediately so fake bridge can connect
-			providerID := "noop-vm-" + clawID[:8]
-			_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=?`, providerID, clawID)
+			// Test provider — only allowed when explicitly enabled via env var.
+			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
+				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
+			} else {
+				providerID := "noop-vm-" + clawID[:8]
+				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=?`, providerID, clawID)
+			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
@@ -436,16 +441,13 @@ func (s *Server) terminateClawForIssue(issueID string) {
 }
 
 func (s *Server) defaultProvider() string {
-	var typedProvider string
 	for name, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" {
+		// Only consider providers with real credentials, not Type-only stubs (e.g. noop)
+		if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
 			return name
 		}
-		if typedProvider == "" && p.Type != "" {
-			typedProvider = name
-		}
 	}
-	return typedProvider
+	return ""
 }
 
 func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) string {

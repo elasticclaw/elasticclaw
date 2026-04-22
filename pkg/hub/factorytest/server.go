@@ -55,6 +55,8 @@ func (ts *TestServer) WaitForClawStatus(t *testing.T, clawID, status string, tim
 
 func NewTestServer(t *testing.T) *TestServer {
 	t.Helper()
+	// Enable noop provider for tests
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	gh := NewMockGitHub(t)
 	li := NewMockLinear(t)
 
