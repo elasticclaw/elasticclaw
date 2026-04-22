@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2 } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -29,7 +29,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, uploadFiles, type ClawPR } from "@/lib/api"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 
@@ -787,6 +787,10 @@ const MessageBubble = memo(function MessageBubble({
     )
   }
 
+  const { body, attachments: parsedAttachments } = isUser
+    ? splitAttachmentsFooter(message.content)
+    : { body: message.content, attachments: [] as ParsedAttachment[] }
+
   return (
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
@@ -811,13 +815,89 @@ const MessageBubble = memo(function MessageBubble({
           </span>
         </div>
         {isUser ? (
-          <p className="text-sm whitespace-pre-wrap text-foreground">{message.content}</p>
+          <p className="text-sm whitespace-pre-wrap text-foreground">{body}</p>
         ) : (
-          <MarkdownContent content={message.content} className="text-sm" />
+          <MarkdownContent content={body} className="text-sm" />
+        )}
+        {parsedAttachments.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {parsedAttachments.map((a, i) => (
+              <div
+                key={`${a.path}-${i}`}
+                className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/40 px-2 py-0.5 text-xs text-muted-foreground"
+                title={`${a.path} (${a.mimetype})`}
+              >
+                <FileIcon className="size-3" />
+                <span className="max-w-[14rem] truncate">{a.name}</span>
+                <span>{a.sizeLabel}</span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>
   )})
+
+// ─── Attachments (shared helpers) ────────────────────────────────────────────
+
+const MAX_FILE_BYTES = 20 * 1024 * 1024
+const MAX_FILES_PER_MSG = 10
+const ATTACHMENTS_MARKER = "\n\n[Attachments]\n"
+
+interface PendingAttachment {
+  localId: string
+  name: string
+  size: number
+  mimetype: string
+  path?: string
+  status: "uploading" | "ready" | "error"
+  error?: string
+}
+
+interface ParsedAttachment {
+  name: string
+  path: string
+  mimetype: string
+  sizeLabel: string
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+// buildAttachmentsFooter renders the paths/sizes block that gets appended to
+// a user message so the agent can Read the files at the paths the bridge wrote.
+function buildAttachmentsFooter(atts: PendingAttachment[]): string {
+  if (atts.length === 0) return ""
+  const lines = atts
+    .filter((a) => a.status === "ready" && a.path)
+    .map((a) => `- ${a.name} — ${a.path} (${a.mimetype}, ${formatBytes(a.size)})`)
+  if (lines.length === 0) return ""
+  return `${ATTACHMENTS_MARKER}${lines.join("\n")}`
+}
+
+// splitAttachmentsFooter extracts the attachments block from stored message
+// content so history can render chips without a schema change. If the marker
+// is absent or the block is malformed, the raw content is returned unchanged.
+function splitAttachmentsFooter(content: string): { body: string; attachments: ParsedAttachment[] } {
+  const idx = content.indexOf(ATTACHMENTS_MARKER)
+  if (idx < 0) return { body: content, attachments: [] }
+  const body = content.slice(0, idx)
+  const tail = content.slice(idx + ATTACHMENTS_MARKER.length)
+  const atts: ParsedAttachment[] = []
+  for (const line of tail.split("\n")) {
+    // Expected: "- name — path (mimetype, size)". Path is greedy so backtracking
+    // anchors to the *last* " (mime, size)" on the line — otherwise a filename
+    // like "report (2).pdf" would truncate the path at the embedded "(".
+    const m = /^-\s+(.+?)\s+—\s+(.+)\s+\(([^,]+),\s*([^)]+)\)\s*$/.exec(line)
+    if (!m) continue
+    atts.push({ name: m[1], path: m[2], mimetype: m[3], sizeLabel: m[4] })
+  }
+  if (atts.length === 0) return { body: content, attachments: [] }
+  return { body, attachments: atts }
+}
 
 // ─── ClawChatView ─────────────────────────────────────────────────────────────
 // Extracted so scroll refs are only live when this branch is mounted.
@@ -841,8 +921,62 @@ function ClawChatView({
   const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const [dragHover, setDragHover] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const addFiles = useCallback((picked: File[]) => {
+    if (picked.length === 0) return
+    const accepted: File[] = []
+    for (const f of picked) {
+      if (f.size > MAX_FILE_BYTES) {
+        alert(`${f.name} is larger than 20 MB — skipped.`)
+        continue
+      }
+      accepted.push(f)
+    }
+    if (accepted.length === 0) return
+    if (attachments.length + accepted.length > MAX_FILES_PER_MSG) {
+      alert(`At most ${MAX_FILES_PER_MSG} files per message.`)
+      return
+    }
+    const entries: PendingAttachment[] = accepted.map((f) => ({
+      localId: `pa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: f.name,
+      size: f.size,
+      mimetype: f.type || "application/octet-stream",
+      status: "uploading",
+    }))
+    setAttachments((prev) => [...prev, ...entries])
+
+    uploadFiles(claw.id, accepted)
+      .then((uploaded) => {
+        setAttachments((prev) => {
+          const next = [...prev]
+          entries.forEach((e, i) => {
+            const idx = next.findIndex((p) => p.localId === e.localId)
+            if (idx >= 0 && uploaded[i]) {
+              next[idx] = { ...next[idx], status: "ready", path: uploaded[i].path }
+            }
+          })
+          return next
+        })
+      })
+      .catch((err) => {
+        console.error("upload failed", err)
+        setAttachments((prev) => prev.map((p) =>
+          entries.some((e) => e.localId === p.localId)
+            ? { ...p, status: "error", error: String(err) }
+            : p
+        ))
+      })
+  }, [attachments.length, claw.id])
+
+  const removeAttachment = useCallback((localId: string) => {
+    setAttachments((prev) => prev.filter((p) => p.localId !== localId))
+  }, [])
 
   const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
     clawId: claw.id,
@@ -889,30 +1023,77 @@ function ClawChatView({
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)
 
+  const stillUploading = attachments.some((a) => a.status === "uploading")
+  const hasErrored = attachments.some((a) => a.status === "error")
+  const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const text = input.trim()
-    if (!text) return
+    if (stillUploading || hasErrored) return
+    const footer = buildAttachmentsFooter(attachments)
+    const trimmed = input.trim()
+    if (!trimmed && !footer) return
     setInput("")
+    setAttachments([])
     pinnedToBottom.current = true
     if (panelTextareaRef.current) {
       panelTextareaRef.current.style.height = "auto"
       panelTextareaRef.current.style.overflowY = "hidden"
     }
-    if (isSlashCommand(text, "/cancel")) {
+    if (isSlashCommand(trimmed, "/cancel")) {
       setCmdToast("Hard cancel not yet implemented")
       setTimeout(() => setCmdToast(null), 3000)
       return
     }
-    if (isSlashCommand(text, "/stop")) {
+    if (isSlashCommand(trimmed, "/stop")) {
       onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
       return
     }
-    onSendMessage(text)
+    const payload = trimmed + footer
+    onSendMessage(payload)
+  }
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault()
+      setDragHover(true)
+    }
+  }
+  const onDragLeave = () => setDragHover(false)
+  const onDrop = (e: React.DragEvent) => {
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    e.preventDefault()
+    setDragHover(false)
+    addFiles(Array.from(e.dataTransfer.files))
+  }
+  const onPaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const files: File[] = []
+    for (const it of Array.from(items)) {
+      if (it.kind === "file") {
+        const f = it.getAsFile()
+        if (f) files.push(f)
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault()
+      addFiles(files)
+    }
   }
 
   return (
-    <main className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden">
+    <main
+      className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden relative"
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragHover && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring rounded-sm">
+          <div className="text-sm text-foreground font-medium">Drop files to attach</div>
+        </div>
+      )}
       <header className="border-b border-border">
         <div className="px-6 pt-2">
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
@@ -981,37 +1162,98 @@ function ClawChatView({
             {cmdToast}
           </div>
         )}
-        <form onSubmit={handleSubmit} className="flex gap-2 items-end max-w-3xl mx-auto">
-          <textarea
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              const el = e.target
-              el.style.height = "auto"
-              const maxH = 200
-              if (el.scrollHeight <= maxH) {
-                el.style.height = el.scrollHeight + "px"
-                el.style.overflowY = "hidden"
-              } else {
-                el.style.height = maxH + "px"
-                el.style.overflowY = "auto"
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                if (input.trim()) handleSubmit(e as unknown as React.FormEvent)
-              }
-            }}
-            ref={panelTextareaRef}
-            placeholder="Message claw or /stop"
-            rows={1}
-            className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
-          />
-          <Button type="submit" size="icon" disabled={!input.trim()} className="shrink-0">
-            <Send className="size-4" />
-            <span className="sr-only">Send message</span>
-          </Button>
+        <form
+          onSubmit={handleSubmit}
+          className="flex flex-col gap-2 max-w-3xl mx-auto rounded-md"
+        >
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {attachments.map((a) => (
+                <div
+                  key={a.localId}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
+                    a.status === "error"
+                      ? "border-destructive/50 bg-destructive/10 text-destructive"
+                      : "border-border bg-secondary text-foreground"
+                  )}
+                  title={a.error || a.path || a.name}
+                >
+                  {a.status === "uploading" ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : a.status === "error" ? (
+                    <AlertCircle className="size-3" />
+                  ) : (
+                    <FileIcon className="size-3" />
+                  )}
+                  <span className="max-w-[16rem] truncate">{a.name}</span>
+                  <span className="text-muted-foreground">{formatBytes(a.size)}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.localId)}
+                    className="ml-0.5 text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove ${a.name}`}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-2 items-end">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) addFiles(Array.from(e.target.files))
+                e.target.value = ""
+              }}
+            />
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={() => fileInputRef.current?.click()}
+              className="shrink-0"
+              title="Attach files"
+            >
+              <Paperclip className="size-4" />
+              <span className="sr-only">Attach files</span>
+            </Button>
+            <textarea
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value)
+                const el = e.target
+                el.style.height = "auto"
+                const maxH = 200
+                if (el.scrollHeight <= maxH) {
+                  el.style.height = el.scrollHeight + "px"
+                  el.style.overflowY = "hidden"
+                } else {
+                  el.style.height = maxH + "px"
+                  el.style.overflowY = "auto"
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  if (canSubmit) handleSubmit(e as unknown as React.FormEvent)
+                }
+              }}
+              onPaste={onPaste}
+              ref={panelTextareaRef}
+              placeholder="Message claw, /stop, or attach files"
+              rows={1}
+              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
+            />
+            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0">
+              <Send className="size-4" />
+              <span className="sr-only">Send message</span>
+            </Button>
+          </div>
         </form>
       </div>
 

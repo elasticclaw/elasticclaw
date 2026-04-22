@@ -107,6 +107,31 @@ export async function sendMessage(clawId: string, content: string): Promise<ApiM
   })
 }
 
+export interface UploadedAttachment {
+  name: string
+  path: string
+  size: number
+  mimetype: string
+}
+
+export async function uploadFiles(clawId: string, files: File[]): Promise<UploadedAttachment[]> {
+  const token = await resolveToken()
+  const hubBase = getHubUrl()
+  const url = hubBase ? `${hubBase}/api/files/${clawId}` : `/hub/api/files/${clawId}`
+  const form = new FormData()
+  for (const f of files) form.append("files", f, f.name)
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  })
+  if (!res.ok) {
+    throw new Error(`upload failed ${res.status}: ${await res.text()}`)
+  }
+  const data = await res.json()
+  return data.files as UploadedAttachment[]
+}
+
 export async function createClaw(req: CreateClawRequest): Promise<ApiClaw> {
   return apiFetch<ApiClaw>("/api/claws", {
     method: "POST",

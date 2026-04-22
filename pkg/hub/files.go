@@ -1,0 +1,159 @@
+package hub
+
+import (
+	"context"
+	"encoding/base64"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
+	"nhooyr.io/websocket/wsjson"
+)
+
+// File upload limits for POST /api/files/{clawId}.
+const (
+	maxFileBytes    = 20 << 20 // 20MB per file
+	maxTotalBytes   = 50 << 20 // 50MB per request
+	maxFilesPerReq  = 10
+	fileAckTimeout  = 30 * time.Second
+	uploadFormField = "files"
+)
+
+// fileAck is the hub<->claw ack envelope for a file write.
+// Bridge sends this back after writing (or failing to write) a file to disk.
+type fileAck struct {
+	RequestID string `json:"request_id"`
+	Path      string `json:"path"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+// filePayload is what the hub sends to the claw-bridge over WS as type="file".
+type filePayload struct {
+	RequestID string `json:"request_id"`
+	Filename  string `json:"filename"`
+	MimeType  string `json:"mimetype"`
+	Size      int64  `json:"size"`
+	Data      string `json:"data"` // base64
+}
+
+type uploadedAttachment struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	MimeType string `json:"mimetype"`
+}
+
+// handleFileUpload accepts multipart/form-data under the "files" field and
+// forwards each file to the claw-bridge over the existing WebSocket. It waits
+// for matching file_ack frames and returns the on-disk paths for use in the
+// subsequent message submission.
+func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	if clawID == "" {
+		http.Error(w, "missing claw id", http.StatusBadRequest)
+		return
+	}
+
+	// Bound the request body before parsing multipart.
+	r.Body = http.MaxBytesReader(w, r.Body, maxTotalBytes+(1<<20))
+	if err := r.ParseMultipartForm(maxTotalBytes); err != nil {
+		http.Error(w, "upload too large or malformed", http.StatusBadRequest)
+		return
+	}
+	files := r.MultipartForm.File[uploadFormField]
+	if len(files) == 0 {
+		http.Error(w, "no files", http.StatusBadRequest)
+		return
+	}
+	if len(files) > maxFilesPerReq {
+		http.Error(w, "too many files", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		http.Error(w, "claw not connected", http.StatusConflict)
+		return
+	}
+
+	out := make([]uploadedAttachment, 0, len(files))
+	for _, fh := range files {
+		if fh.Size > maxFileBytes {
+			http.Error(w, "file too large: "+fh.Filename, http.StatusRequestEntityTooLarge)
+			return
+		}
+		f, err := fh.Open()
+		if err != nil {
+			http.Error(w, "open: "+fh.Filename, http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(f)
+		_ = f.Close()
+		if err != nil {
+			http.Error(w, "read: "+fh.Filename, http.StatusBadRequest)
+			return
+		}
+		mime := fh.Header.Get("Content-Type")
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+
+		reqID := uuid.New().String()
+		ch := make(chan fileAck, 1)
+		s.fileAckMu.Lock()
+		s.fileAckWaiters[reqID] = ch
+		s.fileAckMu.Unlock()
+
+		payload := filePayload{
+			RequestID: reqID,
+			Filename:  fh.Filename,
+			MimeType:  mime,
+			Size:      fh.Size,
+			Data:      base64.StdEncoding.EncodeToString(data),
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), fileAckTimeout)
+		if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "file", Payload: payload}); err != nil {
+			cancel()
+			s.fileAckMu.Lock()
+			delete(s.fileAckWaiters, reqID)
+			s.fileAckMu.Unlock()
+			http.Error(w, "send to claw failed", http.StatusBadGateway)
+			return
+		}
+
+		select {
+		case ack := <-ch:
+			cancel()
+			if !ack.OK {
+				http.Error(w, "claw rejected file: "+ack.Error, http.StatusBadGateway)
+				return
+			}
+			out = append(out, uploadedAttachment{
+				Name:     fh.Filename,
+				Path:     ack.Path,
+				Size:     fh.Size,
+				MimeType: mime,
+			})
+		case <-ctx.Done():
+			cancel()
+			s.fileAckMu.Lock()
+			delete(s.fileAckWaiters, reqID)
+			s.fileAckMu.Unlock()
+			http.Error(w, "timeout waiting for claw ack", http.StatusGatewayTimeout)
+			return
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{"files": out})
+}
+
