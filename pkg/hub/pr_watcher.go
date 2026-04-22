@@ -168,8 +168,8 @@ func (s *Server) pollAllPRs() {
 		factory, _ := s.findFactoryForClaw(r.pr.clawID)
 		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
 
-		// Check if PR is merged/closed for idle claws, or for connected claws only when pipeline-driven.
-		if (r.clawStatus == "idle" || (r.clawStatus == "connected" && isPipelineDriven)) && s.checkPRMerged(r.pr, token) {
+		// Check if PR is merged/closed for any non-terminal claw status.
+		if s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
