@@ -68,8 +68,12 @@ type FactoryView struct {
 	Template         string   `json:"template"`
 	NamePattern      string   `json:"namePattern"`
 	WebhookSecretSet bool     `json:"webhookSecretSet"`
+	WebhookSecretRef string   `json:"webhookSecretRef,omitempty"`
+	PipelineYAML     string   `json:"pipelineYAML,omitempty"`
 	Tags             []string `json:"tags"`
 	Color            string   `json:"color"`
+	Labels           []string `json:"labels,omitempty"`
+	AssignedTo       string   `json:"assigned_to,omitempty"`
 	Enabled          bool     `json:"enabled"`
 }
 
@@ -145,8 +149,12 @@ type FactoryPatch struct {
 	Template         string   `json:"template"`
 	NamePattern      string   `json:"namePattern,omitempty"`
 	WebhookSecret    string   `json:"webhookSecret,omitempty"`
+	WebhookSecretRef string   `json:"webhookSecretRef,omitempty"`
+	PipelineYAML     string   `json:"pipelineYAML,omitempty"`
 	Tags             []string `json:"tags,omitempty"`
 	Color            string   `json:"color,omitempty"`
+	Labels           []string `json:"labels,omitempty"`
+	AssignedTo       string   `json:"assigned_to,omitempty"`
 	Enabled          *bool    `json:"enabled,omitempty"`
 }
 
@@ -279,9 +287,13 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			TerminateOnLeave: f.TerminateOnLeave,
 			Template:         f.Template,
 			NamePattern:      f.NamePattern,
-			WebhookSecretSet: f.WebhookSecret != "",
+			WebhookSecretSet: f.WebhookSecret != "" || f.WebhookSecretRef != "",
+			WebhookSecretRef: f.WebhookSecretRef,
+			PipelineYAML:     f.PipelineYAML,
 			Tags:             f.Tags,
 			Color:            f.Color,
+			Labels:           f.Labels,
+			AssignedTo:       f.AssignedTo,
 			Enabled:          isFactoryEnabled(f),
 		})
 	}
@@ -539,7 +551,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
 				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
 				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
-				Tags: fp.Tags, Color: fp.Color, Enabled: fp.Enabled,
+				WebhookSecretRef: fp.WebhookSecretRef, PipelineYAML: fp.PipelineYAML,
+				Tags: fp.Tags, Color: fp.Color, Labels: fp.Labels,
+				AssignedTo: fp.AssignedTo, Enabled: fp.Enabled,
 			})
 		}
 		updatedCfg.Factories = factories

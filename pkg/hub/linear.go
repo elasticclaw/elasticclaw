@@ -34,6 +34,12 @@ type linearWebhookPayload struct {
 			Key  string `json:"key"`
 			Name string `json:"name"`
 		} `json:"team"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels,omitempty"`
+		Assignee *struct {
+			Name string `json:"name"`
+		} `json:"assignee,omitempty"`
 	} `json:"data"`
 	UpdatedFrom *struct {
 		State *struct {
@@ -78,11 +84,17 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
+	s.mu.RLock()
+	integrations := s.hubCfg.Integrations
+	factories := s.hubCfg.Factories
+	secrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+
 	hasAnySecret := false
 
 	// Check integration-level secrets
-	if s.hubCfg.Integrations != nil {
-		for _, li := range s.hubCfg.Integrations.Linear {
+	if integrations != nil {
+		for _, li := range integrations.Linear {
 			if li.WebhookSecret == "" {
 				continue
 			}
@@ -97,13 +109,21 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	}
 
 	// Check factory-level secrets
-	if s.hubCfg.Factories != nil {
-		for _, factory := range s.hubCfg.Factories {
-			if factory.Integration != "linear" || factory.WebhookSecret == "" {
+	if factories != nil {
+		for _, factory := range factories {
+			if factory.Integration != "linear" {
+				continue
+			}
+			// Resolve secret: inline value or named ref
+			secret := factory.WebhookSecret
+			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+				secret = secrets[factory.WebhookSecretRef]
+			}
+			if secret == "" {
 				continue
 			}
 			hasAnySecret = true
-			mac := hmac.New(sha256.New, []byte(factory.WebhookSecret))
+			mac := hmac.New(sha256.New, []byte(secret))
 			mac.Write(body)
 			expected := hex.EncodeToString(mac.Sum(nil))
 			if hmac.Equal([]byte(sig), []byte(expected)) {
@@ -143,6 +163,53 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 		if factory.Team != "" && !strings.EqualFold(factory.Team, teamKey) {
 			continue
+		}
+
+		// Labels filter: all configured labels must be present on the issue (AND)
+		if len(factory.Labels) > 0 {
+			issueLabels := map[string]bool{}
+			for _, l := range payload.Data.Labels {
+				issueLabels[strings.ToLower(l.Name)] = true
+			}
+			allMatch := true
+			for _, required := range factory.Labels {
+				if !issueLabels[strings.ToLower(required)] {
+					allMatch = false
+					break
+				}
+			}
+			if !allMatch {
+				continue
+			}
+		}
+
+		// AssignedTo filter
+		if factory.AssignedTo != "" {
+			assignee := ""
+			if payload.Data.Assignee != nil {
+				assignee = payload.Data.Assignee.Name
+			}
+			wanted := strings.ToLower(strings.TrimSpace(factory.AssignedTo))
+			switch {
+			case wanted == "any":
+				if assignee == "" {
+					continue
+				}
+			case wanted == "none":
+				if assignee != "" {
+					continue
+				}
+			case strings.HasPrefix(wanted, "!"):
+				excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
+				if strings.EqualFold(assignee, excluded) {
+					continue
+				}
+			default:
+				target := strings.TrimPrefix(wanted, "@")
+				if !strings.EqualFold(assignee, target) {
+					continue
+				}
+			}
 		}
 
 		// Issue entering trigger status → create claw.
