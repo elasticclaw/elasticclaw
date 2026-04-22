@@ -542,7 +542,7 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
-// If so, terminates the claw and returns true.
+// It terminates the claw only when merged, and returns true only in that case.
 func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
