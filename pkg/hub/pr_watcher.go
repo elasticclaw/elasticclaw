@@ -124,6 +124,7 @@ func (s *Server) pollAllPRs() {
 		WHERE cl.status NOT IN ('deleted','error','offline')
 	`)
 	if err != nil {
+		log.Printf("[pr-watcher] poll query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -150,11 +151,15 @@ func (s *Server) pollAllPRs() {
 
 	token := s.resolveGitHubToken()
 	if token == "" {
+		log.Printf("[pr-watcher] poll: no GitHub token, skipping %d PRs", len(prs))
 		return
 	}
 
+	log.Printf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
+
 	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
+		log.Printf("[pr-watcher] poll: claw=%s status=%s pr=%s", r.pr.clawID[:8], r.clawStatus, r.pr.prURL)
 		// Skip PRs for claws that were already terminated in this poll
 		if terminatedClaws[r.pr.clawID] {
 			continue
@@ -613,6 +618,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
+
+	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
 	if state != "closed" && !merged {
 		return false // still open
