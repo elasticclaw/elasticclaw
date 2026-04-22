@@ -182,6 +182,7 @@ func (s *Server) pollAllPRs() {
 		if r.autoFixBugbot || isPipelineDriven {
 			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 			if err != nil {
+				log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
 				continue
 			}
 			if r.autoFixBugbot {
