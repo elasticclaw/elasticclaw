@@ -38,7 +38,7 @@ interface SettingsData {
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean
+    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
   }>
 }
 
@@ -767,59 +767,14 @@ function ShortcutIntegrationsBlock({ settings, onSave, saving }: { settings: Set
   )
 }
 
-interface FactoryFormData {
-  name: string; workspace: string; team: string
-  triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-  webhookSecret: string; tags: string; color: string; originalName?: string
-}
-
 function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
-  const [generatedSecret, setGeneratedSecret] = useState<string>(() => {
-    // Generate a random hex secret for Shortcut webhook signing
-    const bytes = new Uint8Array(32)
-    crypto.getRandomValues(bytes)
-    return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("")
-  })
-  const [secretCopied, setSecretCopied] = useState(false)
-  const copySecret = () => {
-    navigator.clipboard.writeText(generatedSecret).then(() => { setSecretCopied(true); setTimeout(() => setSecretCopied(false), 2000) })
-  }
   const factories = settings.factories || []
-  const [availableTemplates, setAvailableTemplates] = useState<string[]>([])
-  useEffect(() => {
-    const hubUrl = getHubUrl()
-    const token = sessionStorage.getItem("ec_hub_token") || ""
-    fetch(`${hubUrl}/api/templates`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then((d: Array<{ name: string }>) => setAvailableTemplates(d.map(t => t.name)))
-      .catch(() => {})
-  }, [])
   const [copied, setCopied] = useState(false)
   const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
   const handleCopy = () => {
     if (!webhookUrl) return
     navigator.clipboard.writeText(webhookUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
-  }
-  const [editingFactory, setEditingFactory] = useState<number | null>(null)
-  const [editForm, setEditForm] = useState<FactoryFormData>({ name: "", workspace: "", team: "", triggerStatus: "", doneStatus: "", terminateOnLeave: true, template: "", webhookSecret: "", tags: "", color: "", originalName: "" })
-  const [form, setForm] = useState<FactoryFormData>({
-    name: "", workspace: "", team: "", triggerStatus: "Ready for Agent",
-    doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: ""
-  })
-
-  const formIntegration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
-  const workspaces = [
-    ...(settings.integrations?.linear?.map(l => ({ label: `Linear: ${l.workspace}`, value: `linear:${l.workspace}` })) || []),
-    ...(settings.integrations?.shortcut?.map(s => ({ label: `Shortcut: ${s.workspace}`, value: `shortcut:${s.workspace}` })) || []),
-  ]
-
-  function update(k: keyof FactoryFormData, v: string | boolean) {
-    if (k === "workspace" && typeof v === "string" && v.startsWith("shortcut:")) {
-      setForm(prev => ({ ...prev, workspace: v, team: "", webhookSecret: "" }))
-      return
-    }
-    setForm(prev => ({ ...prev, [k]: v }))
   }
 
   return (
@@ -864,230 +819,65 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </div>
       </div>
 
+      {/* Factories-as-code callout */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
+        <p className="font-medium mb-1">Factories are managed as code</p>
+        <p className="text-muted-foreground text-xs">
+          Define factories in <code className="bg-muted px-1 rounded">.elasticclaw/factories/</code> and push to this hub with{" "}
+          <code className="bg-muted px-1 rounded">elasticclaw factory push</code>.
+          Use <code className="bg-muted px-1 rounded">elasticclaw factory create</code> to scaffold a new factory.
+        </p>
+      </div>
+
       {factories.length > 0 && (
-        <div className="space-y-2 mb-6">
+        <div className="space-y-2">
           {factories.map((f, i) => (
-            <div key={i}>
-              {editingFactory === i ? (
-                <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
-                  <h4 className="text-sm font-semibold">Edit: {f.name}</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Name</label>
-                      <Input value={editForm.name} onChange={e => setEditForm(p => ({...p, name: e.target.value}))} className="h-8 text-sm" />
-                    </div>
-                    {f.integration !== "shortcut" && (
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
-                      <Input value={editForm.team} onChange={e => setEditForm(p => ({...p, team: e.target.value}))} className="h-8 text-sm" placeholder="ELA" />
-                    </div>
-                    )}
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
-                      <Input value={editForm.triggerStatus} onChange={e => setEditForm(p => ({...p, triggerStatus: e.target.value}))} className="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Done status</label>
-                      <Input value={editForm.doneStatus} onChange={e => setEditForm(p => ({...p, doneStatus: e.target.value}))} className="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Template</label>
-                      {availableTemplates.length > 0 ? (
-                        <select value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))}
-                          className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
-                          <option value="">Select template</option>
-                          {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      ) : (
-                        <Input value={editForm.template} onChange={e => setEditForm(p => ({...p, template: e.target.value}))} className="h-8 text-sm" />
-                      )}
-                    </div>
-                    {f.integration === "shortcut" ? (
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
-                      <p className="text-xs text-muted-foreground mb-1">{f.webhookSecretSet ? "Set — enter a new value to rotate it." : "Not set — enter a value to set it."}</p>
-                      <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="(generate a new secret or leave blank to keep)" />
-                    </div>
-                    ) : (
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
-                      <Input type="password" value={editForm.webhookSecret} onChange={e => setEditForm(p => ({...p, webhookSecret: e.target.value}))} className="h-8 text-sm" placeholder="whsec_... (leave blank to keep)" />
-                    </div>
-                    )}
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-                      <Input value={editForm.tags} onChange={e => setEditForm(p => ({...p, tags: e.target.value}))} className="h-8 text-sm" placeholder={f.integration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Color</label>
-                      <Input value={editForm.color} onChange={e => setEditForm(p => ({...p, color: e.target.value}))} className="h-8 text-sm" placeholder="teal, coral, amber…" />
-                    </div>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm cursor-pointer">
-                    <input type="checkbox" checked={editForm.terminateOnLeave} onChange={e => setEditForm(p => ({...p, terminateOnLeave: e.target.checked}))} />
-                    Terminate claw when issue leaves trigger status
-                  </label>
-                  <div className="flex gap-2">
-                    <Button size="sm" disabled={saving} onClick={() => {
-                      const { webhookSecret, tags: tagsStr, color, originalName, ...rest } = editForm
-                      const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
-                      const updated = factories.map((x, j) => j === i ? { ...x, ...rest, ...(originalName ? { originalName } : {}), ...(webhookSecret ? { webhookSecret } : {}), tags, color } : x)
-                      onSave({ factories: updated })
-                      setEditingFactory(null)
-                    }}>Save</Button>
-                    <Button size="sm" variant="outline" onClick={() => setEditingFactory(null)}>Cancel</Button>
-                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive ml-auto" disabled={saving}
-                      onClick={() => { onSave({ factories: factories.filter((_, j) => j !== i) }); setEditingFactory(null) }}>
-                      Remove
-                    </Button>
-                  </div>
+            <div key={i} className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium">{f.name}</p>
+                  {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
                 </div>
-              ) : (
-                <div className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium">{f.name}</p>
-                      {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {f.integration} · {f.team || f.workspace} · "{f.triggerStatus}" → {f.template}
-                      {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {/* Toggle switch — uses silent save to avoid global 'Saved' banner */}
-                    {savedFactory === f.name && (
-                      <span className="text-xs text-green-500">✓</span>
-                    )}
-                    <button
-                      onClick={async () => {
-                        const enabled = !(f.enabled ?? true)
-                        const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
-                        setSavedFactory(f.name)
-                        setTimeout(() => setSavedFactory(null), 1500)
-                        onSaveSilent({ factories: updated })
-                      }}
-                      className={cn(
-                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
-                        (f.enabled ?? true)
-                          ? "bg-green-600 border-2 border-transparent"
-                          : "bg-transparent border-2 border-muted-foreground/40"
-                      )}
-                      title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
-                    >
-                      <span className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
-                        (f.enabled ?? true)
-                          ? "bg-white translate-x-4"
-                          : "bg-muted-foreground/50 translate-x-0"
-                      )} />
-                    </button>
-                    <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
-                    <Button size="sm" variant="outline" onClick={() => {
-                      setEditingFactory(i)
-                      setEditForm({ name: f.name, workspace: f.workspace, team: f.team || "", triggerStatus: f.triggerStatus, doneStatus: f.doneStatus || "", terminateOnLeave: f.terminateOnLeave, template: f.template, webhookSecret: "", tags: (f.tags || []).join(", "), color: f.color || "", originalName: f.name })
-                    }}>Edit</Button>
-                  </div>
-                </div>
-              )}
+                <p className="text-xs text-muted-foreground">
+                  {f.integration} · {f.workspace} · &ldquo;{f.triggerStatus}&rdquo; → {f.template}
+                  {f.labels && f.labels.length > 0 && ` · labels: ${f.labels.join(", ")}`}
+                  {f.assigned_to && ` · assigned: ${f.assigned_to}`}
+                  {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {savedFactory === f.name && (
+                  <span className="text-xs text-green-500">✓</span>
+                )}
+                <button
+                  onClick={async () => {
+                    const enabled = !(f.enabled ?? true)
+                    const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
+                    setSavedFactory(f.name)
+                    setTimeout(() => setSavedFactory(null), 1500)
+                    onSaveSilent({ factories: updated })
+                  }}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
+                    (f.enabled ?? true)
+                      ? "bg-green-600 border-2 border-transparent"
+                      : "bg-transparent border-2 border-muted-foreground/40"
+                  )}
+                  title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
+                >
+                  <span className={cn(
+                    "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
+                    (f.enabled ?? true)
+                      ? "bg-white translate-x-4"
+                      : "bg-muted-foreground/50 translate-x-0"
+                  )} />
+                </button>
+                <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
+              </div>
             </div>
           ))}
         </div>
       )}
-
-      <div className="border border-border rounded-lg p-5 space-y-4">
-        <h3 className="text-sm font-semibold">New Factory</h3>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Factory name</label>
-            <Input value={form.name} onChange={e => update("name", e.target.value)} className="h-8 text-sm" placeholder="ELA feature work" />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Workspace</label>
-            <select value={form.workspace} onChange={e => update("workspace", e.target.value)}
-              className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
-              <option value="">Select workspace</option>
-              {workspaces.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
-            </select>
-          </div>
-          {formIntegration === "linear" && (
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Team key <span className="text-muted-foreground/60">(optional)</span></label>
-            <Input value={form.team} onChange={e => update("team", e.target.value)} className="h-8 text-sm" placeholder="ELA" />
-          </div>
-          )}
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Template</label>
-            {availableTemplates.length > 0 ? (
-              <select value={form.template} onChange={e => update("template", e.target.value)}
-                className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
-                <option value="">Select template</option>
-                {availableTemplates.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            ) : (
-              <Input value={form.template} onChange={e => update("template", e.target.value)} className="h-8 text-sm" placeholder="base (push templates first)" />
-            )}
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Trigger status</label>
-            <Input value={form.triggerStatus} onChange={e => update("triggerStatus", e.target.value)} className="h-8 text-sm" />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Done status</label>
-            <Input value={form.doneStatus} onChange={e => update("doneStatus", e.target.value)} className="h-8 text-sm" />
-          </div>
-        </div>
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input type="checkbox" checked={form.terminateOnLeave} onChange={e => update("terminateOnLeave", e.target.checked)} />
-          Terminate claw when issue leaves trigger status
-        </label>
-        {formIntegration === "linear" ? (
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Webhook Signing Secret</label>
-            <Input type="password" value={form.webhookSecret} onChange={e => update("webhookSecret", e.target.value)} className="h-8 text-sm" placeholder="whsec_... from Linear webhook settings" />
-          </div>
-        ) : (
-          <div>
-            <label className="text-xs text-muted-foreground mb-1.5 block">Webhook Signing Secret</label>
-            <p className="text-xs text-muted-foreground mb-2">Copy this secret and include it as <code className="bg-muted px-1 rounded">secret</code> when registering your Shortcut webhook.</p>
-            <div className="flex items-center gap-2">
-              <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate select-all">{generatedSecret}</code>
-              <Button variant="outline" size="sm" className="shrink-0" onClick={copySecret}>
-                {secretCopied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
-                <span className="ml-1.5">{secretCopied ? "Copied" : "Copy"}</span>
-              </Button>
-            </div>
-          </div>
-        )}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Tags <span className="text-muted-foreground/60">(comma-separated)</span></label>
-            <Input value={form.tags} onChange={e => update("tags", e.target.value)} className="h-8 text-sm" placeholder={formIntegration === "shortcut" ? "shortcut, feature" : "linear, feature"} />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Color</label>
-            <Input value={form.color} onChange={e => update("color", e.target.value)} className="h-8 text-sm" placeholder="teal, coral, amber…" />
-          </div>
-        </div>
-        <Button size="sm" disabled={saving || !form.name || !form.workspace || !form.template || !form.triggerStatus}
-          onClick={async () => {
-            const { webhookSecret, tags: tagsStr, color, ...rest } = form
-            const tags = tagsStr.split(",").map(t => t.trim()).filter(Boolean)
-            // Determine integration type from workspace value prefix
-            const integration = form.workspace.startsWith("shortcut:") ? "shortcut" : "linear"
-            const workspaceName = form.workspace.includes(":") ? form.workspace.split(":")[1] : form.workspace
-            // For Shortcut, use the generated secret (user copies it to their webhook registration)
-            const effectiveSecret = integration === "shortcut" ? generatedSecret : webhookSecret
-            const saved = await onSave({ factories: [...factories, { ...rest, workspace: workspaceName, integration, ...(effectiveSecret ? { webhookSecret: effectiveSecret } : {}), ...(tags.length ? { tags } : {}), ...(color ? { color } : {}) }] })
-            if (!saved) return
-            // Regenerate secret for next Shortcut factory
-            const newBytes = new Uint8Array(32); crypto.getRandomValues(newBytes)
-            setGeneratedSecret(Array.from(newBytes).map(b => b.toString(16).padStart(2, "0")).join(""))
-            setForm({ name: "", workspace: "", team: "", triggerStatus: "Ready for Agent", doneStatus: "In Review", terminateOnLeave: true, template: "base", webhookSecret: "", tags: "", color: "" })
-          }}>
-          Add Factory
-        </Button>
-      </div>
     </div>
   )
 }
