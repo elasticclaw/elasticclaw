@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -35,89 +34,49 @@ func FactoryCmd() *cobra.Command {
 // ── factory create ────────────────────────────────────────────────────────────
 
 func factoryCreateCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		name          string
+		integration   string
+		workspace     string
+		triggerStatus string
+		doneStatus    string
+		tmpl          string
+	)
+	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Bootstrap a new factory directory with interactive prompts",
+		Short: "Bootstrap a new factory directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runFactoryCreate()
+			if name == "" {
+				return fmt.Errorf("--name is required")
+			}
+			return runFactoryCreate(name, integration, workspace, triggerStatus, doneStatus, tmpl)
 		},
 	}
+	cmd.Flags().StringVar(&name, "name", "", "factory name (slug, used as directory name) [required]")
+	cmd.Flags().StringVar(&integration, "integration", "linear", "integration type (linear, shortcut, github)")
+	cmd.Flags().StringVar(&workspace, "workspace", "", "workspace name (defaults to --name)")
+	cmd.Flags().StringVar(&triggerStatus, "trigger-status", "In Progress", "issue status that triggers claw creation")
+	cmd.Flags().StringVar(&doneStatus, "done-status", "In Review", "issue status set when claw sends [DONE]")
+	cmd.Flags().StringVar(&tmpl, "template", "elasticclaw", "claw template to use")
+	return cmd
 }
 
-func prompt(scanner *bufio.Scanner, question, defaultVal string) string {
-	if defaultVal != "" {
-		fmt.Printf("%s [%s]: ", question, defaultVal)
-	} else {
-		fmt.Printf("%s: ", question)
-	}
-	scanner.Scan()
-	val := strings.TrimSpace(scanner.Text())
-	if val == "" {
-		return defaultVal
-	}
-	return val
-}
-
-func runFactoryCreate() error {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	name := prompt(scanner, "Factory name (slug, used as directory name)", "")
-	if name == "" {
-		return fmt.Errorf("factory name is required")
-	}
+func runFactoryCreate(name, integration, workspace, triggerStatus, doneStatus, tmpl string) error {
 	name = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
-
-	description := prompt(scanner, "Description (optional)", "")
-	integration := prompt(scanner, "Integration (linear / shortcut)", "linear")
-	workspace := prompt(scanner, "Workspace name", "")
 	if workspace == "" {
-		return fmt.Errorf("workspace is required")
-	}
-	triggerStatus := prompt(scanner, "Trigger status", "In Progress")
-	labelsRaw := prompt(scanner, "Labels to match, comma-separated (optional)", "")
-	assignedTo := prompt(scanner, "Assigned to filter (optional: @user, !@user, any, none)", "")
-	tmpl := prompt(scanner, "Template", "elasticclaw")
-	doneStatus := prompt(scanner, "Done status (issue status when claw sends [DONE])", "In Review")
-
-	// Parse labels
-	var labelsYAML string
-	if labelsRaw != "" {
-		parts := strings.Split(labelsRaw, ",")
-		var lb strings.Builder
-		lb.WriteString("labels: [")
-		for i, p := range parts {
-			if i > 0 {
-				lb.WriteString(", ")
-			}
-			lb.WriteString(strings.TrimSpace(p))
-		}
-		lb.WriteString("]")
-		labelsYAML = lb.String() + "\n"
-	} else {
-		labelsYAML = "# labels: [bug, claw-ready]\n"
-	}
-
-	var assignedToYAML string
-	if assignedTo != "" {
-		assignedToYAML = fmt.Sprintf("assigned_to: %q\n", assignedTo)
-	} else {
-		assignedToYAML = "# assigned_to: \"@username\"  # or !@username, any, none\n"
-	}
-
-	var descriptionYAML string
-	if description != "" {
-		descriptionYAML = fmt.Sprintf("description: %q\n\n", description)
+		workspace = name
 	}
 
 	factoryYAML := fmt.Sprintf(`name: %s
-%sintegration: %s
+integration: %s
 workspace: %s
 trigger_status: %q
-%s%swebhook_secret_ref: %s_webhook_secret
+# labels: [bug, claw-ready]
+# assigned_to: "@username"  # or !@username, any, none
+webhook_secret_ref: %s_webhook_secret
 
 template: %s
-`, name, descriptionYAML, integration, workspace, triggerStatus,
-		labelsYAML, assignedToYAML, name, tmpl)
+`, name, integration, workspace, triggerStatus, name, tmpl)
 
 	pipelineYAML := fmt.Sprintf(`# Pipeline for %s
 # Stages define the lifecycle of a factory claw.
