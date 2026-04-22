@@ -1537,6 +1537,7 @@ export function ConversationView({
 
   return (
     <ClawChatView
+      key={claw.id}
       claw={claw}
       messages={messages}
       onSendMessage={onSendMessage}
