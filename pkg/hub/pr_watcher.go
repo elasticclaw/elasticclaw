@@ -155,7 +155,9 @@ func (s *Server) pollAllPRs() {
 		return
 	}
 
-	log.Printf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
+	if len(prs) > 0 {
+		log.Printf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
+	}
 
 	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
