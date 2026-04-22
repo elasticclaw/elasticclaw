@@ -2,9 +2,7 @@ package factorytest
 
 import (
 	"database/sql"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -23,14 +21,6 @@ type TestServer struct {
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
 
 func (ts *TestServer) ClawToken() string { return "test-claw-token" }
-
-func (ts *TestServer) PostWebhook(path string, body []byte) *http.Response {
-	resp, err := http.Post(ts.HTTPSrv.URL+path, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		panic(err)
-	}
-	return resp
-}
 
 func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout time.Duration) string {
 	t.Helper()

@@ -117,6 +117,42 @@ func (s *Server) Run(opts ...RunOptions) error {
 	mux := http.NewServeMux()
 	s.mux = mux
 
+	s.registerRoutes(mux)
+
+	// Serve embedded web UI (static export)
+	if noWebUI {
+		log.Printf("[hub] web UI disabled (--no-web-ui)")
+	} else if webFS, err := webui.FS(); err == nil {
+		if _, indexErr := webFS.Open("index.html"); indexErr != nil {
+			log.Printf("[hub] web UI not built — run: make build-web")
+		} else {
+			s.serveWebUI(mux, webFS)
+			log.Printf("[hub] serving embedded web UI")
+		}
+	}
+
+	// Connect to relay if configured
+	s.mu.RLock()
+	relayURL := s.hubCfg.RelayURL
+	relaySecret := s.hubCfg.RelaySecret
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if relayURL != "" {
+		hubID := HubID(s.identity.PublicKey)
+		relayToken := RelayToken(relaySecret, hubID, clawToken)
+		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
+		log.Printf("[relay] connecting to %s", relayURL)
+		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
+	}
+
+	log.Printf("ElasticClaw Hub listening on %s", s.addr)
+	if s.hubCfg.UIPassword == "" {
+		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
+	}
+	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+}
+
+func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Claw WebSocket
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
 
@@ -167,38 +203,6 @@ func (s *Server) Run(opts ...RunOptions) error {
 		s.mu.RUnlock()
 		jsonOK(w, out)
 	}))
-
-	// Serve embedded web UI (static export)
-	if noWebUI {
-		log.Printf("[hub] web UI disabled (--no-web-ui)")
-	} else if webFS, err := webui.FS(); err == nil {
-		if _, indexErr := webFS.Open("index.html"); indexErr != nil {
-			log.Printf("[hub] web UI not built — run: make build-web")
-		} else {
-			s.serveWebUI(mux, webFS)
-			log.Printf("[hub] serving embedded web UI")
-		}
-	}
-
-	// Connect to relay if configured
-	s.mu.RLock()
-	relayURL := s.hubCfg.RelayURL
-	relaySecret := s.hubCfg.RelaySecret
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	if relayURL != "" {
-		hubID := HubID(s.identity.PublicKey)
-		relayToken := RelayToken(relaySecret, hubID, clawToken)
-		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
-		log.Printf("[relay] connecting to %s", relayURL)
-		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
-	}
-
-	log.Printf("ElasticClaw Hub listening on %s", s.addr)
-	if s.hubCfg.UIPassword == "" {
-		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
-	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
 }
 
 // corsMiddleware adds permissive CORS headers so the web UI can connect

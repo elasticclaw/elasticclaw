@@ -31,7 +31,9 @@ func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
 			},
 		},
 		"updatedFrom": map[string]interface{}{
-			"stateId": prevStatus,
+			"state": map[string]interface{}{
+				"name": prevStatus,
+			},
 		},
 	}
 	b, _ := json.Marshal(payload)

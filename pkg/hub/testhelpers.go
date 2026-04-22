@@ -53,57 +53,10 @@ func NewTestServerWithConfig(t interface {
 		linearBaseURL: linearBaseURL,
 	}
 	// Register routes (same as Run but without serving web UI or starting relay)
-	s.setupRoutes()
-	return s, db
-}
-
-// setupRoutes registers all HTTP handlers on s.mux without starting the HTTP server.
-// This mirrors the Run() logic but is separated so tests can wrap with httptest.Server.
-func (s *Server) setupRoutes() {
-	mux := s.newMux(false)
-	s.mux = mux
-}
-
-// newMux builds and returns the handler mux. noWebUI=true skips embedding the web UI.
-func (s *Server) newMux(noWebUI bool) *http.ServeMux {
 	mux := http.NewServeMux()
-
-	// Claw WebSocket
-	mux.HandleFunc("/claw/ws", s.handleClawWS)
-
-	// Browser WebSocket
-	mux.HandleFunc("/api/ws", s.handleUserWS)
-
-	// REST API
-	mux.HandleFunc("/api/login", s.handleLogin)
-	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
-	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
-	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
-	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
-	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
-	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
-
-	// Template store
-	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
-	mux.HandleFunc("/api/templates/{name}", s.withWebAuth(s.handleTemplateDetail))
-
-	// Integration webhooks
-	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
-	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))
-	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
-	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
-	mux.HandleFunc("/api/terminal/", s.handleTerminal)
-	mux.HandleFunc("/api/github/token/", s.handleGitHubToken)
-	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
-	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource))
-
-	// Health
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	return mux
+	s.registerRoutes(mux)
+	s.mux = mux
+	return s, db
 }
 
 // Handler returns the server's HTTP handler (mux). Must be called after setupRoutes.
