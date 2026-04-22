@@ -97,7 +97,7 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			s.pollAllPRs()
@@ -160,8 +160,8 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		// Check if PR is merged/closed for idle claws or pipeline-driven active claws
-		if (r.clawStatus == "idle" || r.clawStatus == "active") && s.checkPRMerged(r.pr, token) {
+		// Check if PR is merged/closed for idle claws or pipeline-driven connected claws.
+		if (r.clawStatus == "idle" || r.clawStatus == "connected") && s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
@@ -175,12 +175,22 @@ func (s *Server) pollAllPRs() {
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
-		if r.autoFixBugbot {
-			s.checkBugbotComments(r.pr, token)
-		}
-		// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
-		if s.findFactoryForClaw(r.pr.clawID) != nil {
-			s.checkPRComments(r.pr, token)
+		factory := s.findFactoryForClaw(r.pr.clawID)
+		if r.autoFixBugbot || factory != nil {
+			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
+			if err != nil {
+				continue
+			}
+			if r.autoFixBugbot {
+				s.checkBugbotComments(r.pr, commentsData)
+			}
+			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
+			if factory != nil {
+				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
+				// so the same comment is not injected twice with different templates.
+				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
+			}
+			s.updatePRCommentWatermark(r.pr, commentsData)
 		}
 	}
 }
@@ -277,15 +287,8 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 
 // checkPRComments forwards new comments from any human reviewer to the claw.
 // Used for pipeline-driven claws that need to react to review feedback.
-func (s *Server) checkPRComments(pr clawPR, token string) {
-	// Issue comments (PR thread comments)
-	commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", pr.repo, pr.prNumber), token)
-	if err != nil {
-		return
-	}
-
+func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugbot bool) {
 	var newComments []string
-	var maxID int64 = pr.lastCommentID
 
 	for _, c := range commentsData {
 		comment, _ := c.(map[string]interface{})
@@ -293,9 +296,6 @@ func (s *Server) checkPRComments(pr clawPR, token string) {
 		id := int64(idF)
 		if id <= pr.lastCommentID {
 			continue
-		}
-		if id > maxID {
-			maxID = id
 		}
 		user, _ := comment["user"].(map[string]interface{})
 		login, _ := user["login"].(string)
@@ -307,13 +307,12 @@ func (s *Server) checkPRComments(pr clawPR, token string) {
 		if strings.EqualFold(userType, "bot") || strings.HasSuffix(login, "[bot]") {
 			continue
 		}
+		if skipBugbot && isBugbotComment(login, body) {
+			continue
+		}
 
 		newComments = append(newComments, fmt.Sprintf("**@%s** commented on PR #%d:\n> %s\n[View](%s)",
 			login, pr.prNumber, strings.TrimSpace(body), htmlURL))
-	}
-
-	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
 	}
 
 	if len(newComments) == 0 {
@@ -324,14 +323,8 @@ func (s *Server) checkPRComments(pr clawPR, token string) {
 }
 
 // checkBugbotComments polls PR review comments for new bugbot entries.
-func (s *Server) checkBugbotComments(pr clawPR, token string) {
-	commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", pr.repo, pr.prNumber), token)
-	if err != nil {
-		return
-	}
-
+func (s *Server) checkBugbotComments(pr clawPR, commentsData []interface{}) {
 	var newComments []string
-	var maxID int64 = pr.lastCommentID
 
 	for _, c := range commentsData {
 		comment, _ := c.(map[string]interface{})
@@ -340,27 +333,14 @@ func (s *Server) checkBugbotComments(pr clawPR, token string) {
 		if id <= pr.lastCommentID {
 			continue
 		}
-		if id > maxID {
-			maxID = id
-		}
 		user, _ := comment["user"].(map[string]interface{})
 		login, _ := user["login"].(string)
 		body, _ := comment["body"].(string)
 		htmlURL, _ := comment["html_url"].(string)
-
-		// Match cursor bugbot (login starts with "cursor" or body has "cursor bot" signature)
-		isBugbot := strings.Contains(strings.ToLower(login), "cursor") ||
-			strings.Contains(strings.ToLower(body), "cursor bot") ||
-			strings.Contains(strings.ToLower(body), "bugbot")
-
-		if isBugbot {
+		if isBugbotComment(login, body) {
 			newComments = append(newComments, fmt.Sprintf("> %s\n\n[View comment](%s)",
 				strings.TrimSpace(body), htmlURL))
 		}
-	}
-
-	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
 	}
 
 	if len(newComments) == 0 {
@@ -371,6 +351,27 @@ func (s *Server) checkBugbotComments(pr clawPR, token string) {
 		pr.prNumber, pr.repo, pr.prURL, strings.Join(newComments, "\n\n---\n\n"))
 
 	s.injectUserMessage(pr.clawID, msg)
+}
+
+func isBugbotComment(login, body string) bool {
+	return strings.Contains(strings.ToLower(login), "cursor") ||
+		strings.Contains(strings.ToLower(body), "cursor bot") ||
+		strings.Contains(strings.ToLower(body), "bugbot")
+}
+
+func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{}) {
+	maxID := pr.lastCommentID
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if maxID > pr.lastCommentID {
+		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+	}
 }
 
 // injectUserMessage inserts a user-role message into the claw's conversation
