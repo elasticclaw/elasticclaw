@@ -97,7 +97,7 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			s.pollAllPRs()
