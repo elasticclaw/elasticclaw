@@ -195,6 +195,7 @@ func (s *Server) pollAllPRs() {
 			}
 			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
 			if isPipelineDriven {
+				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
 				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
 				// so the same comment is not injected twice with different templates.
 				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
@@ -328,6 +329,7 @@ func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugb
 		return
 	}
 
+	log.Printf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
 	s.injectUserMessage(pr.clawID, strings.Join(newComments, "\n\n"))
 }
 
