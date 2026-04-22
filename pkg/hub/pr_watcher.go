@@ -160,8 +160,11 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		// Check if PR is merged/closed for idle claws or pipeline-driven connected claws.
-		if (r.clawStatus == "idle" || r.clawStatus == "connected") && s.checkPRMerged(r.pr, token) {
+		factory, _ := s.findFactoryForClaw(r.pr.clawID)
+		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
+
+		// Check if PR is merged/closed for idle claws, or for connected claws only when pipeline-driven.
+		if (r.clawStatus == "idle" || (r.clawStatus == "connected" && isPipelineDriven)) && s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
@@ -175,7 +178,6 @@ func (s *Server) pollAllPRs() {
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
-		factory := s.findFactoryForClaw(r.pr.clawID)
 		if r.autoFixBugbot || factory != nil {
 			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 			if err != nil {
