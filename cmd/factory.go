@@ -112,7 +112,7 @@ func runFactoryCreate() error {
 %sintegration: %s
 workspace: %s
 trigger_status: %q
-%s%swebhook_secret: %s_webhook_secret
+%s%swebhook_secret_ref: %s_webhook_secret
 
 template: %s
 `, name, descriptionYAML, integration, workspace, triggerStatus,

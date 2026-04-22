@@ -49,14 +49,22 @@ func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
 	sig = strings.TrimPrefix(sig, "sha256=")
 	s.mu.RLock()
 	factories := s.hubCfg.Factories
+	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 	hasSecrets := false
 	for _, f := range factories {
-		if f.Integration != "shortcut" || f.WebhookSecret == "" {
+		if f.Integration != "shortcut" {
+			continue
+		}
+		secret := f.WebhookSecret
+		if secret == "" && f.WebhookSecretRef != "" && secrets != nil {
+			secret = secrets[f.WebhookSecretRef]
+		}
+		if secret == "" {
 			continue
 		}
 		hasSecrets = true
-		mac := hmac.New(sha256.New, []byte(f.WebhookSecret))
+		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
 		expected := hex.EncodeToString(mac.Sum(nil))
 		if hmac.Equal([]byte(sig), []byte(expected)) {

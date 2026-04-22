@@ -99,11 +99,16 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	// Upsert by name — preserve existing webhook secrets for repo-pushed factories
+	// Upsert by name — preserve existing webhook secrets for repo-pushed factories.
+	// Keep factory ordering stable: preserve existing order and append newly-added
+	// factories in request order.
 	existing := make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
 		existing[f.Name] = f
 	}
+	incomingByName := make(map[string]*types.FactoryConfig, len(req.Factories))
+	incomingOrder := make([]string, 0, len(req.Factories))
+	seenIncoming := make(map[string]bool, len(req.Factories))
 	for _, incoming := range req.Factories {
 		if prev, ok := existing[incoming.Name]; ok {
 			// Preserve inline webhook secret if not provided in push
@@ -112,10 +117,25 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		existing[incoming.Name] = incoming
+		incomingByName[incoming.Name] = incoming
+		if !seenIncoming[incoming.Name] {
+			seenIncoming[incoming.Name] = true
+			incomingOrder = append(incomingOrder, incoming.Name)
+		}
 	}
 	updated := make([]*types.FactoryConfig, 0, len(existing))
-	for _, f := range existing {
+	for _, f := range s.hubCfg.Factories {
+		if incoming, ok := incomingByName[f.Name]; ok {
+			updated = append(updated, incoming)
+			delete(incomingByName, f.Name)
+			continue
+		}
 		updated = append(updated, f)
+	}
+	for _, name := range incomingOrder {
+		if incoming, ok := incomingByName[name]; ok {
+			updated = append(updated, incoming)
+		}
 	}
 	s.hubCfg.Factories = updated
 	cfgCopy := *s.hubCfg
