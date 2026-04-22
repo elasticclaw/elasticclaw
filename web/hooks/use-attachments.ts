@@ -14,8 +14,9 @@ export interface UseAttachmentsApi {
   addFiles: (files: File[]) => void
   removeAttachment: (localId: string) => void
   clearAttachments: () => void
+  onDragEnter: (e: React.DragEvent) => void
   onDragOver: (e: React.DragEvent) => void
-  onDragLeave: () => void
+  onDragLeave: (e: React.DragEvent) => void
   onDrop: (e: React.DragEvent) => void
   onPaste: (e: React.ClipboardEvent) => void
 }
@@ -125,16 +126,31 @@ export function useAttachments(clawId: string): UseAttachmentsApi {
     })
   }, [])
 
-  const onDragOver = useCallback((e: React.DragEvent) => {
+  const dragCounterRef = useRef(0)
+
+  const onDragEnter = useCallback((e: React.DragEvent) => {
     if (e.dataTransfer.types.includes("Files")) {
       e.preventDefault()
+      dragCounterRef.current++
       setDragHover(true)
     }
   }, [])
-  const onDragLeave = useCallback(() => setDragHover(false), [])
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault()
+    }
+  }, [])
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    dragCounterRef.current--
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0
+      setDragHover(false)
+    }
+  }, [])
   const onDrop = useCallback((e: React.DragEvent) => {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
     e.preventDefault()
+    dragCounterRef.current = 0
     setDragHover(false)
     addFiles(Array.from(e.dataTransfer.files))
   }, [addFiles])
@@ -154,5 +170,5 @@ export function useAttachments(clawId: string): UseAttachmentsApi {
     }
   }, [addFiles])
 
-  return { attachments, dragHover, addFiles, removeAttachment, clearAttachments, onDragOver, onDragLeave, onDrop, onPaste }
+  return { attachments, dragHover, addFiles, removeAttachment, clearAttachments, onDragEnter, onDragOver, onDragLeave, onDrop, onPaste }
 }

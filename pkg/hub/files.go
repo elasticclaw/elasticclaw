@@ -173,6 +173,23 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"files": out})
 }
 
+// isActiveContentType returns true if the content type or extension could
+// execute scripts when rendered by a browser (e.g., SVG, HTML, XML).
+func isActiveContentType(ct, ext string) bool {
+	switch ext {
+	case ".svg", ".html", ".htm", ".xhtml", ".xml", ".xsl", ".xslt":
+		return true
+	}
+	if strings.HasPrefix(ct, "image/svg") ||
+		strings.HasPrefix(ct, "text/html") ||
+		strings.HasPrefix(ct, "application/xhtml") ||
+		strings.HasPrefix(ct, "text/xml") ||
+		strings.HasPrefix(ct, "application/xml") {
+		return true
+	}
+	return false
+}
+
 // handleFileView streams the bytes of a previously-uploaded file back to the
 // browser so images can render inline in chat history. The bridge enforces
 // path containment within its uploads dir, so arbitrary filesystem reads are
@@ -235,12 +252,22 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ct := ""
+		ext := ""
 		if dot := strings.LastIndex(path, "."); dot >= 0 {
-			ct = mime.TypeByExtension(strings.ToLower(path[dot:]))
+			ext = strings.ToLower(path[dot:])
+			ct = mime.TypeByExtension(ext)
 		}
 		if ct == "" {
 			ct = http.DetectContentType(data)
 		}
+
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+
+		if isActiveContentType(ct, ext) {
+			w.Header().Set("Content-Disposition", "attachment")
+		}
+
 		w.Header().Set("Content-Type", ct)
 		w.Header().Set("Cache-Control", "private, max-age=3600")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))

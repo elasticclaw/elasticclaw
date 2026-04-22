@@ -337,6 +337,7 @@ function ClawBoardCard({
     addFiles,
     removeAttachment,
     clearAttachments,
+    onDragEnter,
     onDragOver,
     onDragLeave,
     onDrop,
@@ -401,6 +402,7 @@ function ClawBoardCard({
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
+          onDragEnter={isPending ? undefined : onDragEnter}
           onDragOver={isPending ? undefined : onDragOver}
           onDragLeave={onDragLeave}
           onDrop={isPending ? undefined : onDrop}
@@ -1024,6 +1026,7 @@ function ClawChatView({
     addFiles,
     removeAttachment,
     clearAttachments,
+    onDragEnter,
     onDragOver,
     onDragLeave,
     onDrop,
@@ -1108,6 +1111,7 @@ function ClawChatView({
   return (
     <main
       className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden relative"
+      onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
