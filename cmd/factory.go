@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -349,7 +350,7 @@ func runFactoryShow(name string) error {
 		return err
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, hubURL+"/api/factories?name="+name, nil)
+	req, _ := http.NewRequest(http.MethodGet, hubURL+"/api/factories?name="+url.QueryEscape(name), nil)
 	req.Header.Set("Authorization", "Bearer "+clawToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -388,7 +389,7 @@ func runFactoryRm(name string) error {
 		return err
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, hubURL+"/api/factories?name="+name, nil)
+	req, _ := http.NewRequest(http.MethodDelete, hubURL+"/api/factories?name="+url.QueryEscape(name), nil)
 	req.Header.Set("Authorization", "Bearer "+clawToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

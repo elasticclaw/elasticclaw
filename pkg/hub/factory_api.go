@@ -112,7 +112,7 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	for _, incoming := range req.Factories {
 		if prev, ok := existing[incoming.Name]; ok {
 			// Preserve inline webhook secret if not provided in push
-			if incoming.WebhookSecret == "" && prev.WebhookSecret != "" {
+			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && prev.WebhookSecret != "" {
 				incoming.WebhookSecret = prev.WebhookSecret
 			}
 		}

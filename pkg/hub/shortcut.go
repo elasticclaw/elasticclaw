@@ -36,6 +36,13 @@ type shortcutAction struct {
 	Changes     map[string]shortcutChange `json:"changes"`
 }
 
+type shortcutStoryFilterData struct {
+	labels    map[string]bool
+	assignees map[string]bool
+	hasOwner  bool
+	loadErr   error
+}
+
 type shortcutChange struct {
 	New interface{} `json:"new"`
 	Old interface{} `json:"old"`
@@ -139,6 +146,8 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			continue
 		}
 
+		storyFiltersByToken := map[string]*shortcutStoryFilterData{}
+
 		// Check if workflow_state_id changed
 		stateChange, ok := action.Changes["workflow_state_id"]
 		if !ok {
@@ -161,6 +170,67 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token == "" {
 				continue
+			}
+
+			if len(factory.Labels) > 0 || factory.AssignedTo != "" {
+				filterData, ok := storyFiltersByToken[token]
+				if !ok {
+					filterData = s.loadShortcutStoryFilterData(token, action.ID)
+					storyFiltersByToken[token] = filterData
+				}
+				if filterData.loadErr != nil {
+					log.Printf("[factory:%s] skipping story %s: failed to load Shortcut story filters: %v", factory.Name, storyID, filterData.loadErr)
+					continue
+				}
+
+				// Labels filter: all configured labels must be present on the story (AND)
+				if len(factory.Labels) > 0 {
+					allMatch := true
+					for _, required := range factory.Labels {
+						required = strings.ToLower(strings.TrimSpace(required))
+						if required == "" {
+							continue
+						}
+						if !filterData.labels[required] {
+							allMatch = false
+							break
+						}
+					}
+					if !allMatch {
+						continue
+					}
+				}
+
+				// AssignedTo filter
+				if factory.AssignedTo != "" {
+					wanted := strings.ToLower(strings.TrimSpace(factory.AssignedTo))
+					switch {
+					case wanted == "any":
+						if !filterData.hasOwner {
+							continue
+						}
+					case wanted == "none":
+						if filterData.hasOwner {
+							continue
+						}
+					case strings.HasPrefix(wanted, "!"):
+						excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
+						if excluded == "" {
+							continue
+						}
+						if filterData.assignees[excluded] {
+							continue
+						}
+					default:
+						target := strings.TrimPrefix(wanted, "@")
+						if target == "" {
+							continue
+						}
+						if !filterData.assignees[target] {
+							continue
+						}
+					}
+				}
 			}
 
 			newStateName := s.shortcutStateName(token, newStateID)
@@ -195,6 +265,87 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 						"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", oldStateName, newStateName, factory.TriggerStatus))
 				}
 			}
+		}
+	}
+}
+
+func (s *Server) loadShortcutStoryFilterData(token string, storyID int64) *shortcutStoryFilterData {
+	data := &shortcutStoryFilterData{
+		labels:    map[string]bool{},
+		assignees: map[string]bool{},
+	}
+	story, err := shortcutAPI(fmt.Sprintf("stories/%d", storyID), token)
+	if err != nil {
+		data.loadErr = err
+		return data
+	}
+
+	if rawLabels, ok := story["labels"].([]interface{}); ok {
+		for _, item := range rawLabels {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			labelName, _ := m["name"].(string)
+			labelName = strings.ToLower(strings.TrimSpace(labelName))
+			if labelName != "" {
+				data.labels[labelName] = true
+			}
+		}
+	}
+
+	var ownerIDs []string
+	if rawOwners, ok := story["owner_ids"].([]interface{}); ok {
+		for _, raw := range rawOwners {
+			ownerID, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			ownerID = strings.TrimSpace(ownerID)
+			if ownerID == "" {
+				continue
+			}
+			ownerIDs = append(ownerIDs, ownerID)
+			data.assignees[strings.ToLower(ownerID)] = true
+		}
+	}
+	data.hasOwner = len(ownerIDs) > 0
+
+	for _, ownerID := range ownerIDs {
+		member, err := shortcutAPI("members/"+ownerID, token)
+		if err != nil {
+			continue
+		}
+		collectShortcutAssigneeIdentifiers(data.assignees, member)
+	}
+
+	return data
+}
+
+func collectShortcutAssigneeIdentifiers(set map[string]bool, member map[string]interface{}) {
+	add := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			return
+		}
+		set[value] = true
+		if strings.HasPrefix(value, "@") {
+			set[strings.TrimPrefix(value, "@")] = true
+		}
+	}
+
+	if mentionName, ok := member["mention_name"].(string); ok {
+		add(mentionName)
+	}
+	if name, ok := member["name"].(string); ok {
+		add(name)
+	}
+	if profile, ok := member["profile"].(map[string]interface{}); ok {
+		if mentionName, ok := profile["mention_name"].(string); ok {
+			add(mentionName)
+		}
+		if name, ok := profile["name"].(string); ok {
+			add(name)
 		}
 	}
 }
