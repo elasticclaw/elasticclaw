@@ -114,6 +114,17 @@ export interface UploadedAttachment {
   mimetype: string
 }
 
+// getFileViewUrl returns the hub URL that serves the bytes of an uploaded
+// file back to the browser. Suitable for <img src>. Auth is via ?token query
+// since browsers can't set Authorization on <img>.
+export function getFileViewUrl(clawId: string, path: string): string {
+  const token = getTokenSync()
+  const hubBase = getHubUrl()
+  const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/hub/api/files/view/${clawId}`
+  const qs = new URLSearchParams({ path, token }).toString()
+  return `${base}?${qs}`
+}
+
 export async function uploadFiles(clawId: string, files: File[]): Promise<UploadedAttachment[]> {
   const token = await resolveToken()
   const hubBase = getHubUrl()

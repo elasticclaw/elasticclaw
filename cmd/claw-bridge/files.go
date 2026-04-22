@@ -83,6 +83,54 @@ func sendAck(ctx context.Context, conn *websocket.Conn, ack fileAck) {
 	})
 }
 
+type fileReadIn struct {
+	RequestID string `json:"request_id"`
+	Path      string `json:"path"`
+}
+
+type fileReadResp struct {
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	Data      string `json:"data,omitempty"` // base64
+	Error     string `json:"error,omitempty"`
+}
+
+// handleFileReadMessage returns the bytes of a previously-uploaded file so the
+// hub can serve it back to the browser (e.g. image previews in chat history).
+// Restricted to uploadDirPath() to prevent arbitrary filesystem read.
+func handleFileReadMessage(ctx context.Context, conn *websocket.Conn, payload json.RawMessage) {
+	var req fileReadIn
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return
+	}
+	resp := fileReadResp{RequestID: req.RequestID}
+	send := func() {
+		_ = wsjson.Write(ctx, conn, hubMsg{Type: "file_read_resp", Payload: mustJSON(resp)})
+	}
+
+	dir := uploadDirPath()
+	abs, err := filepath.Abs(req.Path)
+	if err != nil {
+		resp.Error = "bad path"
+		send()
+		return
+	}
+	if !strings.HasPrefix(abs, dir+string(filepath.Separator)) {
+		resp.Error = "path outside uploads dir"
+		send()
+		return
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		resp.Error = err.Error()
+		send()
+		return
+	}
+	resp.OK = true
+	resp.Data = base64.StdEncoding.EncodeToString(data)
+	send()
+}
+
 // sanitizeFilename produces a shell-safe basename. Anything outside
 // [A-Za-z0-9._-] is replaced with "_" so an agent that shell-executes an
 // unquoted path can't be tricked into command injection via the filename.

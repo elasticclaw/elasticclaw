@@ -29,7 +29,9 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, uploadFiles, type ClawPR } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, getFileViewUrl, type ClawPR } from "@/lib/api"
+import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
+import { useAttachments } from "@/hooks/use-attachments"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 
@@ -320,6 +322,7 @@ function ClawBoardCard({
 }) {
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const cardFileInputRef = useRef<HTMLInputElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
@@ -327,6 +330,21 @@ function ClawBoardCard({
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const [showCardScrollBtn, setShowCardScrollBtn] = useState(false)
+
+  const {
+    attachments,
+    dragHover,
+    addFiles,
+    removeAttachment,
+    clearAttachments,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPaste,
+  } = useAttachments(claw.id)
+  const stillUploading = attachments.some((a) => a.status === "uploading")
+  const hasErrored = attachments.some((a) => a.status === "error")
+  const canSubmitCard = !isPending && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
   useEffect(() => {
     const el = msgScrollRef.current
@@ -342,13 +360,16 @@ function ClawBoardCard({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (input.trim()) {
-      onSendMessage(input.trim())
-      setInput("")
-      if (cardTextareaRef.current) {
-        cardTextareaRef.current.style.height = "auto"
-        cardTextareaRef.current.style.overflowY = "hidden"
-      }
+    if (stillUploading || hasErrored) return
+    const footer = buildAttachmentsFooter(attachments)
+    const trimmed = input.trim()
+    if (!trimmed && !footer) return
+    onSendMessage(trimmed + footer)
+    setInput("")
+    clearAttachments()
+    if (cardTextareaRef.current) {
+      cardTextareaRef.current.style.height = "auto"
+      cardTextareaRef.current.style.overflowY = "hidden"
     }
   }
 
@@ -380,7 +401,15 @@ function ClawBoardCard({
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
+          onDragOver={isPending ? undefined : onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={isPending ? undefined : onDrop}
         >
+          {dragHover && !isPending && (
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-background/80">
+              <div className="text-xs font-medium text-foreground">Drop files</div>
+            </div>
+          )}
           {claw.isStreaming && (
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
           )}
@@ -501,6 +530,9 @@ function ClawBoardCard({
                     </div>
                   )
                 }
+                const { body: cardBody, attachments: cardAttachments } = message.role === "user"
+                  ? splitAttachmentsFooter(message.content)
+                  : { body: message.content, attachments: [] as ParsedAttachment[] }
                 return (
                   <div
                     key={message.id}
@@ -519,7 +551,24 @@ function ClawBoardCard({
                         {formatTimestamp(message.timestamp)}
                       </span>
                     </div>
-                    <MarkdownContent content={message.content} className="text-xs text-foreground" />
+                    {cardBody.trim() && (
+                      <MarkdownContent content={cardBody} className="text-xs text-foreground" />
+                    )}
+                    {cardAttachments.length > 0 && (
+                      <div className={cn("flex flex-wrap gap-1", cardBody.trim() && "mt-1")}>
+                        {cardAttachments.map((a, i) => (
+                          <div
+                            key={`${a.path}-${i}`}
+                            className="flex items-center gap-1 rounded border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                            title={`${a.path} (${a.mimetype})`}
+                          >
+                            <FileIcon className="size-2.5" />
+                            <span className="max-w-[8rem] truncate">{a.name}</span>
+                            <span>{a.sizeLabel}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )
               })
@@ -536,8 +585,87 @@ function ClawBoardCard({
           </div>
           
           {/* Input area */}
-          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border">
+          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {attachments.map((a) => a.previewUrl ? (
+                  <div key={a.localId} className="relative">
+                    <img
+                      src={a.previewUrl}
+                      alt={a.name}
+                      className={cn(
+                        "max-h-16 max-w-[6rem] rounded border object-cover",
+                        a.status === "error" ? "border-destructive/50 opacity-60" : "border-border"
+                      )}
+                    />
+                    {a.status === "uploading" && (
+                      <div className="absolute inset-0 flex items-center justify-center rounded bg-background/60">
+                        <Loader2 className="size-3 animate-spin" />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeAttachment(a.localId) }}
+                      className="absolute -top-1 -right-1 rounded-full bg-background border border-border p-0.5 text-muted-foreground hover:text-foreground shadow-sm"
+                      aria-label={`Remove ${a.name}`}
+                    >
+                      <X className="size-2.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    key={a.localId}
+                    className={cn(
+                      "flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+                      a.status === "error"
+                        ? "border-destructive/50 bg-destructive/10 text-destructive"
+                        : "border-border bg-secondary text-foreground"
+                    )}
+                    title={a.error || a.path || a.name}
+                  >
+                    {a.status === "uploading" ? (
+                      <Loader2 className="size-2.5 animate-spin" />
+                    ) : a.status === "error" ? (
+                      <AlertCircle className="size-2.5" />
+                    ) : (
+                      <FileIcon className="size-2.5" />
+                    )}
+                    <span className="max-w-[7rem] truncate">{a.name}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeAttachment(a.localId) }}
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label={`Remove ${a.name}`}
+                    >
+                      <X className="size-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex gap-1.5">
+              <input
+                ref={cardFileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) addFiles(Array.from(e.target.files))
+                  e.target.value = ""
+                }}
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8 shrink-0"
+                disabled={isPending}
+                onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
+                title="Attach files"
+              >
+                <Paperclip className="size-3" />
+                <span className="sr-only">Attach files</span>
+              </Button>
               <textarea
                 value={input}
                 rows={1}
@@ -557,20 +685,21 @@ function ClawBoardCard({
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault()
-                    if (input.trim() && !isPending) handleSubmit(e as unknown as React.FormEvent)
+                    if (canSubmitCard) handleSubmit(e as unknown as React.FormEvent)
                   }
                 }}
+                onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Claw offline" : "Starting up...") : "Send message..."}
                 className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
               />
-              <Button 
-                type="submit" 
-                size="icon" 
+              <Button
+                type="submit"
+                size="icon"
                 className="size-8 shrink-0"
-                disabled={!input.trim() || isPending}
+                disabled={!canSubmitCard}
                 onClick={(e) => e.stopPropagation()}
               >
                 <Send className="size-3" />
@@ -725,12 +854,45 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
+// HistoryAttachment renders an uploaded image inline; if the hub can't serve
+// the bytes (old path, bridge dropped, file deleted) it falls back to a chip.
+function HistoryAttachment({ clawId, att }: { clawId: string; att: ParsedAttachment }) {
+  const [broken, setBroken] = useState(false)
+  const isImage = att.mimetype.startsWith("image/")
+  if (isImage && !broken) {
+    const url = getFileViewUrl(clawId, att.path)
+    return (
+      <a href={url} target="_blank" rel="noreferrer" title={`${att.name} (${att.sizeLabel})`} className="block">
+        <img
+          src={url}
+          alt={att.name}
+          onError={() => setBroken(true)}
+          className="max-h-64 max-w-xs rounded-md border border-border/60 object-contain bg-background/40"
+          loading="lazy"
+        />
+      </a>
+    )
+  }
+  return (
+    <div
+      className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/40 px-2 py-0.5 text-xs text-muted-foreground"
+      title={`${att.path} (${att.mimetype})`}
+    >
+      <FileIcon className="size-3" />
+      <span className="max-w-[14rem] truncate">{att.name}</span>
+      <span>{att.sizeLabel}</span>
+    </div>
+  )
+}
+
 const MessageBubble = memo(function MessageBubble({
   message,
+  clawId,
   clawName,
   clawColor,
 }: {
   message: Message
+  clawId: string
   clawName: string
   clawColor?: string
 }) {
@@ -820,84 +982,15 @@ const MessageBubble = memo(function MessageBubble({
           <MarkdownContent content={body} className="text-sm" />
         )}
         {parsedAttachments.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-2 flex flex-wrap gap-2">
             {parsedAttachments.map((a, i) => (
-              <div
-                key={`${a.path}-${i}`}
-                className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/40 px-2 py-0.5 text-xs text-muted-foreground"
-                title={`${a.path} (${a.mimetype})`}
-              >
-                <FileIcon className="size-3" />
-                <span className="max-w-[14rem] truncate">{a.name}</span>
-                <span>{a.sizeLabel}</span>
-              </div>
+              <HistoryAttachment key={`${a.path}-${i}`} clawId={clawId} att={a} />
             ))}
           </div>
         )}
       </div>
     </div>
   )})
-
-// ─── Attachments (shared helpers) ────────────────────────────────────────────
-
-const MAX_FILE_BYTES = 20 * 1024 * 1024
-const MAX_FILES_PER_MSG = 10
-const ATTACHMENTS_MARKER = "\n\n[Attachments]\n"
-
-interface PendingAttachment {
-  localId: string
-  name: string
-  size: number
-  mimetype: string
-  path?: string
-  status: "uploading" | "ready" | "error"
-  error?: string
-}
-
-interface ParsedAttachment {
-  name: string
-  path: string
-  mimetype: string
-  sizeLabel: string
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
-// buildAttachmentsFooter renders the paths/sizes block that gets appended to
-// a user message so the agent can Read the files at the paths the bridge wrote.
-function buildAttachmentsFooter(atts: PendingAttachment[]): string {
-  if (atts.length === 0) return ""
-  const lines = atts
-    .filter((a) => a.status === "ready" && a.path)
-    .map((a) => `- ${a.name} — ${a.path} (${a.mimetype}, ${formatBytes(a.size)})`)
-  if (lines.length === 0) return ""
-  return `${ATTACHMENTS_MARKER}${lines.join("\n")}`
-}
-
-// splitAttachmentsFooter extracts the attachments block from stored message
-// content so history can render chips without a schema change. If the marker
-// is absent or the block is malformed, the raw content is returned unchanged.
-function splitAttachmentsFooter(content: string): { body: string; attachments: ParsedAttachment[] } {
-  const idx = content.indexOf(ATTACHMENTS_MARKER)
-  if (idx < 0) return { body: content, attachments: [] }
-  const body = content.slice(0, idx)
-  const tail = content.slice(idx + ATTACHMENTS_MARKER.length)
-  const atts: ParsedAttachment[] = []
-  for (const line of tail.split("\n")) {
-    // Expected: "- name — path (mimetype, size)". Path is greedy so backtracking
-    // anchors to the *last* " (mime, size)" on the line — otherwise a filename
-    // like "report (2).pdf" would truncate the path at the embedded "(".
-    const m = /^-\s+(.+?)\s+—\s+(.+)\s+\(([^,]+),\s*([^)]+)\)\s*$/.exec(line)
-    if (!m) continue
-    atts.push({ name: m[1], path: m[2], mimetype: m[3], sizeLabel: m[4] })
-  }
-  if (atts.length === 0) return { body: content, attachments: [] }
-  return { body, attachments: atts }
-}
 
 // ─── ClawChatView ─────────────────────────────────────────────────────────────
 // Extracted so scroll refs are only live when this branch is mounted.
@@ -921,62 +1014,21 @@ function ClawChatView({
   const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
-  const [dragHover, setDragHover] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const addFiles = useCallback((picked: File[]) => {
-    if (picked.length === 0) return
-    const accepted: File[] = []
-    for (const f of picked) {
-      if (f.size > MAX_FILE_BYTES) {
-        alert(`${f.name} is larger than 20 MB — skipped.`)
-        continue
-      }
-      accepted.push(f)
-    }
-    if (accepted.length === 0) return
-    if (attachments.length + accepted.length > MAX_FILES_PER_MSG) {
-      alert(`At most ${MAX_FILES_PER_MSG} files per message.`)
-      return
-    }
-    const entries: PendingAttachment[] = accepted.map((f) => ({
-      localId: `pa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: f.name,
-      size: f.size,
-      mimetype: f.type || "application/octet-stream",
-      status: "uploading",
-    }))
-    setAttachments((prev) => [...prev, ...entries])
-
-    uploadFiles(claw.id, accepted)
-      .then((uploaded) => {
-        setAttachments((prev) => {
-          const next = [...prev]
-          entries.forEach((e, i) => {
-            const idx = next.findIndex((p) => p.localId === e.localId)
-            if (idx >= 0 && uploaded[i]) {
-              next[idx] = { ...next[idx], status: "ready", path: uploaded[i].path }
-            }
-          })
-          return next
-        })
-      })
-      .catch((err) => {
-        console.error("upload failed", err)
-        setAttachments((prev) => prev.map((p) =>
-          entries.some((e) => e.localId === p.localId)
-            ? { ...p, status: "error", error: String(err) }
-            : p
-        ))
-      })
-  }, [attachments.length, claw.id])
-
-  const removeAttachment = useCallback((localId: string) => {
-    setAttachments((prev) => prev.filter((p) => p.localId !== localId))
-  }, [])
+  const {
+    attachments,
+    dragHover,
+    addFiles,
+    removeAttachment,
+    clearAttachments,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPaste,
+  } = useAttachments(claw.id)
 
   const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
     clawId: claw.id,
@@ -1034,7 +1086,7 @@ function ClawChatView({
     const trimmed = input.trim()
     if (!trimmed && !footer) return
     setInput("")
-    setAttachments([])
+    clearAttachments()
     pinnedToBottom.current = true
     if (panelTextareaRef.current) {
       panelTextareaRef.current.style.height = "auto"
@@ -1051,35 +1103,6 @@ function ClawChatView({
     }
     const payload = trimmed + footer
     onSendMessage(payload)
-  }
-
-  const onDragOver = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("Files")) {
-      e.preventDefault()
-      setDragHover(true)
-    }
-  }
-  const onDragLeave = () => setDragHover(false)
-  const onDrop = (e: React.DragEvent) => {
-    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
-    e.preventDefault()
-    setDragHover(false)
-    addFiles(Array.from(e.dataTransfer.files))
-  }
-  const onPaste = (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    const files: File[] = []
-    for (const it of Array.from(items)) {
-      if (it.kind === "file") {
-        const f = it.getAsFile()
-        if (f) files.push(f)
-      }
-    }
-    if (files.length > 0) {
-      e.preventDefault()
-      addFiles(files)
-    }
   }
 
   return (
@@ -1140,7 +1163,7 @@ function ClawChatView({
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
             messages.map((message) => (
-              <MessageBubble key={message.id} message={message} clawName={claw.name} clawColor={claw.color} />
+              <MessageBubble key={message.id} message={message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
             ))
           )}
           <div ref={bottomRef} className="h-4" />
@@ -1168,7 +1191,31 @@ function ClawChatView({
         >
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {attachments.map((a) => (
+              {attachments.map((a) => a.previewUrl ? (
+                <div key={a.localId} className="relative group">
+                  <img
+                    src={a.previewUrl}
+                    alt={a.name}
+                    className={cn(
+                      "max-h-24 max-w-[8rem] rounded-md border object-cover",
+                      a.status === "error" ? "border-destructive/50 opacity-60" : "border-border"
+                    )}
+                  />
+                  {a.status === "uploading" && (
+                    <div className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60">
+                      <Loader2 className="size-4 animate-spin" />
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.localId)}
+                    className="absolute -top-1.5 -right-1.5 rounded-full bg-background border border-border p-0.5 text-muted-foreground hover:text-foreground shadow-sm"
+                    aria-label={`Remove ${a.name}`}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ) : (
                 <div
                   key={a.localId}
                   className={cn(

@@ -3,7 +3,9 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -38,6 +40,14 @@ type filePayload struct {
 	MimeType  string `json:"mimetype"`
 	Size      int64  `json:"size"`
 	Data      string `json:"data"` // base64
+}
+
+// fileReadResp is the claw-bridge response for a file_read WS request.
+type fileReadResp struct {
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	Data      string `json:"data,omitempty"` // base64
+	Error     string `json:"error,omitempty"`
 }
 
 type uploadedAttachment struct {
@@ -155,5 +165,79 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{"files": out})
+}
+
+// handleFileView streams the bytes of a previously-uploaded file back to the
+// browser so images can render inline in chat history. The bridge enforces
+// path containment within its uploads dir, so arbitrary filesystem reads are
+// rejected at the claw even if a caller crafts a malicious path query.
+func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/files/view/")
+	path := r.URL.Query().Get("path")
+	if clawID == "" || path == "" {
+		http.Error(w, "missing claw id or path", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		http.Error(w, "claw not connected", http.StatusConflict)
+		return
+	}
+
+	reqID := uuid.New().String()
+	ch := make(chan fileReadResp, 1)
+	s.fileAckMu.Lock()
+	s.fileReadWaiters[reqID] = ch
+	s.fileAckMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), fileAckTimeout)
+	defer cancel()
+
+	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{
+		Type:    "file_read",
+		Payload: map[string]string{"request_id": reqID, "path": path},
+	}); err != nil {
+		s.fileAckMu.Lock()
+		delete(s.fileReadWaiters, reqID)
+		s.fileAckMu.Unlock()
+		http.Error(w, "send to claw failed", http.StatusBadGateway)
+		return
+	}
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			http.Error(w, "claw read failed: "+resp.Error, http.StatusBadGateway)
+			return
+		}
+		data, err := base64.StdEncoding.DecodeString(resp.Data)
+		if err != nil {
+			http.Error(w, "decode failed", http.StatusBadGateway)
+			return
+		}
+		ct := ""
+		if dot := strings.LastIndex(path, "."); dot >= 0 {
+			ct = mime.TypeByExtension(strings.ToLower(path[dot:]))
+		}
+		if ct == "" {
+			ct = http.DetectContentType(data)
+		}
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+		_, _ = w.Write(data)
+	case <-ctx.Done():
+		s.fileAckMu.Lock()
+		delete(s.fileReadWaiters, reqID)
+		s.fileAckMu.Unlock()
+		http.Error(w, "timeout waiting for claw", http.StatusGatewayTimeout)
+	}
 }
 

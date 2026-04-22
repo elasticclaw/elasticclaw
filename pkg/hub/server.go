@@ -41,8 +41,9 @@ type Server struct {
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 
-	fileAckMu      sync.Mutex
-	fileAckWaiters map[string]chan fileAck // request_id -> waiter
+	fileAckMu       sync.Mutex
+	fileAckWaiters  map[string]chan fileAck      // request_id -> waiter
+	fileReadWaiters map[string]chan fileReadResp // request_id -> waiter
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
@@ -100,7 +101,8 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		identity: id,
 		claws:    make(map[string]*clawConn),
 		users:    make(map[string]*userConn),
-		fileAckWaiters: make(map[string]chan fileAck),
+		fileAckWaiters:  make(map[string]chan fileAck),
+		fileReadWaiters: make(map[string]chan fileReadResp),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -188,6 +190,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
 	mux.HandleFunc("/api/files/", s.withAuth(s.handleFileUpload))
+	mux.HandleFunc("/api/files/view/", s.withAuth(s.handleFileView))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
 	// Health
@@ -1105,6 +1108,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if ch != nil {
 						select {
 						case ch <- ack:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "file_read_resp" {
+				raw, _ := json.Marshal(msg.Payload)
+				var resp fileReadResp
+				if err := json.Unmarshal(raw, &resp); err == nil && resp.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.fileReadWaiters[resp.RequestID]
+					delete(s.fileReadWaiters, resp.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- resp:
 						default:
 						}
 					}
