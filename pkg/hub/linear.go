@@ -481,6 +481,14 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
 	})
+
+	// Initialize pipeline if factory has one
+	if pl := parsePipelineForFactory(factory); pl != nil {
+		if entry := pl.EntryStage(); entry != nil {
+			s.transitionPipelineStage(clawID, *entry, factory, issueID)
+		}
+	}
+
 	return nil
 }
 
@@ -608,8 +616,17 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return
 	}
 
-	// Move the issue to done_status if configured
-	if factory.DoneStatus != "" {
+	// Check if the pipeline handles the [DONE] signal
+	pipelineHandledDone := false
+	if pl := parsePipelineForFactory(factory); pl != nil {
+		if stage := pl.StageForMessageContains("[DONE]"); stage != nil {
+			s.transitionPipelineStage(clawID, *stage, factory, issueID)
+			pipelineHandledDone = true
+		}
+	}
+
+	// Move the issue to done_status if configured (skip if pipeline already handled it)
+	if !pipelineHandledDone && factory.DoneStatus != "" {
 		if strings.HasPrefix(issueID, "sc-") {
 			// Shortcut story
 			scToken := s.resolveShortcutToken(factory.Workspace)
@@ -650,8 +667,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
 	})
-	// Notify the claw it's in watch mode
-	s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.")
+	// Notify the claw it's in watch mode — skip if the pipeline already injected a message
+	if !pipelineHandledDone {
+		s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.")
+	}
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.

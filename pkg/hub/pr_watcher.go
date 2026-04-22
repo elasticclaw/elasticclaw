@@ -574,14 +574,40 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
 		// Stop polling this closed PR so we only notify once.
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
-		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
-		// Stop polling this closed PR so the claw doesn't get duplicate notifications.
-		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
+
+		// Check if the pipeline handles pr_closed
+		factory := s.findFactoryForClaw(clawID)
+		var issueID string
+		_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&issueID)
+		pipelineHandled := false
+		if factory != nil {
+			if pl := parsePipelineForFactory(factory); pl != nil {
+				if stage := pl.StageForPRClosed(); stage != nil {
+					s.transitionPipelineStage(clawID, *stage, factory, issueID)
+					pipelineHandled = true
+				}
+			}
+		}
+		if !pipelineHandled {
+			s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+		}
 		return false
 	}
 
-	// PR was merged — terminate the claw.
+	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
+
+	// Check if the pipeline handles pr_merged (run on_enter before terminating)
+	mergeFactory := s.findFactoryForClaw(clawID)
+	if mergeFactory != nil {
+		var mergeIssueID string
+		_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&mergeIssueID)
+		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
+			if stage := pl.StageForPRMerged(); stage != nil {
+				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
+			}
+		}
+	}
 
 	var providerID, provider string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)

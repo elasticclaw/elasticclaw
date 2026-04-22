@@ -39,6 +39,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_ci INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_bugbot INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -73,7 +74,8 @@ func migrate(db *sql.DB) error {
 		linear_issue_id  TEXT NOT NULL DEFAULT '',
 		auto_fix_ci      INTEGER NOT NULL DEFAULT 1,
 		auto_fix_bugbot  INTEGER NOT NULL DEFAULT 1,
-		llm_key          TEXT NOT NULL DEFAULT ''
+		llm_key          TEXT NOT NULL DEFAULT '',
+		pipeline_stage   TEXT NOT NULL DEFAULT ''
 	);
 
 
