@@ -65,13 +65,18 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 	}
 }
 
-func (s *Server) handleFactoriesList(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
+	nameFilter := strings.TrimSpace(r.URL.Query().Get("name"))
+
 	s.mu.RLock()
 	factories := s.hubCfg.Factories
 	s.mu.RUnlock()
 
 	views := make([]FactoryPushView, 0, len(factories))
 	for _, f := range factories {
+		if nameFilter != "" && !strings.EqualFold(f.Name, nameFilter) {
+			continue
+		}
 		views = append(views, factoryToPushView(f))
 	}
 	jsonOK(w, views)
@@ -126,7 +131,7 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		views = append(views, factoryToPushView(f))
 	}
 	jsonOK(w, map[string]interface{}{
-		"pushed": len(req.Factories),
+		"pushed":    len(req.Factories),
 		"factories": views,
 	})
 }

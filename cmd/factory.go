@@ -83,7 +83,7 @@ func runFactoryCreate() error {
 	if labelsRaw != "" {
 		parts := strings.Split(labelsRaw, ",")
 		var lb strings.Builder
-		lb.WriteString("    labels: [")
+		lb.WriteString("labels: [")
 		for i, p := range parts {
 			if i > 0 {
 				lb.WriteString(", ")
@@ -93,14 +93,14 @@ func runFactoryCreate() error {
 		lb.WriteString("]")
 		labelsYAML = lb.String() + "\n"
 	} else {
-		labelsYAML = "    # labels: [bug, claw-ready]\n"
+		labelsYAML = "# labels: [bug, claw-ready]\n"
 	}
 
 	var assignedToYAML string
 	if assignedTo != "" {
-		assignedToYAML = fmt.Sprintf("    assigned_to: %q\n", assignedTo)
+		assignedToYAML = fmt.Sprintf("assigned_to: %q\n", assignedTo)
 	} else {
-		assignedToYAML = "    # assigned_to: \"@username\"  # or !@username, any, none\n"
+		assignedToYAML = "# assigned_to: \"@username\"  # or !@username, any, none\n"
 	}
 
 	var descriptionYAML string
@@ -109,13 +109,10 @@ func runFactoryCreate() error {
 	}
 
 	factoryYAML := fmt.Sprintf(`name: %s
-%strigger:
-  integration: %s
-  workspace: %s
-  on:
-    status: %q
-%s%s  secrets:
-    webhook_secret: %s_webhook_secret
+%sintegration: %s
+workspace: %s
+trigger_status: %q
+%s%swebhook_secret: %s_webhook_secret
 
 template: %s
 `, name, descriptionYAML, integration, workspace, triggerStatus,
