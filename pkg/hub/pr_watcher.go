@@ -165,6 +165,13 @@ func (s *Server) pollAllPRs() {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
+		if r.clawStatus == "idle" {
+			var prCount int
+			if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE id=?`, r.pr.id).Scan(&prCount); err == nil && prCount == 0 {
+				// PR was removed while handling close/merge state, so skip follow-up checks.
+				continue
+			}
+		}
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
