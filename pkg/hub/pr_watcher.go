@@ -180,7 +180,11 @@ func (s *Server) pollAllPRs() {
 			s.checkCIFailures(r.pr, token)
 		}
 		if r.autoFixBugbot || isPipelineDriven {
-			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
+			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
+			if repoToken == "" {
+				repoToken = token
+			}
+			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
 			if err != nil {
 				log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
 				continue
