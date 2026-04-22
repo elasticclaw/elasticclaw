@@ -961,7 +961,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
       <div className="border border-border rounded-lg p-5 space-y-4">
         <h3 className="text-sm font-medium">Add Secret</h3>
         <div className="flex gap-2">
-          <Input placeholder="Name (e.g. canio_webhook_secret)" value={newName} onChange={e => setNewName(e.target.value)} className="font-mono text-sm" />
+          <Input placeholder="Name (e.g. linear_webhook_secret)" value={newName} onChange={e => setNewName(e.target.value)} className="font-mono text-sm" />
           <Input placeholder="Value" type="password" value={newValue} onChange={e => setNewValue(e.target.value)} className="font-mono text-sm" />
           <Button onClick={handleAdd} disabled={saving || !newName.trim() || !newValue.trim()}>
             {saving ? "Saving…" : "Save"}
