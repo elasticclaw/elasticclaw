@@ -612,7 +612,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Check if the pipeline handles the [DONE] signal
 	pipelineHandledDone := false
 	if pl := parsePipelineForFactory(factory); pl != nil {
-		if stage := pl.StageForMessageContains("[DONE]"); stage != nil {
+		if stage := pl.StageForMessageContains(rawMessage); stage != nil {
 			s.transitionPipelineStage(clawID, *stage, factory, issueID)
 			pipelineHandledDone = true
 		}

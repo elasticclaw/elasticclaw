@@ -79,16 +79,6 @@ func (p *Pipeline) EntryStage() *Stage {
 	return nil
 }
 
-// FindStage returns the stage with the given ID, or nil if not found.
-func (p *Pipeline) FindStage(id string) *Stage {
-	for i := range p.Stages {
-		if p.Stages[i].ID == id {
-			return &p.Stages[i]
-		}
-	}
-	return nil
-}
-
 // StageForMessageContains returns the first stage that has a message_contains
 // trigger matching the given message text. Returns nil if none match.
 func (p *Pipeline) StageForMessageContains(message string) *Stage {

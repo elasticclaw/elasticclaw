@@ -60,17 +60,6 @@ func TestEntryStage(t *testing.T) {
 	}
 }
 
-func TestFindStage(t *testing.T) {
-	p, _ := pipeline.Parse([]byte(sampleYAML))
-	s := p.FindStage("merged")
-	if s == nil {
-		t.Fatal("expected to find 'merged' stage")
-	}
-	if !s.Terminal {
-		t.Error("expected 'merged' stage to be terminal")
-	}
-}
-
 func TestStageForMessageContains(t *testing.T) {
 	p, _ := pipeline.Parse([]byte(sampleYAML))
 	s := p.StageForMessageContains("Great work! [DONE] https://github.com/org/repo/pull/1")
