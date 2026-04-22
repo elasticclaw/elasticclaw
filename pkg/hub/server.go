@@ -45,8 +45,6 @@ type Server struct {
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
 	linearBaseURL string
-	// testGitHubToken is used in tests to bypass GitHub App token resolution
-	testGitHubToken string
 }
 
 type clawConn struct {

@@ -244,10 +244,12 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Find provider: factory override > template config > hub default
 	provider := factory.Provider
 	if provider == "" {
-		provider = s.defaultProvider()
+		if tmplCfg != nil && tmplCfg.Provider != "" {
+			provider = tmplCfg.Provider
+		}
 	}
-	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
-		provider = tmplCfg.Provider
+	if provider == "" {
+		provider = s.defaultProvider()
 	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")
@@ -434,12 +436,16 @@ func (s *Server) terminateClawForIssue(issueID string) {
 }
 
 func (s *Server) defaultProvider() string {
+	var typedProvider string
 	for name, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" || p.Type != "" {
+		if p.Token != "" || p.APIKey != "" {
 			return name
 		}
+		if typedProvider == "" && p.Type != "" {
+			typedProvider = name
+		}
 	}
-	return ""
+	return typedProvider
 }
 
 func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) string {
@@ -691,12 +697,7 @@ func (s *Server) moveLinearIssueOnServer(token, issueIdentifier, targetStateName
 	return moveLinearIssueWithBase(base, token, issueIdentifier, targetStateName)
 }
 
-// moveLinearIssue updates a Linear issue's state by name using the Linear GraphQL API.
-func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
-	return moveLinearIssueWithBase("https://api.linear.app", token, issueIdentifier, targetStateName)
-}
-
-// moveLinearIssueWithBase is like moveLinearIssue but against a custom base URL (for testing).
+// moveLinearIssueWithBase updates a Linear issue's state against a custom base URL (for testing).
 func moveLinearIssueWithBase(baseURL, token, issueIdentifier, targetStateName string) error {
 	// First find the issue ID from identifier using GraphQL variables
 	queryBody := map[string]interface{}{

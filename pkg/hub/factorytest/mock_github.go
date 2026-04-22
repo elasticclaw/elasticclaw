@@ -51,7 +51,7 @@ func NewMockGitHub(t *testing.T) *MockGitHub {
 			return
 		}
 		// GET /repos/:owner/:repo/issues/:number/comments
-		if len(parts) == 4 && parts[2] == "issues" && r.Method == http.MethodGet {
+		if len(parts) == 5 && parts[2] == "issues" && parts[4] == "comments" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte("[]"))
 			return
