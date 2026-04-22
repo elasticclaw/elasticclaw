@@ -375,13 +375,13 @@ func resolveHubConn() (hubURL, clawToken string, err error) {
 	clawToken = os.Getenv("ELASTICCLAW_CLAW_TOKEN")
 
 	if hubURL == "" || clawToken == "" {
-		cfg, cfgErr := config.LoadHubConfig()
-		if cfgErr == nil && cfg != nil {
+		h, _, resolveErr := config.ResolveHub(profile)
+		if resolveErr == nil && h != nil {
 			if hubURL == "" {
-				hubURL = cfg.URL
+				hubURL = h.URL
 			}
 			if clawToken == "" {
-				clawToken = cfg.ClawToken
+				clawToken = h.Token
 			}
 		}
 	}
