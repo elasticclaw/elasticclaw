@@ -178,7 +178,7 @@ func (s *Server) pollAllPRs() {
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
-		if r.autoFixBugbot || factory != nil {
+		if r.autoFixBugbot || isPipelineDriven {
 			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 			if err != nil {
 				continue
@@ -187,7 +187,7 @@ func (s *Server) pollAllPRs() {
 				s.checkBugbotComments(r.pr, commentsData)
 			}
 			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
-			if factory != nil {
+			if isPipelineDriven {
 				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
 				// so the same comment is not injected twice with different templates.
 				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
