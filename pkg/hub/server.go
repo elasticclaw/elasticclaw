@@ -938,9 +938,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
-	// If gateway is already ready on connect (common for factory claws where bootstrap
-	// completes before bridge registers), fire the wake message immediately.
+	// Initialize entry pipeline stage only after bridge connects so on_enter inject
+	// can be delivered over WS.
+	usedPipelineEntryInject := false
 	if cc.gatewayReady && currentStatus == "connected" {
+		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
+	}
+	// If no pipeline entry inject was sent, fire the default wake message.
+	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
 		go s.sendWakeMessage(cc, clawID)
 	}
 
@@ -983,6 +988,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
+					var wakeConn *clawConn
+					var shouldWake bool
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
@@ -1004,7 +1011,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 								})
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-								go s.sendWakeMessage(cc, clawID)
+								shouldWake = true
+								wakeConn = cc
 							}
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
@@ -1015,6 +1023,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					s.mu.Unlock()
+					if shouldWake {
+						if !s.initializePipelineEntryIfNeeded(clawID) {
+							go s.sendWakeMessage(wakeConn, clawID)
+						}
+					}
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side

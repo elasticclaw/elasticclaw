@@ -74,13 +74,44 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 	s.runOnEnter(clawID, stage, factory, issueID)
 }
 
+// initializePipelineEntryIfNeeded transitions a factory claw into its entry stage
+// exactly once, after the claw is connected and ready.
+// Returns true when entry on_enter inject should be used as the initial wake-up.
+func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
+	// Entry runs only once; if a stage is already set we are done.
+	if s.getPipelineStage(clawID) != "" {
+		return false
+	}
+
+	var issueID string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID); err != nil || issueID == "" {
+		return false
+	}
+
+	factory := s.findFactoryForIssue(issueID)
+	if factory == nil {
+		return false
+	}
+	pl := parsePipelineForFactory(factory)
+	if pl == nil {
+		return false
+	}
+	entry := pl.EntryStage()
+	if entry == nil {
+		return false
+	}
+
+	s.transitionPipelineStage(clawID, *entry, factory, issueID)
+	return strings.TrimSpace(entry.OnEnter.Inject) != ""
+}
+
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
-func (s *Server) findFactoryForClaw(clawID string) *types.FactoryConfig {
+func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
 	var issueID string
 	_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&issueID)
 	if issueID == "" {
-		return nil
+		return nil, ""
 	}
-	return s.findFactoryForIssue(issueID)
+	return s.findFactoryForIssue(issueID), issueID
 }

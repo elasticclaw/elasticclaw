@@ -482,13 +482,6 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
 	})
 
-	// Initialize pipeline if factory has one
-	if pl := parsePipelineForFactory(factory); pl != nil {
-		if entry := pl.EntryStage(); entry != nil {
-			s.transitionPipelineStage(clawID, *entry, factory, issueID)
-		}
-	}
-
 	return nil
 }
 

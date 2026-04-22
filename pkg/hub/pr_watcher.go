@@ -628,9 +628,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
 		// Check if the pipeline handles pr_closed
-		factory := s.findFactoryForClaw(clawID)
-		var issueID string
-		_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&issueID)
+		factory, issueID := s.findFactoryForClaw(clawID)
 		pipelineHandled := false
 		if factory != nil {
 			if pl := parsePipelineForFactory(factory); pl != nil {
@@ -650,10 +648,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
-	mergeFactory := s.findFactoryForClaw(clawID)
+	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
 	if mergeFactory != nil {
-		var mergeIssueID string
-		_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&mergeIssueID)
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
 			if stage := pl.StageForPRMerged(); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)

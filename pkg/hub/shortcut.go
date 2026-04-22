@@ -562,13 +562,6 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	})
 	log.Printf("[factory] created claw %s (%s) for Shortcut story %s", clawName, clawID[:8], storyID)
 
-	// Initialize pipeline if factory has one
-	if pl := parsePipelineForFactory(factory); pl != nil {
-		if entry := pl.EntryStage(); entry != nil {
-			s.transitionPipelineStage(clawID, *entry, factory, storyID)
-		}
-	}
-
 	return nil
 }
 
