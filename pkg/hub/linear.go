@@ -241,9 +241,12 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
-	// Find provider: template config > hub default
-	provider := s.defaultProvider()
-	if tmplCfg != nil && tmplCfg.Provider != "" {
+	// Find provider: factory override > template config > hub default
+	provider := factory.Provider
+	if provider == "" {
+		provider = s.defaultProvider()
+	}
+	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
 		provider = tmplCfg.Provider
 	}
 	if provider == "" {
@@ -385,6 +388,10 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "vercel":
 			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		case "noop":
+			// Test provider — skip provisioning, mark connected immediately so fake bridge can connect
+			providerID := "noop-vm-" + clawID[:8]
+			_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=?`, providerID, clawID)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
@@ -428,7 +435,7 @@ func (s *Server) terminateClawForIssue(issueID string) {
 
 func (s *Server) defaultProvider() string {
 	for name, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" {
+		if p.Token != "" || p.APIKey != "" || p.Type != "" {
 			return name
 		}
 	}
@@ -542,7 +549,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			// Linear issue
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken != "" {
-				if err := moveLinearIssue(linearToken, issueID, factory.DoneStatus); err != nil {
+				if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.DoneStatus); err != nil {
 					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, factory.DoneStatus, err)
 				} else {
 					log.Printf("[factory] moved issue %s to '%s'", issueID, factory.DoneStatus)
@@ -674,8 +681,23 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	return nil
 }
 
+// moveLinearIssueOnServer updates a Linear issue's state, using the server's configured
+// linearBaseURL override if set (for testing).
+func (s *Server) moveLinearIssueOnServer(token, issueIdentifier, targetStateName string) error {
+	base := s.linearBaseURL
+	if base == "" {
+		base = "https://api.linear.app"
+	}
+	return moveLinearIssueWithBase(base, token, issueIdentifier, targetStateName)
+}
+
 // moveLinearIssue updates a Linear issue's state by name using the Linear GraphQL API.
 func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
+	return moveLinearIssueWithBase("https://api.linear.app", token, issueIdentifier, targetStateName)
+}
+
+// moveLinearIssueWithBase is like moveLinearIssue but against a custom base URL (for testing).
+func moveLinearIssueWithBase(baseURL, token, issueIdentifier, targetStateName string) error {
 	// First find the issue ID from identifier using GraphQL variables
 	queryBody := map[string]interface{}{
 		"query": "query($id: String!) { issue(id: $id) { id team { states { nodes { id name } } } } }",
@@ -684,7 +706,7 @@ func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
 		},
 	}
 	queryJSON, _ := json.Marshal(queryBody)
-	req, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(string(queryJSON)))
+	req, _ := http.NewRequest("POST", baseURL+"/graphql", strings.NewReader(string(queryJSON)))
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -734,7 +756,7 @@ func moveLinearIssue(token, issueIdentifier, targetStateName string) error {
 		},
 	}
 	mutationJSON, _ := json.Marshal(mutationBody)
-	req2, _ := http.NewRequest("POST", "https://api.linear.app/graphql", strings.NewReader(string(mutationJSON)))
+	req2, _ := http.NewRequest("POST", baseURL+"/graphql", strings.NewReader(string(mutationJSON)))
 	req2.Header.Set("Authorization", token)
 	req2.Header.Set("Content-Type", "application/json")
 	resp2, err := http.DefaultClient.Do(req2)

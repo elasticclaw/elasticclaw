@@ -541,7 +541,11 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	if tokenForPR == "" {
 		tokenForPR = token
 	}
-	data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+	data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
 	if err != nil {
 		return false
 	}
