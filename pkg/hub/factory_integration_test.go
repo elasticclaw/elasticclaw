@@ -50,8 +50,11 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 	payload := buildLinearWebhookPayload(issueID, "Backlog", "In Progress")
 	resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
 		strings.NewReader(string(payload)))
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("webhook post failed: err=%v status=%d", err, resp.StatusCode)
+	if err != nil {
+		t.Fatalf("webhook post failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("webhook post failed: status=%d", resp.StatusCode)
 	}
 
 	// Wait for claw to be created
