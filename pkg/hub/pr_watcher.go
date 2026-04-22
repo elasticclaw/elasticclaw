@@ -552,18 +552,21 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		return false // still open
 	}
 
-	// PR is merged or closed — terminate the claw
 	clawID := pr.clawID
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
 		return false
 	}
 
-	action := "merged"
-	if !merged {
-		action = "closed"
+	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
+	if state == "closed" && !merged {
+		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
+		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+		return false
 	}
-	log.Printf("[pr-watcher] PR %s#%d %s — terminating claw %s", pr.repo, pr.prNumber, action, clawID[:8])
+
+	// PR was merged — terminate the claw.
+	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	var providerID, provider string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
@@ -573,7 +576,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, fmt.Sprintf("factory: PR %s", action))
+		cc.conn.Close(1000, "factory: PR merged")
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
