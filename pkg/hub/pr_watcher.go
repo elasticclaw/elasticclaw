@@ -169,6 +169,7 @@ func (s *Server) pollAllPRs() {
 
 		factory, _ := s.findFactoryForClaw(r.pr.clawID)
 		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
+		log.Printf("[pr-watcher] claw=%s factory=%v pipelineDriven=%v", r.pr.clawID[:8], factory != nil, isPipelineDriven)
 
 		// Check if PR is merged/closed for any non-terminal claw status.
 		if s.checkPRMerged(r.pr, token) {
