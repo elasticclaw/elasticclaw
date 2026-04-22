@@ -561,6 +561,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
 	if state == "closed" && !merged {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
+		// Stop polling this closed PR so we only notify once.
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
 		return false
 	}
