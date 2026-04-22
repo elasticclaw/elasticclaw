@@ -561,6 +561,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
 	})
 	log.Printf("[factory] created claw %s (%s) for Shortcut story %s", clawName, clawID[:8], storyID)
+
 	return nil
 }
 

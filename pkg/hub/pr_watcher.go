@@ -97,7 +97,7 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			s.pollAllPRs()
@@ -124,6 +124,7 @@ func (s *Server) pollAllPRs() {
 		WHERE cl.status NOT IN ('deleted','error','offline')
 	`)
 	if err != nil {
+		log.Printf("[pr-watcher] poll query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -150,33 +151,55 @@ func (s *Server) pollAllPRs() {
 
 	token := s.resolveGitHubToken()
 	if token == "" {
+		log.Printf("[pr-watcher] poll: no GitHub token, skipping %d PRs", len(prs))
 		return
+	}
+
+	if len(prs) > 0 {
+		log.Printf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
 	}
 
 	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
+		log.Printf("[pr-watcher] poll: claw=%s status=%s pr=%s", r.pr.clawID[:8], r.clawStatus, r.pr.prURL)
 		// Skip PRs for claws that were already terminated in this poll
 		if terminatedClaws[r.pr.clawID] {
 			continue
 		}
 
-		// Only check if PR is merged/closed for idle claws (factory claws that sent [DONE])
-		if r.clawStatus == "idle" && s.checkPRMerged(r.pr, token) {
+		factory, _ := s.findFactoryForClaw(r.pr.clawID)
+		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
+		log.Printf("[pr-watcher] claw=%s factory=%v pipelineDriven=%v", r.pr.clawID[:8], factory != nil, isPipelineDriven)
+
+		// Check if PR is merged/closed for any non-terminal claw status.
+		if s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
-		}
-		if r.clawStatus == "idle" {
-			var prCount int
-			if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE id=?`, r.pr.id).Scan(&prCount); err == nil && prCount == 0 {
-				// PR was removed while handling close/merge state, so skip follow-up checks.
-				continue
-			}
 		}
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
-		if r.autoFixBugbot {
-			s.checkBugbotComments(r.pr, token)
+		if r.autoFixBugbot || isPipelineDriven {
+			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
+			if repoToken == "" {
+				repoToken = token
+			}
+			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+			if err != nil {
+				log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
+				continue
+			}
+			if r.autoFixBugbot {
+				s.checkBugbotComments(r.pr, commentsData)
+			}
+			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
+			if isPipelineDriven {
+				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
+				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
+				// so the same comment is not injected twice with different templates.
+				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
+			}
+			s.updatePRCommentWatermark(r.pr, commentsData)
 		}
 	}
 }
@@ -271,15 +294,10 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 	s.injectUserMessage(pr.clawID, msg)
 }
 
-// checkBugbotComments polls PR review comments for new bugbot entries.
-func (s *Server) checkBugbotComments(pr clawPR, token string) {
-	commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", pr.repo, pr.prNumber), token)
-	if err != nil {
-		return
-	}
-
+// checkPRComments forwards new comments from any human reviewer to the claw.
+// Used for pipeline-driven claws that need to react to review feedback.
+func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugbot bool) {
 	var newComments []string
-	var maxID int64 = pr.lastCommentID
 
 	for _, c := range commentsData {
 		comment, _ := c.(map[string]interface{})
@@ -288,27 +306,51 @@ func (s *Server) checkBugbotComments(pr clawPR, token string) {
 		if id <= pr.lastCommentID {
 			continue
 		}
-		if id > maxID {
-			maxID = id
-		}
 		user, _ := comment["user"].(map[string]interface{})
 		login, _ := user["login"].(string)
 		body, _ := comment["body"].(string)
 		htmlURL, _ := comment["html_url"].(string)
 
-		// Match cursor bugbot (login starts with "cursor" or body has "cursor bot" signature)
-		isBugbot := strings.Contains(strings.ToLower(login), "cursor") ||
-			strings.Contains(strings.ToLower(body), "cursor bot") ||
-			strings.Contains(strings.ToLower(body), "bugbot")
+		// Skip bots
+		userType, _ := user["type"].(string)
+		if strings.EqualFold(userType, "bot") || strings.HasSuffix(login, "[bot]") {
+			continue
+		}
+		if skipBugbot && isBugbotComment(login, body) {
+			continue
+		}
 
-		if isBugbot {
+		newComments = append(newComments, fmt.Sprintf("**@%s** commented on PR #%d:\n> %s\n[View](%s)",
+			login, pr.prNumber, strings.TrimSpace(body), htmlURL))
+	}
+
+	if len(newComments) == 0 {
+		return
+	}
+
+	log.Printf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
+	s.injectUserMessage(pr.clawID, strings.Join(newComments, "\n\n"))
+}
+
+// checkBugbotComments polls PR review comments for new bugbot entries.
+func (s *Server) checkBugbotComments(pr clawPR, commentsData []interface{}) {
+	var newComments []string
+
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id <= pr.lastCommentID {
+			continue
+		}
+		user, _ := comment["user"].(map[string]interface{})
+		login, _ := user["login"].(string)
+		body, _ := comment["body"].(string)
+		htmlURL, _ := comment["html_url"].(string)
+		if isBugbotComment(login, body) {
 			newComments = append(newComments, fmt.Sprintf("> %s\n\n[View comment](%s)",
 				strings.TrimSpace(body), htmlURL))
 		}
-	}
-
-	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
 	}
 
 	if len(newComments) == 0 {
@@ -319,6 +361,27 @@ func (s *Server) checkBugbotComments(pr clawPR, token string) {
 		pr.prNumber, pr.repo, pr.prURL, strings.Join(newComments, "\n\n---\n\n"))
 
 	s.injectUserMessage(pr.clawID, msg)
+}
+
+func isBugbotComment(login, body string) bool {
+	return strings.Contains(strings.ToLower(login), "cursor") ||
+		strings.Contains(strings.ToLower(body), "cursor bot") ||
+		strings.Contains(strings.ToLower(body), "bugbot")
+}
+
+func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{}) {
+	maxID := pr.lastCommentID
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if maxID > pr.lastCommentID {
+		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+	}
 }
 
 // injectUserMessage inserts a user-role message into the claw's conversation
@@ -559,6 +622,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 
+	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
+
 	if state != "closed" && !merged {
 		return false // still open
 	}
@@ -574,14 +639,36 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
 		// Stop polling this closed PR so we only notify once.
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
-		s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
-		// Stop polling this closed PR so the claw doesn't get duplicate notifications.
-		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
+
+		// Check if the pipeline handles pr_closed
+		factory, issueID := s.findFactoryForClaw(clawID)
+		pipelineHandled := false
+		if factory != nil {
+			if pl := parsePipelineForFactory(factory); pl != nil {
+				if stage := pl.StageForPRClosed(); stage != nil {
+					s.transitionPipelineStage(clawID, *stage, factory, issueID)
+					pipelineHandled = true
+				}
+			}
+		}
+		if !pipelineHandled {
+			s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+		}
 		return false
 	}
 
-	// PR was merged — terminate the claw.
+	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
+
+	// Check if the pipeline handles pr_merged (run on_enter before terminating)
+	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
+	if mergeFactory != nil {
+		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
+			if stage := pl.StageForPRMerged(); stage != nil {
+				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
+			}
+		}
+	}
 
 	var providerID, provider string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
