@@ -34,6 +34,12 @@ type linearWebhookPayload struct {
 			Key  string `json:"key"`
 			Name string `json:"name"`
 		} `json:"team"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels,omitempty"`
+		Assignee *struct {
+			Name string `json:"name"`
+		} `json:"assignee,omitempty"`
 	} `json:"data"`
 	UpdatedFrom *struct {
 		State *struct {
@@ -99,11 +105,19 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	// Check factory-level secrets
 	if s.hubCfg.Factories != nil {
 		for _, factory := range s.hubCfg.Factories {
-			if factory.Integration != "linear" || factory.WebhookSecret == "" {
+			if factory.Integration != "linear" {
+				continue
+			}
+			// Resolve secret: inline value or named ref
+			secret := factory.WebhookSecret
+			if secret == "" && factory.WebhookSecretRef != "" && s.hubCfg.Secrets != nil {
+				secret = s.hubCfg.Secrets[factory.WebhookSecretRef]
+			}
+			if secret == "" {
 				continue
 			}
 			hasAnySecret = true
-			mac := hmac.New(sha256.New, []byte(factory.WebhookSecret))
+			mac := hmac.New(sha256.New, []byte(secret))
 			mac.Write(body)
 			expected := hex.EncodeToString(mac.Sum(nil))
 			if hmac.Equal([]byte(sig), []byte(expected)) {
@@ -143,6 +157,52 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 		}
 		if factory.Team != "" && !strings.EqualFold(factory.Team, teamKey) {
 			continue
+		}
+
+		// Labels filter: all configured labels must be present on the issue (AND)
+		if len(factory.Labels) > 0 {
+			issueLabels := map[string]bool{}
+			for _, l := range payload.Data.Labels {
+				issueLabels[strings.ToLower(l.Name)] = true
+			}
+			allMatch := true
+			for _, required := range factory.Labels {
+				if !issueLabels[strings.ToLower(required)] {
+					allMatch = false
+					break
+				}
+			}
+			if !allMatch {
+				continue
+			}
+		}
+
+		// AssignedTo filter
+		if factory.AssignedTo != "" {
+			assignee := ""
+			if payload.Data.Assignee != nil {
+				assignee = payload.Data.Assignee.Name
+			}
+			switch {
+			case factory.AssignedTo == "any":
+				if assignee == "" {
+					continue
+				}
+			case factory.AssignedTo == "none":
+				if assignee != "" {
+					continue
+				}
+			case strings.HasPrefix(factory.AssignedTo, "!"):
+				excluded := strings.TrimPrefix(strings.TrimPrefix(factory.AssignedTo, "!"), "@")
+				if strings.EqualFold(assignee, excluded) {
+					continue
+				}
+			default:
+				wanted := strings.TrimPrefix(factory.AssignedTo, "@")
+				if !strings.EqualFold(assignee, wanted) {
+					continue
+				}
+			}
 		}
 
 		// Issue entering trigger status → create claw.

@@ -210,6 +210,8 @@ type HubConfig struct {
 
 	// Factories defines automation rules that spin up claws based on integration events.
 	Factories []*FactoryConfig `yaml:"factories,omitempty"`
+	// Secrets is a named map of secret values referenced by factories via webhook_secret_ref.
+	Secrets map[string]string `yaml:"secrets,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
@@ -246,6 +248,14 @@ type FactoryConfig struct {
 	WebhookSecret     string   `yaml:"webhook_secret,omitempty"` // HMAC-SHA256 secret for validating webhooks
 	Tags              []string `yaml:"tags,omitempty"`          // tags applied to created claws
 	Color             string   `yaml:"color,omitempty"`         // color applied to created claws
+	// Labels: all must be present on the issue to trigger (AND)
+	Labels []string `yaml:"labels,omitempty"`
+	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
+	AssignedTo string `yaml:"assigned_to,omitempty"`
+	// WebhookSecretRef is a named key in HubConfig.Secrets (use instead of inline WebhookSecret for repo-defined factories)
+	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty"`
+	// PipelineYAML is the raw pipeline.yaml content stored alongside this factory
+	PipelineYAML string `yaml:"pipeline_yaml,omitempty"`
 }
 
 type ProviderConfig struct {
