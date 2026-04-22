@@ -96,6 +96,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID := tenantFromCtx(r)
+	if cc.tenantID != tenantID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	out := make([]uploadedAttachment, 0, len(files))
 	for _, fh := range files {
 		if fh.Size > maxFileBytes {
@@ -188,6 +194,12 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	if cc == nil {
 		http.Error(w, "claw not connected", http.StatusConflict)
+		return
+	}
+
+	tenantID := tenantFromCtx(r)
+	if cc.tenantID != tenantID {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
