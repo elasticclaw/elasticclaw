@@ -1853,8 +1853,8 @@ func (s *Server) syncReplicatedVMs() {
 				newStatus, c.id)
 			if execErr == nil {
 				if n, _ := res.RowsAffected(); n > 0 {
-					log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
-						c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
+					log.Printf("Claw %s (%s): VM %s %s → hub status %s",
+						c.name, c.id[:8], c.providerID, vm.Status, newStatus)
 					s.broadcastToUsers(c.tenantID, types.WSMessage{
 						Type:    "claw_status",
 						Payload: map[string]string{"claw_id": c.id, "status": newStatus},
