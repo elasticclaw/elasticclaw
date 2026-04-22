@@ -28,8 +28,8 @@ func init() {
 
 func runHubUpgrade(cmd *cobra.Command, args []string) error {
 	if hubUpgradeServer == "" {
-		// Try to infer from active profile's hub URL
-		hubUpgradeServer = inferSSHFromProfile()
+		// Try to infer from --profile (or active profile)
+		hubUpgradeServer = inferSSHFromProfile(profile)
 	}
 	if hubUpgradeServer == "" {
 		return fmt.Errorf("--server required, e.g. --server ssh://root@elasticclaw.example.com")
@@ -102,9 +102,10 @@ fi
 	return nil
 }
 
-// inferSSHFromProfile tries to guess the SSH target from the active profile's hub URL.
-func inferSSHFromProfile() string {
-	hubProfile, _, err := config.ResolveHub("")
+// inferSSHFromProfile tries to guess the SSH target from the given profile's hub URL.
+// Pass "" to use the active profile.
+func inferSSHFromProfile(profileName string) string {
+	hubProfile, _, err := config.ResolveHub(profileName)
 	if err != nil || hubProfile == nil || hubProfile.URL == "" {
 		return ""
 	}
