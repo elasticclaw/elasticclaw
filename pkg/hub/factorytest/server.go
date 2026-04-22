@@ -68,7 +68,7 @@ func NewTestServer(t *testing.T) *TestServer {
 				Integration:   "linear",
 				Workspace:     "test-workspace",
 				TriggerStatus: "In Progress",
-				DoneStatus:    "done-state-id",
+				DoneStatus:    "Done",
 				Template:      "elasticclaw",
 				Provider:      "noop",
 			},

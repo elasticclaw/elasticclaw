@@ -76,7 +76,16 @@ func NewMockLinear(t *testing.T) *MockLinear {
 						"description": "Please add a 'Hello World' section to the README.md file.",
 						"url":         "https://linear.app/test/issue/ELA-123",
 						"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
-						"team":        map[string]interface{}{"name": "Engineering", "key": "ELA"},
+						"team": map[string]interface{}{
+							"name": "Engineering",
+							"key":  "ELA",
+							"states": map[string]interface{}{
+								"nodes": []map[string]interface{}{
+									{"id": "done-state-id", "name": "Done"},
+									{"id": "in-progress-id", "name": "In Progress"},
+								},
+							},
+						},
 					},
 				},
 			})
