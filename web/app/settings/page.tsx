@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
-type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "templates"
+type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "secrets" | "templates"
 
 interface LLMKeyView {
   name: string
@@ -40,6 +40,7 @@ interface SettingsData {
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
   }>
+  secrets?: string[]
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -126,6 +127,7 @@ export default function SettingsPage() {
     { id: "security", label: "Security", icon: Shield },
     { id: "integrations", label: "Integrations", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
+    { id: "secrets", label: "Secrets", icon: Lock },
     { id: "templates", label: "Templates", icon: LayoutTemplate },
   ]
 
@@ -189,6 +191,9 @@ export default function SettingsPage() {
           )}
           {settings && section === "factories" && (
             <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} onSaveSilent={saveSilent} saving={saving} />
+          )}
+          {section === "secrets" && (
+            <SecretsSection settings={settings} />
           )}
           {section === "templates" && (
             <TemplatesSection />
@@ -878,6 +883,92 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function SecretsSection({ settings }: { settings: SettingsData | null }) {
+  const [secrets, setSecrets] = useState<string[]>(settings?.secrets || [])
+  const [newName, setNewName] = useState("")
+  const [newValue, setNewValue] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const hubUrl = getHubUrl()
+  const token = () => sessionStorage.getItem("ec_hub_token") || ""
+
+  const refresh = async () => {
+    const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
+    if (res.ok) {
+      const data = await res.json()
+      setSecrets(data.secrets || [])
+    }
+  }
+
+  const handleAdd = async () => {
+    if (!newName.trim() || !newValue.trim()) return
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch(`${hubUrl}/api/secrets`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
+        body: JSON.stringify({ name: newName.trim(), value: newValue.trim() }),
+      })
+      if (!res.ok) { setError(await res.text()); return }
+      setNewName("")
+      setNewValue("")
+      await refresh()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async (name: string) => {
+    setError(null)
+    const res = await fetch(`${hubUrl}/api/secrets?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token()}` },
+    })
+    if (!res.ok) { setError(await res.text()); return }
+    await refresh()
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Secrets</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Named secrets referenced by factories via <code className="bg-muted px-1 rounded text-xs">webhook_secret_ref</code>.
+        </p>
+      </div>
+
+      <div className="border border-border rounded-lg divide-y divide-border">
+        {secrets.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center">No secrets configured.</p>
+        ) : (
+          secrets.map(name => (
+            <div key={name} className="flex items-center justify-between px-4 py-3">
+              <code className="text-sm font-mono">{name}</code>
+              <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive" onClick={() => handleDelete(name)}>
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="border border-border rounded-lg p-5 space-y-4">
+        <h3 className="text-sm font-medium">Add Secret</h3>
+        <div className="flex gap-2">
+          <Input placeholder="Name (e.g. canio_webhook_secret)" value={newName} onChange={e => setNewName(e.target.value)} className="font-mono text-sm" />
+          <Input placeholder="Value" type="password" value={newValue} onChange={e => setNewValue(e.target.value)} className="font-mono text-sm" />
+          <Button onClick={handleAdd} disabled={saving || !newName.trim() || !newValue.trim()}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+        {error && <p className="text-xs text-destructive">{error}</p>}
+      </div>
     </div>
   )
 }

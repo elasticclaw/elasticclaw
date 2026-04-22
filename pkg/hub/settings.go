@@ -34,6 +34,7 @@ type SettingsView struct {
 	SSHPublicKeys []string                `json:"sshPublicKeys"`
 	Integrations  *IntegrationsView       `json:"integrations"`
 	Factories     []FactoryView           `json:"factories"`
+	Secrets       []string                `json:"secrets"`
 }
 
 type IntegrationsView struct {
@@ -272,6 +273,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 				WebhookSecretSet: li.WebhookSecret != "",
 			})
 		}
+	}
+
+	// Secrets — names only
+	view.Secrets = []string{}
+	for k := range s.hubCfg.Secrets {
+		view.Secrets = append(view.Secrets, k)
 	}
 
 	// Factories
