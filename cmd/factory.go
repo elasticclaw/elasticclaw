@@ -363,9 +363,12 @@ func runFactoryShow(name string) error {
 	}
 
 	// Pretty print as YAML
-	var v interface{}
+	var v []interface{}
 	_ = json.Unmarshal(body, &v)
-	out, _ := yaml.Marshal(v)
+	if len(v) == 0 {
+		return fmt.Errorf("factory %q not found", name)
+	}
+	out, _ := yaml.Marshal(v[0])
 	fmt.Print(string(out))
 	return nil
 }

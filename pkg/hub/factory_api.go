@@ -139,15 +139,13 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	}
 	cfgCopy := *s.hubCfg
 	cfgCopy.Factories = updated
+	s.hubCfg = &cfgCopy
 	s.mu.Unlock()
 
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.mu.Lock()
-	s.hubCfg.Factories = updated
-	s.mu.Unlock()
 
 	views := make([]FactoryPushView, 0, len(req.Factories))
 	for _, f := range req.Factories {
@@ -170,22 +168,20 @@ func (s *Server) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, nam
 		}
 		factories = append(factories, f)
 	}
-	cfgCopy := *s.hubCfg
-	cfgCopy.Factories = factories
-	s.mu.Unlock()
-
 	if !found {
+		s.mu.Unlock()
 		http.Error(w, "factory not found", http.StatusNotFound)
 		return
 	}
+	cfgCopy := *s.hubCfg
+	cfgCopy.Factories = factories
+	s.hubCfg = &cfgCopy
+	s.mu.Unlock()
 
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.mu.Lock()
-	s.hubCfg.Factories = factories
-	s.mu.Unlock()
 
 	jsonOK(w, map[string]string{"deleted": name})
 }

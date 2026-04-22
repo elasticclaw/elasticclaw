@@ -84,11 +84,17 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
+	s.mu.RLock()
+	integrations := s.hubCfg.Integrations
+	factories := s.hubCfg.Factories
+	secrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+
 	hasAnySecret := false
 
 	// Check integration-level secrets
-	if s.hubCfg.Integrations != nil {
-		for _, li := range s.hubCfg.Integrations.Linear {
+	if integrations != nil {
+		for _, li := range integrations.Linear {
 			if li.WebhookSecret == "" {
 				continue
 			}
@@ -103,15 +109,15 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	}
 
 	// Check factory-level secrets
-	if s.hubCfg.Factories != nil {
-		for _, factory := range s.hubCfg.Factories {
+	if factories != nil {
+		for _, factory := range factories {
 			if factory.Integration != "linear" {
 				continue
 			}
 			// Resolve secret: inline value or named ref
 			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && s.hubCfg.Secrets != nil {
-				secret = s.hubCfg.Secrets[factory.WebhookSecretRef]
+			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+				secret = secrets[factory.WebhookSecretRef]
 			}
 			if secret == "" {
 				continue
