@@ -183,23 +183,24 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			if payload.Data.Assignee != nil {
 				assignee = payload.Data.Assignee.Name
 			}
+			wanted := strings.ToLower(strings.TrimSpace(factory.AssignedTo))
 			switch {
-			case factory.AssignedTo == "any":
+			case wanted == "any":
 				if assignee == "" {
 					continue
 				}
-			case factory.AssignedTo == "none":
+			case wanted == "none":
 				if assignee != "" {
 					continue
 				}
-			case strings.HasPrefix(factory.AssignedTo, "!"):
-				excluded := strings.TrimPrefix(strings.TrimPrefix(factory.AssignedTo, "!"), "@")
+			case strings.HasPrefix(wanted, "!"):
+				excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
 				if strings.EqualFold(assignee, excluded) {
 					continue
 				}
 			default:
-				wanted := strings.TrimPrefix(factory.AssignedTo, "@")
-				if !strings.EqualFold(assignee, wanted) {
+				target := strings.TrimPrefix(wanted, "@")
+				if !strings.EqualFold(assignee, target) {
 					continue
 				}
 			}
