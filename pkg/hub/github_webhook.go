@@ -176,9 +176,10 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			switch payload.Action {
 			case "closed":
 				// Let the pr_watcher handle merged/closed — don't double-inject
-			case "synchronize", "reopened":
+			case "synchronize", "reopened", "edited", "labeled", "unlabeled", "assigned", "unassigned", "review_requested":
 				// Only inject if the claw is connected and ready — otherwise the
-				// claw hasn't started yet and the update is redundant/lost.
+				// claw hasn't started yet and the update is redundant (claw gets
+				// full context from BOOTSTRAP on startup).
 				s.mu.RLock()
 				cc, connected := s.claws[existingClawID]
 				ready := connected && cc.gatewayReady
@@ -186,17 +187,17 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				if !ready {
 					log.Printf("[factory:%s] github PR #%d action=%s — claw %s not ready yet, skipping inject", factory.Name, payload.Number, payload.Action, existingClawID[:8])
 				} else {
-					var msg string
+					msg := fmt.Sprintf("PR #%d update: %s.", payload.Number, payload.Action)
 					if payload.Action == "synchronize" {
 						msg = fmt.Sprintf("PR #%d was updated with new commits. Review the latest changes.", payload.Number)
-					} else {
+					} else if payload.Action == "reopened" {
 						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 					}
 					log.Printf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
 					s.injectHubMessageByID(existingClawID, msg)
 				}
 			default:
-				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, ignoring", factory.Name, payload.Number, payload.Action)
+				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, no action taken", factory.Name, payload.Number, payload.Action)
 			}
 			continue
 		}
