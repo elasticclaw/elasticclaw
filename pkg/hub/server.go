@@ -182,6 +182,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Integration webhooks (signature-validated, no session auth)
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
+	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))  // factory CRUD (GET list, POST push)
@@ -1954,13 +1955,11 @@ func (s *Server) bridgeDownloadURL() string {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 // sendWakeMessage sends a silent system message to wake the agent.
-// For factory claws (those with a linear_issue_id), it sends a task-specific prompt.
+// For factory claws, it sends a task-specific prompt.
 // Not stored in DB — invisible to the user but triggers the agent to respond.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
-	var issueID string
-	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
-	if issueID != "" {
+	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
 		wakeContent = `Read your BOOTSTRAP.md now. Then:
 1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
 2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
