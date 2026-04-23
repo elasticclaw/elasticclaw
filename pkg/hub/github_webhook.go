@@ -176,21 +176,31 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		// Check if a claw already exists for this PR
 		existingClawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL)
 		if existingClawID != "" {
-			// Claw exists — inject a contextual update message
-			var msg string
 			switch payload.Action {
-			case "synchronize":
-				msg = fmt.Sprintf("PR #%d was updated with new commits (action: %s). Review the latest changes.", payload.Number, payload.Action)
-			case "reopened":
-				msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 			case "closed":
 				// Let the pr_watcher handle merged/closed — don't double-inject
-				continue
+			case "synchronize", "reopened":
+				// Only inject if the claw is connected and ready — otherwise the
+				// claw hasn't started yet and the update is redundant/lost.
+				s.mu.RLock()
+				cc, connected := s.claws[existingClawID]
+				ready := connected && cc.gatewayReady
+				s.mu.RUnlock()
+				if !ready {
+					log.Printf("[factory:%s] github PR #%d action=%s — claw %s not ready yet, skipping inject", factory.Name, payload.Number, payload.Action, existingClawID[:8])
+				} else {
+					var msg string
+					if payload.Action == "synchronize" {
+						msg = fmt.Sprintf("PR #%d was updated with new commits. Review the latest changes.", payload.Number)
+					} else {
+						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
+					}
+					log.Printf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
+					s.injectUserMessage(existingClawID, msg)
+				}
 			default:
-				msg = fmt.Sprintf("PR #%d event: %s.", payload.Number, payload.Action)
+				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, ignoring", factory.Name, payload.Number, payload.Action)
 			}
-			log.Printf("[factory:%s] github PR #%d action=%s — injecting into existing claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
-			s.injectUserMessage(existingClawID, msg)
 			continue
 		}
 
