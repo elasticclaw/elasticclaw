@@ -80,7 +80,11 @@ func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name string) {
-	diskCfg, _ := config.LoadHubConfig()
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		http.Error(w, "failed to load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	s.mu.Lock()
 	_, inMemory := s.hubCfg.Secrets[name]

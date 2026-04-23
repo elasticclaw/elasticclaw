@@ -282,16 +282,16 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	prNumber := payload.Issue.Number
 
 	prURL := payload.Issue.PullRequest.HTMLURL
+	commentMsg := fmt.Sprintf("**@%s** commented on PR #%d:\n> %s\n[View](%s)",
+		payload.Comment.User.Login, prNumber,
+		strings.TrimSpace(payload.Comment.Body), payload.Comment.HTMLURL)
 
 	// Check if a claw already exists for this PR
 	existingClawID := s.findClawForGitHubPR(prURL)
 	if existingClawID != "" {
 		// Inject the comment into the existing claw
-		msg := fmt.Sprintf("**@%s** commented on PR #%d:\n> %s\n[View](%s)",
-			payload.Comment.User.Login, prNumber,
-			strings.TrimSpace(payload.Comment.Body), payload.Comment.HTMLURL)
 		log.Printf("[github-webhook] issue_comment on PR #%d — injecting into existing claw %s", prNumber, existingClawID[:8])
-		s.injectHubMessageByID(existingClawID, msg)
+		s.injectHubMessageByID(existingClawID, commentMsg)
 		return
 	}
 
@@ -357,6 +357,11 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if err := s.createClawForGitHubPR(factory, prPayload); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
 			continue // let next matching factory try
+		}
+		createdClawID := s.findClawForGitHubPR(prPayload.PullRequest.HTMLURL)
+		if createdClawID != "" {
+			log.Printf("[github-webhook] issue_comment on PR #%d — injecting into newly created claw %s", prNumber, createdClawID[:8])
+			s.injectHubMessageByID(createdClawID, commentMsg)
 		}
 		break // success — one factory match is enough
 	}
