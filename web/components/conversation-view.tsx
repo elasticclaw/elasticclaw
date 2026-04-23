@@ -1030,6 +1030,7 @@ function ClawChatView({
     const trimmed = input.trim()
     if (!trimmed && !footer) return
     setInput("")
+    clearAttachments()
     pinnedToBottom.current = true
     if (panelTextareaRef.current) {
       panelTextareaRef.current.style.height = "auto"
@@ -1044,7 +1045,6 @@ function ClawChatView({
       onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
       return
     }
-    clearAttachments()
     const payload = trimmed + footer
     onSendMessage(payload)
   }
