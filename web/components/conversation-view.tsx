@@ -565,6 +565,7 @@ function ClawBoardCard({
                             name={a.name}
                             sizeLabel={a.sizeLabel}
                             mimetype={a.mimetype}
+                            source={{ kind: "history", clawId: claw.id, path: a.path }}
                             size="sm"
                             path={a.path}
                           />
