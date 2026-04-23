@@ -107,15 +107,15 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id                 string
-	clawID             string
-	repo               string
-	prNumber           int
-	prURL              string
-	lastCISHA          string
-	lastCommentID      int64
-	lastCommentAt      string
-	prConditionsFired  bool
+	id                string
+	clawID            string
+	repo              string
+	prNumber          int
+	prURL             string
+	lastCISHA         string
+	lastCommentID     int64
+	lastCommentAt     string
+	prConditionsFired bool
 }
 
 func (s *Server) pollAllPRs() {
@@ -789,10 +789,31 @@ func (s *Server) checkPRConditions(pr clawPR, token string) *pipeline.Stage {
 			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
 			return nil
 		}
+		latestReviewStateByUser := make(map[string]struct {
+			id    int64
+			state string
+		})
 		for _, rv := range reviewsData {
 			review, _ := rv.(map[string]interface{})
+			userObj, _ := review["user"].(map[string]interface{})
+			login, _ := userObj["login"].(string)
+			if login == "" {
+				continue
+			}
+			idF, _ := review["id"].(float64)
+			reviewID := int64(idF)
 			state, _ := review["state"].(string)
-			if state == "CHANGES_REQUESTED" {
+			prev, seen := latestReviewStateByUser[login]
+			if seen && reviewID <= prev.id {
+				continue
+			}
+			latestReviewStateByUser[login] = struct {
+				id    int64
+				state string
+			}{id: reviewID, state: state}
+		}
+		for _, latest := range latestReviewStateByUser {
+			if latest.state == "CHANGES_REQUESTED" {
 				return nil
 			}
 		}

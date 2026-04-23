@@ -89,12 +89,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	var issueID string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID); err != nil || issueID == "" {
-		return false
-	}
-
-	factory := s.findFactoryForIssue(issueID)
+	factory, issueID := s.findFactoryForClaw(clawID)
 	if factory == nil {
 		return false
 	}

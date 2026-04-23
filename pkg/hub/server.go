@@ -95,12 +95,12 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:       db,
-		addr:     addr,
-		hubCfg:   hubCfg,
-		identity: id,
-		claws:    make(map[string]*clawConn),
-		users:    make(map[string]*userConn),
+		db:              db,
+		addr:            addr,
+		hubCfg:          hubCfg,
+		identity:        id,
+		claws:           make(map[string]*clawConn),
+		users:           make(map[string]*userConn),
 		fileAckWaiters:  make(map[string]chan types.FileAck),
 		fileReadWaiters: make(map[string]chan types.FileReadResp),
 	}
@@ -183,8 +183,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))  // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))  // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))   // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -994,6 +994,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
+					var shouldWake bool
+					var wakeConn *clawConn
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
@@ -1015,9 +1017,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 								})
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-								if !s.initializePipelineEntryIfNeeded(clawID) {
-									go s.sendWakeMessage(cc, clawID)
-								}
+								shouldWake = true
+								wakeConn = cc
 							}
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
@@ -1028,6 +1029,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					s.mu.Unlock()
+					if shouldWake {
+						if !s.initializePipelineEntryIfNeeded(clawID) && wakeConn != nil {
+							go s.sendWakeMessage(wakeConn, clawID)
+						}
+					}
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side

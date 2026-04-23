@@ -20,8 +20,8 @@ import (
 
 // githubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
 type githubPRPayload struct {
-	Action string `json:"action"` // "opened", "synchronize", "reopened", "closed"
-	Number int    `json:"number"`
+	Action      string `json:"action"` // "opened", "synchronize", "reopened", "closed"
+	Number      int    `json:"number"`
 	PullRequest struct {
 		HTMLURL string `json:"html_url"`
 		Title   string `json:"title"`
@@ -363,15 +363,6 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Store the PR immediately so the watcher picks it up
 	s.storePRMention(clawID, repoFullName, prNumber, prURL)
-
-	// Initialize pipeline entry stage if factory has pipeline_yaml
-	if factory.PipelineYAML != "" {
-		if pl := parsePipelineForFactory(factory); pl != nil {
-			if entry := pl.EntryStage(); entry != nil {
-				s.transitionPipelineStage(clawID, *entry, factory, "")
-			}
-		}
-	}
 
 	// Log factory event
 	s.logFactoryEvent(factory.Name,
