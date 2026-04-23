@@ -344,11 +344,21 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if prPayload.PullRequest.HTMLURL == "" {
 			continue
 		}
+		// Apply base_branch filter now that we have PR data
+		// (author filter intentionally skipped — commenter may not be PR author)
+		if factory.Trigger.Filter != nil && factory.Trigger.Filter.BaseBranch != "" {
+			if !strings.EqualFold(factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref) {
+				log.Printf("[github-webhook] factory %q: issue_comment skipped (base_branch mismatch: want %q, got %q)",
+					factory.Name, factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref)
+				continue
+			}
+		}
 		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
 		if err := s.createClawForGitHubPR(factory, prPayload); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
+			continue // let next matching factory try
 		}
-		break // one factory match is enough
+		break // success — one factory match is enough
 	}
 }
 
