@@ -1140,11 +1140,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.TenantID = tenantID
 				hm.Role = "claw"
 				hm.CreatedAt = now()
-				// Skip empty messages — never store or broadcast
-				if strings.TrimSpace(hm.Content) == "" {
-					continue
-				}
-				// Use the streaming message ID if we already started buffering
+				// Always clean up streaming state first, even for empty messages.
 				s.mu.Lock()
 				if cc, ok := s.claws[clawID]; ok && cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
@@ -1157,6 +1153,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID = uuid.New().String()
 				}
 				s.mu.Unlock()
+				// Drop empty messages — never store or broadcast
+				if strings.TrimSpace(hm.Content) == "" {
+					continue
+				}
 				_, _ = s.db.Exec(
 					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
