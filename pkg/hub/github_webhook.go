@@ -182,9 +182,9 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				// Let the pr_watcher handle merged/closed — don't double-inject
 			case "synchronize", "reopened", "review_requested":
 				// Skip synchronize events triggered by the claw itself pushing commits.
-				// The sender will be a Bot (our GitHub App) in that case.
-				if payload.Action == "synchronize" && strings.EqualFold(payload.Sender.Type, "bot") {
-					log.Printf("[factory:%s] github PR #%d synchronize from bot sender %q — skipping (claw's own push)", factory.Name, payload.Number, payload.Sender.Login)
+				// Only skip if the sender is our own GitHub App bot, not other bots (e.g. dependabot).
+				if payload.Action == "synchronize" && s.isOwnAppBot(payload.Sender.Login) {
+					log.Printf("[factory:%s] github PR #%d synchronize from own app bot %q — skipping", factory.Name, payload.Number, payload.Sender.Login)
 					continue
 				}
 				// Only inject if the claw is connected and ready — otherwise the
@@ -249,6 +249,30 @@ func githubRepoMatches(fullName string, repos []string) bool {
 }
 
 // createClawForGitHubPR provisions a new claw for a GitHub PR event.
+// isOwnAppBot returns true if the given GitHub login is the bot account for one of
+// the hub's configured GitHub Apps. App bots have the login "<app-slug>[bot]".
+// The app slug is derived from the App URL field (e.g. "https://github.com/apps/my-app" → "my-app").
+func (s *Server) isOwnAppBot(login string) bool {
+	if !strings.HasSuffix(login, "[bot]") {
+		return false
+	}
+	s.mu.RLock()
+	apps := s.hubCfg.GitHubApps
+	s.mu.RUnlock()
+	for _, app := range apps {
+		if app.URL == "" {
+			continue
+		}
+		// Extract slug from URL: https://github.com/apps/<slug> or https://github.com/settings/apps/<slug>
+		u := strings.TrimSuffix(app.URL, "/")
+		slug := u[strings.LastIndex(u, "/")+1:]
+		if strings.EqualFold(login, slug+"[bot]") {
+			return true
+		}
+	}
+	return false
+}
+
 // findClawForGitHubPR returns the claw ID that is already tracking this PR URL, or "".
 func (s *Server) findClawForGitHubPR(prURL string) string {
 	var clawID string
