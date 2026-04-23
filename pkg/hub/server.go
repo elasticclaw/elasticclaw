@@ -1059,9 +1059,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
 					}
-					// Inject context warning when crossing 95% threshold for the first time this turn
+					// Inject context warning once per streaming turn when usage is >=95%
 					var shouldWarnContext bool
-					if cc2, ok2 := s.claws[clawID]; ok2 && hb.ContextUsage >= 95 && prevUsage < 95 && !cc2.contextWarningSent {
+					if cc2, ok2 := s.claws[clawID]; ok2 && hb.ContextUsage >= 95 && !cc2.contextWarningSent {
 						cc2.contextWarningSent = true
 						shouldWarnContext = true
 					}
