@@ -173,7 +173,7 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		factory, _ := s.findFactoryForClaw(r.pr.clawID)
+		factory, issueID := s.findFactoryForClaw(r.pr.clawID)
 		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
 		log.Printf("[pr-watcher] claw=%s factory=%v pipelineDriven=%v", r.pr.clawID[:8], factory != nil, isPipelineDriven)
 
@@ -210,10 +210,9 @@ func (s *Server) pollAllPRs() {
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
 		if isPipelineDriven && !r.pr.prConditionsFired {
-			if stage := s.checkPRConditions(r.pr, token); stage != nil {
+			if stage := s.checkPRConditions(r.pr, token, factory); stage != nil {
 				_, _ = s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, r.pr.id)
-				condFactory, condIssueID := s.findFactoryForClaw(r.pr.clawID)
-				s.transitionPipelineStage(r.pr.clawID, *stage, condFactory, condIssueID)
+				s.transitionPipelineStage(r.pr.clawID, *stage, factory, issueID)
 			}
 		}
 	}
@@ -386,6 +385,8 @@ func isBugbotComment(login, body string) bool {
 
 func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{}) {
 	maxID := pr.lastCommentID
+	latestCommentAt := ""
+	var latestCommentTime time.Time
 	for _, c := range commentsData {
 		comment, _ := c.(map[string]interface{})
 		idF, _ := comment["id"].(float64)
@@ -393,10 +394,29 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 		if id > maxID {
 			maxID = id
 		}
+		if id <= pr.lastCommentID {
+			continue
+		}
+		createdAt, _ := comment["created_at"].(string)
+		if createdAt == "" {
+			continue
+		}
+		createdAtTime, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			continue
+		}
+		if latestCommentAt == "" || createdAtTime.After(latestCommentTime) {
+			latestCommentAt = createdAt
+			latestCommentTime = createdAtTime
+		}
 	}
 	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
-			maxID, time.Now().UTC().Format(time.RFC3339), pr.id)
+		if latestCommentAt != "" {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
+				maxID, latestCommentAt, pr.id)
+		} else {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+		}
 	}
 }
 
@@ -719,9 +739,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 // checkPRConditions evaluates the pr_conditions trigger for a given PR.
 // Returns the matching stage if ALL conditions pass, nil otherwise.
-func (s *Server) checkPRConditions(pr clawPR, token string) *pipeline.Stage {
-	// Find the factory for this claw
-	factory, _ := s.findFactoryForClaw(pr.clawID)
+func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.FactoryConfig) *pipeline.Stage {
 	if factory == nil {
 		return nil
 	}

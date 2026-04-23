@@ -85,17 +85,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateGitHubSignature verifies the HMAC-SHA256 signature from GitHub against all
-// configured GitHub factory webhook secrets. Returns true if any matches (or no secrets configured).
+// configured GitHub factory webhook secrets. Returns true if any matches.
 func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 	// Strip sha256= prefix
 	sig = strings.TrimPrefix(sig, "sha256=")
+	if sig == "" {
+		return false
+	}
 
 	s.mu.RLock()
 	factories := s.hubCfg.Factories
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
-
-	hasAnySecret := false
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
@@ -109,7 +110,6 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 		if secret == "" {
 			continue
 		}
-		hasAnySecret = true
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
 		expected := hex.EncodeToString(mac.Sum(nil))
@@ -118,11 +118,8 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 		}
 	}
 
-	// If any secrets are configured but none matched, reject.
-	if hasAnySecret {
-		return false
-	}
-	return true // no secrets configured
+	// Reject if no secrets are configured or if none matched.
+	return false
 }
 
 // processGitHubPREvent finds matching factories and creates claws for a PR event.

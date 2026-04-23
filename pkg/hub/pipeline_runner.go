@@ -124,12 +124,15 @@ func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string
 	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
 		return nil, issueID
 	}
+	s.mu.RLock()
+	factories := s.hubCfg.Factories
+	s.mu.RUnlock()
 	for _, tag := range tags {
 		if !strings.HasPrefix(tag, "factory:") {
 			continue
 		}
 		factoryName := strings.TrimPrefix(tag, "factory:")
-		for _, factory := range s.hubCfg.Factories {
+		for _, factory := range factories {
 			if factory.Name == factoryName {
 				return factory, issueID
 			}
