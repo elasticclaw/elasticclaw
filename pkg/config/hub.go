@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
@@ -72,10 +73,21 @@ func SaveHubConfig(cfg *types.HubConfig) error {
 	for _, f := range cfg.Factories {
 		log.Printf("[SaveHubConfig] factory %q repos=%v trigger=%+v", f.Name, f.Repos, f.Trigger)
 	}
-	log.Printf("[SaveHubConfig] yaml snippet (first 800 bytes):\n%s", func() string {
-		if len(data) > 800 { return string(data[:800]) }
-		return string(data)
-	}())
+	// Log the factories section specifically
+	lines := strings.Split(string(data), "\n")
+	inFactories := false
+	var factoryLines []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "factories:") {
+			inFactories = true
+		} else if inFactories && len(line) > 0 && line[0] != ' ' {
+			break
+		}
+		if inFactories {
+			factoryLines = append(factoryLines, line)
+		}
+	}
+	log.Printf("[SaveHubConfig] factories yaml:\n%s", strings.Join(factoryLines, "\n"))
 	return os.WriteFile(path, data, 0600)
 }
 
