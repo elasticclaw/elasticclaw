@@ -61,6 +61,7 @@ type clawConn struct {
 	streamingMsgID       string          // pre-assigned message ID for the current stream
 	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -966,6 +967,27 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Read loop — claw sends messages back to users
 	defer func() {
 		s.mu.Lock()
+		// Flush any partial streaming buffer as an interrupted message
+		if partialCC, ok := s.claws[clawID]; ok && partialCC.streamingBuf.Len() > 0 {
+			partialContent := partialCC.streamingBuf.String() + " [interrupted]"
+			partialMsgID := partialCC.streamingMsgID
+			if partialMsgID == "" {
+				partialMsgID = uuid.New().String()
+			}
+			partialCC.streamingBuf.Reset()
+			partialCC.streamingMsgID = ""
+			s.mu.Unlock()
+			_, _ = s.db.Exec(
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+				partialMsgID, clawID, tenantID, "claw", partialContent, now(),
+			)
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{
+				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+				Content: partialContent, CreatedAt: now(),
+			}})
+			s.mu.Lock()
+		}
 		delete(s.claws, clawID)
 		s.mu.Unlock()
 		var currentStatus string
@@ -1004,11 +1026,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					var wakeConn *clawConn
 					var shouldWake bool
+					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
 						prevHealthy := cc.gatewayReady
-						prevUsage := cc.contextUsage
+						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
@@ -1036,7 +1059,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
 					}
+					// Inject context warning when crossing 95% threshold for the first time this turn
+					var shouldWarnContext bool
+					if cc2, ok2 := s.claws[clawID]; ok2 && hb.ContextUsage >= 95 && prevUsage < 95 && !cc2.contextWarningSent {
+						cc2.contextWarningSent = true
+						shouldWarnContext = true
+					}
 					s.mu.Unlock()
+					if shouldWarnContext {
+						s.mu.RLock()
+						warnCC := s.claws[clawID]
+						s.mu.RUnlock()
+						if warnCC != nil {
+							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+						}
+					}
 					if shouldWake {
 						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" {
 							go s.sendWakeMessage(wakeConn, clawID)
@@ -1073,6 +1110,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.streamingMsgID = uuid.New().String()
 							cc.streamingStartedAt = time.Now()
 							cc.streamingTimeoutSent = false
+							cc.contextWarningSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1111,6 +1149,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.TenantID = tenantID
 				hm.Role = "claw"
 				hm.CreatedAt = now()
+				// Skip empty messages — never store or broadcast
+				if strings.TrimSpace(hm.Content) == "" {
+					continue
+				}
 				_, _ = s.db.Exec(
 					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
