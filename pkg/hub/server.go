@@ -956,8 +956,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
 	}
 	// If no pipeline entry inject was sent, fire the default wake message.
+	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
 	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
-		go s.sendWakeMessage(cc, clawID)
+		if s.getPipelineStage(clawID) == "" {
+			go s.sendWakeMessage(cc, clawID)
+		}
 	}
 
 	// Read loop — claw sends messages back to users
@@ -1035,7 +1038,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					s.mu.Unlock()
 					if shouldWake {
-						if !s.initializePipelineEntryIfNeeded(clawID) {
+						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}
@@ -2109,24 +2112,9 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 	}
 
-	// Write template files to workspace via separate SSH sessions
-	if len(files) > 0 {
-		fileNames := make([]string, 0, len(files))
-		for k := range files { fileNames = append(fileNames, k) }
-		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
-		for attempt := 1; attempt <= 5; attempt++ {
-			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
-				log.Printf("Template files written for claw %s", clawName)
-				break
-			} else if attempt == 5 {
-				log.Printf("Warning: failed to write template files: %v", err)
-			} else {
-				time.Sleep(10 * time.Second)
-			}
-		}
-	}
-
-	// Retry SSH up to 5 times with 10s delay — VM may report 'running' before SSH is ready
+	// Run bootstrap script first — this installs OpenClaw and initializes the workspace.
+	// Template files must be written AFTER the script completes so openclaw onboard
+	// doesn't overwrite BOOTSTRAP.md and other workspace files.
 	var sshErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
@@ -2143,6 +2131,25 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 		return
 	}
+
+	// Write template files AFTER bootstrap — openclaw onboard initializes the workspace
+	// and would overwrite BOOTSTRAP.md if we wrote it before the script ran.
+	if len(files) > 0 {
+		fileNames := make([]string, 0, len(files))
+		for k := range files { fileNames = append(fileNames, k) }
+		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
+		for attempt := 1; attempt <= 3; attempt++ {
+			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
+				log.Printf("Template files written for claw %s", clawName)
+				break
+			} else if attempt == 3 {
+				log.Printf("Warning: failed to write template files: %v", err)
+			} else {
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}
+
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
