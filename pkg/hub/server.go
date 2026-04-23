@@ -2178,14 +2178,15 @@ func detectToolLoop(content string) bool {
 	return false
 }
 
-// injectHubMessage sends a user-role message to the claw over its WebSocket
+// injectHubMessage sends a hub-role message to the claw over its WebSocket
 // connection and persists it to the DB so it appears in the message history.
+// Hub messages are visually distinct from user messages in the UI.
 func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string) {
 	msg := types.HubMessage{
 		ID:        uuid.New().String(),
 		ClawID:    cc.id,
 		TenantID:  cc.tenantID,
-		Role:      "user",
+		Role:      "hub",
 		Content:   text,
 		CreatedAt: now(),
 	}

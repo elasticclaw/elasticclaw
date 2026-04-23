@@ -31,7 +31,7 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 // move is skipped silently.
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
-		s.injectUserMessage(clawID, strings.TrimRight(stage.OnEnter.Inject, "\n"))
+		s.injectHubMessageByID(clawID, strings.TrimRight(stage.OnEnter.Inject, "\n"))
 	}
 
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {

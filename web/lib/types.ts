@@ -25,7 +25,7 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system"
+  role: "user" | "claw" | "system" | "hub"
   content: string
   timestamp: Date
   // API fields
@@ -54,7 +54,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw"
+  role: "user" | "claw" | "hub"
   content: string
   created_at: string
 }

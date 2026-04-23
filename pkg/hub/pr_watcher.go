@@ -329,7 +329,7 @@ func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugb
 	}
 
 	log.Printf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
-	s.injectUserMessage(pr.clawID, strings.Join(newComments, "\n\n"))
+	s.injectHubMessageByID(pr.clawID, strings.Join(newComments, "\n\n"))
 }
 
 // checkBugbotComments polls PR review comments for new bugbot entries.
@@ -388,10 +388,20 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 // and forwards it over the WS connection (if connected) so the agent sees it.
 // Skips injection if the claw is currently streaming a response.
 func (s *Server) injectUserMessage(clawID, content string) {
-	s.injectUserMessageWithRetry(clawID, content, 0)
+	s.injectMessageWithRetry(clawID, content, "user", 0)
+}
+
+// injectHubMessageByID inserts a hub-role message into the claw's conversation.
+// Hub messages are system-injected and rendered distinctly in the UI.
+func (s *Server) injectHubMessageByID(clawID, content string) {
+	s.injectMessageWithRetry(clawID, content, "hub", 0)
 }
 
 func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount int) {
+	s.injectMessageWithRetry(clawID, content, "user", retryCount)
+}
+
+func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount int) {
 	// Don't interrupt a response in progress
 	s.mu.RLock()
 	cc, connected := s.claws[clawID]
@@ -403,7 +413,7 @@ func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount i
 			// Retry once after 30s
 			go func() {
 				time.Sleep(30 * time.Second)
-				s.injectUserMessageWithRetry(clawID, content, retryCount+1)
+				s.injectMessageWithRetry(clawID, content, role, retryCount+1)
 			}()
 		} else {
 			log.Printf("[pr-watcher] claw %s still streaming after retry, dropping message", clawID[:8])
@@ -420,7 +430,7 @@ func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount i
 	msgID := uuid.New().String()
 	_, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		msgID, clawID, tenantID, "user", content, now(),
+		msgID, clawID, tenantID, role, content, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to insert message: %v", err)
@@ -434,7 +444,7 @@ func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount i
 	if ok {
 		_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{
 			Type:    "message",
-			Payload: map[string]string{"role": "user", "content": content},
+			Payload: map[string]string{"role": role, "content": content},
 		})
 	}
 
@@ -445,7 +455,7 @@ func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount i
 			"id":         msgID,
 			"claw_id":    clawID,
 			"tenant_id":  tenantID,
-			"role":       "user",
+			"role":       role,
 			"content":    content,
 			"created_at": now(),
 		},
@@ -652,7 +662,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			}
 		}
 		if !pipelineHandled {
-			s.injectUserMessage(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+			s.injectHubMessageByID(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
 		}
 		return false
 	}

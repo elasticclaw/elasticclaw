@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2 } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -493,6 +493,14 @@ function ClawBoardCard({
                     </div>
                   )
                 }
+                if (message.role === "hub") {
+                  return (
+                    <div key={message.id} className="flex items-center gap-1.5 py-0.5">
+                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40" />
+                      <span className="text-[10px] italic text-muted-foreground/60 leading-tight">{message.content}</span>
+                    </div>
+                  )
+                }
                 return (
                   <div
                     key={message.id}
@@ -766,6 +774,18 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   const isUser = message.role === "user"
+  const isHub = message.role === "hub"
+
+  if (isHub) {
+    return (
+      <div className="flex items-center gap-2 py-1">
+        <div className="flex items-center gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]">
+          <Settings2 className="size-3 shrink-0 text-muted-foreground/50" />
+          <span className="text-muted-foreground/80">{message.content}</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
