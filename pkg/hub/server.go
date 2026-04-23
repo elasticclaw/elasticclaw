@@ -52,13 +52,15 @@ type Server struct {
 }
 
 type clawConn struct {
-	id             string
-	tenantID       string
-	conn           *websocket.Conn
-	contextUsage   int             // 0-100, updated from heartbeats
-	gatewayReady   bool            // true once bridge reports gateway session established
-	streamingBuf   strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID string          // pre-assigned message ID for the current stream
+	id                   string
+	tenantID             string
+	conn                 *websocket.Conn
+	contextUsage         int             // 0-100, updated from heartbeats
+	gatewayReady         bool            // true once bridge reports gateway session established
+	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID       string          // pre-assigned message ID for the current stream
+	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -1036,6 +1038,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}
+					// Check for streaming turn timeout (12 minutes)
+					s.mu.Lock()
+					if cc, ok := s.claws[clawID]; ok &&
+						!cc.streamingStartedAt.IsZero() &&
+						!cc.streamingTimeoutSent &&
+						time.Since(cc.streamingStartedAt) > 12*time.Minute {
+						cc.streamingTimeoutSent = true
+						s.mu.Unlock()
+						go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+					} else {
+						s.mu.Unlock()
+					}
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side
@@ -1053,6 +1067,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if cc, ok := s.claws[clawID]; ok {
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
+							cc.streamingStartedAt = time.Now()
+							cc.streamingTimeoutSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1081,6 +1097,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID = cc.streamingMsgID
 					cc.streamingMsgID = ""
 					cc.streamingBuf.Reset()
+					cc.streamingStartedAt = time.Time{}
+					cc.streamingTimeoutSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
