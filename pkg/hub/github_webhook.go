@@ -196,7 +196,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 					}
 					log.Printf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
-					s.injectUserMessage(existingClawID, msg)
+					s.injectHubMessageByID(existingClawID, msg)
 				}
 			default:
 				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, ignoring", factory.Name, payload.Number, payload.Action)
