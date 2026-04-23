@@ -96,7 +96,7 @@ func handleFileReadMessage(ctx context.Context, conn *websocket.Conn, payload js
 	}
 
 	dir := uploadDirPath()
-	abs, err := filepath.Abs(req.Path)
+	abs, err := filepath.EvalSymlinks(req.Path)
 	if err != nil {
 		resp.Error = "bad path"
 		send()
