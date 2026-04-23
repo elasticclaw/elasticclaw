@@ -20,9 +20,9 @@ import (
 
 // githubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
 type githubPRPayload struct {
-	Action      string `json:"action"` // "opened", "synchronize", "reopened", "closed"
-	Number      int    `json:"number"`
-	Sender      struct {
+	Action string `json:"action"` // "opened", "synchronize", "reopened", "closed"
+	Number int    `json:"number"`
+	Sender struct {
 		Login string `json:"login"`
 		Type  string `json:"type"` // "Bot", "User", "Organization"
 	} `json:"sender"`
@@ -235,13 +235,11 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 	}
 }
 
-// githubRepoMatches returns true if fullName matches any entry in repos.
-// Each entry is either an exact "owner/repo" or a glob "owner/*".
 // githubIssueCommentPayload holds fields from an issue_comment webhook event.
 type githubIssueCommentPayload struct {
-	Action  string `json:"action"` // "created", "edited", "deleted"
-	Issue   struct {
-		Number      int    `json:"number"`
+	Action string `json:"action"` // "created", "edited", "deleted"
+	Issue  struct {
+		Number      int `json:"number"`
 		PullRequest struct {
 			URL string `json:"url"` // non-empty only for PR comments
 		} `json:"pull_request"`
@@ -302,6 +300,9 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if factory.Integration != "github" || factory.Trigger == nil {
 			continue
 		}
+		if factory.Trigger.On != "pull_request" {
+			continue
+		}
 		if factory.Enabled != nil && !*factory.Enabled {
 			continue
 		}
@@ -347,6 +348,8 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	}
 }
 
+// githubRepoMatches returns true if fullName matches any entry in repos.
+// Each entry is either an exact "owner/repo" or a glob "owner/*".
 func githubRepoMatches(fullName string, repos []string) bool {
 	if len(repos) == 0 {
 		return true // no restriction

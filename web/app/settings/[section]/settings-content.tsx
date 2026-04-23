@@ -845,7 +845,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         {/* GitHub webhook */}
         <div className="space-y-2 pt-3 border-t border-border">
           <h3 className="text-sm font-medium">GitHub Webhook URL</h3>
-          <p className="text-xs text-muted-foreground">Use this URL when configuring webhooks in your GitHub repo or org settings. Subscribe to: <strong>Pull requests</strong> events only.</p>
+          <p className="text-xs text-muted-foreground">Use this URL when configuring webhooks in your GitHub repo or org settings. Subscribe to: <strong>Pull requests</strong> and <strong>Issue comments</strong> events.</p>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
               {hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "Loading…"}
