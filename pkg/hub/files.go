@@ -24,15 +24,6 @@ const (
 	uploadFormField = "files"
 )
 
-// fileAck is the hub<->claw ack envelope for a file write.
-// Bridge sends this back after writing (or failing to write) a file to disk.
-type fileAck struct {
-	RequestID string `json:"request_id"`
-	Path      string `json:"path"`
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-}
-
 // filePayload is what the hub sends to the claw-bridge over WS as type="file".
 type filePayload struct {
 	RequestID string `json:"request_id"`
@@ -40,14 +31,6 @@ type filePayload struct {
 	MimeType  string `json:"mimetype"`
 	Size      int64  `json:"size"`
 	Data      string `json:"data"` // base64
-}
-
-// fileReadResp is the claw-bridge response for a file_read WS request.
-type fileReadResp struct {
-	RequestID string `json:"request_id"`
-	OK        bool   `json:"ok"`
-	Data      string `json:"data,omitempty"` // base64
-	Error     string `json:"error,omitempty"`
 }
 
 type uploadedAttachment struct {
@@ -125,7 +108,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		reqID := uuid.New().String()
-		ch := make(chan fileAck, 1)
+		ch := make(chan types.FileAck, 1)
 		s.fileAckMu.Lock()
 		s.fileAckWaiters[reqID] = ch
 		s.fileAckMu.Unlock()
@@ -221,7 +204,7 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqID := uuid.New().String()
-	ch := make(chan fileReadResp, 1)
+	ch := make(chan types.FileReadResp, 1)
 	s.fileAckMu.Lock()
 	s.fileReadWaiters[reqID] = ch
 	s.fileAckMu.Unlock()

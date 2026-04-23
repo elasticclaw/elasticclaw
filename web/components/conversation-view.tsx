@@ -29,9 +29,10 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, getFileViewUrl, type ClawPR } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
+import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 
@@ -559,15 +560,14 @@ function ClawBoardCard({
                     {cardAttachments.length > 0 && (
                       <div className={cn("flex flex-wrap gap-1", cardBody.trim() && "mt-1")}>
                         {cardAttachments.map((a, i) => (
-                          <div
+                          <AttachmentChip
                             key={`${a.path}-${i}`}
-                            className="flex items-center gap-1 rounded border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                            title={`${a.path} (${a.mimetype})`}
-                          >
-                            <FileIcon className="size-2.5" />
-                            <span className="max-w-[8rem] truncate">{a.name}</span>
-                            <span>{a.sizeLabel}</span>
-                          </div>
+                            name={a.name}
+                            sizeLabel={a.sizeLabel}
+                            mimetype={a.mimetype}
+                            size="sm"
+                            path={a.path}
+                          />
                         ))}
                       </div>
                     )}
@@ -590,58 +590,19 @@ function ClawBoardCard({
           <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-1">
-                {attachments.map((a) => a.previewUrl ? (
-                  <div key={a.localId} className="relative">
-                    <img
-                      src={a.previewUrl}
-                      alt={a.name}
-                      className={cn(
-                        "max-h-16 max-w-[6rem] rounded border object-cover",
-                        a.status === "error" ? "border-destructive/50 opacity-60" : "border-border"
-                      )}
-                    />
-                    {a.status === "uploading" && (
-                      <div className="absolute inset-0 flex items-center justify-center rounded bg-background/60">
-                        <Loader2 className="size-3 animate-spin" />
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); removeAttachment(a.localId) }}
-                      className="absolute -top-1 -right-1 rounded-full bg-background border border-border p-0.5 text-muted-foreground hover:text-foreground shadow-sm"
-                      aria-label={`Remove ${a.name}`}
-                    >
-                      <X className="size-2.5" />
-                    </button>
-                  </div>
-                ) : (
-                  <div
+                {attachments.map((a) => (
+                  <AttachmentChip
                     key={a.localId}
-                    className={cn(
-                      "flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
-                      a.status === "error"
-                        ? "border-destructive/50 bg-destructive/10 text-destructive"
-                        : "border-border bg-secondary text-foreground"
-                    )}
-                    title={a.error || a.path || a.name}
-                  >
-                    {a.status === "uploading" ? (
-                      <Loader2 className="size-2.5 animate-spin" />
-                    ) : a.status === "error" ? (
-                      <AlertCircle className="size-2.5" />
-                    ) : (
-                      <FileIcon className="size-2.5" />
-                    )}
-                    <span className="max-w-[7rem] truncate">{a.name}</span>
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); removeAttachment(a.localId) }}
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label={`Remove ${a.name}`}
-                    >
-                      <X className="size-2.5" />
-                    </button>
-                  </div>
+                    name={a.name}
+                    sizeLabel={formatBytes(a.size)}
+                    mimetype={a.mimetype}
+                    source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                    size="sm"
+                    status={a.status}
+                    error={a.error}
+                    path={a.path}
+                    onRemove={() => removeAttachment(a.localId)}
+                  />
                 ))}
               </div>
             )}
@@ -856,37 +817,6 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-// HistoryAttachment renders an uploaded image inline; if the hub can't serve
-// the bytes (old path, bridge dropped, file deleted) it falls back to a chip.
-function HistoryAttachment({ clawId, att }: { clawId: string; att: ParsedAttachment }) {
-  const [broken, setBroken] = useState(false)
-  const isImage = att.mimetype.startsWith("image/")
-  if (isImage && !broken) {
-    const url = getFileViewUrl(clawId, att.path)
-    return (
-      <a href={url} target="_blank" rel="noreferrer" title={`${att.name} (${att.sizeLabel})`} className="block">
-        <img
-          src={url}
-          alt={att.name}
-          onError={() => setBroken(true)}
-          className="max-h-64 max-w-xs rounded-md border border-border/60 object-contain bg-background/40"
-          loading="lazy"
-        />
-      </a>
-    )
-  }
-  return (
-    <div
-      className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/40 px-2 py-0.5 text-xs text-muted-foreground"
-      title={`${att.path} (${att.mimetype})`}
-    >
-      <FileIcon className="size-3" />
-      <span className="max-w-[14rem] truncate">{att.name}</span>
-      <span>{att.sizeLabel}</span>
-    </div>
-  )
-}
-
 const MessageBubble = memo(function MessageBubble({
   message,
   clawId,
@@ -978,15 +908,25 @@ const MessageBubble = memo(function MessageBubble({
             {formatTimestamp(message.timestamp)}
           </span>
         </div>
-        {isUser ? (
-          <p className="text-sm whitespace-pre-wrap text-foreground">{body}</p>
-        ) : (
-          <MarkdownContent content={body} className="text-sm" />
+        {body.trim() && (
+          isUser ? (
+            <p className="text-sm whitespace-pre-wrap text-foreground">{body}</p>
+          ) : (
+            <MarkdownContent content={body} className="text-sm" />
+          )
         )}
         {parsedAttachments.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className={cn("flex flex-wrap gap-2", body.trim() && "mt-2")}>
             {parsedAttachments.map((a, i) => (
-              <HistoryAttachment key={`${a.path}-${i}`} clawId={clawId} att={a} />
+              <AttachmentChip
+                key={`${a.path}-${i}`}
+                name={a.name}
+                sizeLabel={a.sizeLabel}
+                mimetype={a.mimetype}
+                source={{ kind: "history", clawId, path: a.path }}
+                size="md"
+                path={a.path}
+              />
             ))}
           </div>
         )}
@@ -1195,59 +1135,19 @@ function ClawChatView({
         >
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {attachments.map((a) => a.previewUrl ? (
-                <div key={a.localId} className="relative group">
-                  <img
-                    src={a.previewUrl}
-                    alt={a.name}
-                    className={cn(
-                      "max-h-24 max-w-[8rem] rounded-md border object-cover",
-                      a.status === "error" ? "border-destructive/50 opacity-60" : "border-border"
-                    )}
-                  />
-                  {a.status === "uploading" && (
-                    <div className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60">
-                      <Loader2 className="size-4 animate-spin" />
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a.localId)}
-                    className="absolute -top-1.5 -right-1.5 rounded-full bg-background border border-border p-0.5 text-muted-foreground hover:text-foreground shadow-sm"
-                    aria-label={`Remove ${a.name}`}
-                  >
-                    <X className="size-3" />
-                  </button>
-                </div>
-              ) : (
-                <div
+              {attachments.map((a) => (
+                <AttachmentChip
                   key={a.localId}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
-                    a.status === "error"
-                      ? "border-destructive/50 bg-destructive/10 text-destructive"
-                      : "border-border bg-secondary text-foreground"
-                  )}
-                  title={a.error || a.path || a.name}
-                >
-                  {a.status === "uploading" ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : a.status === "error" ? (
-                    <AlertCircle className="size-3" />
-                  ) : (
-                    <FileIcon className="size-3" />
-                  )}
-                  <span className="max-w-[16rem] truncate">{a.name}</span>
-                  <span className="text-muted-foreground">{formatBytes(a.size)}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a.localId)}
-                    className="ml-0.5 text-muted-foreground hover:text-foreground"
-                    aria-label={`Remove ${a.name}`}
-                  >
-                    <X className="size-3" />
-                  </button>
-                </div>
+                  name={a.name}
+                  sizeLabel={formatBytes(a.size)}
+                  mimetype={a.mimetype}
+                  source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                  size="md"
+                  status={a.status}
+                  error={a.error}
+                  path={a.path}
+                  onRemove={() => removeAttachment(a.localId)}
+                />
               ))}
             </div>
           )}

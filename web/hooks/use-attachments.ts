@@ -148,11 +148,18 @@ export function useAttachments(clawId: string): UseAttachmentsApi {
     }
   }, [])
   const onDrop = useCallback((e: React.DragEvent) => {
-    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    // Always preventDefault and clear overlay state. A drag announced in
+    // `types` as "Files" can deliver zero files on drop — most commonly when
+    // the user drags one of our own rendered image previews back onto the
+    // same view (Chromium flags in-page image drags with "Files" but doesn't
+    // materialize a File). Leaking the overlay / skipping preventDefault
+    // there would sometimes navigate to the image URL.
     e.preventDefault()
     dragCounterRef.current = 0
     setDragHover(false)
-    addFiles(Array.from(e.dataTransfer.files))
+    const files = e.dataTransfer.files
+    if (!files || files.length === 0) return
+    addFiles(Array.from(files))
   }, [addFiles])
   const onPaste = useCallback((e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items

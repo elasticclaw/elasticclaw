@@ -41,17 +41,16 @@ export function buildAttachmentsFooter(atts: PendingAttachment[]): string {
 }
 
 // splitAttachmentsFooter extracts the attachments block from stored message
-// content so history can render chips without a schema change. Accepts either
-// the embedded form ("body\n\n[Attachments]\n…") or a body-less form where the
-// marker sits at the start of the message (the hub trims leading whitespace).
+// content so history can render chips without a schema change. Accepts the
+// embedded form ("body\n\n[Attachments]\n…") and the body-less form where the
+// hub has trimmed the leading whitespace off the marker.
 export function splitAttachmentsFooter(content: string): { body: string; attachments: ParsedAttachment[] } {
-  let idx = content.indexOf(ATTACHMENTS_MARKER)
-  let markerLen = ATTACHMENTS_MARKER.length
-  if (idx < 0 && content.startsWith("[Attachments]\n")) {
-    idx = 0
-    markerLen = "[Attachments]\n".length
-  }
-  if (idx < 0) return { body: content, attachments: [] }
+  const embeddedIdx = content.indexOf(ATTACHMENTS_MARKER)
+  const leadingMarker = "[Attachments]\n"
+  const leading = embeddedIdx < 0 && content.startsWith(leadingMarker)
+  if (embeddedIdx < 0 && !leading) return { body: content, attachments: [] }
+  const idx = leading ? 0 : embeddedIdx
+  const markerLen = leading ? leadingMarker.length : ATTACHMENTS_MARKER.length
   const body = content.slice(0, idx)
   const tail = content.slice(idx + markerLen)
   const atts: ParsedAttachment[] = []

@@ -42,8 +42,8 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 
 	fileAckMu       sync.Mutex
-	fileAckWaiters  map[string]chan fileAck      // request_id -> waiter
-	fileReadWaiters map[string]chan fileReadResp // request_id -> waiter
+	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
+	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
@@ -101,8 +101,8 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		identity: id,
 		claws:    make(map[string]*clawConn),
 		users:    make(map[string]*userConn),
-		fileAckWaiters:  make(map[string]chan fileAck),
-		fileReadWaiters: make(map[string]chan fileReadResp),
+		fileAckWaiters:  make(map[string]chan types.FileAck),
+		fileReadWaiters: make(map[string]chan types.FileReadResp),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -1099,7 +1099,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
-				var ack fileAck
+				var ack types.FileAck
 				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
 					s.fileAckMu.Lock()
 					ch := s.fileAckWaiters[ack.RequestID]
@@ -1114,7 +1114,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if msg.Type == "file_read_resp" {
 				raw, _ := json.Marshal(msg.Payload)
-				var resp fileReadResp
+				var resp types.FileReadResp
 				if err := json.Unmarshal(raw, &resp); err == nil && resp.RequestID != "" {
 					s.fileAckMu.Lock()
 					ch := s.fileReadWaiters[resp.RequestID]

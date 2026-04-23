@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -32,22 +33,15 @@ type fileIn struct {
 	Data      string `json:"data"`
 }
 
-type fileAck struct {
-	RequestID string `json:"request_id"`
-	Path      string `json:"path"`
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-}
-
 // handleFileMessage decodes a base64 file payload from the hub and writes it
-// to /home/daytona/.uploads/<ts>-<sanitized-name>, then sends a file_ack back.
+// under uploadDirPath(), then sends a file_ack back.
 func handleFileMessage(ctx context.Context, conn *websocket.Conn, payload json.RawMessage) {
 	var f fileIn
 	if err := json.Unmarshal(payload, &f); err != nil {
 		log.Printf("[bridge] file: bad payload: %v", err)
 		return
 	}
-	ack := fileAck{RequestID: f.RequestID}
+	ack := types.FileAck{RequestID: f.RequestID}
 
 	data, err := base64.StdEncoding.DecodeString(f.Data)
 	if err != nil {
@@ -76,7 +70,7 @@ func handleFileMessage(ctx context.Context, conn *websocket.Conn, payload json.R
 	sendAck(ctx, conn, ack)
 }
 
-func sendAck(ctx context.Context, conn *websocket.Conn, ack fileAck) {
+func sendAck(ctx context.Context, conn *websocket.Conn, ack types.FileAck) {
 	_ = wsjson.Write(ctx, conn, hubMsg{
 		Type:    "file_ack",
 		Payload: mustJSON(ack),
@@ -88,13 +82,6 @@ type fileReadIn struct {
 	Path      string `json:"path"`
 }
 
-type fileReadResp struct {
-	RequestID string `json:"request_id"`
-	OK        bool   `json:"ok"`
-	Data      string `json:"data,omitempty"` // base64
-	Error     string `json:"error,omitempty"`
-}
-
 // handleFileReadMessage returns the bytes of a previously-uploaded file so the
 // hub can serve it back to the browser (e.g. image previews in chat history).
 // Restricted to uploadDirPath() to prevent arbitrary filesystem read.
@@ -103,7 +90,7 @@ func handleFileReadMessage(ctx context.Context, conn *websocket.Conn, payload js
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return
 	}
-	resp := fileReadResp{RequestID: req.RequestID}
+	resp := types.FileReadResp{RequestID: req.RequestID}
 	send := func() {
 		_ = wsjson.Write(ctx, conn, hubMsg{Type: "file_read_resp", Payload: mustJSON(resp)})
 	}
