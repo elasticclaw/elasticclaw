@@ -275,11 +275,15 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Secrets — names only
+	// Secrets — names only, read from disk so manually-edited hub.yaml entries are visible
 	view.Secrets = []string{}
-	for k := range s.hubCfg.Secrets {
-		view.Secrets = append(view.Secrets, k)
+	s.mu.RUnlock()
+	if diskCfg, err := config.LoadHubConfig(); err == nil && diskCfg != nil {
+		for k := range diskCfg.Secrets {
+			view.Secrets = append(view.Secrets, k)
+		}
 	}
+	s.mu.RLock()
 
 	// Factories
 	view.Factories = []FactoryView{}

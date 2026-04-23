@@ -59,6 +59,18 @@ func SaveHubConfig(cfg *types.HubConfig) error {
 	if err != nil {
 		return err
 	}
+	// Merge: preserve any secrets that exist on disk but not in memory
+	// (handles manual hub.yaml edits that were never loaded via API)
+	if existing, err := LoadHubConfig(); err == nil && existing != nil {
+		if cfg.Secrets == nil {
+			cfg.Secrets = make(map[string]string)
+		}
+		for k, v := range existing.Secrets {
+			if _, already := cfg.Secrets[k]; !already {
+				cfg.Secrets[k] = v
+			}
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}

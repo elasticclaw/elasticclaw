@@ -31,12 +31,14 @@ func (s *Server) handleSecretsCRUD(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecretsList(w http.ResponseWriter, _ *http.Request) {
-	s.mu.RLock()
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
-
-	names := make([]string, 0, len(secrets))
-	for k := range secrets {
+	// Read from disk so manually-edited hub.yaml entries are visible immediately
+	cfg, err := config.LoadHubConfig()
+	if err != nil || cfg == nil {
+		jsonOK(w, map[string][]string{"secrets": {}})
+		return
+	}
+	names := make([]string, 0, len(cfg.Secrets))
+	for k := range cfg.Secrets {
 		names = append(names, k)
 	}
 	jsonOK(w, map[string][]string{"secrets": names})
