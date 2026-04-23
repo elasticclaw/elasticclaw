@@ -1141,6 +1141,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					cc.streamingBuf.Reset()
 					cc.streamingStartedAt = time.Time{}
 					cc.streamingTimeoutSent = false
+					cc.contextWarningSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
