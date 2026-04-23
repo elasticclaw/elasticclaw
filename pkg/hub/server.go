@@ -2111,6 +2111,9 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 	// Write template files to workspace via separate SSH sessions
 	if len(files) > 0 {
+		fileNames := make([]string, 0, len(files))
+		for k := range files { fileNames = append(fileNames, k) }
+		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
 		for attempt := 1; attempt <= 5; attempt++ {
 			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
 				log.Printf("Template files written for claw %s", clawName)
