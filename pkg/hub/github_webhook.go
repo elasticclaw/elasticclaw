@@ -176,7 +176,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			switch payload.Action {
 			case "closed":
 				// Let the pr_watcher handle merged/closed — don't double-inject
-			case "synchronize", "reopened", "edited", "labeled", "unlabeled", "assigned", "unassigned", "review_requested":
+			case "synchronize", "reopened", "review_requested":
 				// Only inject if the claw is connected and ready — otherwise the
 				// claw hasn't started yet and the update is redundant (claw gets
 				// full context from BOOTSTRAP on startup).
@@ -283,11 +283,10 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		}
 	}
 
-	// Build BOOTSTRAP context
+	// Build BOOTSTRAP context — for GitHub PR claws, use only the PR context.
+	// Don't append the template BOOTSTRAP.md since it's Linear-specific.
+	// The pipeline entry inject provides the actual instructions.
 	prCtx := buildGitHubPRContext(pr)
-	if existing, ok := templateFiles["BOOTSTRAP.md"]; ok && existing != "" {
-		prCtx = prCtx + "\n\n---\n\n" + existing
-	}
 	templateFiles["BOOTSTRAP.md"] = prCtx
 	templateFiles["CONTEXT.md"] = prCtx
 
