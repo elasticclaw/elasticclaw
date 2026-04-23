@@ -116,12 +116,13 @@ type clawPR struct {
 	lastCommentID     int64
 	lastCommentAt     string
 	prConditionsFired bool
+	createdAt         string
 }
 
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
-		       cp.last_comment_at, cp.pr_conditions_fired,
+		       cp.last_comment_at, cp.pr_conditions_fired, cp.created_at,
 		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
@@ -144,7 +145,7 @@ func (s *Server) pollAllPRs() {
 		var r row
 		var ciInt, bugbotInt, prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt,
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt, &r.pr.createdAt,
 			&ciInt, &bugbotInt, &r.clawStatus); err != nil {
 			continue
 		}
@@ -844,10 +845,16 @@ func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.Facto
 			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
 			return nil
 		}
-		if pr.lastCommentAt == "" {
-			return nil // never had a comment — treat as not quiet enough yet
+		// If no comments yet, use PR creation time — a PR with no comments
+		// has been quiet since it was created, so quiet_for should still fire.
+		quietSince := pr.lastCommentAt
+		if quietSince == "" {
+			quietSince = pr.createdAt
 		}
-		lastComment, err := time.Parse(time.RFC3339, pr.lastCommentAt)
+		if quietSince == "" {
+			return nil
+		}
+		lastComment, err := time.Parse(time.RFC3339, quietSince)
 		if err != nil {
 			return nil
 		}
