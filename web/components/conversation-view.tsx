@@ -818,6 +818,7 @@ function ClawChatView({
   onDeselectClaw: () => void
 }) {
   const [input, setInput] = useState("")
+  const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -865,17 +866,26 @@ function ClawChatView({
     return () => timers.forEach(clearTimeout)
   }, [messages])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (input.trim()) {
-      onSendMessage(input)
-      setInput("")
-      pinnedToBottom.current = true
-      if (panelTextareaRef.current) {
-        panelTextareaRef.current.style.height = "auto"
-        panelTextareaRef.current.style.overflowY = "hidden"
-      }
+    const text = input.trim()
+    if (!text) return
+    setInput("")
+    pinnedToBottom.current = true
+    if (panelTextareaRef.current) {
+      panelTextareaRef.current.style.height = "auto"
+      panelTextareaRef.current.style.overflowY = "hidden"
     }
+    if (text.startsWith("/cancel")) {
+      setCmdToast("Hard cancel not yet implemented")
+      setTimeout(() => setCmdToast(null), 3000)
+      return
+    }
+    if (text.startsWith("/stop")) {
+      onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
+      return
+    }
+    onSendMessage(text)
   }
 
   return (
@@ -943,6 +953,11 @@ function ClawChatView({
       </div>
 
       <div className="p-4 border-t border-border">
+        {cmdToast && (
+          <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
+            {cmdToast}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="flex gap-2 items-end max-w-3xl mx-auto">
           <textarea
             value={input}
@@ -966,7 +981,7 @@ function ClawChatView({
               }
             }}
             ref={panelTextareaRef}
-            placeholder="Send a message to this claw..."
+            placeholder="Message claw or /stop"
             rows={1}
             className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
           />

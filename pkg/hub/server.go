@@ -48,13 +48,15 @@ type Server struct {
 }
 
 type clawConn struct {
-	id             string
-	tenantID       string
-	conn           *websocket.Conn
-	contextUsage   int             // 0-100, updated from heartbeats
-	gatewayReady   bool            // true once bridge reports gateway session established
-	streamingBuf   strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID string          // pre-assigned message ID for the current stream
+	id                   string
+	tenantID             string
+	conn                 *websocket.Conn
+	contextUsage         int             // 0-100, updated from heartbeats
+	gatewayReady         bool            // true once bridge reports gateway session established
+	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID       string          // pre-assigned message ID for the current stream
+	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -1028,6 +1030,23 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}
+					// Check for streaming turn timeout (12 minutes)
+					s.mu.Lock()
+					if cc, ok := s.claws[clawID]; ok &&
+						!cc.streamingStartedAt.IsZero() &&
+						!cc.streamingTimeoutSent &&
+						time.Since(cc.streamingStartedAt) > 12*time.Minute {
+						cc.streamingTimeoutSent = true
+						s.mu.Unlock()
+						s.mu.RLock()
+						timeoutCC := s.claws[clawID]
+						s.mu.RUnlock()
+						if timeoutCC != nil {
+							go s.injectHubMessage(ctx, timeoutCC, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+						}
+					} else {
+						s.mu.Unlock()
+					}
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side
@@ -1045,6 +1064,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if cc, ok := s.claws[clawID]; ok {
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
+							cc.streamingStartedAt = time.Now()
+							cc.streamingTimeoutSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1073,6 +1094,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID = cc.streamingMsgID
 					cc.streamingMsgID = ""
 					cc.streamingBuf.Reset()
+					cc.streamingStartedAt = time.Time{}
+					cc.streamingTimeoutSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
@@ -1093,6 +1116,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				// Detect and store any PR URLs mentioned by the agent
 				go s.scanMessageForPRs(clawID, hm.Content)
+				// Detect tool error loops and inject a corrective message
+				if detectToolLoop(hm.Content) {
+					s.mu.RLock()
+					loopCC := s.claws[clawID]
+					s.mu.RUnlock()
+					if loopCC != nil {
+						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+					}
+				}
 			} else if msg.Type == "http_proxy_req" {
 				// Proxy an HTTP request from the bridge to the hub's internal API.
 				// This allows tools in the sandbox to reach hub APIs without a public URL.
@@ -2132,6 +2164,37 @@ func mergeTags(templateName string, configTags []string, cliTags []string) []str
 		add(t)
 	}
 	return result
+}
+
+// detectToolLoop returns true if the same class of tool error appears 3+ times
+// in the content of a completed assistant turn.
+func detectToolLoop(content string) bool {
+	patterns := []string{"edit failed:", "write failed:", "read failed:"}
+	for _, p := range patterns {
+		if strings.Count(strings.ToLower(content), p) >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+// injectHubMessage sends a user-role message to the claw over its WebSocket
+// connection and persists it to the DB so it appears in the message history.
+func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string) {
+	msg := types.HubMessage{
+		ID:        uuid.New().String(),
+		ClawID:    cc.id,
+		TenantID:  cc.tenantID,
+		Role:      "user",
+		Content:   text,
+		CreatedAt: now(),
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+	)
+	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
+	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
 func randomHex(n int) string {
