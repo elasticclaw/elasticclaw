@@ -54,14 +54,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	event := r.Header.Get("X-GitHub-Event")
+	log.Printf("[github-webhook] received event=%q body_len=%d", event, len(body))
+
 	// Verify HMAC-SHA256 signature against any matching factory webhook secret.
 	sig := r.Header.Get("X-Hub-Signature-256")
 	if !s.validateGitHubSignature(body, sig) {
+		log.Printf("[github-webhook] signature validation failed (sig=%q) — check webhook secret matches hub secret", sig)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
+	log.Printf("[github-webhook] signature valid")
 
-	event := r.Header.Get("X-GitHub-Event")
 	if event == "" {
 		http.Error(w, "missing X-GitHub-Event", http.StatusBadRequest)
 		return
@@ -71,14 +75,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	case "pull_request":
 		var payload githubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse pull_request payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
+		log.Printf("[github-webhook] pull_request action=%q repo=%q pr=#%d author=%q base=%q",
+			payload.Action, payload.Repository.FullName, payload.Number,
+			payload.PullRequest.User.Login, payload.PullRequest.Base.Ref)
 		go s.processGitHubPREvent(payload)
 	case "ping":
-		// GitHub sends a ping on webhook creation — acknowledge it.
+		log.Printf("[github-webhook] ping received — webhook configured correctly")
 	default:
-		// Unsupported event type; ignore gracefully.
+		log.Printf("[github-webhook] unsupported event type %q — ignored", event)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -129,35 +137,43 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 	s.mu.RUnlock()
 
 	repoFullName := payload.Repository.FullName
+	log.Printf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
 			continue
 		}
 		if factory.Enabled != nil && !*factory.Enabled {
+			log.Printf("[github-webhook] factory %q: skipped (disabled)", factory.Name)
 			continue
 		}
 		if factory.Trigger == nil {
+			log.Printf("[github-webhook] factory %q: skipped (no trigger configured)", factory.Name)
 			continue
 		}
 		if factory.Trigger.On != "pull_request" {
+			log.Printf("[github-webhook] factory %q: skipped (trigger.on=%q, not pull_request)", factory.Name, factory.Trigger.On)
 			continue
 		}
 		// Check action match
 		if factory.Trigger.Action != "" && factory.Trigger.Action != payload.Action {
+			log.Printf("[github-webhook] factory %q: skipped (action mismatch: want %q, got %q)", factory.Name, factory.Trigger.Action, payload.Action)
 			continue
 		}
 		// Check repo match
 		if !githubRepoMatches(repoFullName, factory.Repos) {
+			log.Printf("[github-webhook] factory %q: skipped (repo %q not in %v)", factory.Name, repoFullName, factory.Repos)
 			continue
 		}
 		// Check filter
 		if factory.Trigger.Filter != nil {
 			f := factory.Trigger.Filter
 			if f.Author != "" && !strings.EqualFold(f.Author, payload.PullRequest.User.Login) {
+				log.Printf("[github-webhook] factory %q: skipped (author mismatch: want %q, got %q)", factory.Name, f.Author, payload.PullRequest.User.Login)
 				continue
 			}
 			if f.BaseBranch != "" && !strings.EqualFold(f.BaseBranch, payload.PullRequest.Base.Ref) {
+				log.Printf("[github-webhook] factory %q: skipped (base_branch mismatch: want %q, got %q)", factory.Name, f.BaseBranch, payload.PullRequest.Base.Ref)
 				continue
 			}
 		}
