@@ -237,10 +237,10 @@ type LinearIntegrationConfig struct {
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
 	Enabled           *bool  `yaml:"enabled,omitempty"`  // nil = true (default on); set false to pause
-	Integration       string `yaml:"integration"`        // "linear" or "shortcut"
-	Workspace         string `yaml:"workspace"`          // matches integrations.<type>[].workspace
+	Integration       string `yaml:"integration"`        // "linear", "shortcut", or "github"
+	Workspace         string `yaml:"workspace,omitempty"` // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
-	TriggerStatus     string `yaml:"trigger_status"`     // entering this status → create claw
+	TriggerStatus     string `yaml:"trigger_status,omitempty"` // entering this status → create claw
 	DoneStatus        string `yaml:"done_status,omitempty"`  // claw moves issue here when done
 	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
 	Template          string `yaml:"template"`           // template name (must be pushed to hub)
@@ -257,6 +257,22 @@ type FactoryConfig struct {
 	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty"`
 	// PipelineYAML is the raw pipeline.yaml content stored alongside this factory
 	PipelineYAML string `yaml:"pipeline_yaml,omitempty"`
+	// GitHub factory fields (integration: github)
+	Repos   []string       `yaml:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
+	Trigger *GitHubTrigger `yaml:"trigger,omitempty"`
+}
+
+// GitHubTrigger defines what GitHub event triggers this factory.
+type GitHubTrigger struct {
+	On     string               `yaml:"on"`              // "pull_request" | "issue"
+	Action string               `yaml:"action"`          // "opened" | "synchronize" | "reopened" | "closed"
+	Filter *GitHubTriggerFilter `yaml:"filter,omitempty"`
+}
+
+// GitHubTriggerFilter further constrains which events match the trigger.
+type GitHubTriggerFilter struct {
+	Author     string `yaml:"author,omitempty"`      // e.g. "dependabot[bot]"
+	BaseBranch string `yaml:"base_branch,omitempty"` // e.g. "main"
 }
 
 type ProviderConfig struct {

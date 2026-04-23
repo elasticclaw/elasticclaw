@@ -26,6 +26,15 @@ type Trigger struct {
 	PRMerged bool
 	// PRClosed is true when the pr_closed key is present in the YAML (even with null value).
 	PRClosed bool
+	// PRConditions transitions when all stated PR conditions are met.
+	PRConditions *PRConditionsTrigger `yaml:"pr_conditions"`
+}
+
+// PRConditionsTrigger specifies compound PR state conditions that must all pass.
+type PRConditionsTrigger struct {
+	CI       string `yaml:"ci"`        // "passing" — all check runs must be success/skipped
+	Reviews  string `yaml:"reviews"`   // "clean" — no CHANGES_REQUESTED reviews
+	QuietFor string `yaml:"quiet_for"` // e.g. "1h", "30m" — optional quiet period since last comment
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler so that bare `pr_merged:` and
@@ -47,6 +56,24 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 			t.PRMerged = true
 		case "pr_closed":
 			t.PRClosed = true
+		case "pr_conditions":
+			// Decode the pr_conditions sub-mapping
+			var cond PRConditionsTrigger
+			if val.Kind == yaml.MappingNode {
+				for j := 0; j+1 < len(val.Content); j += 2 {
+					subKey := val.Content[j].Value
+					subVal := val.Content[j+1].Value
+					switch subKey {
+					case "ci":
+						cond.CI = subVal
+					case "reviews":
+						cond.Reviews = subVal
+					case "quiet_for":
+						cond.QuietFor = subVal
+					}
+				}
+			}
+			t.PRConditions = &cond
 		}
 	}
 	return nil
@@ -58,6 +85,8 @@ type OnEnter struct {
 	Inject string `yaml:"inject"`
 	// MoveIssue moves the associated Linear/Shortcut issue to this status name.
 	MoveIssue string `yaml:"move_issue"`
+	// MergePR triggers the GitHub merge API for the tracked PR (stub — not yet implemented).
+	MergePR bool `yaml:"merge_pr,omitempty"`
 }
 
 // Parse decodes YAML bytes into a Pipeline. Returns an error if the YAML is invalid.
@@ -109,6 +138,18 @@ func (p *Pipeline) StageForPRClosed() *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
 			if t.PRClosed {
+				return &p.Stages[i]
+			}
+		}
+	}
+	return nil
+}
+
+// StageForPRConditions returns the first stage whose trigger has a non-nil PRConditions, or nil.
+func (p *Pipeline) StageForPRConditions() *Stage {
+	for i := range p.Stages {
+		for _, t := range p.Stages[i].Triggers {
+			if t.PRConditions != nil {
 				return &p.Stages[i]
 			}
 		}

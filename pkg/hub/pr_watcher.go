@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
@@ -106,18 +107,21 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id            string
-	clawID        string
-	repo          string
-	prNumber      int
-	prURL         string
-	lastCISHA     string
-	lastCommentID int64
+	id                 string
+	clawID             string
+	repo               string
+	prNumber           int
+	prURL              string
+	lastCISHA          string
+	lastCommentID      int64
+	lastCommentAt      string
+	prConditionsFired  bool
 }
 
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
+		       cp.last_comment_at, cp.pr_conditions_fired,
 		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
@@ -138,11 +142,13 @@ func (s *Server) pollAllPRs() {
 	var prs []row
 	for rows.Next() {
 		var r row
-		var ciInt, bugbotInt int
+		var ciInt, bugbotInt, prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt, &r.clawStatus); err != nil {
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt,
+			&ciInt, &bugbotInt, &r.clawStatus); err != nil {
 			continue
 		}
+		r.pr.prConditionsFired = prConditionsFiredInt == 1
 		r.autoFixCI = ciInt == 1
 		r.autoFixBugbot = bugbotInt == 1
 		prs = append(prs, r)
@@ -200,6 +206,15 @@ func (s *Server) pollAllPRs() {
 				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
 			}
 			s.updatePRCommentWatermark(r.pr, commentsData)
+		}
+
+		// For pipeline-driven claws, evaluate pr_conditions trigger.
+		if isPipelineDriven && !r.pr.prConditionsFired {
+			if stage := s.checkPRConditions(r.pr, token); stage != nil {
+				_, _ = s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, r.pr.id)
+				condFactory, condIssueID := s.findFactoryForClaw(r.pr.clawID)
+				s.transitionPipelineStage(r.pr.clawID, *stage, condFactory, condIssueID)
+			}
 		}
 	}
 }
@@ -380,7 +395,8 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 		}
 	}
 	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
+			maxID, time.Now().UTC().Format(time.RFC3339), pr.id)
 	}
 }
 
@@ -699,4 +715,126 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 
 	return true
+}
+
+// checkPRConditions evaluates the pr_conditions trigger for a given PR.
+// Returns the matching stage if ALL conditions pass, nil otherwise.
+func (s *Server) checkPRConditions(pr clawPR, token string) *pipeline.Stage {
+	// Find the factory for this claw
+	factory, _ := s.findFactoryForClaw(pr.clawID)
+	if factory == nil {
+		return nil
+	}
+	pl := parsePipelineForFactory(factory)
+	if pl == nil {
+		return nil
+	}
+	stage := pl.StageForPRConditions()
+	if stage == nil {
+		return nil
+	}
+	// Find the pr_conditions trigger on this stage
+	var cond *pipeline.PRConditionsTrigger
+	for _, t := range stage.Triggers {
+		if t.PRConditions != nil {
+			cond = t.PRConditions
+			break
+		}
+	}
+	if cond == nil {
+		return nil
+	}
+
+	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
+	if repoToken == "" {
+		repoToken = token
+	}
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+
+	// Evaluate ci: passing
+	if cond.CI == "passing" {
+		sha := pr.lastCISHA
+		if sha == "" {
+			return nil // no SHA yet, can't check
+		}
+		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
+			return nil
+		}
+		checkRuns, _ := checksData["check_runs"].([]interface{})
+		if len(checkRuns) == 0 {
+			return nil // no checks yet
+		}
+		for _, cr := range checkRuns {
+			run, _ := cr.(map[string]interface{})
+			conclusion, _ := run["conclusion"].(string)
+			status, _ := run["status"].(string)
+			if status != "completed" {
+				return nil // not all done
+			}
+			if conclusion != "success" && conclusion != "skipped" && conclusion != "neutral" {
+				return nil // a check failed or is pending
+			}
+		}
+	}
+
+	// Evaluate reviews: clean
+	if cond.Reviews == "clean" {
+		reviewsData, err := githubAPIListWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.repo, pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
+			return nil
+		}
+		for _, rv := range reviewsData {
+			review, _ := rv.(map[string]interface{})
+			state, _ := review["state"].(string)
+			if state == "CHANGES_REQUESTED" {
+				return nil
+			}
+		}
+	}
+
+	// Evaluate quiet_for
+	if cond.QuietFor != "" {
+		dur, err := time.ParseDuration(cond.QuietFor)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
+			return nil
+		}
+		if pr.lastCommentAt == "" {
+			return nil // never had a comment — treat as not quiet enough yet
+		}
+		lastComment, err := time.Parse(time.RFC3339, pr.lastCommentAt)
+		if err != nil {
+			return nil
+		}
+		if time.Since(lastComment) < dur {
+			return nil // not quiet enough
+		}
+	}
+
+	return stage
+}
+
+// githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
+func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
+	req, _ := http.NewRequest("GET", baseURL+"/"+path+"?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result []interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("github API list parse error: %w", err)
+	}
+	return result, nil
 }
