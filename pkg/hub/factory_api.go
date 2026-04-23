@@ -2,8 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
 	"strings"
 
@@ -90,18 +88,10 @@ type FactoryPushRequest struct {
 }
 
 func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	log.Printf("[factory-push] raw body (first 500): %s", func() string {
-		if len(body) > 500 { return string(body[:500]) }
-		return string(body)
-	}())
 	var req FactoryPushRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
-	}
-	for _, f := range req.Factories {
-		log.Printf("[factory-push] decoded factory %q: integration=%q repos=%v trigger=%+v", f.Name, f.Integration, f.Repos, f.Trigger)
 	}
 	if len(req.Factories) == 0 {
 		http.Error(w, "no factories provided", http.StatusBadRequest)
@@ -151,10 +141,6 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	cfgCopy.Factories = updated
 	s.hubCfg = &cfgCopy
 	s.mu.Unlock()
-
-	for _, f := range updated {
-		log.Printf("[factory-push] saving factory %q: repos=%v trigger=%+v", f.Name, f.Repos, f.Trigger)
-	}
 
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)

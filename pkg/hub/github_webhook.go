@@ -55,16 +55,13 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
-	log.Printf("[github-webhook] received event=%q body_len=%d", event, len(body))
-
 	// Verify HMAC-SHA256 signature against any matching factory webhook secret.
 	sig := r.Header.Get("X-Hub-Signature-256")
 	if !s.validateGitHubSignature(body, sig) {
-		log.Printf("[github-webhook] signature validation failed (sig=%q) — check webhook secret matches hub secret", sig)
+		log.Printf("[github-webhook] signature validation failed for event=%q — check webhook secret", event)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
-	log.Printf("[github-webhook] signature valid")
 
 	if event == "" {
 		http.Error(w, "missing X-GitHub-Event", http.StatusBadRequest)
