@@ -190,8 +190,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
-	mux.HandleFunc("/api/files/", s.withAuth(s.handleFileUpload))
-	mux.HandleFunc("/api/files/view/", s.withAuth(s.handleFileView))
+	mux.HandleFunc("POST /api/files/{clawID}", s.withAuth(s.handleFileUpload))
+	mux.HandleFunc("GET /api/files/view/{clawID}", s.withAuth(s.handleFileView))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
 	// Health

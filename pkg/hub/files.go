@@ -49,7 +49,10 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	clawID := r.PathValue("clawID")
+	if clawID == "" {
+		clawID = strings.TrimPrefix(r.URL.Path, "/api/files/")
+	}
 	if clawID == "" {
 		http.Error(w, "missing claw id", http.StatusBadRequest)
 		return
@@ -182,7 +185,10 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/files/view/")
+	clawID := r.PathValue("clawID")
+	if clawID == "" {
+		clawID = strings.TrimPrefix(r.URL.Path, "/api/files/view/")
+	}
 	path := r.URL.Query().Get("path")
 	if clawID == "" || path == "" {
 		http.Error(w, "missing claw id or path", http.StatusBadRequest)
@@ -262,4 +268,3 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "timeout waiting for claw", http.StatusGatewayTimeout)
 	}
 }
-

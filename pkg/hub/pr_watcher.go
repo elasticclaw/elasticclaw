@@ -59,6 +59,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	// Get the current max comment ID and head SHA to avoid flooding with historical data
 	token := s.resolveGitHubToken()
 	var maxCommentID int64
+	var lastCommentAt string
+	var lastCommentTime time.Time
 	var headSHA string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
@@ -69,6 +71,18 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 				id := int64(idF)
 				if id > maxCommentID {
 					maxCommentID = id
+				}
+				createdAt, _ := comment["created_at"].(string)
+				if createdAt == "" {
+					continue
+				}
+				createdAtTime, err := time.Parse(time.RFC3339, createdAt)
+				if err != nil {
+					continue
+				}
+				if lastCommentAt == "" || createdAtTime.After(lastCommentTime) {
+					lastCommentAt = createdAt
+					lastCommentTime = createdAtTime
 				}
 			}
 		}
@@ -82,8 +96,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	}
 
 	_, _ = s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, headSHA, now(),
+		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, headSHA, now(),
 	)
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
 }
@@ -522,21 +536,7 @@ func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, err
 
 // githubAPIList makes a GET request expecting a JSON array.
 func githubAPIList(path, token string) ([]interface{}, error) {
-	req, _ := http.NewRequest("GET", "https://api.github.com/"+path+"?per_page=100&sort=created&direction=desc", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var result []interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("github API list parse error: %w", err)
-	}
-	return result, nil
+	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
 // handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/settings
@@ -874,7 +874,11 @@ func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.Facto
 
 // githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
 func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
-	req, err := http.NewRequest("GET", baseURL+"/"+path+"?per_page=100", nil)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	req, err := http.NewRequest("GET", baseURL+"/"+path+separator+"per_page=100", nil)
 	if err != nil {
 		return nil, err
 	}
