@@ -982,14 +982,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		delete(s.claws, clawID)
 		s.mu.Unlock()
 		if partialContent != "" {
+			interruptedAt := now()
 			_, _ = s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-				partialMsgID, clawID, tenantID, "claw", partialContent, now(),
+				partialMsgID, clawID, tenantID, "claw", partialContent, interruptedAt,
 			)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{
 				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
-				Content: partialContent, CreatedAt: now(),
+				Content: partialContent, CreatedAt: interruptedAt,
 			}})
 		}
 		var currentStatus string
