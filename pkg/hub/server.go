@@ -1038,12 +1038,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						time.Since(cc.streamingStartedAt) > 12*time.Minute {
 						cc.streamingTimeoutSent = true
 						s.mu.Unlock()
-						s.mu.RLock()
-						timeoutCC := s.claws[clawID]
-						s.mu.RUnlock()
-						if timeoutCC != nil {
-							go s.injectHubMessage(ctx, timeoutCC, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
-						}
+						go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
 					} else {
 						s.mu.Unlock()
 					}
