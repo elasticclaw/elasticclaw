@@ -241,7 +241,8 @@ type githubIssueCommentPayload struct {
 	Issue  struct {
 		Number      int `json:"number"`
 		PullRequest struct {
-			URL string `json:"url"` // non-empty only for PR comments
+			URL     string `json:"url"`      // non-empty only for PR comments
+			HTMLURL string `json:"html_url"` // web URL for the PR
 		} `json:"pull_request"`
 	} `json:"issue"`
 	Comment struct {
@@ -280,8 +281,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	repoFullName := payload.Repository.FullName
 	prNumber := payload.Issue.Number
 
-	// Build the PR HTML URL from the repo and number (issue_comment doesn't include it directly)
-	prURL := fmt.Sprintf("https://github.com/%s/pull/%d", repoFullName, prNumber)
+	prURL := payload.Issue.PullRequest.HTMLURL
 
 	// Check if a claw already exists for this PR
 	existingClawID := s.findClawForGitHubPR(prURL)
