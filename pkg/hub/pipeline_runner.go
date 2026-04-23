@@ -90,6 +90,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 	}
 
 	factory, issueID := s.findFactoryForClaw(clawID)
+	log.Printf("[pipeline] initializePipelineEntryIfNeeded: claw=%s factory=%v issueID=%q", clawID[:8], factory != nil, issueID)
 	if factory == nil {
 		return false
 	}
