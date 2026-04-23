@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2 } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -493,6 +493,14 @@ function ClawBoardCard({
                     </div>
                   )
                 }
+                if (message.role === "hub") {
+                  return (
+                    <div key={message.id} className="flex items-center gap-1.5 py-0.5">
+                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40" />
+                      <span className="text-[10px] italic text-muted-foreground/60 leading-tight">{message.content}</span>
+                    </div>
+                  )
+                }
                 return (
                   <div
                     key={message.id}
@@ -766,6 +774,18 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   const isUser = message.role === "user"
+  const isHub = message.role === "hub"
+
+  if (isHub) {
+    return (
+      <div className="flex items-center gap-2 py-1">
+        <div className="flex items-center gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]">
+          <Settings2 className="size-3 shrink-0 text-muted-foreground/50" />
+          <span className="text-muted-foreground/80">{message.content}</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
@@ -818,6 +838,7 @@ function ClawChatView({
   onDeselectClaw: () => void
 }) {
   const [input, setInput] = useState("")
+  const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -865,17 +886,29 @@ function ClawChatView({
     return () => timers.forEach(clearTimeout)
   }, [messages])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const isSlashCommand = (value: string, command: string) =>
+    value === command || value.startsWith(`${command} `)
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (input.trim()) {
-      onSendMessage(input)
-      setInput("")
-      pinnedToBottom.current = true
-      if (panelTextareaRef.current) {
-        panelTextareaRef.current.style.height = "auto"
-        panelTextareaRef.current.style.overflowY = "hidden"
-      }
+    const text = input.trim()
+    if (!text) return
+    setInput("")
+    pinnedToBottom.current = true
+    if (panelTextareaRef.current) {
+      panelTextareaRef.current.style.height = "auto"
+      panelTextareaRef.current.style.overflowY = "hidden"
     }
+    if (isSlashCommand(text, "/cancel")) {
+      setCmdToast("Hard cancel not yet implemented")
+      setTimeout(() => setCmdToast(null), 3000)
+      return
+    }
+    if (isSlashCommand(text, "/stop")) {
+      onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
+      return
+    }
+    onSendMessage(text)
   }
 
   return (
@@ -943,6 +976,11 @@ function ClawChatView({
       </div>
 
       <div className="p-4 border-t border-border">
+        {cmdToast && (
+          <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
+            {cmdToast}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="flex gap-2 items-end max-w-3xl mx-auto">
           <textarea
             value={input}
@@ -966,7 +1004,7 @@ function ClawChatView({
               }
             }}
             ref={panelTextareaRef}
-            placeholder="Send a message to this claw..."
+            placeholder="Message claw or /stop"
             rows={1}
             className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
           />
