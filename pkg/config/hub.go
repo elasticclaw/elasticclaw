@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
@@ -67,6 +69,10 @@ func SaveHubConfig(cfg *types.HubConfig) error {
 	if err != nil {
 		return err
 	}
+	// Debug: log caller stack to trace who is saving what
+	buf := make([]byte, 2048)
+	n := runtime.Stack(buf, false)
+	log.Printf("[SaveHubConfig] writing to %s — factories: %d — stack:\n%s", path, len(cfg.Factories), buf[:n])
 	return os.WriteFile(path, data, 0600)
 }
 
