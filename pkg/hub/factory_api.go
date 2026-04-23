@@ -152,6 +152,10 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	s.hubCfg = &cfgCopy
 	s.mu.Unlock()
 
+	for _, f := range updated {
+		log.Printf("[factory-push] saving factory %q: repos=%v trigger=%+v", f.Name, f.Repos, f.Trigger)
+	}
+
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
