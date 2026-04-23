@@ -61,6 +61,7 @@ type clawConn struct {
 	streamingMsgID       string          // pre-assigned message ID for the current stream
 	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -966,8 +967,32 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Read loop — claw sends messages back to users
 	defer func() {
 		s.mu.Lock()
+		var partialContent string
+		var partialMsgID string
+		// Flush any partial streaming buffer as an interrupted message
+		if partialCC, ok := s.claws[clawID]; ok && partialCC.streamingBuf.Len() > 0 {
+			partialContent = partialCC.streamingBuf.String() + " [interrupted]"
+			partialMsgID = partialCC.streamingMsgID
+			if partialMsgID == "" {
+				partialMsgID = uuid.New().String()
+			}
+			partialCC.streamingBuf.Reset()
+			partialCC.streamingMsgID = ""
+		}
 		delete(s.claws, clawID)
 		s.mu.Unlock()
+		if partialContent != "" {
+			interruptedAt := now()
+			_, _ = s.db.Exec(
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+				partialMsgID, clawID, tenantID, "claw", partialContent, interruptedAt,
+			)
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{
+				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+				Content: partialContent, CreatedAt: interruptedAt,
+			}})
+		}
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
@@ -1004,11 +1029,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					var wakeConn *clawConn
 					var shouldWake bool
+					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
 						prevHealthy := cc.gatewayReady
-						prevUsage := cc.contextUsage
+						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
@@ -1036,7 +1062,24 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
 					}
+					// Inject context warning once per streaming turn when usage is >=95%
+					var shouldWarnContext bool
+					if cc2, ok2 := s.claws[clawID]; ok2 &&
+						!cc2.streamingStartedAt.IsZero() &&
+						hb.ContextUsage >= 95 &&
+						!cc2.contextWarningSent {
+						cc2.contextWarningSent = true
+						shouldWarnContext = true
+					}
 					s.mu.Unlock()
+					if shouldWarnContext {
+						s.mu.RLock()
+						warnCC := s.claws[clawID]
+						s.mu.RUnlock()
+						if warnCC != nil {
+							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+						}
+					}
 					if shouldWake {
 						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" {
 							go s.sendWakeMessage(wakeConn, clawID)
@@ -1073,6 +1116,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.streamingMsgID = uuid.New().String()
 							cc.streamingStartedAt = time.Now()
 							cc.streamingTimeoutSent = false
+							cc.contextWarningSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1095,7 +1139,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload, &hm); err != nil {
 					continue
 				}
-				// Use the streaming message ID if we already started buffering
+				hm.ClawID = clawID
+				hm.TenantID = tenantID
+				hm.Role = "claw"
+				hm.CreatedAt = now()
+				// Always clean up streaming state first, even for empty messages.
 				s.mu.Lock()
 				if cc, ok := s.claws[clawID]; ok && cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
@@ -1103,14 +1151,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					cc.streamingBuf.Reset()
 					cc.streamingStartedAt = time.Time{}
 					cc.streamingTimeoutSent = false
+					cc.contextWarningSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
 				s.mu.Unlock()
-				hm.ClawID = clawID
-				hm.TenantID = tenantID
-				hm.Role = "claw"
-				hm.CreatedAt = now()
+				// Drop empty messages — never store or broadcast
+				if strings.TrimSpace(hm.Content) == "" {
+					continue
+				}
 				_, _ = s.db.Exec(
 					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
