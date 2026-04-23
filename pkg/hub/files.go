@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -234,12 +235,8 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "decode failed", http.StatusBadGateway)
 			return
 		}
-		ct := ""
-		ext := ""
-		if dot := strings.LastIndex(path, "."); dot >= 0 {
-			ext = strings.ToLower(path[dot:])
-			ct = mime.TypeByExtension(ext)
-		}
+		ext := strings.ToLower(filepath.Ext(path))
+		ct := mime.TypeByExtension(ext)
 		if ct == "" {
 			ct = http.DetectContentType(data)
 		}
