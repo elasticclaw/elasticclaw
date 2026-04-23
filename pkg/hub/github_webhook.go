@@ -316,7 +316,11 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if token == "" {
 			continue
 		}
-		data, err := githubAPIWithBase(s.githubBaseURL, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
+		ghBase := s.githubBaseURL
+		if ghBase == "" {
+			ghBase = "https://api.github.com"
+		}
+		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
 		if err != nil {
 			log.Printf("[github-webhook] issue_comment: failed to fetch PR %s#%d: %v", repoFullName, prNumber, err)
 			continue
