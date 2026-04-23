@@ -967,16 +967,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Read loop — claw sends messages back to users
 	defer func() {
 		s.mu.Lock()
+		var partialContent string
+		var partialMsgID string
 		// Flush any partial streaming buffer as an interrupted message
 		if partialCC, ok := s.claws[clawID]; ok && partialCC.streamingBuf.Len() > 0 {
-			partialContent := partialCC.streamingBuf.String() + " [interrupted]"
-			partialMsgID := partialCC.streamingMsgID
+			partialContent = partialCC.streamingBuf.String() + " [interrupted]"
+			partialMsgID = partialCC.streamingMsgID
 			if partialMsgID == "" {
 				partialMsgID = uuid.New().String()
 			}
 			partialCC.streamingBuf.Reset()
 			partialCC.streamingMsgID = ""
-			s.mu.Unlock()
+		}
+		delete(s.claws, clawID)
+		s.mu.Unlock()
+		if partialContent != "" {
 			_, _ = s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
@@ -986,10 +991,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
 				Content: partialContent, CreatedAt: now(),
 			}})
-			s.mu.Lock()
 		}
-		delete(s.claws, clawID)
-		s.mu.Unlock()
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
