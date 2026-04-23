@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"log"
 	"strings"
 
@@ -32,6 +33,11 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
 		s.injectHubMessageByID(clawID, strings.TrimRight(stage.OnEnter.Inject, "\n"))
+	}
+
+	if stage.OnEnter.MergePR {
+		log.Printf("[pipeline] claw %s: merge_pr=true (stub — not yet implemented)", clawID[:8])
+		// TODO: call GitHub merge API
 	}
 
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
@@ -83,12 +89,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	var issueID string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID); err != nil || issueID == "" {
-		return false
-	}
-
-	factory := s.findFactoryForIssue(issueID)
+	factory, issueID := s.findFactoryForClaw(clawID)
 	if factory == nil {
 		return false
 	}
@@ -108,10 +109,34 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID string
-	_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&issueID)
-	if issueID == "" {
+	var issueID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &tagsJSON); err != nil {
 		return nil, ""
 	}
-	return s.findFactoryForIssue(issueID), issueID
+
+	if issueID != "" {
+		if factory := s.findFactoryForIssue(issueID); factory != nil {
+			return factory, issueID
+		}
+	}
+
+	var tags []string
+	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+		return nil, issueID
+	}
+	s.mu.RLock()
+	factories := s.hubCfg.Factories
+	s.mu.RUnlock()
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "factory:") {
+			continue
+		}
+		factoryName := strings.TrimPrefix(tag, "factory:")
+		for _, factory := range factories {
+			if factory.Name == factoryName {
+				return factory, issueID
+			}
+		}
+	}
+	return nil, issueID
 }

@@ -41,6 +41,10 @@ type Server struct {
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 
+	fileAckMu       sync.Mutex
+	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
+	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
+
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
@@ -48,15 +52,13 @@ type Server struct {
 }
 
 type clawConn struct {
-	id                   string
-	tenantID             string
-	conn                 *websocket.Conn
-	contextUsage         int             // 0-100, updated from heartbeats
-	gatewayReady         bool            // true once bridge reports gateway session established
-	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID       string          // pre-assigned message ID for the current stream
-	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
+	id             string
+	tenantID       string
+	conn           *websocket.Conn
+	contextUsage   int             // 0-100, updated from heartbeats
+	gatewayReady   bool            // true once bridge reports gateway session established
+	streamingBuf   strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID string          // pre-assigned message ID for the current stream
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -93,12 +95,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:       db,
-		addr:     addr,
-		hubCfg:   hubCfg,
-		identity: id,
-		claws:    make(map[string]*clawConn),
-		users:    make(map[string]*userConn),
+		db:              db,
+		addr:            addr,
+		hubCfg:          hubCfg,
+		identity:        id,
+		claws:           make(map[string]*clawConn),
+		users:           make(map[string]*userConn),
+		fileAckWaiters:  make(map[string]chan types.FileAck),
+		fileReadWaiters: make(map[string]chan types.FileReadResp),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -177,14 +181,17 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Integration webhooks (signature-validated, no session auth)
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
+	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))  // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))  // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))   // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
+	mux.HandleFunc("POST /api/files/{clawID}", s.withAuth(s.handleFileUpload))
+	mux.HandleFunc("GET /api/files/view/{clawID}", s.withAuth(s.handleFileView))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
 	// Health
@@ -940,15 +947,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
-	// Initialize entry pipeline stage only after bridge connects so on_enter inject
-	// can be delivered over WS.
-	usedPipelineEntryInject := false
+	// If gateway is already ready on connect (common for factory claws where bootstrap
+	// completes before bridge registers), fire the wake message immediately.
 	if cc.gatewayReady && currentStatus == "connected" {
-		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
-	}
-	// If no pipeline entry inject was sent, fire the default wake message.
-	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
-		go s.sendWakeMessage(cc, clawID)
+		if !s.initializePipelineEntryIfNeeded(clawID) {
+			go s.sendWakeMessage(cc, clawID)
+		}
 	}
 
 	// Read loop — claw sends messages back to users
@@ -978,7 +982,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.db.Exec(`UPDATE claws SET last_seen=? WHERE id=?`, now(), clawID)
 		default:
 			var msg types.WSMessage
-			conn.SetReadLimit(1 << 20) // 1MB
+			conn.SetReadLimit(32 << 20) // 32MB (file uploads ride this channel)
 			if err := wsjson.Read(ctx, conn, &msg); err != nil {
 				return
 			}
@@ -990,8 +994,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					ContextUsage   int   `json:"context_usage"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
-					var wakeConn *clawConn
 					var shouldWake bool
+					var wakeConn *clawConn
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
@@ -1026,21 +1030,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					s.mu.Unlock()
 					if shouldWake {
-						if !s.initializePipelineEntryIfNeeded(clawID) {
+						if !s.initializePipelineEntryIfNeeded(clawID) && wakeConn != nil {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
-					}
-					// Check for streaming turn timeout (12 minutes)
-					s.mu.Lock()
-					if cc, ok := s.claws[clawID]; ok &&
-						!cc.streamingStartedAt.IsZero() &&
-						!cc.streamingTimeoutSent &&
-						time.Since(cc.streamingStartedAt) > 12*time.Minute {
-						cc.streamingTimeoutSent = true
-						s.mu.Unlock()
-						go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
-					} else {
-						s.mu.Unlock()
 					}
 				}
 			} else if msg.Type == "chunk" {
@@ -1059,8 +1051,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if cc, ok := s.claws[clawID]; ok {
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
-							cc.streamingStartedAt = time.Now()
-							cc.streamingTimeoutSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1089,8 +1079,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID = cc.streamingMsgID
 					cc.streamingMsgID = ""
 					cc.streamingBuf.Reset()
-					cc.streamingStartedAt = time.Time{}
-					cc.streamingTimeoutSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
@@ -1118,6 +1106,36 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.RUnlock()
 					if loopCC != nil {
 						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+					}
+				}
+			} else if msg.Type == "file_ack" {
+				raw, _ := json.Marshal(msg.Payload)
+				var ack types.FileAck
+				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.fileAckWaiters[ack.RequestID]
+					delete(s.fileAckWaiters, ack.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- ack:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "file_read_resp" {
+				raw, _ := json.Marshal(msg.Payload)
+				var resp types.FileReadResp
+				if err := json.Unmarshal(raw, &resp); err == nil && resp.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.fileReadWaiters[resp.RequestID]
+					delete(s.fileReadWaiters, resp.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- resp:
+						default:
+						}
 					}
 				}
 			} else if msg.Type == "http_proxy_req" {
@@ -1797,8 +1815,7 @@ func (s *Server) syncReplicatedVMs() {
 		return
 	}
 
-	// Find claws provisioned on Replicated that are still in a VM-managed state.
-	// Exclude hub-managed statuses (idle, connected) — those claws don't need VM polling.
+	// Find claws provisioned on Replicated that are still in bootstrap states.
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id, name, provider_id, status
 		FROM claws
@@ -1871,22 +1888,22 @@ func (s *Server) syncReplicatedVMs() {
 			newStatus = "provisioning"
 		}
 
-		// Only overwrite provisioning/starting statuses — never clobber hub-managed
-		// statuses (idle, connected, deleted, error) which have higher semantic meaning.
-		// Use a conditional UPDATE so we race-safely check the current DB value.
 		if newStatus != c.status {
 			res, execErr := s.db.Exec(
 				`UPDATE claws SET status=? WHERE id=? AND status IN ('provisioning','starting')`,
-				newStatus, c.id)
-			if execErr == nil {
-				if n, _ := res.RowsAffected(); n > 0 {
-					log.Printf("Claw %s (%s): VM %s %s → hub status %s",
-						c.name, c.id[:8], c.providerID, vm.Status, newStatus)
-					s.broadcastToUsers(c.tenantID, types.WSMessage{
-						Type:    "claw_status",
-						Payload: map[string]string{"claw_id": c.id, "status": newStatus},
-					})
-				}
+				newStatus, c.id,
+			)
+			if execErr != nil {
+				continue
+			}
+			rowsUpdated, _ := res.RowsAffected()
+			if rowsUpdated > 0 {
+				log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
+					c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
+				s.broadcastToUsers(c.tenantID, types.WSMessage{
+					Type:    "claw_status",
+					Payload: map[string]string{"claw_id": c.id, "status": newStatus},
+				})
 			}
 		}
 	}
@@ -1916,13 +1933,11 @@ func (s *Server) bridgeDownloadURL() string {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 // sendWakeMessage sends a silent system message to wake the agent.
-// For factory claws (those with a linear_issue_id), it sends a task-specific prompt.
+// For factory claws (including GitHub-triggered claws), it sends a task-specific prompt.
 // Not stored in DB — invisible to the user but triggers the agent to respond.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
-	var issueID string
-	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
-	if issueID != "" {
+	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
 		wakeContent = `Read your BOOTSTRAP.md now. Then:
 1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
 2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
@@ -2159,38 +2174,6 @@ func mergeTags(templateName string, configTags []string, cliTags []string) []str
 		add(t)
 	}
 	return result
-}
-
-// detectToolLoop returns true if the same class of tool error appears 3+ times
-// in the content of a completed assistant turn.
-func detectToolLoop(content string) bool {
-	patterns := []string{"edit failed:", "write failed:", "read failed:"}
-	for _, p := range patterns {
-		if strings.Count(strings.ToLower(content), p) >= 3 {
-			return true
-		}
-	}
-	return false
-}
-
-// injectHubMessage sends a hub-role message to the claw over its WebSocket
-// connection and persists it to the DB so it appears in the message history.
-// Hub messages are visually distinct from user messages in the UI.
-func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string) {
-	msg := types.HubMessage{
-		ID:        uuid.New().String(),
-		ClawID:    cc.id,
-		TenantID:  cc.tenantID,
-		Role:      "hub",
-		Content:   text,
-		CreatedAt: now(),
-	}
-	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
-	)
-	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
-	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
 func randomHex(n int) string {
@@ -2835,4 +2818,36 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
 	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
+}
+
+// detectToolLoop returns true if the same class of tool error appears 3+ times
+// in the content of a completed assistant turn.
+func detectToolLoop(content string) bool {
+	patterns := []string{"edit failed:", "write failed:", "read failed:"}
+	for _, p := range patterns {
+		if strings.Count(strings.ToLower(content), p) >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+// injectHubMessage sends a hub-role message to the claw over its WebSocket
+// connection and persists it to the DB so it appears in the message history.
+// Hub messages are visually distinct from user messages in the UI.
+func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string) {
+	msg := types.HubMessage{
+		ID:        uuid.New().String(),
+		ClawID:    cc.id,
+		TenantID:  cc.tenantID,
+		Role:      "hub",
+		Content:   text,
+		CreatedAt: now(),
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+	)
+	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
+	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
 }

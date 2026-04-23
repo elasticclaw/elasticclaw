@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
@@ -58,6 +59,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	// Get the current max comment ID and head SHA to avoid flooding with historical data
 	token := s.resolveGitHubToken()
 	var maxCommentID int64
+	var lastCommentAt string
+	var lastCommentTime time.Time
 	var headSHA string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
@@ -68,6 +71,18 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 				id := int64(idF)
 				if id > maxCommentID {
 					maxCommentID = id
+				}
+				createdAt, _ := comment["created_at"].(string)
+				if createdAt == "" {
+					continue
+				}
+				createdAtTime, err := time.Parse(time.RFC3339, createdAt)
+				if err != nil {
+					continue
+				}
+				if lastCommentAt == "" || createdAtTime.After(lastCommentTime) {
+					lastCommentAt = createdAt
+					lastCommentTime = createdAtTime
 				}
 			}
 		}
@@ -81,8 +96,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	}
 
 	_, _ = s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, headSHA, now(),
+		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, headSHA, now(),
 	)
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
 }
@@ -106,18 +121,22 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id            string
-	clawID        string
-	repo          string
-	prNumber      int
-	prURL         string
-	lastCISHA     string
-	lastCommentID int64
+	id                string
+	clawID            string
+	repo              string
+	prNumber          int
+	prURL             string
+	lastCISHA         string
+	lastCommentID     int64
+	lastCommentAt     string
+	prConditionsFired bool
+	createdAt         string
 }
 
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
+		       cp.last_comment_at, cp.pr_conditions_fired, cp.created_at,
 		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
@@ -138,11 +157,13 @@ func (s *Server) pollAllPRs() {
 	var prs []row
 	for rows.Next() {
 		var r row
-		var ciInt, bugbotInt int
+		var ciInt, bugbotInt, prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &ciInt, &bugbotInt, &r.clawStatus); err != nil {
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt, &r.pr.createdAt,
+			&ciInt, &bugbotInt, &r.clawStatus); err != nil {
 			continue
 		}
+		r.pr.prConditionsFired = prConditionsFiredInt == 1
 		r.autoFixCI = ciInt == 1
 		r.autoFixBugbot = bugbotInt == 1
 		prs = append(prs, r)
@@ -167,7 +188,7 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		factory, _ := s.findFactoryForClaw(r.pr.clawID)
+		factory, issueID := s.findFactoryForClaw(r.pr.clawID)
 		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
 		log.Printf("[pr-watcher] claw=%s factory=%v pipelineDriven=%v", r.pr.clawID[:8], factory != nil, isPipelineDriven)
 
@@ -200,6 +221,14 @@ func (s *Server) pollAllPRs() {
 				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
 			}
 			s.updatePRCommentWatermark(r.pr, commentsData)
+		}
+
+		// For pipeline-driven claws, evaluate pr_conditions trigger.
+		if isPipelineDriven && !r.pr.prConditionsFired {
+			if stage := s.checkPRConditions(r.pr, token, factory); stage != nil {
+				_, _ = s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, r.pr.id)
+				s.transitionPipelineStage(r.pr.clawID, *stage, factory, issueID)
+			}
 		}
 	}
 }
@@ -371,6 +400,8 @@ func isBugbotComment(login, body string) bool {
 
 func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{}) {
 	maxID := pr.lastCommentID
+	latestCommentAt := ""
+	var latestCommentTime time.Time
 	for _, c := range commentsData {
 		comment, _ := c.(map[string]interface{})
 		idF, _ := comment["id"].(float64)
@@ -378,9 +409,29 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 		if id > maxID {
 			maxID = id
 		}
+		if id <= pr.lastCommentID {
+			continue
+		}
+		createdAt, _ := comment["created_at"].(string)
+		if createdAt == "" {
+			continue
+		}
+		createdAtTime, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			continue
+		}
+		if latestCommentAt == "" || createdAtTime.After(latestCommentTime) {
+			latestCommentAt = createdAt
+			latestCommentTime = createdAtTime
+		}
 	}
 	if maxID > pr.lastCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+		if latestCommentAt != "" {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
+				maxID, latestCommentAt, pr.id)
+		} else {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+		}
 	}
 }
 
@@ -485,21 +536,7 @@ func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, err
 
 // githubAPIList makes a GET request expecting a JSON array.
 func githubAPIList(path, token string) ([]interface{}, error) {
-	req, _ := http.NewRequest("GET", "https://api.github.com/"+path+"?per_page=100&sort=created&direction=desc", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var result []interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("github API list parse error: %w", err)
-	}
-	return result, nil
+	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
 // handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/settings
@@ -699,4 +736,164 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 
 	return true
+}
+
+// checkPRConditions evaluates the pr_conditions trigger for a given PR.
+// Returns the matching stage if ALL conditions pass, nil otherwise.
+func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.FactoryConfig) *pipeline.Stage {
+	if factory == nil {
+		return nil
+	}
+	pl := parsePipelineForFactory(factory)
+	if pl == nil {
+		return nil
+	}
+	stage := pl.StageForPRConditions()
+	if stage == nil {
+		return nil
+	}
+	// Find the pr_conditions trigger on this stage
+	var cond *pipeline.PRConditionsTrigger
+	for _, t := range stage.Triggers {
+		if t.PRConditions != nil {
+			cond = t.PRConditions
+			break
+		}
+	}
+	if cond == nil {
+		return nil
+	}
+
+	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
+	if repoToken == "" {
+		repoToken = token
+	}
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+
+	// Evaluate ci: passing
+	if cond.CI == "passing" {
+		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
+			return nil
+		}
+		headObj, _ := prData["head"].(map[string]interface{})
+		sha, _ := headObj["sha"].(string)
+		if sha == "" {
+			return nil // no head SHA yet, can't check
+		}
+		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
+			return nil
+		}
+		checkRuns, _ := checksData["check_runs"].([]interface{})
+		if len(checkRuns) == 0 {
+			return nil // no checks yet
+		}
+		for _, cr := range checkRuns {
+			run, _ := cr.(map[string]interface{})
+			conclusion, _ := run["conclusion"].(string)
+			status, _ := run["status"].(string)
+			if status != "completed" {
+				return nil // not all done
+			}
+			if conclusion != "success" && conclusion != "skipped" && conclusion != "neutral" {
+				return nil // a check failed or is pending
+			}
+		}
+	}
+
+	// Evaluate reviews: clean
+	if cond.Reviews == "clean" {
+		reviewsData, err := githubAPIListWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.repo, pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
+			return nil
+		}
+		latestReviewStateByUser := make(map[string]struct {
+			id    int64
+			state string
+		})
+		for _, rv := range reviewsData {
+			review, _ := rv.(map[string]interface{})
+			userObj, _ := review["user"].(map[string]interface{})
+			login, _ := userObj["login"].(string)
+			if login == "" {
+				continue
+			}
+			idF, _ := review["id"].(float64)
+			reviewID := int64(idF)
+			state, _ := review["state"].(string)
+			prev, seen := latestReviewStateByUser[login]
+			if seen && reviewID <= prev.id {
+				continue
+			}
+			latestReviewStateByUser[login] = struct {
+				id    int64
+				state string
+			}{id: reviewID, state: state}
+		}
+		for _, latest := range latestReviewStateByUser {
+			if latest.state == "CHANGES_REQUESTED" {
+				return nil
+			}
+		}
+	}
+
+	// Evaluate quiet_for
+	if cond.QuietFor != "" {
+		dur, err := time.ParseDuration(cond.QuietFor)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
+			return nil
+		}
+		// If no comments yet, use PR creation time — a PR with no comments
+		// has been quiet since it was created, so quiet_for should still fire.
+		quietSince := pr.lastCommentAt
+		if quietSince == "" {
+			quietSince = pr.createdAt
+		}
+		if quietSince == "" {
+			return nil
+		}
+		lastComment, err := time.Parse(time.RFC3339, quietSince)
+		if err != nil {
+			return nil
+		}
+		if time.Since(lastComment) < dur {
+			return nil // not quiet enough
+		}
+	}
+
+	return stage
+}
+
+// githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
+func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	req, err := http.NewRequest("GET", baseURL+"/"+path+separator+"per_page=100", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result []interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("github API list parse error: %w", err)
+	}
+	return result, nil
 }

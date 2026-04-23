@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2 } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -30,6 +30,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
+import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
+import { useAttachments } from "@/hooks/use-attachments"
+import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 
@@ -320,6 +323,7 @@ function ClawBoardCard({
 }) {
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const cardFileInputRef = useRef<HTMLInputElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
@@ -327,6 +331,22 @@ function ClawBoardCard({
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const [showCardScrollBtn, setShowCardScrollBtn] = useState(false)
+
+  const {
+    attachments,
+    dragHover,
+    addFiles,
+    removeAttachment,
+    clearAttachments,
+    onDragEnter,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPaste,
+  } = useAttachments(claw.id)
+  const stillUploading = attachments.some((a) => a.status === "uploading")
+  const hasErrored = attachments.some((a) => a.status === "error")
+  const canSubmitCard = !isPending && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
   useEffect(() => {
     const el = msgScrollRef.current
@@ -342,13 +362,16 @@ function ClawBoardCard({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (input.trim()) {
-      onSendMessage(input.trim())
-      setInput("")
-      if (cardTextareaRef.current) {
-        cardTextareaRef.current.style.height = "auto"
-        cardTextareaRef.current.style.overflowY = "hidden"
-      }
+    if (stillUploading || hasErrored) return
+    const footer = buildAttachmentsFooter(attachments)
+    const trimmed = input.trim()
+    if (!trimmed && !footer) return
+    onSendMessage(trimmed + footer)
+    setInput("")
+    clearAttachments()
+    if (cardTextareaRef.current) {
+      cardTextareaRef.current.style.height = "auto"
+      cardTextareaRef.current.style.overflowY = "hidden"
     }
   }
 
@@ -380,7 +403,16 @@ function ClawBoardCard({
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
+          onDragEnter={isPending ? undefined : onDragEnter}
+          onDragOver={isPending ? undefined : onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={isPending ? undefined : onDrop}
         >
+          {dragHover && !isPending && (
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-background/80">
+              <div className="text-xs font-medium text-foreground">Drop files</div>
+            </div>
+          )}
           {claw.isStreaming && (
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
           )}
@@ -501,6 +533,9 @@ function ClawBoardCard({
                     </div>
                   )
                 }
+                const { body: cardBody, attachments: cardAttachments } = message.role === "user"
+                  ? splitAttachmentsFooter(message.content)
+                  : { body: message.content, attachments: [] as ParsedAttachment[] }
                 return (
                   <div
                     key={message.id}
@@ -519,7 +554,24 @@ function ClawBoardCard({
                         {formatTimestamp(message.timestamp)}
                       </span>
                     </div>
-                    <MarkdownContent content={message.content} className="text-xs text-foreground" />
+                    {cardBody.trim() && (
+                      <MarkdownContent content={cardBody} className="text-xs text-foreground" />
+                    )}
+                    {cardAttachments.length > 0 && (
+                      <div className={cn("flex flex-wrap gap-1", cardBody.trim() && "mt-1")}>
+                        {cardAttachments.map((a, i) => (
+                          <AttachmentChip
+                            key={`${a.path}-${i}`}
+                            name={a.name}
+                            sizeLabel={a.sizeLabel}
+                            mimetype={a.mimetype}
+                            source={{ kind: "history", clawId: claw.id, path: a.path }}
+                            size="sm"
+                            path={a.path}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )
               })
@@ -536,8 +588,48 @@ function ClawBoardCard({
           </div>
           
           {/* Input area */}
-          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border">
+          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {attachments.map((a) => (
+                  <AttachmentChip
+                    key={a.localId}
+                    name={a.name}
+                    sizeLabel={formatBytes(a.size)}
+                    mimetype={a.mimetype}
+                    source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                    size="sm"
+                    status={a.status}
+                    error={a.error}
+                    path={a.path}
+                    onRemove={() => removeAttachment(a.localId)}
+                  />
+                ))}
+              </div>
+            )}
             <div className="flex gap-1.5">
+              <input
+                ref={cardFileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) addFiles(Array.from(e.target.files))
+                  e.target.value = ""
+                }}
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8 shrink-0"
+                disabled={isPending}
+                onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
+                title="Attach files"
+              >
+                <Paperclip className="size-3" />
+                <span className="sr-only">Attach files</span>
+              </Button>
               <textarea
                 value={input}
                 rows={1}
@@ -557,20 +649,21 @@ function ClawBoardCard({
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault()
-                    if (input.trim() && !isPending) handleSubmit(e as unknown as React.FormEvent)
+                    if (canSubmitCard) handleSubmit(e as unknown as React.FormEvent)
                   }
                 }}
+                onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Claw offline" : "Starting up...") : "Send message..."}
                 className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
               />
-              <Button 
-                type="submit" 
-                size="icon" 
+              <Button
+                type="submit"
+                size="icon"
                 className="size-8 shrink-0"
-                disabled={!input.trim() || isPending}
+                disabled={!canSubmitCard}
                 onClick={(e) => e.stopPropagation()}
               >
                 <Send className="size-3" />
@@ -727,10 +820,12 @@ function formatTimestamp(date: Date): string {
 
 const MessageBubble = memo(function MessageBubble({
   message,
+  clawId,
   clawName,
   clawColor,
 }: {
   message: Message
+  clawId: string
   clawName: string
   clawColor?: string
 }) {
@@ -787,6 +882,10 @@ const MessageBubble = memo(function MessageBubble({
     )
   }
 
+  const { body, attachments: parsedAttachments } = isUser
+    ? splitAttachmentsFooter(message.content)
+    : { body: message.content, attachments: [] as ParsedAttachment[] }
+
   return (
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
@@ -810,10 +909,27 @@ const MessageBubble = memo(function MessageBubble({
             {formatTimestamp(message.timestamp)}
           </span>
         </div>
-        {isUser ? (
-          <p className="text-sm whitespace-pre-wrap text-foreground">{message.content}</p>
-        ) : (
-          <MarkdownContent content={message.content} className="text-sm" />
+        {body.trim() && (
+          isUser ? (
+            <p className="text-sm whitespace-pre-wrap text-foreground">{body}</p>
+          ) : (
+            <MarkdownContent content={body} className="text-sm" />
+          )
+        )}
+        {parsedAttachments.length > 0 && (
+          <div className={cn("flex flex-wrap gap-2", body.trim() && "mt-2")}>
+            {parsedAttachments.map((a, i) => (
+              <AttachmentChip
+                key={`${a.path}-${i}`}
+                name={a.name}
+                sizeLabel={a.sizeLabel}
+                mimetype={a.mimetype}
+                source={{ kind: "history", clawId, path: a.path }}
+                size="md"
+                path={a.path}
+              />
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -843,6 +959,20 @@ function ClawChatView({
   const [confirmKill, setConfirmKill] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const {
+    attachments,
+    dragHover,
+    addFiles,
+    removeAttachment,
+    clearAttachments,
+    onDragEnter,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPaste,
+  } = useAttachments(claw.id)
 
   const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
     clawId: claw.id,
@@ -889,30 +1019,49 @@ function ClawChatView({
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)
 
+  const stillUploading = attachments.some((a) => a.status === "uploading")
+  const hasErrored = attachments.some((a) => a.status === "error")
+  const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const text = input.trim()
-    if (!text) return
+    if (stillUploading || hasErrored) return
+    const footer = buildAttachmentsFooter(attachments)
+    const trimmed = input.trim()
+    if (!trimmed && !footer) return
     setInput("")
+    clearAttachments()
     pinnedToBottom.current = true
     if (panelTextareaRef.current) {
       panelTextareaRef.current.style.height = "auto"
       panelTextareaRef.current.style.overflowY = "hidden"
     }
-    if (isSlashCommand(text, "/cancel")) {
+    if (isSlashCommand(trimmed, "/cancel")) {
       setCmdToast("Hard cancel not yet implemented")
       setTimeout(() => setCmdToast(null), 3000)
       return
     }
-    if (isSlashCommand(text, "/stop")) {
+    if (isSlashCommand(trimmed, "/stop")) {
       onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
       return
     }
-    onSendMessage(text)
+    const payload = trimmed + footer
+    onSendMessage(payload)
   }
 
   return (
-    <main className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden">
+    <main
+      className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden relative"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragHover && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring rounded-sm">
+          <div className="text-sm text-foreground font-medium">Drop files to attach</div>
+        </div>
+      )}
       <header className="border-b border-border">
         <div className="px-6 pt-2">
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
@@ -959,7 +1108,7 @@ function ClawChatView({
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
             messages.map((message) => (
-              <MessageBubble key={message.id} message={message} clawName={claw.name} clawColor={claw.color} />
+              <MessageBubble key={message.id} message={message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
             ))
           )}
           <div ref={bottomRef} className="h-4" />
@@ -981,37 +1130,82 @@ function ClawChatView({
             {cmdToast}
           </div>
         )}
-        <form onSubmit={handleSubmit} className="flex gap-2 items-end max-w-3xl mx-auto">
-          <textarea
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              const el = e.target
-              el.style.height = "auto"
-              const maxH = 200
-              if (el.scrollHeight <= maxH) {
-                el.style.height = el.scrollHeight + "px"
-                el.style.overflowY = "hidden"
-              } else {
-                el.style.height = maxH + "px"
-                el.style.overflowY = "auto"
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                if (input.trim()) handleSubmit(e as unknown as React.FormEvent)
-              }
-            }}
-            ref={panelTextareaRef}
-            placeholder="Message claw or /stop"
-            rows={1}
-            className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
-          />
-          <Button type="submit" size="icon" disabled={!input.trim()} className="shrink-0">
-            <Send className="size-4" />
-            <span className="sr-only">Send message</span>
-          </Button>
+        <form
+          onSubmit={handleSubmit}
+          className="flex flex-col gap-2 max-w-3xl mx-auto rounded-md"
+        >
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {attachments.map((a) => (
+                <AttachmentChip
+                  key={a.localId}
+                  name={a.name}
+                  sizeLabel={formatBytes(a.size)}
+                  mimetype={a.mimetype}
+                  source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                  size="md"
+                  status={a.status}
+                  error={a.error}
+                  path={a.path}
+                  onRemove={() => removeAttachment(a.localId)}
+                />
+              ))}
+            </div>
+          )}
+          <div className="flex gap-2 items-end">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) addFiles(Array.from(e.target.files))
+                e.target.value = ""
+              }}
+            />
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={() => fileInputRef.current?.click()}
+              className="shrink-0"
+              title="Attach files"
+            >
+              <Paperclip className="size-4" />
+              <span className="sr-only">Attach files</span>
+            </Button>
+            <textarea
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value)
+                const el = e.target
+                el.style.height = "auto"
+                const maxH = 200
+                if (el.scrollHeight <= maxH) {
+                  el.style.height = el.scrollHeight + "px"
+                  el.style.overflowY = "hidden"
+                } else {
+                  el.style.height = maxH + "px"
+                  el.style.overflowY = "auto"
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  if (canSubmit) handleSubmit(e as unknown as React.FormEvent)
+                }
+              }}
+              onPaste={onPaste}
+              ref={panelTextareaRef}
+              placeholder="Message claw, /stop, or attach files"
+              rows={1}
+              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
+            />
+            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0">
+              <Send className="size-4" />
+              <span className="sr-only">Send message</span>
+            </Button>
+          </div>
         </form>
       </div>
 
@@ -1244,6 +1438,7 @@ export function ConversationView({
 
   return (
     <ClawChatView
+      key={claw.id}
       claw={claw}
       messages={messages}
       onSendMessage={onSendMessage}
