@@ -22,6 +22,10 @@ import (
 type githubPRPayload struct {
 	Action      string `json:"action"` // "opened", "synchronize", "reopened", "closed"
 	Number      int    `json:"number"`
+	Sender      struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "Bot", "User", "Organization"
+	} `json:"sender"`
 	PullRequest struct {
 		HTMLURL string `json:"html_url"`
 		Title   string `json:"title"`
@@ -177,6 +181,12 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			case "closed":
 				// Let the pr_watcher handle merged/closed — don't double-inject
 			case "synchronize", "reopened", "review_requested":
+				// Skip synchronize events triggered by the claw itself pushing commits.
+				// The sender will be a Bot (our GitHub App) in that case.
+				if payload.Action == "synchronize" && strings.EqualFold(payload.Sender.Type, "bot") {
+					log.Printf("[factory:%s] github PR #%d synchronize from bot sender %q — skipping (claw's own push)", factory.Name, payload.Number, payload.Sender.Login)
+					continue
+				}
 				// Only inject if the claw is connected and ready — otherwise the
 				// claw hasn't started yet and the update is redundant (claw gets
 				// full context from BOOTSTRAP on startup).
@@ -189,7 +199,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				} else {
 					msg := fmt.Sprintf("PR #%d update: %s.", payload.Number, payload.Action)
 					if payload.Action == "synchronize" {
-						msg = fmt.Sprintf("PR #%d was updated with new commits. Review the latest changes.", payload.Number)
+						msg = fmt.Sprintf("PR #%d was updated with new commits from a human. Review the latest changes.", payload.Number)
 					} else if payload.Action == "reopened" {
 						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 					}
