@@ -397,10 +397,6 @@ func (s *Server) injectHubMessageByID(clawID, content string) {
 	s.injectMessageWithRetry(clawID, content, "hub", 0)
 }
 
-func (s *Server) injectUserMessageWithRetry(clawID, content string, retryCount int) {
-	s.injectMessageWithRetry(clawID, content, "user", retryCount)
-}
-
 func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount int) {
 	// Don't interrupt a response in progress
 	s.mu.RLock()

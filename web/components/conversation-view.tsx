@@ -886,6 +886,9 @@ function ClawChatView({
     return () => timers.forEach(clearTimeout)
   }, [messages])
 
+  const isSlashCommand = (value: string, command: string) =>
+    value === command || value.startsWith(`${command} `)
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const text = input.trim()
@@ -896,12 +899,12 @@ function ClawChatView({
       panelTextareaRef.current.style.height = "auto"
       panelTextareaRef.current.style.overflowY = "hidden"
     }
-    if (text.startsWith("/cancel")) {
+    if (isSlashCommand(text, "/cancel")) {
       setCmdToast("Hard cancel not yet implemented")
       setTimeout(() => setCmdToast(null), 3000)
       return
     }
-    if (text.startsWith("/stop")) {
+    if (isSlashCommand(text, "/stop")) {
       onSendMessage("Stop what you are doing immediately and wait for my next instruction.")
       return
     }
