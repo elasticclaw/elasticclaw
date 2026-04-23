@@ -775,9 +775,15 @@ func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.Facto
 
 	// Evaluate ci: passing
 	if cond.CI == "passing" {
-		sha := pr.lastCISHA
+		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
+			return nil
+		}
+		headObj, _ := prData["head"].(map[string]interface{})
+		sha, _ := headObj["sha"].(string)
 		if sha == "" {
-			return nil // no SHA yet, can't check
+			return nil // no head SHA yet, can't check
 		}
 		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
 		if err != nil {
@@ -868,7 +874,10 @@ func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.Facto
 
 // githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
 func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
-	req, _ := http.NewRequest("GET", baseURL+"/"+path+"?per_page=100", nil)
+	req, err := http.NewRequest("GET", baseURL+"/"+path+"?per_page=100", nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
