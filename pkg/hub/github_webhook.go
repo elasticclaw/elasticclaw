@@ -155,11 +155,6 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			log.Printf("[github-webhook] factory %q: skipped (trigger.on=%q, not pull_request)", factory.Name, factory.Trigger.On)
 			continue
 		}
-		// Check action match
-		if factory.Trigger.Action != "" && factory.Trigger.Action != payload.Action {
-			log.Printf("[github-webhook] factory %q: skipped (action mismatch: want %q, got %q)", factory.Name, factory.Trigger.Action, payload.Action)
-			continue
-		}
 		// Check repo match
 		if !githubRepoMatches(repoFullName, factory.Repos) {
 			log.Printf("[github-webhook] factory %q: skipped (repo %q not in %v)", factory.Name, repoFullName, factory.Repos)
@@ -178,6 +173,28 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			}
 		}
 
+		// Check if a claw already exists for this PR
+		existingClawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL)
+		if existingClawID != "" {
+			// Claw exists — inject a contextual update message
+			var msg string
+			switch payload.Action {
+			case "synchronize":
+				msg = fmt.Sprintf("PR #%d was updated with new commits (action: %s). Review the latest changes.", payload.Number, payload.Action)
+			case "reopened":
+				msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
+			case "closed":
+				// Let the pr_watcher handle merged/closed — don't double-inject
+				continue
+			default:
+				msg = fmt.Sprintf("PR #%d event: %s.", payload.Number, payload.Action)
+			}
+			log.Printf("[factory:%s] github PR #%d action=%s — injecting into existing claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
+			s.injectUserMessage(existingClawID, msg)
+			continue
+		}
+
+		// No existing claw — create one (regardless of action, first event wins)
 		log.Printf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
 		if err := s.createClawForGitHubPR(factory, payload); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, payload.Number, err)
@@ -214,6 +231,19 @@ func githubRepoMatches(fullName string, repos []string) bool {
 }
 
 // createClawForGitHubPR provisions a new claw for a GitHub PR event.
+// findClawForGitHubPR returns the claw ID that is already tracking this PR URL, or "".
+func (s *Server) findClawForGitHubPR(prURL string) string {
+	var clawID string
+	_ = s.db.QueryRow(
+		`SELECT cp.claw_id FROM claw_prs cp
+		 JOIN claws cl ON cl.id = cp.claw_id
+		 WHERE cp.pr_url = ? AND cl.status NOT IN ('deleted','error','offline')
+		 LIMIT 1`,
+		prURL,
+	).Scan(&clawID)
+	return clawID
+}
+
 func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload) error {
 	repoFullName := pr.Repository.FullName
 	prNumber := pr.Number
