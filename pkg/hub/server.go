@@ -950,7 +950,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// If gateway is already ready on connect (common for factory claws where bootstrap
 	// completes before bridge registers), fire the wake message immediately.
 	if cc.gatewayReady && currentStatus == "connected" {
-		go s.sendWakeMessage(cc, clawID)
+		if !s.initializePipelineEntryIfNeeded(clawID) {
+			go s.sendWakeMessage(cc, clawID)
+		}
 	}
 
 	// Read loop — claw sends messages back to users
@@ -1013,7 +1015,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 								})
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-								go s.sendWakeMessage(cc, clawID)
+								if !s.initializePipelineEntryIfNeeded(clawID) {
+									go s.sendWakeMessage(cc, clawID)
+								}
 							}
 						} else if !hb.GatewayHealthy && prevHealthy {
 							// Gateway went unhealthy
@@ -1805,13 +1809,13 @@ func (s *Server) syncReplicatedVMs() {
 		return
 	}
 
-	// Find claws provisioned on Replicated that aren't in a terminal state
+	// Find claws provisioned on Replicated that are still in bootstrap states.
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id, name, provider_id, status
 		FROM claws
 		WHERE provider = 'replicated'
 		  AND provider_id != ''
-		  AND status NOT IN ('failed', 'error', 'offline', 'deleted')
+		  AND status IN ('provisioning', 'starting')
 	`)
 	if err != nil {
 		log.Printf("pollProviderStatus: query error: %v", err)
@@ -1879,13 +1883,22 @@ func (s *Server) syncReplicatedVMs() {
 		}
 
 		if newStatus != c.status {
-			_, _ = s.db.Exec(`UPDATE claws SET status=? WHERE id=?`, newStatus, c.id)
-			log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
-				c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
-			s.broadcastToUsers(c.tenantID, types.WSMessage{
-				Type:    "claw_status",
-				Payload: map[string]string{"claw_id": c.id, "status": newStatus},
-			})
+			res, execErr := s.db.Exec(
+				`UPDATE claws SET status=? WHERE id=? AND status IN ('provisioning','starting')`,
+				newStatus, c.id,
+			)
+			if execErr != nil {
+				continue
+			}
+			rowsUpdated, _ := res.RowsAffected()
+			if rowsUpdated > 0 {
+				log.Printf("Claw %s (%s): status %s → %s (VM %s: %s)",
+					c.name, c.id[:8], c.status, newStatus, c.providerID, vm.Status)
+				s.broadcastToUsers(c.tenantID, types.WSMessage{
+					Type:    "claw_status",
+					Payload: map[string]string{"claw_id": c.id, "status": newStatus},
+				})
+			}
 		}
 	}
 }
@@ -1914,13 +1927,11 @@ func (s *Server) bridgeDownloadURL() string {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 // sendWakeMessage sends a silent system message to wake the agent.
-// For factory claws (those with a linear_issue_id), it sends a task-specific prompt.
+// For factory claws (including GitHub-triggered claws), it sends a task-specific prompt.
 // Not stored in DB — invisible to the user but triggers the agent to respond.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
-	var issueID string
-	_ = s.db.QueryRow(`SELECT COALESCE(linear_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&issueID)
-	if issueID != "" {
+	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
 		wakeContent = `Read your BOOTSTRAP.md now. Then:
 1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
 2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.

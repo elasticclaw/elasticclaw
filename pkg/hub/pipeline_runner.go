@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"log"
 	"strings"
 
@@ -113,10 +114,31 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID string
-	_ = s.db.QueryRow(`SELECT linear_issue_id FROM claws WHERE id=?`, clawID).Scan(&issueID)
-	if issueID == "" {
+	var issueID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &tagsJSON); err != nil {
 		return nil, ""
 	}
-	return s.findFactoryForIssue(issueID), issueID
+
+	if issueID != "" {
+		if factory := s.findFactoryForIssue(issueID); factory != nil {
+			return factory, issueID
+		}
+	}
+
+	var tags []string
+	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+		return nil, issueID
+	}
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "factory:") {
+			continue
+		}
+		factoryName := strings.TrimPrefix(tag, "factory:")
+		for _, factory := range s.hubCfg.Factories {
+			if factory.Name == factoryName {
+				return factory, issueID
+			}
+		}
+	}
+	return nil, issueID
 }
