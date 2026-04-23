@@ -102,7 +102,13 @@ func handleFileReadMessage(ctx context.Context, conn *websocket.Conn, payload js
 		send()
 		return
 	}
-	if !strings.HasPrefix(abs, dir+string(filepath.Separator)) {
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resp.Error = "bad path"
+		send()
+		return
+	}
+	if !strings.HasPrefix(abs, resolvedDir+string(filepath.Separator)) {
 		resp.Error = "path outside uploads dir"
 		send()
 		return
