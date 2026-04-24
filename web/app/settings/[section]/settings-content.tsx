@@ -1267,7 +1267,7 @@ function AIConfigSection() {
       const msgs = [...prev]
       const last = msgs[msgs.length - 1]
       if (last?.role === "assistant" && last.streaming) {
-        if (dropIfEmpty && visibleFinalContent === "" && finalContent.trim() === "") return msgs.slice(0, -1)
+        if (dropIfEmpty && visibleFinalContent.trim() === "") return msgs.slice(0, -1)
         msgs[msgs.length - 1] = { role: "assistant", content: finalContent, streaming: false }
       }
       return msgs
