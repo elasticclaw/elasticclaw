@@ -1048,6 +1048,7 @@ function AIConfigSection() {
   const [applySuccess, setApplySuccess] = useState(false)
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
+  const chatInputRef = useRef<HTMLTextAreaElement>(null)
 
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_hub_token") || ""
@@ -1163,6 +1164,7 @@ function AIConfigSection() {
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       setLoading(false)
+      setTimeout(() => chatInputRef.current?.focus(), 0)
     }
   }
 
@@ -1302,12 +1304,14 @@ function AIConfigSection() {
           {/* Input pinned to bottom */}
           <div className="flex-none border-t border-border p-3 flex gap-2">
             <Input
+              ref={chatInputRef as React.Ref<HTMLInputElement>}
               placeholder="e.g. Add a Linear integration for workspace acme"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
               disabled={loading}
               className="flex-1 text-sm"
+              autoFocus
             />
             <Button size="icon" onClick={sendMessage} disabled={loading || !input.trim()}>
               <Send className="size-4" />
