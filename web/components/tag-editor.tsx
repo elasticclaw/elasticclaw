@@ -42,7 +42,7 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
       setAdding(false)
       return
     }
-    const next = [...tags, tag]
+    const next = [tag, ...tags]
     setSaving(true)
     try {
       await patchClaw(clawId, { tags: next })
