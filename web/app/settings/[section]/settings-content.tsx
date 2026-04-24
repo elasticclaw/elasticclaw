@@ -1330,6 +1330,11 @@ function AIConfigSection() {
             // Detect start of yaml block — redirect subsequent tokens to YAML panel
             const fullSoFar = assistantContentRef.current + typewriterQueueRef.current.join("") + tokenText
             if (!inYamlBlock && /```ya?ml/i.test(fullSoFar)) {
+              const queued = typewriterQueueRef.current.join("")
+              if (queued) {
+                typewriterQueueRef.current = []
+                assistantContentRef.current += queued
+              }
               inYamlBlock = true
               yamlFenceConsumed = false
               setYamlStreaming(true)
