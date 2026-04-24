@@ -1048,8 +1048,9 @@ function AIConfigSection() {
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return
+    const previousMessages = messages
     const userMsg: ChatMessage = { role: "user", content: input.trim() }
-    const newMessages = [...messages, userMsg]
+    const newMessages = [...previousMessages, userMsg]
     setMessages(newMessages)
     setInput("")
     setLoading(true)
@@ -1061,7 +1062,7 @@ function AIConfigSection() {
         headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           message: userMsg.content,
-          history: messages,
+          history: previousMessages,
         }),
       })
       if (!res.ok) throw new Error(await res.text())
@@ -1073,6 +1074,7 @@ function AIConfigSection() {
         setSecretValues({})
       }
     } catch (e) {
+      setMessages(previousMessages)
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       setLoading(false)

@@ -21,8 +21,8 @@ import (
 // ─── Request / response types ─────────────────────────────────────────────────
 
 type aiConfigRequest struct {
-	Message string           `json:"message"`
-	History []aiChatMessage  `json:"history"`
+	Message string          `json:"message"`
+	History []aiChatMessage `json:"history"`
 }
 
 type aiChatMessage struct {
@@ -178,13 +178,20 @@ func (s *Server) handleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot determine hub config path: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	expectedPrefix := hubYAMLPath + ".bak."
-	if !strings.HasPrefix(req.BackupPath, expectedPrefix) {
+	cleanHubYAMLPath := filepath.Clean(hubYAMLPath)
+	cleanBackupPath := filepath.Clean(req.BackupPath)
+	expectedPrefix := cleanHubYAMLPath + ".bak."
+	if !strings.HasPrefix(cleanBackupPath, expectedPrefix) {
+		http.Error(w, "invalid backup path", http.StatusBadRequest)
+		return
+	}
+	suffix := strings.TrimPrefix(cleanBackupPath, expectedPrefix)
+	if !backupTimestampSuffixRe.MatchString(suffix) {
 		http.Error(w, "invalid backup path", http.StatusBadRequest)
 		return
 	}
 
-	data, err := os.ReadFile(req.BackupPath)
+	data, err := os.ReadFile(cleanBackupPath)
 	if err != nil {
 		http.Error(w, "cannot read backup: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -450,51 +457,67 @@ func sanitizeHubConfig(cfg *types.HubConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s := string(data)
-
-	// Mask top-level token fields
-	s = maskYAMLField(s, "token")
-	s = maskYAMLField(s, "claw_token")
-	s = maskYAMLField(s, "relay_secret")
-	s = maskYAMLField(s, "ui_password")
-
-	// Mask api_key in llm_keys and providers
-	s = maskYAMLField(s, "api_key")
-	s = maskYAMLField(s, "access_token")
-	s = maskYAMLField(s, "private_key_pem")
-	s = maskYAMLField(s, "client_secret")
-	s = maskYAMLField(s, "webhook_secret")
-
-	// Mask secrets map values
-	s = maskSecretsMapValues(s)
-
-	return s, nil
-}
-
-var yamlFieldRe = map[string]*regexp.Regexp{}
-
-func maskYAMLField(s, field string) string {
-	re, ok := yamlFieldRe[field]
-	if !ok {
-		re = regexp.MustCompile(`(?m)^(\s*` + regexp.QuoteMeta(field) + `:\s*)(.+)$`)
-		yamlFieldRe[field] = re
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return "", err
 	}
-	return re.ReplaceAllString(s, `${1}***`)
+	maskSensitiveYAMLValues(&node)
+	sanitized, err := yaml.Marshal(&node)
+	if err != nil {
+		return "", err
+	}
+	return string(sanitized), nil
 }
 
-// maskSecretsMapValues masks values in a YAML map block following "secrets:".
-var secretsBlockRe = regexp.MustCompile(`(?ms)(^secrets:\n)((?:  \S[^\n]*\n)*)`)
-var secretsValueRe = regexp.MustCompile(`(?m)^(\s+\S+:\s*)(.+)$`)
+var backupTimestampSuffixRe = regexp.MustCompile(`^\d+$`)
 
-func maskSecretsMapValues(s string) string {
-	return secretsBlockRe.ReplaceAllStringFunc(s, func(block string) string {
-		match := secretsBlockRe.FindStringSubmatch(block)
-		if len(match) < 3 {
-			return block
+var sensitiveYAMLFields = map[string]struct{}{
+	"token":           {},
+	"claw_token":      {},
+	"relay_secret":    {},
+	"ui_password":     {},
+	"api_key":         {},
+	"access_token":    {},
+	"private_key_pem": {},
+	"client_secret":   {},
+	"webhook_secret":  {},
+}
+
+func maskSensitiveYAMLValues(node *yaml.Node) {
+	switch node.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, child := range node.Content {
+			maskSensitiveYAMLValues(child)
 		}
-		masked := secretsValueRe.ReplaceAllString(match[2], `${1}***`)
-		return match[1] + masked
-	})
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+
+			if _, ok := sensitiveYAMLFields[keyNode.Value]; ok {
+				maskYAMLNodeValue(valNode)
+				continue
+			}
+			if keyNode.Value == "secrets" && valNode.Kind == yaml.MappingNode {
+				for j := 1; j < len(valNode.Content); j += 2 {
+					maskYAMLNodeValue(valNode.Content[j])
+				}
+				continue
+			}
+
+			maskSensitiveYAMLValues(valNode)
+		}
+	}
+}
+
+func maskYAMLNodeValue(node *yaml.Node) {
+	node.Kind = yaml.ScalarNode
+	node.Style = 0
+	node.Tag = "!!str"
+	node.Value = "***"
+	node.Anchor = ""
+	node.Alias = nil
+	node.Content = nil
 }
 
 // extractYAMLBlock extracts the content of the first ```yaml ... ``` block.
