@@ -1373,14 +1373,14 @@ function AIConfigSection() {
             setError(parsed.content as string)
             finalizeTypewriter(true)
           } else if (parsed.type === "done") {
-            finalizeTypewriter()
+            // finalizeTypewriter() called in finally
           }
         }
       }
     } catch (e) {
-      finalizeTypewriter(true)
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
+      finalizeTypewriter(true)
       setLoading(false)
       setTimeout(() => chatInputRef.current?.focus(), 0)
     }
