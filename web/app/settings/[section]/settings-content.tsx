@@ -1308,6 +1308,7 @@ function AIConfigSection() {
 
       // Add streaming placeholder
       setMessages(prev => [...prev, { role: "assistant", content: "", streaming: true }])
+      let inYamlBlock = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -1323,30 +1324,35 @@ function AIConfigSection() {
           try { parsed = JSON.parse(line.slice(6)) } catch { continue }
 
           if (parsed.type === "token") {
-            // Push to typewriter queue instead of directly to state
-            const chars = (parsed.content as string).split("")
-            typewriterQueueRef.current.push(...chars)
-            startTypewriter()
+            const tokenText = parsed.content as string
+            // Detect start of yaml block — redirect subsequent tokens to YAML panel
+            const fullSoFar = assistantContentRef.current + tokenText
+            if (!inYamlBlock && /```ya?ml/i.test(fullSoFar)) {
+              inYamlBlock = true
+              setYamlStreaming(true)
+              setStreamingYaml("")
+            }
+            if (inYamlBlock) {
+              // Stream to YAML panel — strip the opening fence
+              const cleaned = tokenText.replace(/^```ya?ml\n?/i, "")
+              if (cleaned) setStreamingYaml(prev => prev + cleaned)
+              // Still push to assistant content for stripping
+              assistantContentRef.current += tokenText
+            } else {
+              // Push to typewriter queue instead of directly to state
+              const chars = tokenText.split("")
+              typewriterQueueRef.current.push(...chars)
+              startTypewriter()
+              assistantContentRef.current += tokenText
+            }
+            continue
           } else if (parsed.type === "proposed_yaml") {
-            // Typewriter-animate the YAML into the right panel
+            // YAML was already streamed live via token events — just finalize
             const yaml = parsed.yaml as string
-            setYamlStreaming(true)
+            setYamlStreaming(false)
+            setProposedYaml(yaml)
             setStreamingYaml("")
-            yamlQueueRef.current = yaml.split("")
-            if (yamlIntervalRef.current) clearInterval(yamlIntervalRef.current)
-            yamlIntervalRef.current = setInterval(() => {
-              const q = yamlQueueRef.current
-              if (q.length === 0) {
-                clearInterval(yamlIntervalRef.current!)
-                yamlIntervalRef.current = null
-                setYamlStreaming(false)
-                setProposedYaml(yaml)
-                setStreamingYaml("")
-                return
-              }
-              const chars = q.splice(0, 8).join("")
-              setStreamingYaml(prev => prev + chars)
-            }, 16)
+            inYamlBlock = false
           } else if (parsed.type === "placeholders") {
             setPlaceholders(parsed.items as string[])
             setSecretValues({})
