@@ -309,9 +309,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if !githubRepoMatches(repoFullName, factory.Repos) {
 			continue
 		}
-		// Don't apply author filter for comment-triggered creation — the commenter
-		// may be a human reviewer, not the PR author. We still create the claw.
-		// Fetch the PR details to build the payload.
+		// Fetch PR details — we need them before we can apply author/base_branch filters.
 		token := s.resolveGitHubTokenForRepo(repoFullName)
 		if token == "" {
 			continue
@@ -344,12 +342,18 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if prPayload.PullRequest.HTMLURL == "" {
 			continue
 		}
-		// Apply base_branch filter now that we have PR data
-		// (author filter intentionally skipped — commenter may not be PR author)
-		if factory.Trigger.Filter != nil && factory.Trigger.Filter.BaseBranch != "" {
-			if !strings.EqualFold(factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref) {
+		// Apply filters on the PR itself (not the commenter)
+		if factory.Trigger.Filter != nil {
+			f := factory.Trigger.Filter
+			// Author filter: check PR author, not commenter
+			if f.Author != "" && !strings.EqualFold(f.Author, prPayload.PullRequest.User.Login) {
+				log.Printf("[github-webhook] factory %q: issue_comment skipped (PR author mismatch: want %q, got %q)",
+					factory.Name, f.Author, prPayload.PullRequest.User.Login)
+				continue
+			}
+			if f.BaseBranch != "" && !strings.EqualFold(f.BaseBranch, prPayload.PullRequest.Base.Ref) {
 				log.Printf("[github-webhook] factory %q: issue_comment skipped (base_branch mismatch: want %q, got %q)",
-					factory.Name, factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref)
+					factory.Name, f.BaseBranch, prPayload.PullRequest.Base.Ref)
 				continue
 			}
 		}
