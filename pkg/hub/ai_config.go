@@ -401,6 +401,21 @@ func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
 
 // ─── LLM call ────────────────────────────────────────────────────────────────
 
+func sanitizeAIChatHistory(history []aiChatMessage) []aiChatMessage {
+	msgs := make([]aiChatMessage, 0, len(history))
+	for _, m := range history {
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		msgs = append(msgs, aiChatMessage{
+			Role:    role,
+			Content: m.Content,
+		})
+	}
+	return msgs
+}
+
 const aiConfigSystemPromptTemplate = `You are a configuration assistant for ElasticClaw hub. You help users configure their hub.yaml.
 
 The current hub.yaml (with secrets masked as ***) is:
@@ -446,7 +461,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 
 	// Build message list
 	var msgs []aiChatMessage
-	msgs = append(msgs, history...)
+	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
 	// Select provider
@@ -482,7 +497,7 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 	systemPrompt := fmt.Sprintf(aiConfigSystemPromptTemplate, sanitizedYAML)
 
 	var msgs []aiChatMessage
-	msgs = append(msgs, history...)
+	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
 	var anthropicKey, openaiKey string
