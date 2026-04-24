@@ -1480,6 +1480,7 @@ function AIConfigSection() {
               sessionStorage.removeItem("ai-config-chat-history")
               sessionStorage.removeItem("ai-config-proposed-yaml")
               sessionStorage.removeItem("ai-config-backup-path")
+              setBackupPath(null)
               setTimeout(() => chatInputRef.current?.focus(), 0)
             }}
           >
