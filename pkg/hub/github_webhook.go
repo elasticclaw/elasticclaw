@@ -668,5 +668,14 @@ func buildGitHubPRContext(pr githubPRPayload) string {
 	b.WriteString(fmt.Sprintf("Branch: %s → %s\n", pr.PullRequest.Head.Ref, pr.PullRequest.Base.Ref))
 	b.WriteString(fmt.Sprintf("Title: %s\n", pr.PullRequest.Title))
 	b.WriteString(fmt.Sprintf("Repo: %s\n", pr.Repository.FullName))
+	b.WriteString(`
+## Git & GitHub Auth
+
+A git credential helper is pre-configured. You do NOT need to run gh auth login or set GH_TOKEN.
+Just use git and gh commands directly — authentication is handled automatically.
+
+To check out this PR:
+`)
+	b.WriteString(fmt.Sprintf("\tgh pr checkout %s\n", pr.PullRequest.HTMLURL))
 	return b.String()
 }
