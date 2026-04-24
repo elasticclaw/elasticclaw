@@ -151,3 +151,18 @@ secrets:
 		t.Fatalf("webhook_secret = %q, want %q", restored.Secrets["webhook_secret"], "line1\nline2: value #tag")
 	}
 }
+
+func TestValidateHubConfig_RequiresToken(t *testing.T) {
+	cfg := &types.HubConfig{
+		URL:       "https://hub.example.com",
+		ClawToken: "claw-token",
+	}
+
+	err := validateHubConfig(cfg)
+	if err == nil {
+		t.Fatal("validateHubConfig() error = nil, want token validation error")
+	}
+	if err.Error() != "token is required" {
+		t.Fatalf("validateHubConfig() error = %q, want %q", err.Error(), "token is required")
+	}
+}

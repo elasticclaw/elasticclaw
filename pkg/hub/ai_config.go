@@ -1200,6 +1200,9 @@ func validateHubConfig(cfg *types.HubConfig) error {
 	if cfg.URL == "" {
 		return fmt.Errorf("url is required")
 	}
+	if cfg.Token == "" {
+		return fmt.Errorf("token is required")
+	}
 	for i, k := range cfg.LLMKeys {
 		if k.Name == "" {
 			return fmt.Errorf("llm_keys[%d]: name is required", i)
