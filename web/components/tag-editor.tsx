@@ -64,24 +64,37 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
     }
   }
 
+  const MAX_VISIBLE = 3
+  const visibleTags = tags.slice(0, MAX_VISIBLE)
+  const hiddenCount = tags.length - MAX_VISIBLE
+
   return (
-    <div className={cn("flex flex-wrap items-center gap-1", className)}>
-      {tags.map((tag) => (
+    <div className={cn("flex flex-wrap items-center gap-1 overflow-hidden", className)}>
+      {visibleTags.map((tag) => (
         <span
           key={tag}
-          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded group/tag"
+          title={tag}
+          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded group/tag max-w-[120px]"
         >
-          {tag}
+          <span className="truncate">{tag}</span>
           <button
             onClick={() => removeTag(tag)}
             disabled={saving}
-            className="ml-0.5 opacity-0 group-hover/tag:opacity-100 hover:text-destructive transition-opacity"
+            className="ml-0.5 opacity-0 group-hover/tag:opacity-100 hover:text-destructive transition-opacity flex-shrink-0"
             title="Remove tag"
           >
             <X className="size-2.5" />
           </button>
         </span>
       ))}
+      {hiddenCount > 0 && (
+        <span
+          title={tags.slice(MAX_VISIBLE).join(", ")}
+          className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded cursor-default"
+        >
+          +{hiddenCount} more
+        </span>
+      )}
 
       {adding ? (
         <input
