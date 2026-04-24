@@ -1350,8 +1350,10 @@ function AIConfigSection() {
                 }
               }
               // Strip closing fence if it appears at the end
+              const hadClosingFence = /```\s*$/.test(content)
               content = content.replace(/```\s*$/, "")
               if (content) setStreamingYaml(prev => prev + content)
+              if (hadClosingFence) inYamlBlock = false
               // Still push to assistant content for stripping
               assistantContentRef.current += tokenText
             } else {
