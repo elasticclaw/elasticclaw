@@ -1122,24 +1122,27 @@ const SS_YAML_KEY = "ai-config-proposed-yaml"
 const SS_BACKUP_KEY = "ai-config-backup-path"
 
 function AIConfigSection() {
-  // Load persisted state from sessionStorage
-  const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    try {
-      const raw = sessionStorage.getItem(SS_CHAT_KEY)
-      return raw ? (JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage) : []
-    } catch { return [] }
-  })
+  // Load persisted state from sessionStorage — always start empty to avoid SSR hydration mismatch,
+  // then restore from sessionStorage after mount.
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
-  const [proposedYaml, setProposedYaml] = useState<string | null>(() => {
-    try { return sessionStorage.getItem(SS_YAML_KEY) } catch { return null }
-  })
+  const [proposedYaml, setProposedYaml] = useState<string | null>(null)
   const [currentConfig, setCurrentConfig] = useState<string | null>(null)
   const [placeholders, setPlaceholders] = useState<string[]>([])
   const [secretValues, setSecretValues] = useState<Record<string, string>>({})
-  const [backupPath, setBackupPath] = useState<string | null>(() => {
-    try { return sessionStorage.getItem(SS_BACKUP_KEY) } catch { return null }
-  })
+  const [backupPath, setBackupPath] = useState<string | null>(null)
+  // Restore from sessionStorage after mount (client-only)
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(SS_CHAT_KEY)
+      if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
+      const yaml = sessionStorage.getItem(SS_YAML_KEY)
+      if (yaml) setProposedYaml(yaml)
+      const backup = sessionStorage.getItem(SS_BACKUP_KEY)
+      if (backup) setBackupPath(backup)
+    } catch { /* ignore */ }
+  }, [])
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
   const [error, setError] = useState<string | null>(null)
