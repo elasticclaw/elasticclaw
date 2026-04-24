@@ -36,8 +36,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 	}
 
 	if stage.OnEnter.MergePR {
-		log.Printf("[pipeline] claw %s: merge_pr=true (stub — not yet implemented)", clawID[:8])
-		// TODO: call GitHub merge API
+		go s.mergePRForClaw(clawID)
 	}
 
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {

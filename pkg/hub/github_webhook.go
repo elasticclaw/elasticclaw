@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -680,4 +681,59 @@ To check out this PR:
 `)
 	b.WriteString(fmt.Sprintf("\tgh pr checkout %s\n", pr.PullRequest.HTMLURL))
 	return b.String()
+}
+
+// mergePRForClaw finds the tracked PR for a claw and merges it via the GitHub API.
+func (s *Server) mergePRForClaw(clawID string) {
+	var prURL, repo string
+	var prNumber int
+	err := s.db.QueryRow(
+		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`,
+		clawID,
+	).Scan(&prURL, &repo, &prNumber)
+	if err != nil || prURL == "" {
+		log.Printf("[pipeline] merge_pr: no tracked PR for claw %s", clawID[:8])
+		return
+	}
+
+	token := s.resolveGitHubTokenForRepo(repo)
+	if token == "" {
+		log.Printf("[pipeline] merge_pr: no GitHub token for repo %s", repo)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: no GitHub token available for %s — cannot auto-merge.", repo))
+		return
+	}
+
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"merge_method": "squash",
+	})
+	req, _ := http.NewRequest(http.MethodPut,
+		fmt.Sprintf("%s/repos/%s/pulls/%d/merge", ghBase, repo, prNumber),
+		bytes.NewReader(body),
+	)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		log.Printf("[pipeline] merge_pr: merged %s#%d successfully", repo, prNumber)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR #%d merged successfully.", prNumber))
+	} else {
+		log.Printf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(respBody))
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
+	}
 }
