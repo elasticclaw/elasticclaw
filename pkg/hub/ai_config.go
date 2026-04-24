@@ -125,6 +125,18 @@ func (s *Server) handleAIConfigApply(w http.ResponseWriter, r *http.Request) {
 	// Substitute placeholders
 	finalYAML := substitutePlaceholders(req.ProposedYAML, req.Secrets)
 
+	// Restore masked secrets (*** from sanitized config) from disk before parsing.
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	finalYAML, err = restoreMaskedSecretsFromDisk(finalYAML, diskCfg)
+	if err != nil {
+		http.Error(w, "failed to restore masked secrets: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	// Parse and validate
 	var newCfg types.HubConfig
 	if err := yaml.Unmarshal([]byte(finalYAML), &newCfg); err != nil {
@@ -315,18 +327,15 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 	if openaiKey != "" {
 		return callOpenAI(openaiKey, systemPrompt, msgs)
 	}
-	if len(llmKeys) > 0 {
-		// Use first available key with whatever provider
-		k := llmKeys[0]
-		switch k.Provider {
-		case "anthropic":
-			return callAnthropic(k.APIKey, systemPrompt, msgs)
-		case "openai":
-			return callOpenAI(k.APIKey, systemPrompt, msgs)
-		}
+	if len(llmKeys) == 0 {
+		return "", fmt.Errorf("no LLM keys configured")
 	}
-	_ = defaultModel
-	return "", fmt.Errorf("No LLM keys configured")
+	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+	availableProviders := uniqueProviders(llmKeys)
+	if defaultProvider != "" {
+		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
+	}
+	return "", fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai; configured: %s)", strings.Join(availableProviders, ", "))
 }
 
 func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
@@ -559,6 +568,148 @@ func substitutePlaceholders(yamlStr string, secrets map[string]string) string {
 		}
 		return match
 	})
+}
+
+func restoreMaskedSecretsFromDisk(yamlStr string, diskCfg *types.HubConfig) (string, error) {
+	if diskCfg == nil {
+		return yamlStr, nil
+	}
+
+	var proposedNode yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlStr), &proposedNode); err != nil {
+		return "", err
+	}
+
+	diskYAML, err := yaml.Marshal(diskCfg)
+	if err != nil {
+		return "", err
+	}
+	var diskNode yaml.Node
+	if err := yaml.Unmarshal(diskYAML, &diskNode); err != nil {
+		return "", err
+	}
+
+	mergeMaskedSecretsNode(&proposedNode, &diskNode)
+	restored, err := yaml.Marshal(&proposedNode)
+	if err != nil {
+		return "", err
+	}
+	return string(restored), nil
+}
+
+func mergeMaskedSecretsNode(proposed, disk *yaml.Node) {
+	if proposed == nil {
+		return
+	}
+	switch proposed.Kind {
+	case yaml.DocumentNode:
+		if len(proposed.Content) == 0 {
+			return
+		}
+		var diskRoot *yaml.Node
+		if disk != nil && len(disk.Content) > 0 {
+			diskRoot = disk.Content[0]
+		}
+		mergeMaskedSecretsNode(proposed.Content[0], diskRoot)
+	case yaml.SequenceNode:
+		for i := range proposed.Content {
+			var diskChild *yaml.Node
+			if disk != nil && disk.Kind == yaml.SequenceNode && i < len(disk.Content) {
+				diskChild = disk.Content[i]
+			}
+			mergeMaskedSecretsNode(proposed.Content[i], diskChild)
+		}
+	case yaml.MappingNode:
+		diskVals := map[string]*yaml.Node{}
+		if disk != nil && disk.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(disk.Content); i += 2 {
+				diskVals[disk.Content[i].Value] = disk.Content[i+1]
+			}
+		}
+
+		for i := 0; i+1 < len(proposed.Content); i += 2 {
+			keyNode := proposed.Content[i]
+			valNode := proposed.Content[i+1]
+			diskVal := diskVals[keyNode.Value]
+
+			if _, ok := sensitiveYAMLFields[keyNode.Value]; ok && isMaskedValue(valNode) && diskVal != nil {
+				proposed.Content[i+1] = cloneYAMLNode(diskVal)
+				continue
+			}
+
+			if keyNode.Value == "secrets" && valNode.Kind == yaml.MappingNode {
+				mergeMaskedSecretMap(valNode, diskVal)
+				continue
+			}
+
+			mergeMaskedSecretsNode(valNode, diskVal)
+		}
+	}
+}
+
+func mergeMaskedSecretMap(proposedSecrets, diskSecrets *yaml.Node) {
+	if proposedSecrets == nil || proposedSecrets.Kind != yaml.MappingNode {
+		return
+	}
+	if diskSecrets == nil || diskSecrets.Kind != yaml.MappingNode {
+		return
+	}
+
+	diskVals := map[string]*yaml.Node{}
+	for i := 0; i+1 < len(diskSecrets.Content); i += 2 {
+		diskVals[diskSecrets.Content[i].Value] = diskSecrets.Content[i+1]
+	}
+
+	for i := 0; i+1 < len(proposedSecrets.Content); i += 2 {
+		key := proposedSecrets.Content[i].Value
+		val := proposedSecrets.Content[i+1]
+		if isMaskedValue(val) {
+			if diskVal := diskVals[key]; diskVal != nil {
+				proposedSecrets.Content[i+1] = cloneYAMLNode(diskVal)
+			}
+		}
+	}
+}
+
+func isMaskedValue(node *yaml.Node) bool {
+	return node != nil && node.Kind == yaml.ScalarNode && node.Value == "***"
+}
+
+func cloneYAMLNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	cloned := *n
+	if len(n.Content) > 0 {
+		cloned.Content = make([]*yaml.Node, len(n.Content))
+		for i := range n.Content {
+			cloned.Content[i] = cloneYAMLNode(n.Content[i])
+		}
+	}
+	// Alias nodes are not expected in hub config YAML; keep nil to avoid cycles.
+	cloned.Alias = nil
+	return &cloned
+}
+
+func uniqueProviders(llmKeys types.LLMKeysList) []string {
+	seen := map[string]struct{}{}
+	var providers []string
+	for _, k := range llmKeys {
+		p := strings.TrimSpace(k.Provider)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+	if len(providers) == 0 {
+		return []string{"none"}
+	}
+	return providers
 }
 
 // validateHubConfig checks that the config has required fields.
