@@ -3,12 +3,12 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"gopkg.in/yaml.v3"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
-	"gopkg.in/yaml.v3"
 )
 
 var httpGet = http.Get
@@ -55,14 +55,48 @@ func ActiveHubConfigPath() (string, error) {
 }
 
 func SaveHubConfig(cfg *types.HubConfig) error {
+	return saveHubConfig(cfg, true)
+}
+
+// SaveHubConfigNoSecretMerge writes hub config without merging disk secrets.
+// Used by explicit secret delete/update paths where missing keys are intentional.
+func SaveHubConfigNoSecretMerge(cfg *types.HubConfig) error {
+	return saveHubConfig(cfg, false)
+}
+
+func saveHubConfig(cfg *types.HubConfig, mergeDiskSecrets bool) error {
 	path, err := ActiveHubConfigPath()
 	if err != nil {
 		return err
 	}
+
+	// Work on a local copy so saving never mutates the caller's in-memory config.
+	cfgToWrite := *cfg
+	if cfg.Secrets != nil {
+		cfgToWrite.Secrets = make(map[string]string, len(cfg.Secrets))
+		for k, v := range cfg.Secrets {
+			cfgToWrite.Secrets[k] = v
+		}
+	}
+
+	if mergeDiskSecrets {
+		// Merge: preserve any secrets that exist on disk but not in memory
+		// (handles manual hub.yaml edits that were never loaded via API)
+		if existing, err := LoadHubConfig(); err == nil && existing != nil {
+			if cfgToWrite.Secrets == nil {
+				cfgToWrite.Secrets = make(map[string]string)
+			}
+			for k, v := range existing.Secrets {
+				if _, already := cfgToWrite.Secrets[k]; !already {
+					cfgToWrite.Secrets[k] = v
+				}
+			}
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(&cfgToWrite)
 	if err != nil {
 		return err
 	}
@@ -245,5 +279,3 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 	}
 	return files, nil
 }
-
-

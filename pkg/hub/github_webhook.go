@@ -20,9 +20,9 @@ import (
 
 // githubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
 type githubPRPayload struct {
-	Action      string `json:"action"` // "opened", "synchronize", "reopened", "closed"
-	Number      int    `json:"number"`
-	Sender      struct {
+	Action string `json:"action"` // "opened", "synchronize", "reopened", "closed"
+	Number int    `json:"number"`
+	Sender struct {
 		Login string `json:"login"`
 		Type  string `json:"type"` // "Bot", "User", "Organization"
 	} `json:"sender"`
@@ -84,6 +84,19 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			payload.Action, payload.Repository.FullName, payload.Number,
 			payload.PullRequest.User.Login, payload.PullRequest.Base.Ref)
 		go s.processGitHubPREvent(payload)
+	case "issue_comment":
+		var payload githubIssueCommentPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse issue_comment payload: %v", err)
+			break
+		}
+		// Only care about comments on pull requests
+		if payload.Issue.PullRequest.URL == "" {
+			break
+		}
+		log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
+			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
+		go s.processGitHubIssueCommentEvent(payload)
 	case "ping":
 		log.Printf("[github-webhook] ping received — webhook configured correctly")
 	default:
@@ -219,6 +232,138 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			s.logFactoryEvent(factory.Name, fmt.Sprintf("%s#%d", repoFullName, payload.Number),
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
 		}
+	}
+}
+
+// githubIssueCommentPayload holds fields from an issue_comment webhook event.
+type githubIssueCommentPayload struct {
+	Action string `json:"action"` // "created", "edited", "deleted"
+	Issue  struct {
+		Number      int `json:"number"`
+		PullRequest struct {
+			URL     string `json:"url"`      // non-empty only for PR comments
+			HTMLURL string `json:"html_url"` // web URL for the PR
+		} `json:"pull_request"`
+	} `json:"issue"`
+	Comment struct {
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"user"`
+	} `json:"comment"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"sender"`
+}
+
+// processGitHubIssueCommentEvent handles issue_comment events on PRs.
+// If a claw exists for the PR, it injects the comment. If not, it tries to create a claw
+// (useful when a PR was opened before the webhook was configured or the opened event was missed).
+func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayload) {
+	if payload.Action != "created" {
+		return // only care about new comments
+	}
+	// Skip bot comments to avoid loops
+	if strings.EqualFold(payload.Comment.User.Type, "bot") {
+		return
+	}
+
+	s.mu.RLock()
+	factories := s.hubCfg.Factories
+	s.mu.RUnlock()
+
+	repoFullName := payload.Repository.FullName
+	prNumber := payload.Issue.Number
+
+	prURL := payload.Issue.PullRequest.HTMLURL
+	commentMsg := fmt.Sprintf("**@%s** commented on PR #%d:\n> %s\n[View](%s)",
+		payload.Comment.User.Login, prNumber,
+		strings.TrimSpace(payload.Comment.Body), payload.Comment.HTMLURL)
+
+	// Check if a claw already exists for this PR
+	existingClawID := s.findClawForGitHubPR(prURL)
+	if existingClawID != "" {
+		// Inject the comment into the existing claw
+		log.Printf("[github-webhook] issue_comment on PR #%d — injecting into existing claw %s", prNumber, existingClawID[:8])
+		s.injectHubMessageByID(existingClawID, commentMsg)
+		return
+	}
+
+	// No claw yet — try to create one if a factory matches this repo
+	for _, factory := range factories {
+		if factory.Integration != "github" || factory.Trigger == nil {
+			continue
+		}
+		if factory.Trigger.On != "pull_request" {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
+		if !githubRepoMatches(repoFullName, factory.Repos) {
+			continue
+		}
+		// Don't apply author filter for comment-triggered creation — the commenter
+		// may be a human reviewer, not the PR author. We still create the claw.
+		// Fetch the PR details to build the payload.
+		token := s.resolveGitHubTokenForRepo(repoFullName)
+		if token == "" {
+			continue
+		}
+		ghBase := s.githubBaseURL
+		if ghBase == "" {
+			ghBase = "https://api.github.com"
+		}
+		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
+		if err != nil {
+			log.Printf("[github-webhook] issue_comment: failed to fetch PR %s#%d: %v", repoFullName, prNumber, err)
+			continue
+		}
+		var prPayload githubPRPayload
+		prPayload.Action = "comment_triggered"
+		prPayload.Number = prNumber
+		prPayload.Repository.FullName = repoFullName
+		prPayload.PullRequest.HTMLURL, _ = data["html_url"].(string)
+		prPayload.PullRequest.Title, _ = data["title"].(string)
+		if user, ok := data["user"].(map[string]interface{}); ok {
+			prPayload.PullRequest.User.Login, _ = user["login"].(string)
+		}
+		if head, ok := data["head"].(map[string]interface{}); ok {
+			prPayload.PullRequest.Head.Ref, _ = head["ref"].(string)
+			prPayload.PullRequest.Head.SHA, _ = head["sha"].(string)
+		}
+		if base, ok := data["base"].(map[string]interface{}); ok {
+			prPayload.PullRequest.Base.Ref, _ = base["ref"].(string)
+		}
+		if prPayload.PullRequest.HTMLURL == "" {
+			continue
+		}
+		// Apply base_branch filter now that we have PR data
+		// (author filter intentionally skipped — commenter may not be PR author)
+		if factory.Trigger.Filter != nil && factory.Trigger.Filter.BaseBranch != "" {
+			if !strings.EqualFold(factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref) {
+				log.Printf("[github-webhook] factory %q: issue_comment skipped (base_branch mismatch: want %q, got %q)",
+					factory.Name, factory.Trigger.Filter.BaseBranch, prPayload.PullRequest.Base.Ref)
+				continue
+			}
+		}
+		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
+		if err := s.createClawForGitHubPR(factory, prPayload); err != nil {
+			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
+			continue // let next matching factory try
+		}
+		createdClawID := s.findClawForGitHubPR(prPayload.PullRequest.HTMLURL)
+		if createdClawID != "" {
+			log.Printf("[github-webhook] issue_comment on PR #%d — injecting into newly created claw %s", prNumber, createdClawID[:8])
+			s.injectHubMessageByID(createdClawID, commentMsg)
+		}
+		break // success — one factory match is enough
 	}
 }
 

@@ -842,6 +842,22 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
             </Button>
           </div>
         </div>
+        {/* GitHub webhook */}
+        <div className="space-y-2 pt-3 border-t border-border">
+          <h3 className="text-sm font-medium">GitHub Webhook URL</h3>
+          <p className="text-xs text-muted-foreground">Use this URL when configuring webhooks in your GitHub repo or org settings. Subscribe to: <strong>Pull requests</strong> and <strong>Issue comments</strong> events.</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
+              {hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "Loading…"}
+            </code>
+            <Button variant="outline" size="sm" className="shrink-0" onClick={() => {
+              if (hubUrl) navigator.clipboard.writeText(`${hubUrl}/api/integrations/github/webhook`)
+            }} disabled={!hubUrl}>
+              <Copy className="size-3.5" />
+              <span className="ml-1.5">Copy</span>
+            </Button>
+          </div>
+        </div>
       </div>
 
       {/* Factories-as-code callout */}
