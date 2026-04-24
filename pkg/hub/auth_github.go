@@ -150,7 +150,7 @@ func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) 
 		SameSite: http.SameSiteLaxMode,
 		Path:     "/",
 	})
-	if next := r.URL.Query().Get("next"); next != "" {
+	if next := safeNextPath(r.URL.Query().Get("next")); next != "" {
 		http.SetCookie(w, &http.Cookie{
 			Name:     oauthNextCookieName,
 			Value:    base64.RawURLEncoding.EncodeToString([]byte(next)),
@@ -191,7 +191,7 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 	var next string
 	if nextCookie, err := r.Cookie(oauthNextCookieName); err == nil {
 		if decoded, err := base64.RawURLEncoding.DecodeString(nextCookie.Value); err == nil {
-			next = string(decoded)
+			next = safeNextPath(string(decoded))
 		}
 	}
 	// Clear the state cookie
@@ -482,4 +482,21 @@ func randomState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func safeNextPath(next string) string {
+	if next == "" {
+		return ""
+	}
+	parsed, err := url.Parse(next)
+	if err != nil {
+		return ""
+	}
+	if parsed.IsAbs() || parsed.Host != "" {
+		return ""
+	}
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return ""
+	}
+	return next
 }

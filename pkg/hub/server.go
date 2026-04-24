@@ -793,8 +793,28 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	if clawID == "" {
 		clawID = strings.TrimPrefix(r.URL.Path, "/api/claws/")
 	}
+	ghLogin := githubLoginFromContext(r.Context())
+	var accessCfg *types.AccessConfig
+	if ghLogin != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+	}
 
 	if r.Method == http.MethodPatch {
+		if ghLogin != "" {
+			var tagsJSON string
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
+				var clawTags []string
+				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+				if !canViewClaw(accessCfg, ghLogin, clawTags) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
 		var body struct {
 			Name  *string   `json:"name"`
 			Tags  *[]string `json:"tags"`
@@ -838,6 +858,17 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
+		}
+		if ghLogin != "" {
+			var tagsJSON string
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
+				var clawTags []string
+				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+				if !canViewClaw(accessCfg, ghLogin, clawTags) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+			}
 		}
 
 		// Look up provider info before deleting so we can terminate the VM
@@ -884,6 +915,10 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, c.Tags) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	c.TenantID = tenantID
 	if lastSeen.Valid {
 		c.LastSeen = lastSeen.Time
@@ -907,6 +942,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/messages/")
+	ghLoginMsg := githubLoginFromContext(r.Context())
+	var accessCfgMsg *types.AccessConfig
+	if ghLoginMsg != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfgMsg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+	}
 
 	if r.Method == http.MethodPost {
 		var body struct {
@@ -918,14 +962,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Apply tag-based interact filter for GitHub OAuth users
-		ghLoginMsg := githubLoginFromContext(r.Context())
 		if ghLoginMsg != "" {
-			s.mu.RLock()
-			var accessCfgMsg *types.AccessConfig
-			if s.hubCfg.Auth != nil {
-				accessCfgMsg = s.hubCfg.Auth.Access
-			}
-			s.mu.RUnlock()
 			// Fetch claw tags to check interact permission
 			var tagsJSONMsg string
 			_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
@@ -957,6 +994,16 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, msg)
 		return
+	}
+	if ghLoginMsg != "" {
+		var tagsJSONMsg string
+		_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+		var clawTagsMsg []string
+		_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+		if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	// Pagination: ?before=<created_at>&limit=<n> for older messages
