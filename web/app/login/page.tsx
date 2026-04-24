@@ -89,7 +89,10 @@ function LoginForm() {
       if (res.ok) {
         const data = await res.json()
         // One token for everything — hub API token stored in sessionStorage
-        if (data.hubToken) sessionStorage.setItem("ec_hub_token", data.hubToken)
+        if (data.hubToken) {
+          clearConfig()
+          sessionStorage.setItem("ec_hub_token", data.hubToken)
+        }
         // Check if settings are required before going to main dashboard
         try {
           const { getHubUrl } = await import("@/lib/hub-url")
