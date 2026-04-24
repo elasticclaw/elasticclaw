@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams, useRouter } from "next/navigation"
-import { useEffect, useState, useCallback, useRef } from "react"
+import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -1034,11 +1034,12 @@ function renderMarkdown(text: string): React.ReactNode[] {
   // Split off fenced code blocks first
   const parts = text.split(/(```[\s\S]*?```)/g)
   const nodes: React.ReactNode[] = []
+  let globalKey = 0
   parts.forEach((part, pi) => {
     if (part.startsWith("```") && part.endsWith("```")) {
       const inner = part.slice(3, -3).replace(/^[^\n]*\n/, "") // strip language hint
       nodes.push(
-        <pre key={pi} className="bg-muted rounded p-2 my-1 overflow-x-auto">
+        <pre key={`cb-${pi}`} className="bg-muted rounded p-2 my-1 overflow-x-auto">
           <code className="text-xs font-mono">{inner}</code>
         </pre>
       )
@@ -1048,9 +1049,10 @@ function renderMarkdown(text: string): React.ReactNode[] {
     const lines = part.split("\n")
     const lineNodes: React.ReactNode[] = []
     let ulItems: React.ReactNode[] = []
+    let ulKey = 0
     const flushList = () => {
       if (ulItems.length > 0) {
-        lineNodes.push(<ul key={`ul-${lineNodes.length}`} className="list-disc pl-4 my-1 space-y-0.5">{ulItems}</ul>)
+        lineNodes.push(<ul key={`ul-${pi}-${ulKey++}`} className="list-disc pl-4 my-1 space-y-0.5">{ulItems}</ul>)
         ulItems = []
       }
     }
@@ -1058,15 +1060,15 @@ function renderMarkdown(text: string): React.ReactNode[] {
       const isList = /^[\-\*]\s+/.test(line)
       if (!isList) flushList()
       if (isList) {
-        ulItems.push(<li key={li}>{inlineMarkdown(line.replace(/^[\-\*]\s+/, ""))}</li>)
+        ulItems.push(<li key={`li-${pi}-${li}`}>{inlineMarkdown(line.replace(/^[\-\*]\s+/, ""))}</li>)
       } else if (line.trim() === "") {
-        lineNodes.push(<br key={li} />)
+        lineNodes.push(<br key={`br-${pi}-${li}`} />)
       } else {
-        lineNodes.push(<span key={li}>{inlineMarkdown(line)}<br /></span>)
+        lineNodes.push(<span key={`s-${pi}-${li}`}>{inlineMarkdown(line)}<br /></span>)
       }
     })
     flushList()
-    nodes.push(...lineNodes)
+    nodes.push(...lineNodes.map((n, i) => React.cloneElement(n as React.ReactElement, { key: `n-${globalKey++}-${i}` })))
   })
   return nodes
 }
@@ -1384,11 +1386,35 @@ function AIConfigSection() {
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
       {/* Header */}
-      <div className="px-8 pt-6 pb-3 flex-none">
-        <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
-        <p className="text-sm text-muted-foreground">
-          Describe changes in plain English. The AI will propose a hub.yaml update for you to review and apply.
-        </p>
+      <div className="px-8 pt-6 pb-3 flex-none flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
+          <p className="text-sm text-muted-foreground">
+            Describe changes in plain English. The AI will propose a hub.yaml update for you to review and apply.
+          </p>
+        </div>
+        {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground shrink-0"
+            onClick={() => {
+              setMessages([])
+              setProposedYaml(null)
+              setPlaceholders([])
+              setSecretValues({})
+              setError(null)
+              setApplySuccess(false)
+              sessionStorage.removeItem("ai-config-chat-history")
+              sessionStorage.removeItem("ai-config-proposed-yaml")
+              sessionStorage.removeItem("ai-config-backup-path")
+              setTimeout(() => chatInputRef.current?.focus(), 0)
+            }}
+          >
+            <RotateCcw className="size-3.5 mr-1.5" />
+            Start over
+          </Button>
+        )}
       </div>
 
       {/* Status bar */}
