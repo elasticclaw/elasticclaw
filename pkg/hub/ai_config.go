@@ -612,10 +612,16 @@ func mergeMaskedSecretsNode(proposed, disk *yaml.Node) {
 		}
 		mergeMaskedSecretsNode(proposed.Content[0], diskRoot)
 	case yaml.SequenceNode:
+		var diskItems []*yaml.Node
+		if disk != nil && disk.Kind == yaml.SequenceNode {
+			diskItems = disk.Content
+		}
+		usedDiskIndexes := map[int]struct{}{}
 		for i := range proposed.Content {
 			var diskChild *yaml.Node
-			if disk != nil && disk.Kind == yaml.SequenceNode && i < len(disk.Content) {
-				diskChild = disk.Content[i]
+			if idx := findMatchingSequenceIndex(proposed.Content[i], diskItems, usedDiskIndexes, i); idx >= 0 {
+				diskChild = diskItems[idx]
+				usedDiskIndexes[idx] = struct{}{}
 			}
 			mergeMaskedSecretsNode(proposed.Content[i], diskChild)
 		}
@@ -645,6 +651,64 @@ func mergeMaskedSecretsNode(proposed, disk *yaml.Node) {
 			mergeMaskedSecretsNode(valNode, diskVal)
 		}
 	}
+}
+
+func findMatchingSequenceIndex(proposedItem *yaml.Node, diskItems []*yaml.Node, used map[int]struct{}, fallback int) int {
+	identity, hasIdentity := sequenceItemIdentity(proposedItem)
+	if hasIdentity {
+		for i, diskItem := range diskItems {
+			if _, isUsed := used[i]; isUsed {
+				continue
+			}
+			if diskIdentity, ok := sequenceItemIdentity(diskItem); ok && diskIdentity == identity {
+				return i
+			}
+		}
+		// If an identified item is new/renamed, avoid index fallback to prevent
+		// restoring another entry's secret into it.
+		return -1
+	}
+
+	if fallback >= 0 && fallback < len(diskItems) {
+		if _, isUsed := used[fallback]; !isUsed {
+			return fallback
+		}
+	}
+
+	return -1
+}
+
+func sequenceItemIdentity(node *yaml.Node) (string, bool) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return "", false
+	}
+	if name, ok := mappingNodeScalarValue(node, "name"); ok && name != "" {
+		return "name:" + name, true
+	}
+	if appID, ok := mappingNodeScalarValue(node, "app_id"); ok && appID != "" {
+		return "app_id:" + appID, true
+	}
+	if workspace, ok := mappingNodeScalarValue(node, "workspace"); ok && workspace != "" {
+		if integration, ok := mappingNodeScalarValue(node, "integration"); ok && integration != "" {
+			return "workspace:" + workspace + "|integration:" + integration, true
+		}
+		return "workspace:" + workspace, true
+	}
+	return "", false
+}
+
+func mappingNodeScalarValue(node *yaml.Node, key string) (string, bool) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return "", false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valNode := node.Content[i+1]
+		if keyNode.Value == key && valNode.Kind == yaml.ScalarNode {
+			return valNode.Value, true
+		}
+	}
+	return "", false
 }
 
 func mergeMaskedSecretMap(proposedSecrets, diskSecrets *yaml.Node) {
