@@ -816,13 +816,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPatch {
 		if ghLogin != "" {
 			var tagsJSON string
-			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
-				var clawTags []string
-				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			var clawTags []string
+			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+			if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
 			}
 		}
 		var body struct {
@@ -871,13 +873,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if ghLogin != "" {
 			var tagsJSON string
-			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
-				var clawTags []string
-				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			var clawTags []string
+			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+			if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
 			}
 		}
 
@@ -2378,7 +2382,9 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// and would overwrite BOOTSTRAP.md if we wrote it before the script ran.
 	if len(files) > 0 {
 		fileNames := make([]string, 0, len(files))
-		for k := range files { fileNames = append(fileNames, k) }
+		for k := range files {
+			fileNames = append(fileNames, k)
+		}
 		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
 		for attempt := 1; attempt <= 3; attempt++ {
 			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
