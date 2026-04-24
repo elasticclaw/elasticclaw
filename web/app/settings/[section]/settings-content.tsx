@@ -1535,15 +1535,26 @@ function AIConfigSection() {
             </div>
           )}
 
-          {/* Apply button */}
+          {/* Apply / Discard buttons */}
           {proposedYaml && (
-            <div className="flex-none">
+            <div className="flex-none flex gap-2">
               <Button
                 onClick={applyConfig}
                 disabled={applying || !allPlaceholdersFilled}
-                className="w-full"
+                className="flex-1"
               >
-                {applying ? "Applying\u2026" : "Apply Configuration"}
+                {applying ? "Applying\u2026" : "Apply"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={applying}
+                onClick={() => {
+                  setProposedYaml(null)
+                  setPlaceholders([])
+                  setSecretValues({})
+                }}
+              >
+                Discard
               </Button>
             </div>
           )}
