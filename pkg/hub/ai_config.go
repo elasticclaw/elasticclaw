@@ -882,8 +882,8 @@ func maskSensitiveYAMLValues(node *yaml.Node) {
 				continue
 			}
 			if keyNode.Value == "secrets" && valNode.Kind == yaml.MappingNode {
-				for j := 1; j < len(valNode.Content); j += 2 {
-					maskYAMLNodeValue(valNode.Content[j])
+				for j := 0; j+1 < len(valNode.Content); j += 2 {
+					maskYAMLNodeValue(valNode.Content[j+1])
 				}
 				continue
 			}
