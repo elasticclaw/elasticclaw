@@ -280,7 +280,8 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 
 // ─── Current-config endpoint ────────────────────────────────────────────────
 
-// handleAIConfigCurrentConfig returns the sanitized (secrets masked) hub.yaml as plain text.
+// handleAIConfigCurrentConfig returns the hub.yaml as plain text.
+// By default, secrets are masked. Pass ?reveal=true to get the raw unmasked config.
 func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -291,6 +292,20 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	reveal := r.URL.Query().Get("reveal") == "true"
+	if reveal {
+		// Return raw config with actual secret values
+		raw, err := yaml.Marshal(diskCfg)
+		if err != nil {
+			http.Error(w, "failed to marshal config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(raw)
+		return
+	}
+
 	sanitized, err := sanitizeHubConfig(diskCfg)
 	if err != nil {
 		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)

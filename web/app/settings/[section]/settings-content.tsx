@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -1021,6 +1021,59 @@ interface ChatMessage {
   streaming?: boolean
 }
 
+// Simple markdown renderer for assistant messages (no external deps)
+function renderMarkdown(text: string): React.ReactNode[] {
+  // Split off fenced code blocks first
+  const parts = text.split(/(```[\s\S]*?```)/g)
+  const nodes: React.ReactNode[] = []
+  parts.forEach((part, pi) => {
+    if (part.startsWith("```") && part.endsWith("```")) {
+      const inner = part.slice(3, -3).replace(/^[^\n]*\n/, "") // strip language hint
+      nodes.push(
+        <pre key={pi} className="bg-muted rounded p-2 my-1 overflow-x-auto">
+          <code className="text-xs font-mono">{inner}</code>
+        </pre>
+      )
+      return
+    }
+    // Process line by line
+    const lines = part.split("\n")
+    const lineNodes: React.ReactNode[] = []
+    let ulItems: React.ReactNode[] = []
+    const flushList = () => {
+      if (ulItems.length > 0) {
+        lineNodes.push(<ul key={`ul-${lineNodes.length}`} className="list-disc pl-4 my-1 space-y-0.5">{ulItems}</ul>)
+        ulItems = []
+      }
+    }
+    lines.forEach((line, li) => {
+      const isList = /^[\-\*]\s+/.test(line)
+      if (!isList) flushList()
+      if (isList) {
+        ulItems.push(<li key={li}>{inlineMarkdown(line.replace(/^[\-\*]\s+/, ""))}</li>)
+      } else if (line.trim() === "") {
+        lineNodes.push(<br key={li} />)
+      } else {
+        lineNodes.push(<span key={li}>{inlineMarkdown(line)}<br /></span>)
+      }
+    })
+    flushList()
+    nodes.push(...lineNodes)
+  })
+  return nodes
+}
+
+function inlineMarkdown(text: string): React.ReactNode[] {
+  // Split on inline code, bold, italic
+  const tokens = text.split(/(``[^`]+``|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+  return tokens.map((tok, i) => {
+    if (tok.startsWith("**") && tok.endsWith("**")) return <strong key={i}>{tok.slice(2, -2)}</strong>
+    if (tok.startsWith("*") && tok.endsWith("*")) return <em key={i}>{tok.slice(1, -1)}</em>
+    if (tok.startsWith("`") && tok.endsWith("`")) return <code key={i} className="bg-muted px-1 rounded text-xs font-mono">{tok.slice(1, -1)}</code>
+    return tok
+  })
+}
+
 function YamlHighlight({ code }: { code: string }) {
   const [html, setHtml] = useState<string | null>(null)
   useEffect(() => {
@@ -1033,19 +1086,40 @@ function YamlHighlight({ code }: { code: string }) {
   return <div className="h-full overflow-auto p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_code]:!text-xs [&_code]:!font-mono" dangerouslySetInnerHTML={{ __html: html }} />
 }
 
+// Session storage keys
+const SS_CHAT_KEY = "ai-config-chat-history"
+const SS_YAML_KEY = "ai-config-proposed-yaml"
+const SS_BACKUP_KEY = "ai-config-backup-path"
+
 function AIConfigSection() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Load persisted state from sessionStorage
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    try {
+      const raw = sessionStorage.getItem(SS_CHAT_KEY)
+      return raw ? (JSON.parse(raw) as ChatMessage[]).map(m => ({ ...m, streaming: false })) : []
+    } catch { return [] }
+  })
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
-  const [proposedYaml, setProposedYaml] = useState<string | null>(null)
+  const [proposedYaml, setProposedYaml] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(SS_YAML_KEY) } catch { return null }
+  })
   const [currentConfig, setCurrentConfig] = useState<string | null>(null)
   const [placeholders, setPlaceholders] = useState<string[]>([])
   const [secretValues, setSecretValues] = useState<Record<string, string>>({})
-  const [backupPath, setBackupPath] = useState<string | null>(null)
+  const [backupPath, setBackupPath] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(SS_BACKUP_KEY) } catch { return null }
+  })
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [applySuccess, setApplySuccess] = useState(false)
+  const [revealSecrets, setRevealSecrets] = useState(false)
+
+  // Typewriter queue
+  const typewriterQueueRef = useRef<string[]>([])
+  const typewriterIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const assistantContentRef = useRef<string>("")
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
@@ -1053,10 +1127,34 @@ function AIConfigSection() {
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_hub_token") || ""
 
-  // Load current config and any existing backup on mount
+  // Persist messages to sessionStorage on change
+  useEffect(() => {
+    try { sessionStorage.setItem(SS_CHAT_KEY, JSON.stringify(messages)) } catch {}
+  }, [messages])
+
+  // Persist proposedYaml
+  useEffect(() => {
+    try {
+      if (proposedYaml) sessionStorage.setItem(SS_YAML_KEY, proposedYaml)
+      else sessionStorage.removeItem(SS_YAML_KEY)
+    } catch {}
+  }, [proposedYaml])
+
+  // Persist backupPath
+  useEffect(() => {
+    try {
+      if (backupPath) sessionStorage.setItem(SS_BACKUP_KEY, backupPath)
+      else sessionStorage.removeItem(SS_BACKUP_KEY)
+    } catch {}
+  }, [backupPath])
+
+  // Load current config on mount (and when revealSecrets changes)
   useEffect(() => {
     const t = token()
-    fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+    const url = revealSecrets
+      ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+      : `${hubUrl}/api/settings/ai-config/current-config`
+    fetch(url, {
       headers: { Authorization: `Bearer ${t}` },
     })
       .then(r => {
@@ -1065,7 +1163,13 @@ function AIConfigSection() {
       })
       .then(text => setCurrentConfig(text))
       .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealSecrets])
 
+  // Load existing backup on mount (only if not already persisted)
+  useEffect(() => {
+    if (backupPath) return // already have one from sessionStorage
+    const t = token()
     fetch(`${hubUrl}/api/settings/ai-config/backup`, {
       headers: { Authorization: `Bearer ${t}` },
     })
@@ -1082,23 +1186,63 @@ function AIConfigSection() {
     }
   }, [messages])
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return
-    const userMsg: ChatMessage = { role: "user", content: input.trim() }
-    const historyForRequest = [...messages]
-    let assistantContent = ""
-
-    const finalizeAssistantMessage = (dropIfEmpty = false) => {
+  // Typewriter: drain queue at ~20ms intervals
+  const startTypewriter = useCallback(() => {
+    if (typewriterIntervalRef.current) return
+    typewriterIntervalRef.current = setInterval(() => {
+      const queue = typewriterQueueRef.current
+      if (queue.length === 0) return
+      // Drain up to a few chars per tick for smooth ~60fps feel
+      const chars = queue.splice(0, 3).join("")
+      assistantContentRef.current += chars
+      const current = assistantContentRef.current
       setMessages(prev => {
         const msgs = [...prev]
         const last = msgs[msgs.length - 1]
         if (last?.role === "assistant" && last.streaming) {
-          if (dropIfEmpty && assistantContent === "") return msgs.slice(0, -1)
-          msgs[msgs.length - 1] = { role: "assistant", content: assistantContent, streaming: false }
+          msgs[msgs.length - 1] = { role: "assistant", content: current + "\u258c", streaming: true }
         }
         return msgs
       })
+    }, 20)
+  }, [])
+
+  const stopTypewriter = useCallback(() => {
+    if (typewriterIntervalRef.current) {
+      clearInterval(typewriterIntervalRef.current)
+      typewriterIntervalRef.current = null
     }
+  }, [])
+
+  // Drain remaining queue and finalize
+  const finalizeTypewriter = useCallback((dropIfEmpty = false) => {
+    stopTypewriter()
+    // Flush remaining queue synchronously
+    const remaining = typewriterQueueRef.current.join("")
+    typewriterQueueRef.current = []
+    assistantContentRef.current += remaining
+    const finalContent = assistantContentRef.current
+    setMessages(prev => {
+      const msgs = [...prev]
+      const last = msgs[msgs.length - 1]
+      if (last?.role === "assistant" && last.streaming) {
+        if (dropIfEmpty && finalContent === "") return msgs.slice(0, -1)
+        msgs[msgs.length - 1] = { role: "assistant", content: finalContent, streaming: false }
+      }
+      return msgs
+    })
+    assistantContentRef.current = ""
+  }, [stopTypewriter])
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return
+    const userMsg: ChatMessage = { role: "user", content: input.trim() }
+    const historyForRequest = [...messages]
+
+    // Reset typewriter state
+    stopTypewriter()
+    typewriterQueueRef.current = []
+    assistantContentRef.current = ""
 
     setMessages(prev => [...prev, userMsg])
     setInput("")
@@ -1137,15 +1281,10 @@ function AIConfigSection() {
           try { parsed = JSON.parse(line.slice(6)) } catch { continue }
 
           if (parsed.type === "token") {
-            assistantContent += parsed.content as string
-            setMessages(prev => {
-              const msgs = [...prev]
-              const last = msgs[msgs.length - 1]
-              if (last?.role === "assistant") {
-                msgs[msgs.length - 1] = { role: "assistant", content: assistantContent + "\u258c", streaming: true }
-              }
-              return msgs
-            })
+            // Push to typewriter queue instead of directly to state
+            const chars = (parsed.content as string).split("")
+            typewriterQueueRef.current.push(...chars)
+            startTypewriter()
           } else if (parsed.type === "proposed_yaml") {
             setProposedYaml(parsed.yaml as string)
           } else if (parsed.type === "placeholders") {
@@ -1153,14 +1292,14 @@ function AIConfigSection() {
             setSecretValues({})
           } else if (parsed.type === "error") {
             setError(parsed.content as string)
-            finalizeAssistantMessage(true)
+            finalizeTypewriter(true)
           } else if (parsed.type === "done") {
-            finalizeAssistantMessage()
+            finalizeTypewriter()
           }
         }
       }
     } catch (e) {
-      finalizeAssistantMessage(true)
+      finalizeTypewriter(true)
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       setLoading(false)
@@ -1181,7 +1320,10 @@ function AIConfigSection() {
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setBackupPath(data.backup_path)
-      fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+      const cfgUrl = revealSecrets
+        ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+        : `${hubUrl}/api/settings/ai-config/current-config`
+      fetch(cfgUrl, {
         headers: { Authorization: `Bearer ${token()}` },
       }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
       setProposedYaml(null)
@@ -1209,7 +1351,10 @@ function AIConfigSection() {
       if (!res.ok) throw new Error(await res.text())
       setBackupPath(null)
       setApplySuccess(false)
-      fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+      const cfgUrl = revealSecrets
+        ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+        : `${hubUrl}/api/settings/ai-config/current-config`
+      fetch(cfgUrl, {
         headers: { Authorization: `Bearer ${token()}` },
       }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
     } catch (e) {
@@ -1278,13 +1423,16 @@ function AIConfigSection() {
               <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
                 <div
                   className={cn(
-                    "max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap break-words",
+                    "max-w-[90%] rounded-xl px-3 py-2 text-sm break-words",
                     m.role === "user"
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary text-primary-foreground whitespace-pre-wrap"
                       : "bg-muted text-foreground"
                   )}
                 >
-                  {m.content}
+                  {m.role === "assistant"
+                    ? <span>{renderMarkdown(m.content.replace(/\u258c$/, ""))}{m.streaming && <span className="animate-pulse">&#x258c;</span>}</span>
+                    : m.content
+                  }
                 </div>
               </div>
             ))}
@@ -1321,8 +1469,8 @@ function AIConfigSection() {
 
         {/* Right: config panel */}
         <div className="flex flex-col min-h-0 gap-3 flex-1 min-w-0">
-          {/* Label */}
-          <div className="flex-none">
+          {/* Label + secret toggle */}
+          <div className="flex-none flex items-center justify-between gap-2">
             <span className={cn(
               "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
               proposedYaml
@@ -1331,6 +1479,20 @@ function AIConfigSection() {
             )}>
               {yamlLabel}
             </span>
+            <div className="flex items-center gap-2">
+              {revealSecrets && (
+                <span className="text-xs text-amber-500 font-medium">Secrets visible</span>
+              )}
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-6"
+                title={revealSecrets ? "Hide secrets" : "Reveal secrets"}
+                onClick={() => setRevealSecrets(v => !v)}
+              >
+                {revealSecrets ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+              </Button>
+            </div>
           </div>
 
           {/* YAML display — fills available height, scrollable */}
