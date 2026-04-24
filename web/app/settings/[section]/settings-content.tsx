@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams, useRouter } from "next/navigation"
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -1018,6 +1018,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
 interface ChatMessage {
   role: "user" | "assistant"
   content: string
+  streaming?: boolean
 }
 
 function AIConfigSection() {
@@ -1025,6 +1026,7 @@ function AIConfigSection() {
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [proposedYaml, setProposedYaml] = useState<string | null>(null)
+  const [currentConfig, setCurrentConfig] = useState<string | null>(null)
   const [placeholders, setPlaceholders] = useState<string[]>([])
   const [secretValues, setSecretValues] = useState<Record<string, string>>({})
   const [backupPath, setBackupPath] = useState<string | null>(null)
@@ -1033,48 +1035,115 @@ function AIConfigSection() {
   const [error, setError] = useState<string | null>(null)
   const [applySuccess, setApplySuccess] = useState(false)
 
+  const chatScrollRef = useRef<HTMLDivElement>(null)
+
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_hub_token") || ""
 
-  // Check for existing backup on mount
+  // Load current config and any existing backup on mount
   useEffect(() => {
+    const t = token()
+    fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+      headers: { Authorization: `Bearer ${t}` },
+    })
+      .then(r => r.text())
+      .then(text => setCurrentConfig(text))
+      .catch(() => {})
+
     fetch(`${hubUrl}/api/settings/ai-config/backup`, {
-      headers: { Authorization: `Bearer ${token()}` },
+      headers: { Authorization: `Bearer ${t}` },
     })
       .then(r => r.json())
       .then(d => { if (d.backup_path) setBackupPath(d.backup_path) })
       .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Auto-scroll chat to bottom when messages update
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+    }
+  }, [messages])
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return
-    const previousMessages = messages
     const userMsg: ChatMessage = { role: "user", content: input.trim() }
-    const newMessages = [...previousMessages, userMsg]
-    setMessages(newMessages)
+    const historyForRequest = [...messages]
+    setMessages(prev => [...prev, userMsg])
     setInput("")
     setLoading(true)
     setError(null)
+    setProposedYaml(null)
+    setPlaceholders([])
+    setSecretValues({})
 
     try {
-      const res = await fetch(`${hubUrl}/api/settings/ai-config`, {
+      const res = await fetch(`${hubUrl}/api/settings/ai-config/stream`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userMsg.content,
-          history: previousMessages,
-        }),
+        body: JSON.stringify({ message: userMsg.content, history: historyForRequest }),
       })
       if (!res.ok) throw new Error(await res.text())
-      const data = await res.json()
-      setMessages(prev => [...prev, { role: "assistant", content: data.reply }])
-      if (data.proposed_yaml) {
-        setProposedYaml(data.proposed_yaml)
-        setPlaceholders(data.placeholders || [])
-        setSecretValues({})
+
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let assistantContent = ""
+      let sseBuffer = ""
+
+      // Add streaming placeholder
+      setMessages(prev => [...prev, { role: "assistant", content: "", streaming: true }])
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        sseBuffer += decoder.decode(value, { stream: true })
+
+        const lines = sseBuffer.split("\n")
+        sseBuffer = lines.pop() ?? ""
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue
+          let parsed: Record<string, unknown>
+          try { parsed = JSON.parse(line.slice(6)) } catch { continue }
+
+          if (parsed.type === "token") {
+            assistantContent += parsed.content as string
+            setMessages(prev => {
+              const msgs = [...prev]
+              const last = msgs[msgs.length - 1]
+              if (last?.role === "assistant") {
+                msgs[msgs.length - 1] = { role: "assistant", content: assistantContent + "\u258c", streaming: true }
+              }
+              return msgs
+            })
+          } else if (parsed.type === "proposed_yaml") {
+            setProposedYaml(parsed.yaml as string)
+          } else if (parsed.type === "placeholders") {
+            setPlaceholders(parsed.items as string[])
+            setSecretValues({})
+          } else if (parsed.type === "error") {
+            setError(parsed.content as string)
+          } else if (parsed.type === "done") {
+            setMessages(prev => {
+              const msgs = [...prev]
+              const last = msgs[msgs.length - 1]
+              if (last?.role === "assistant") {
+                msgs[msgs.length - 1] = { role: "assistant", content: assistantContent, streaming: false }
+              }
+              return msgs
+            })
+          }
+        }
       }
     } catch (e) {
-      setMessages(previousMessages)
+      setMessages(prev => {
+        const msgs = [...prev]
+        if (msgs[msgs.length - 1]?.streaming && msgs[msgs.length - 1]?.content === "") {
+          return msgs.slice(0, -1)
+        }
+        return msgs
+      })
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       setLoading(false)
@@ -1094,6 +1163,9 @@ function AIConfigSection() {
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setBackupPath(data.backup_path)
+      fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+        headers: { Authorization: `Bearer ${token()}` },
+      }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
       setProposedYaml(null)
       setPlaceholders([])
       setSecretValues({})
@@ -1119,6 +1191,9 @@ function AIConfigSection() {
       if (!res.ok) throw new Error(await res.text())
       setBackupPath(null)
       setApplySuccess(false)
+      fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
+        headers: { Authorization: `Bearer ${token()}` },
+      }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
     } catch (e) {
       setError(e instanceof Error ? e.message : "Revert failed")
     } finally {
@@ -1127,140 +1202,161 @@ function AIConfigSection() {
   }
 
   const allPlaceholdersFilled = placeholders.every(p => secretValues[p]?.trim())
+  const displayedYaml = proposedYaml ?? currentConfig
+  const yamlLabel = proposedYaml ? "Proposed config" : "Current config"
 
   return (
-    <div className="space-y-4 -mx-8 px-0" style={{ maxWidth: "none", width: "calc(100% + 4rem)" }}>
-      <div className="px-8">
-        <h2 className="text-base font-semibold mb-1">Configure with AI</h2>
+    <div className="-mx-8 -mt-8 flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
+      {/* Header */}
+      <div className="px-8 pt-6 pb-3 flex-none">
+        <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
         <p className="text-sm text-muted-foreground">
           Describe changes in plain English. The AI will propose a hub.yaml update for you to review and apply.
         </p>
       </div>
 
-      {error && (
-        <div className="px-8">
-          <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</p>
-        </div>
-      )}
-
-      {applySuccess && !backupPath && (
-        <div className="px-8">
-          <p className="text-sm text-green-600 bg-green-50 dark:bg-green-950/30 px-3 py-2 rounded-lg">Config applied successfully.</p>
-        </div>
-      )}
-
-      {applySuccess && backupPath && (
-        <div className="px-8 flex items-center gap-3">
-          <p className="text-sm text-green-600">✓ Config applied.</p>
-          <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
-            <RotateCcw className="size-3.5 mr-1" />
-            {reverting ? "Reverting…" : "Revert"}
-          </Button>
-        </div>
-      )}
-
-      {backupPath && !applySuccess && (
-        <div className="px-8 flex items-center gap-3">
-          <p className="text-xs text-muted-foreground">Previous backup available.</p>
-          <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
-            <RotateCcw className="size-3.5 mr-1" />
-            {reverting ? "Reverting…" : "Revert to backup"}
-          </Button>
-        </div>
-      )}
-
-      <div className="flex gap-4 px-8" style={{ alignItems: "flex-start" }}>
-        {/* Left: Chat */}
-        <div className="flex flex-col min-w-0" style={{ flex: "1 1 0" }}>
-          {/* Message history */}
-          <div className="border border-border rounded-lg bg-muted/20 flex flex-col" style={{ minHeight: 320, maxHeight: 480 }}>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {messages.length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-8">
-                  Describe the config change you&apos;d like to make.
-                </p>
-              )}
-              {messages.map((m, i) => (
-                <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-                  <div
-                    className={cn(
-                      "max-w-[85%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap break-words",
-                      m.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-foreground"
-                    )}
-                  >
-                    {m.content}
-                  </div>
-                </div>
-              ))}
-              {loading && (
-                <div className="flex justify-start">
-                  <div className="bg-muted rounded-xl px-3 py-2 text-sm text-muted-foreground animate-pulse">Thinking…</div>
-                </div>
+      {/* Status bar */}
+      {(error || applySuccess || (backupPath && !applySuccess)) && (
+        <div className="px-8 flex-none mb-2">
+          {error && (
+            <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</p>
+          )}
+          {applySuccess && (
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-green-600">&check; Config applied.</p>
+              {backupPath && (
+                <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
+                  <RotateCcw className="size-3.5 mr-1" />
+                  {reverting ? "Reverting\u2026" : "Revert"}
+                </Button>
               )}
             </div>
-
-            {/* Input */}
-            <div className="border-t border-border p-3 flex gap-2">
-              <Input
-                placeholder="e.g. Add a Linear integration for workspace acme"
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
-                disabled={loading}
-                className="flex-1 text-sm"
-              />
-              <Button size="icon" onClick={sendMessage} disabled={loading || !input.trim()}>
-                <Send className="size-4" />
+          )}
+          {backupPath && !applySuccess && (
+            <div className="flex items-center gap-3">
+              <p className="text-xs text-muted-foreground">Previous backup available.</p>
+              <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
+                <RotateCcw className="size-3.5 mr-1" />
+                {reverting ? "Reverting\u2026" : "Revert to backup"}
               </Button>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Two-column body — fills remaining height */}
+      <div className="flex flex-1 min-h-0 px-8 pb-6 gap-4">
+
+        {/* Left: chat */}
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 border border-border rounded-lg bg-muted/10 overflow-hidden">
+          {/* Scrollable message history */}
+          <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
+            {messages.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-8">
+                Describe the config change you&apos;d like to make.
+              </p>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+                <div
+                  className={cn(
+                    "max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap break-words",
+                    m.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-foreground"
+                  )}
+                >
+                  {m.content}
+                </div>
+              </div>
+            ))}
+            {loading && (messages.length === 0 || messages[messages.length - 1]?.role === "user") && (
+              <div className="flex justify-start">
+                <div className="bg-muted rounded-xl px-3 py-2 text-sm text-muted-foreground">
+                  <span className="inline-flex gap-1">
+                    <span className="animate-bounce" style={{ animationDelay: "0ms" }}>&middot;</span>
+                    <span className="animate-bounce" style={{ animationDelay: "150ms" }}>&middot;</span>
+                    <span className="animate-bounce" style={{ animationDelay: "300ms" }}>&middot;</span>
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Input pinned to bottom */}
+          <div className="flex-none border-t border-border p-3 flex gap-2">
+            <Input
+              placeholder="e.g. Add a Linear integration for workspace acme"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
+              disabled={loading}
+              className="flex-1 text-sm"
+            />
+            <Button size="icon" onClick={sendMessage} disabled={loading || !input.trim()}>
+              <Send className="size-4" />
+            </Button>
           </div>
         </div>
 
-        {/* Right: Proposed config panel */}
-        {proposedYaml && (
-          <div className="flex flex-col gap-4 min-w-0" style={{ flex: "1 1 0" }}>
-            <div className="border border-border rounded-lg">
-              <div className="px-4 py-2 border-b border-border bg-muted/40">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Proposed hub.yaml</p>
-              </div>
-              <pre className="p-4 text-xs font-mono overflow-auto bg-muted/20 rounded-b-lg" style={{ maxHeight: 300 }}>
-                {proposedYaml}
-              </pre>
-            </div>
-
-            {placeholders.length > 0 && (
-              <div className="border border-border rounded-lg p-4 space-y-3">
-                <p className="text-sm font-medium">Fill in secrets</p>
-                {placeholders.map(ph => (
-                  <div key={ph}>
-                    <label className="text-xs text-muted-foreground font-mono mb-1 block">{ph}</label>
-                    <Input
-                      type="password"
-                      placeholder={`Value for ${ph}`}
-                      value={secretValues[ph] || ""}
-                      onChange={e => setSecretValues(prev => ({ ...prev, [ph]: e.target.value }))}
-                      className="font-mono text-sm"
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <Button
-              onClick={applyConfig}
-              disabled={applying || !allPlaceholdersFilled}
-              className="w-full"
-            >
-              {applying ? "Applying…" : "Apply Configuration"}
-            </Button>
+        {/* Right: config panel */}
+        <div className="flex flex-col min-h-0 gap-3" style={{ width: "22rem" }}>
+          {/* Label */}
+          <div className="flex-none">
+            <span className={cn(
+              "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
+              proposedYaml
+                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                : "bg-muted text-muted-foreground"
+            )}>
+              {yamlLabel}
+            </span>
           </div>
-        )}
+
+          {/* YAML display — fills available height, scrollable */}
+          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-muted/20">
+            <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed">
+              {displayedYaml ?? "Loading\u2026"}
+            </pre>
+          </div>
+
+          {/* Placeholder secret inputs */}
+          {proposedYaml && placeholders.length > 0 && (
+            <div className="flex-none border border-border rounded-lg p-3 space-y-2 bg-background">
+              <p className="text-xs font-medium text-muted-foreground">Fill in secrets</p>
+              {placeholders.map(ph => (
+                <div key={ph}>
+                  <label className="text-xs text-muted-foreground font-mono mb-1 block">{ph}</label>
+                  <Input
+                    type="password"
+                    placeholder={`Value for ${ph}`}
+                    value={secretValues[ph] || ""}
+                    onChange={e => setSecretValues(prev => ({ ...prev, [ph]: e.target.value }))}
+                    className="font-mono text-xs h-7"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Apply button */}
+          {proposedYaml && (
+            <div className="flex-none">
+              <Button
+                onClick={applyConfig}
+                disabled={applying || !allPlaceholdersFilled}
+                className="w-full"
+              >
+                {applying ? "Applying\u2026" : "Apply Configuration"}
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
 }
+
 
 function TemplatesSection() {
   const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])

@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -272,6 +274,112 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, aiConfigBackupResponse{BackupPath: latest, BackupTime: backupTime})
 }
 
+// ─── Current-config endpoint ────────────────────────────────────────────────
+
+// handleAIConfigCurrentConfig returns the sanitized (secrets masked) hub.yaml as plain text.
+func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sanitized, err := sanitizeHubConfig(diskCfg)
+	if err != nil {
+		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(sanitized))
+}
+
+// ─── Streaming SSE endpoint ──────────────────────────────────────────────────
+
+// handleAIConfigStream streams the LLM response as Server-Sent Events.
+// Events:
+//
+//	data: {"type":"token","content":"..."}
+//	data: {"type":"proposed_yaml","yaml":"..."}
+//	data: {"type":"placeholders","items":["SECRET"]}
+//	data: {"type":"done"}
+func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req aiConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.Message == "" {
+		http.Error(w, "message required", http.StatusBadRequest)
+		return
+	}
+
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sanitized, err := sanitizeHubConfig(diskCfg)
+	if err != nil {
+		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.mu.RLock()
+	llmKeys := s.hubCfg.LLMKeys
+	defaultModel := s.hubCfg.DefaultModel
+	s.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	sendEvent := func(v interface{}) {
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+
+	var fullReply strings.Builder
+
+	streamErr := callLLMForConfigStream(
+		r.Context(),
+		sanitized, req.Message, req.History,
+		llmKeys, defaultModel,
+		func(token string) {
+			fullReply.WriteString(token)
+			sendEvent(map[string]string{"type": "token", "content": token})
+		},
+	)
+	if streamErr != nil {
+		sendEvent(map[string]string{"type": "error", "content": streamErr.Error()})
+		return
+	}
+
+	reply := fullReply.String()
+	if yamlBlock := extractYAMLBlock(reply); yamlBlock != "" {
+		sendEvent(map[string]interface{}{"type": "proposed_yaml", "yaml": yamlBlock})
+		if phs := extractPlaceholders(yamlBlock); len(phs) > 0 {
+			sendEvent(map[string]interface{}{"type": "placeholders", "items": phs})
+		}
+	}
+
+	sendEvent(map[string]string{"type": "done"})
+}
+
 // ─── LLM call ────────────────────────────────────────────────────────────────
 
 const aiConfigSystemPromptTemplate = `You are a configuration assistant for ElasticClaw hub. You help users configure their hub.yaml.
@@ -293,6 +401,15 @@ Hub.yaml schema overview:
 - ssh_public_keys: list of SSH public keys allowed for claw access
 - secrets: named secrets map (used by factory webhook_secret_ref)
 - auth: github_oauth config and access control (view/interact tag requirements)
+
+CRITICAL RULES — follow these without exception:
+- NEVER ask the user to paste tokens, API keys, passwords, or any secret values into the chat
+- NEVER tell the user to "share" or "provide" a secret in the chat message
+- If you need a secret value, use __SECRET_NAME__ as a placeholder in the YAML (e.g. __LINEAR_TOKEN__, __SHORTCUT_TOKEN__, __GITHUB_CLIENT_SECRET__)
+- The UI renders a secure password input field for each __PLACEHOLDER__ — the user fills secrets there, not in the chat
+- You may ask for non-secret information (workspace names, org names, URLs, app IDs, usernames)
+- If the user pastes a secret into the chat anyway, acknowledge it briefly and use the value directly in the YAML — do NOT tell them to enter it again in the secret fields
+- If a user message contains what looks like an API key or token (e.g. starts with lin_api_, sk-ant-, sk-, ghp_, or is a long random hex/base64 string of 20+ chars), use it directly as the YAML value instead of a placeholder
 
 When proposing config changes:
 - Return the COMPLETE updated hub.yaml as a YAML code block (` + "```yaml ... ```" + `)
@@ -336,6 +453,228 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
 	}
 	return "", fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai; configured: %s)", strings.Join(availableProviders, ", "))
+}
+
+// callLLMForConfigStream selects the best available provider and streams tokens via onToken.
+func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, history []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
+	systemPrompt := fmt.Sprintf(aiConfigSystemPromptTemplate, sanitizedYAML)
+
+	var msgs []aiChatMessage
+	msgs = append(msgs, history...)
+	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
+
+	var anthropicKey, openaiKey string
+	var firstKey *types.LLMKeyConfig
+	for _, k := range llmKeys {
+		if firstKey == nil {
+			firstKey = k
+		}
+		if k.Provider == "anthropic" && anthropicKey == "" {
+			anthropicKey = k.APIKey
+		}
+		if k.Provider == "openai" && openaiKey == "" {
+			openaiKey = k.APIKey
+		}
+	}
+
+	if anthropicKey != "" {
+		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
+	}
+	if openaiKey != "" {
+		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
+	}
+	if firstKey != nil {
+		switch firstKey.Provider {
+		case "anthropic":
+			return streamAnthropic(ctx, firstKey.APIKey, systemPrompt, msgs, onToken)
+		case "openai":
+			return streamOpenAI(ctx, firstKey.APIKey, systemPrompt, msgs, onToken)
+		default:
+			// Unsupported streaming provider — fall back to blocking call
+			reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
+			if err != nil {
+				return err
+			}
+			onToken(reply)
+			return nil
+		}
+	}
+	_ = defaultModel
+	return fmt.Errorf("no LLM keys configured")
+}
+
+// streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
+func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
+	type anthropicMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type anthropicReq struct {
+		Model     string         `json:"model"`
+		MaxTokens int            `json:"max_tokens"`
+		System    string         `json:"system"`
+		Messages  []anthropicMsg `json:"messages"`
+		Stream    bool           `json:"stream"`
+	}
+
+	anthropicMsgs := make([]anthropicMsg, len(msgs))
+	for i, m := range msgs {
+		anthropicMsgs[i] = anthropicMsg{Role: m.Role, Content: m.Content}
+	}
+	body, _ := json.Marshal(anthropicReq{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 4096,
+		System:    systemPrompt,
+		Messages:  anthropicMsgs,
+		Stream:    true,
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(data, &errResp) == nil && errResp.Error.Message != "" {
+			return fmt.Errorf("Anthropic error: %s", errResp.Error.Message)
+		}
+		return fmt.Errorf("Anthropic error %d: %s", resp.StatusCode, string(data))
+	}
+
+	type deltaEvent struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1*1024*1024)
+	var currentEvent string
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			if currentEvent != "content_block_delta" {
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if raw == "" || raw == "[DONE]" {
+				continue
+			}
+			var ev deltaEvent
+			if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+				continue
+			}
+			if ev.Delta.Type == "text_delta" && ev.Delta.Text != "" {
+				onToken(ev.Delta.Text)
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+// streamOpenAI calls OpenAI Chat Completions API with stream:true, forwarding delta.content.
+func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
+	type openAIMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type openAIReq struct {
+		Model    string      `json:"model"`
+		Messages []openAIMsg `json:"messages"`
+		Stream   bool        `json:"stream"`
+	}
+
+	openAIMsgs := []openAIMsg{{Role: "system", Content: systemPrompt}}
+	for _, m := range msgs {
+		openAIMsgs = append(openAIMsgs, openAIMsg{Role: m.Role, Content: m.Content})
+	}
+	body, _ := json.Marshal(openAIReq{
+		Model:    "gpt-4o",
+		Messages: openAIMsgs,
+		Stream:   true,
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(data, &errResp) == nil && errResp.Error.Message != "" {
+			return fmt.Errorf("OpenAI error: %s", errResp.Error.Message)
+		}
+		return fmt.Errorf("OpenAI error %d: %s", resp.StatusCode, string(data))
+	}
+
+	type streamChoice struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	}
+	type streamChunk struct {
+		Choices []streamChoice `json:"choices"`
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1*1024*1024)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" || raw == "[DONE]" {
+			continue
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			onToken(chunk.Choices[0].Delta.Content)
+		}
+	}
+	return scanner.Err()
 }
 
 func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
