@@ -1157,7 +1157,7 @@ function AIConfigSection() {
   const assistantContentRef = useRef<string>("")
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
-  const chatInputRef = useRef<HTMLTextAreaElement>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
 
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_hub_token") || ""
@@ -1267,7 +1267,7 @@ function AIConfigSection() {
       const msgs = [...prev]
       const last = msgs[msgs.length - 1]
       if (last?.role === "assistant" && last.streaming) {
-        if (dropIfEmpty && visibleFinalContent === "") return msgs.slice(0, -1)
+        if (dropIfEmpty && visibleFinalContent === "" && finalContent.trim() === "") return msgs.slice(0, -1)
         msgs[msgs.length - 1] = { role: "assistant", content: finalContent, streaming: false }
       }
       return msgs
@@ -1563,7 +1563,7 @@ function AIConfigSection() {
           {/* Input pinned to bottom */}
           <div className="flex-none border-t border-border p-3 flex gap-2">
             <Input
-              ref={chatInputRef as React.Ref<HTMLInputElement>}
+              ref={chatInputRef}
               placeholder="e.g. Add a Linear integration for workspace acme"
               value={input}
               onChange={e => setInput(e.target.value)}
