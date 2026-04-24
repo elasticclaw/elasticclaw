@@ -276,12 +276,13 @@ export function Sidebar({
           {activeTagFilters.map((tag) => (
             <span
               key={tag}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded"
+              title={tag}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded max-w-[120px]"
             >
-              {tag}
+              <span className="truncate">{tag}</span>
               <button
                 onClick={() => onRemoveTagFilter(tag)}
-                className="ml-0.5 hover:text-destructive"
+                className="ml-0.5 hover:text-destructive flex-shrink-0"
               >
                 <X className="size-3" />
               </button>
