@@ -711,10 +711,16 @@ func (s *Server) mergePRForClaw(clawID string) {
 	body, _ := json.Marshal(map[string]string{
 		"merge_method": "squash",
 	})
-	req, _ := http.NewRequest(http.MethodPut,
+	req, err := http.NewRequest(
+		http.MethodPut,
 		fmt.Sprintf("%s/repos/%s/pulls/%d/merge", ghBase, repo, prNumber),
 		bytes.NewReader(body),
 	)
+	if err != nil {
+		log.Printf("[pipeline] merge_pr: failed to build request for %s#%d: %v", repo, prNumber, err)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to prepare merge request for PR #%d: %v", prNumber, err))
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
