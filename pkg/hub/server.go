@@ -173,6 +173,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
+	mux.HandleFunc("/api/auth/config", s.handleAuthConfig) // public — no auth required
+	mux.HandleFunc("/api/auth/github", s.handleGitHubOAuthStart)
+	mux.HandleFunc("/api/auth/github/callback", s.handleGitHubOAuthCallback)
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
@@ -298,15 +301,29 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		// Hub token doubles as the web session token — reject empty tokens even if hub token is unset
-		s.mu.RLock()
-		hubToken := s.hubCfg.Token
-		s.mu.RUnlock()
-		if token == "" || token != hubToken {
+		if token == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		s.mu.RUnlock()
+
+		// Accept shared hub token (existing behavior)
+		if token == hubToken {
+			next(w, r)
+			return
+		}
+
+		// Try GitHub OAuth session token
+		if payload, ok := verifyGitHubSession(hubToken, token); ok {
+			ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+			r = r.WithContext(ctx)
+			next(w, r)
+			return
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 
@@ -340,7 +357,38 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]string{"status": "ok"})
+	if login := githubLoginFromContext(r.Context()); login != "" {
+		// Decode full payload from the token to get name and avatar
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		s.mu.RUnlock()
+		if payload, ok := verifyGitHubSession(hubToken, token); ok {
+			jsonOK(w, map[string]string{
+				"login":       payload.Login,
+				"name":        payload.Name,
+				"avatar_url":  payload.AvatarURL,
+				"auth_method": "github",
+			})
+			return
+		}
+	}
+	jsonOK(w, map[string]string{"auth_method": "password"})
+}
+
+// handleAuthConfig returns public auth config (no auth required).
+func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	githubOAuthEnabled := s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil && s.hubCfg.Auth.GitHubOAuth.ClientID != ""
+	passwordAuthEnabled := s.hubCfg.Token != ""
+	s.mu.RUnlock()
+	jsonOK(w, map[string]bool{
+		"github_oauth_enabled":   githubOAuthEnabled,
+		"password_auth_enabled":  passwordAuthEnabled,
+	})
 }
 
 func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
@@ -484,6 +532,15 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// Resolve access config and GitHub login for tag-based filtering
+	s.mu.RLock()
+	var accessCfg *types.AccessConfig
+	if s.hubCfg.Auth != nil {
+		accessCfg = s.hubCfg.Auth.Access
+	}
+	s.mu.RUnlock()
+	ghLogin := githubLoginFromContext(r.Context())
+
 	var out []types.Claw
 	for rows.Next() {
 		var c types.Claw
@@ -512,6 +569,10 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
+		}
+		// Apply tag-based view filter (only applies to GitHub OAuth users)
+		if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, c.Tags) {
+			continue
 		}
 		out = append(out, c)
 	}
@@ -805,6 +866,27 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
+
+		// Apply tag-based interact filter for GitHub OAuth users
+		ghLoginMsg := githubLoginFromContext(r.Context())
+		if ghLoginMsg != "" {
+			s.mu.RLock()
+			var accessCfgMsg *types.AccessConfig
+			if s.hubCfg.Auth != nil {
+				accessCfgMsg = s.hubCfg.Auth.Access
+			}
+			s.mu.RUnlock()
+			// Fetch claw tags to check interact permission
+			var tagsJSONMsg string
+			_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+			var clawTagsMsg []string
+			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+
 		msg := types.HubMessage{
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
