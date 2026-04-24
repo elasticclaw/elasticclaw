@@ -1211,6 +1211,44 @@ func validateHubConfig(cfg *types.HubConfig) error {
 			return fmt.Errorf("llm_keys[%d] (%s): provider is required", i, k.Name)
 		}
 	}
+	if err := checkMaskedValues(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkMaskedValues returns an error if any sensitive field still contains the
+// mask sentinel "***", which indicates restoreMaskedSecretsFromDisk failed to
+// match it to a real disk value (e.g. the LLM hallucinated *** for a new key).
+func checkMaskedValues(cfg *types.HubConfig) error {
+	const mask = "***"
+	if cfg.ClawToken == mask {
+		return fmt.Errorf("claw_token contains unresolved mask value; provide the real value or use a __PLACEHOLDER__")
+	}
+	if cfg.Token == mask {
+		return fmt.Errorf("token contains unresolved mask value")
+	}
+	if cfg.RelaySecret == mask {
+		return fmt.Errorf("relay_secret contains unresolved mask value")
+	}
+	if cfg.UIPassword == mask {
+		return fmt.Errorf("ui_password contains unresolved mask value")
+	}
+	for i, k := range cfg.LLMKeys {
+		if k.APIKey == mask {
+			return fmt.Errorf("llm_keys[%d] (%s): api_key contains unresolved mask value", i, k.Name)
+		}
+	}
+	for i, app := range cfg.GitHubApps {
+		if app.PrivateKeyPEM == mask {
+			return fmt.Errorf("github[%d]: private_key_pem contains unresolved mask value", i)
+		}
+	}
+	for k, v := range cfg.Secrets {
+		if v == mask {
+			return fmt.Errorf("secrets[%q] contains unresolved mask value", k)
+		}
+	}
 	return nil
 }
 
