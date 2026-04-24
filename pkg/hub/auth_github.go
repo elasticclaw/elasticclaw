@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,13 @@ const githubSessionExpiry = 7 * 24 * time.Hour
 const (
 	oauthStateCookieName = "oauth_state"
 	oauthNextCookieName  = "oauth_next"
+	oauthCodeTTL         = 2 * time.Minute
 )
+
+type pendingOAuthCode struct {
+	Token     string
+	ExpiresAt time.Time
+}
 
 // githubSessionPayload is the signed payload stored in OAuth session tokens.
 type githubSessionPayload struct {
@@ -251,14 +258,65 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 
 	log.Printf("[github-oauth] login: %s (%s)", ghUser.Login, ghUser.Name)
 
-	// Redirect to the web UI login page with the token as a query param.
-	// The login page will pick it up, store it in sessionStorage, and redirect to home.
-	redirectQuery := url.Values{"github_token": []string{sessionToken}}
+	// Exchange long-lived session token for short-lived one-time code in URL.
+	oauthCode, err := randomState()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.mu.Lock()
+	s.oauthCodes[oauthCode] = pendingOAuthCode{
+		Token:     sessionToken,
+		ExpiresAt: time.Now().Add(oauthCodeTTL),
+	}
+	s.mu.Unlock()
+
+	redirectQuery := url.Values{"oauth_code": []string{oauthCode}}
 	if next != "" {
 		redirectQuery.Set("next", next)
 	}
 	redirectURL := "/login?" + redirectQuery.Encode()
 	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	s.mu.Lock()
+	for key, pending := range s.oauthCodes {
+		if now.After(pending.ExpiresAt) {
+			delete(s.oauthCodes, key)
+		}
+	}
+	pending, ok := s.oauthCodes[body.Code]
+	if ok {
+		delete(s.oauthCodes, body.Code)
+	}
+	s.mu.Unlock()
+	if !ok || now.After(pending.ExpiresAt) {
+		http.Error(w, "invalid code", http.StatusUnauthorized)
+		return
+	}
+
+	ttl := int(time.Until(pending.ExpiresAt).Seconds())
+	if ttl < 0 {
+		ttl = 0
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-OAuth-Code-TTL", strconv.Itoa(ttl))
+	jsonOK(w, map[string]string{"github_token": pending.Token})
 }
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────

@@ -40,6 +40,8 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	// one-time oauth_code -> signed GitHub session token
+	oauthCodes map[string]pendingOAuthCode
 
 	fileAckMu       sync.Mutex
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
@@ -104,6 +106,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		identity:        id,
 		claws:           make(map[string]*clawConn),
 		users:           make(map[string]*userConn),
+		oauthCodes:      make(map[string]pendingOAuthCode),
 		fileAckWaiters:  make(map[string]chan types.FileAck),
 		fileReadWaiters: make(map[string]chan types.FileReadResp),
 	}
@@ -166,7 +169,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
 
 	// Browser WebSocket
-	mux.HandleFunc("/api/ws", s.handleUserWS)
+	mux.HandleFunc("/api/ws", s.withAuth(s.handleUserWS))
 
 	// REST API
 	mux.HandleFunc("/api/login", s.handleLogin)
@@ -176,6 +179,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig) // public — no auth required
 	mux.HandleFunc("/api/auth/github", s.handleGitHubOAuthStart)
 	mux.HandleFunc("/api/auth/github/callback", s.handleGitHubOAuthCallback)
+	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
@@ -249,12 +253,16 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tenantID, err := s.tenantByToken(token)
-		if err != nil {
+		tenantID, githubLogin, ok := s.resolveAuthToken(token)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxTenantKey{}, tenantID))
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		if githubLogin != "" {
+			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+		}
+		r = r.WithContext(ctx)
 		next(w, r)
 	}
 }
@@ -264,6 +272,45 @@ type ctxTenantKey struct{}
 func tenantFromCtx(r *http.Request) string {
 	v, _ := r.Context().Value(ctxTenantKey{}).(string)
 	return v
+}
+
+// resolveAuthToken accepts either a tenant token (legacy/password auth)
+// or a GitHub OAuth session token and returns the resolved tenant/login.
+func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, ok bool) {
+	if token == "" {
+		return "", "", false
+	}
+	if tenantID, err := s.tenantByToken(token); err == nil {
+		return tenantID, "", true
+	}
+	sessionSecret := s.webSessionSecret()
+	if sessionSecret == "" {
+		return "", "", false
+	}
+	payload, valid := verifyGitHubSession(sessionSecret, token)
+	if !valid {
+		return "", "", false
+	}
+	tenantID, err := s.githubTenantID()
+	if err != nil {
+		return "", "", false
+	}
+	return tenantID, payload.Login, true
+}
+
+// githubTenantID resolves the tenant backing GitHub OAuth sessions.
+func (s *Server) githubTenantID() (string, error) {
+	s.mu.RLock()
+	hubToken := s.hubCfg.Token
+	s.mu.RUnlock()
+	if hubToken != "" {
+		if tenantID, err := s.tenantByToken(hubToken); err == nil {
+			return tenantID, nil
+		}
+	}
+	var tenantID string
+	err := s.db.QueryRow(`SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
+	return tenantID, err
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
@@ -389,8 +436,8 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	passwordAuthEnabled := s.hubCfg.Token != ""
 	s.mu.RUnlock()
 	jsonOK(w, map[string]bool{
-		"github_oauth_enabled":   githubOAuthEnabled,
-		"password_auth_enabled":  passwordAuthEnabled,
+		"github_oauth_enabled":  githubOAuthEnabled,
+		"password_auth_enabled": passwordAuthEnabled,
 	})
 }
 
@@ -1367,11 +1414,15 @@ func (w *proxyResponseWriter) WriteHeader(status int) {
 // ─── User WebSocket ───────────────────────────────────────────────────────────
 
 func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	tenantID, err := s.tenantByToken(token)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	tenantID := tenantFromCtx(r)
+	if tenantID == "" {
+		token := r.URL.Query().Get("token")
+		resolvedTenantID, _, ok := s.resolveAuthToken(token)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID = resolvedTenantID
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})

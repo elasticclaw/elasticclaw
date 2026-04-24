@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
+import { clearConfig } from "@/lib/api"
 
 interface AuthConfig {
   github_oauth_enabled: boolean
@@ -30,12 +31,38 @@ function LoginForm() {
       .catch(() => {/* ignore */})
   }, [])
 
-  // Handle GitHub OAuth callback: token in URL hash or query param
+  // Handle GitHub OAuth callback using short-lived exchange code.
   useEffect(() => {
-    const token = searchParams.get("github_token")
-    if (token) {
-      sessionStorage.setItem("ec_github_token", token)
-      router.replace(next)
+    const oauthCode = searchParams.get("oauth_code")
+    if (!oauthCode) return
+
+    let cancelled = false
+    const hubUrl = getHubUrl()
+    const exchangeUrl = hubUrl ? `${hubUrl}/api/auth/github/exchange` : "/api/auth/github/exchange"
+
+    fetch(exchangeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: oauthCode }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("exchange failed")
+        const data = await res.json()
+        if (cancelled) return
+        if (data.github_token) {
+          clearConfig()
+          sessionStorage.setItem("ec_github_token", data.github_token)
+          router.replace(next)
+          return
+        }
+        throw new Error("missing token")
+      })
+      .catch(() => {
+        if (!cancelled) router.replace("/login")
+      })
+
+    return () => {
+      cancelled = true
     }
   }, [searchParams, next, router])
 
