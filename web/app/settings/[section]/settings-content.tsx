@@ -1030,6 +1030,15 @@ function normalizeStoredMessage(message: ChatMessage): ChatMessage {
 }
 
 // Simple markdown renderer for assistant messages (no external deps)
+// Strip ```yaml ... ``` blocks from text (they go to the right panel, not chat)
+function stripYamlBlocks(text: string): string {
+  return text.replace(/```ya?ml[\s\S]*?```/gi, "").replace(/```[\s\S]*?```/g, (m) => {
+    // Only strip if the block looks like a full hub.yaml (has 'url:' and 'claw_token:')
+    if (m.includes("claw_token:") || m.includes("url: http")) return ""
+    return m
+  }).trim()
+}
+
 function renderMarkdown(text: string): React.ReactNode[] {
   // Split off fenced code blocks first
   const parts = text.split(/(```[\s\S]*?```)/g)
@@ -1208,7 +1217,7 @@ function AIConfigSection() {
       // Drain up to a few chars per tick for smooth ~60fps feel
       const chars = queue.splice(0, 3).join("")
       assistantContentRef.current += chars
-      const current = assistantContentRef.current
+      const current = stripYamlBlocks(assistantContentRef.current)
       setMessages(prev => {
         const msgs = [...prev]
         const last = msgs[msgs.length - 1]
@@ -1236,7 +1245,7 @@ function AIConfigSection() {
     const remaining = typewriterQueueRef.current.join("")
     typewriterQueueRef.current = []
     assistantContentRef.current += remaining
-    const finalContent = assistantContentRef.current
+    const finalContent = stripYamlBlocks(assistantContentRef.current)
     setMessages(prev => {
       const msgs = [...prev]
       const last = msgs[msgs.length - 1]
