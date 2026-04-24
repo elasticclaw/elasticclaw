@@ -186,6 +186,8 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 				"contents":      contentsPermission,
 				"pull_requests": contentsPermission,
 				"metadata":      "read",
+				"checks":        "read", // needed for gh pr checks / CI status
+				"statuses":      "read", // needed for commit status checks
 			},
 		})
 		bodyStr = string(b)
