@@ -1261,12 +1261,13 @@ function AIConfigSection() {
     const remaining = typewriterQueueRef.current.join("")
     typewriterQueueRef.current = []
     assistantContentRef.current += remaining
-    const finalContent = stripYamlBlocks(assistantContentRef.current)
+    const finalContent = assistantContentRef.current
+    const visibleFinalContent = stripYamlBlocks(finalContent)
     setMessages(prev => {
       const msgs = [...prev]
       const last = msgs[msgs.length - 1]
       if (last?.role === "assistant" && last.streaming) {
-        if (dropIfEmpty && finalContent === "") return msgs.slice(0, -1)
+        if (dropIfEmpty && visibleFinalContent === "") return msgs.slice(0, -1)
         msgs[msgs.length - 1] = { role: "assistant", content: finalContent, streaming: false }
       }
       return msgs
@@ -1291,6 +1292,8 @@ function AIConfigSection() {
     setProposedYaml(null)
     setPlaceholders([])
     setSecretValues({})
+    setYamlStreaming(false)
+    setStreamingYaml("")
 
     try {
       const res = await fetch(`${hubUrl}/api/settings/ai-config/stream`, {
@@ -1381,6 +1384,8 @@ function AIConfigSection() {
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       finalizeTypewriter(true)
+      setYamlStreaming(false)
+      setStreamingYaml("")
       setLoading(false)
       setTimeout(() => chatInputRef.current?.focus(), 0)
     }
@@ -1469,6 +1474,8 @@ function AIConfigSection() {
               setSecretValues({})
               setError(null)
               setApplySuccess(false)
+              setYamlStreaming(false)
+              setStreamingYaml("")
               sessionStorage.removeItem("ai-config-chat-history")
               sessionStorage.removeItem("ai-config-proposed-yaml")
               sessionStorage.removeItem("ai-config-backup-path")
@@ -1533,7 +1540,7 @@ function AIConfigSection() {
                   )}
                 >
                   {m.role === "assistant"
-                    ? <span>{renderMarkdown(m.content.replace(/\u258c$/, ""))}{m.streaming && <span className="animate-pulse">&#x258c;</span>}</span>
+                    ? <span>{renderMarkdown(stripYamlBlocks(m.content.replace(/\u258c$/, "")))}{m.streaming && <span className="animate-pulse">&#x258c;</span>}</span>
                     : m.content
                   }
                 </div>
