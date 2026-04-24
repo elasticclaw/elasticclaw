@@ -1,17 +1,17 @@
 "use client"
 
 import { useParams, useRouter } from "next/navigation"
-import { useEffect, useState, useCallback } from "react"
+import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "secrets" | "templates"
+type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "secrets" | "templates" | "ai-config"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "security", "integrations", "factories", "secrets", "templates"]
+const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "security", "integrations", "factories", "secrets", "templates", "ai-config"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -148,6 +148,7 @@ export default function SettingsSectionPage() {
     { id: "factories", label: "Factories", icon: Factory },
     { id: "secrets", label: "Secrets", icon: Lock },
     { id: "templates", label: "Templates", icon: LayoutTemplate },
+    { id: "ai-config", label: "Configure with AI", icon: Sparkles },
   ]
 
   return (
@@ -189,7 +190,7 @@ export default function SettingsSectionPage() {
         </aside>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-8 max-w-2xl">
+        <main className={section === "ai-config" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -216,6 +217,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "templates" && (
             <TemplatesSection />
+          )}
+          {section === "ai-config" && (
+            <AIConfigSection />
           )}
         </main>
       </div>
@@ -1008,6 +1012,695 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
     </div>
   )
 }
+
+// ─── AI Config Section ───────────────────────────────────────────────────────
+
+interface ChatMessage {
+  role: "user" | "assistant"
+  content: string
+  streaming?: boolean
+}
+
+function normalizeStoredMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    content: message.content.replace(/\u258c$/, ""),
+    streaming: false,
+  }
+}
+
+// Simple markdown renderer for assistant messages (no external deps)
+// Strip ```yaml ... ``` blocks and any open/incomplete yaml code block at the end.
+// Applied during streaming so YAML never appears in chat.
+function stripYamlBlocks(text: string): string {
+  // Remove complete yaml blocks
+  let result = text.replace(/```ya?ml[\s\S]*?```/gi, "")
+  // Remove any block that looks like a hub.yaml (complete)
+  result = result.replace(/```[\s\S]*?```/g, (m) => {
+    if (m.includes("claw_token:") || m.includes("url: http")) return ""
+    return m
+  })
+  // Remove incomplete/open yaml block at the end (streaming: block started but not closed)
+  result = result.replace(/```ya?ml[\s\S]*$/i, "")
+  // Also remove any open ``` block at the end if it looks like hub.yaml
+  result = result.replace(/```[\s\S]*$/g, (m) => {
+    if (m.includes("claw_token:") || m.includes("url:") || m.includes("token:")) return ""
+    return m
+  })
+  return result.trim()
+}
+
+function renderMarkdown(text: string): React.ReactNode[] {
+  // Split off fenced code blocks first
+  const parts = text.split(/(```[\s\S]*?```)/g)
+  const nodes: React.ReactNode[] = []
+  let globalKey = 0
+  parts.forEach((part, pi) => {
+    if (part.startsWith("```") && part.endsWith("```")) {
+      const inner = part.slice(3, -3).replace(/^[^\n]*\n/, "") // strip language hint
+      nodes.push(
+        <pre key={`cb-${pi}`} className="bg-muted rounded p-2 my-1 overflow-x-auto">
+          <code className="text-xs font-mono">{inner}</code>
+        </pre>
+      )
+      return
+    }
+    // Process line by line
+    const lines = part.split("\n")
+    const lineNodes: React.ReactNode[] = []
+    let ulItems: React.ReactNode[] = []
+    let ulKey = 0
+    const flushList = () => {
+      if (ulItems.length > 0) {
+        lineNodes.push(<ul key={`ul-${pi}-${ulKey++}`} className="list-disc pl-4 my-1 space-y-0.5">{ulItems}</ul>)
+        ulItems = []
+      }
+    }
+    lines.forEach((line, li) => {
+      const isList = /^[\-\*]\s+/.test(line)
+      if (!isList) flushList()
+      if (isList) {
+        ulItems.push(<li key={`li-${pi}-${li}`}>{inlineMarkdown(line.replace(/^[\-\*]\s+/, ""))}</li>)
+      } else if (line.trim() === "") {
+        lineNodes.push(<br key={`br-${pi}-${li}`} />)
+      } else {
+        lineNodes.push(<span key={`s-${pi}-${li}`}>{inlineMarkdown(line)}<br /></span>)
+      }
+    })
+    flushList()
+    nodes.push(...lineNodes.map((n, i) => React.cloneElement(n as React.ReactElement, { key: `n-${globalKey++}-${i}` })))
+  })
+  return nodes
+}
+
+function inlineMarkdown(text: string): React.ReactNode[] {
+  // Split on inline code, bold, italic
+  const tokens = text.split(/(``[^`]+``|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+  return tokens.map((tok, i) => {
+    if (tok.startsWith("**") && tok.endsWith("**")) return <strong key={i}>{tok.slice(2, -2)}</strong>
+    if (tok.startsWith("*") && tok.endsWith("*")) return <em key={i}>{tok.slice(1, -1)}</em>
+    if (tok.startsWith("`") && tok.endsWith("`")) return <code key={i} className="bg-muted px-1 rounded text-xs font-mono">{tok.slice(1, -1)}</code>
+    return tok
+  })
+}
+
+function YamlHighlight({ code }: { code: string }) {
+  const [html, setHtml] = useState<string | null>(null)
+  useEffect(() => {
+    if (!code) return
+    import("shiki").then(({ codeToHtml }) =>
+      codeToHtml(code, { lang: "yaml", theme: "github-dark" })
+    ).then(setHtml).catch(() => setHtml(null))
+  }, [code])
+  if (!html) return <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed whitespace-pre">{code}</pre>
+  return <div className="h-full overflow-auto p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_code]:!text-xs [&_code]:!font-mono" dangerouslySetInnerHTML={{ __html: html }} />
+}
+
+// Session storage keys
+const SS_CHAT_KEY = "ai-config-chat-history"
+const SS_YAML_KEY = "ai-config-proposed-yaml"
+const SS_BACKUP_KEY = "ai-config-backup-path"
+
+function extractYamlPlaceholders(yaml: string): string[] {
+  const seen = new Set<string>()
+  const placeholders: string[] = []
+  for (const match of yaml.matchAll(/__([A-Z0-9_]+)__/g)) {
+    const name = match[1]
+    if (name && !seen.has(name)) {
+      seen.add(name)
+      placeholders.push(name)
+    }
+  }
+  return placeholders
+}
+
+function AIConfigSection() {
+  // Load persisted state from sessionStorage — always start empty to avoid SSR hydration mismatch,
+  // then restore from sessionStorage after mount.
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [proposedYaml, setProposedYaml] = useState<string | null>(null)
+  const [currentConfig, setCurrentConfig] = useState<string | null>(null)
+  const [placeholders, setPlaceholders] = useState<string[]>([])
+  const [secretValues, setSecretValues] = useState<Record<string, string>>({})
+  const [backupPath, setBackupPath] = useState<string | null>(null)
+  // Restore from sessionStorage after mount (client-only)
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(SS_CHAT_KEY)
+      if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
+      const yaml = sessionStorage.getItem(SS_YAML_KEY)
+      if (yaml) {
+        setProposedYaml(yaml)
+        setPlaceholders(extractYamlPlaceholders(yaml))
+        setSecretValues({})
+      }
+      const backup = sessionStorage.getItem(SS_BACKUP_KEY)
+      if (backup) setBackupPath(backup)
+    } catch { /* ignore */ }
+  }, [])
+  const [applying, setApplying] = useState(false)
+  const [reverting, setReverting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [yamlStreaming, setYamlStreaming] = useState(false)
+  const [streamingYaml, setStreamingYaml] = useState<string>("")
+  const [applySuccess, setApplySuccess] = useState(false)
+  const [revealSecrets, setRevealSecrets] = useState(false)
+
+  // Typewriter queue
+  const typewriterQueueRef = useRef<string[]>([])
+  const typewriterIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const assistantContentRef = useRef<string>("")
+
+  const chatScrollRef = useRef<HTMLDivElement>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
+
+  const hubUrl = getHubUrl()
+  const token = () => sessionStorage.getItem("ec_hub_token") || ""
+
+  // Persist messages to sessionStorage on change
+  useEffect(() => {
+    try {
+      const persisted = messages.map(normalizeStoredMessage)
+      sessionStorage.setItem(SS_CHAT_KEY, JSON.stringify(persisted))
+    } catch {}
+  }, [messages])
+
+  // Persist proposedYaml
+  useEffect(() => {
+    try {
+      if (proposedYaml) sessionStorage.setItem(SS_YAML_KEY, proposedYaml)
+      else sessionStorage.removeItem(SS_YAML_KEY)
+    } catch {}
+  }, [proposedYaml])
+
+  // Persist backupPath
+  useEffect(() => {
+    try {
+      if (backupPath) sessionStorage.setItem(SS_BACKUP_KEY, backupPath)
+      else sessionStorage.removeItem(SS_BACKUP_KEY)
+    } catch {}
+  }, [backupPath])
+
+  // Load current config on mount (and when revealSecrets changes)
+  useEffect(() => {
+    const t = token()
+    const url = revealSecrets
+      ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+      : `${hubUrl}/api/settings/ai-config/current-config`
+    fetch(url, {
+      headers: { Authorization: `Bearer ${t}` },
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`Failed to fetch current config: ${r.status}`)
+        return r.text()
+      })
+      .then(text => setCurrentConfig(text))
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealSecrets])
+
+  // Load existing backup on mount (only if not already persisted)
+  useEffect(() => {
+    if (backupPath) return // already have one from sessionStorage
+    const t = token()
+    fetch(`${hubUrl}/api/settings/ai-config/backup`, {
+      headers: { Authorization: `Bearer ${t}` },
+    })
+      .then(r => r.json())
+      .then(d => { if (d.backup_path) setBackupPath(d.backup_path) })
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Auto-scroll chat to bottom when messages update
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+    }
+  }, [messages])
+
+  // Typewriter: drain queue at ~20ms intervals
+  const startTypewriter = useCallback(() => {
+    if (typewriterIntervalRef.current) return
+    typewriterIntervalRef.current = setInterval(() => {
+      const queue = typewriterQueueRef.current
+      if (queue.length === 0) return
+      // Drain up to a few chars per tick for smooth ~60fps feel
+      const chars = queue.splice(0, 3).join("")
+      assistantContentRef.current += chars
+      const current = stripYamlBlocks(assistantContentRef.current)
+      setMessages(prev => {
+        const msgs = [...prev]
+        const last = msgs[msgs.length - 1]
+        if (last?.role === "assistant" && last.streaming) {
+          msgs[msgs.length - 1] = { role: "assistant", content: current + "\u258c", streaming: true }
+        }
+        return msgs
+      })
+    }, 20)
+  }, [])
+
+  const stopTypewriter = useCallback(() => {
+    if (typewriterIntervalRef.current) {
+      clearInterval(typewriterIntervalRef.current)
+      typewriterIntervalRef.current = null
+    }
+  }, [])
+
+  useEffect(() => () => { stopTypewriter() }, [stopTypewriter])
+
+  // Drain remaining queue and finalize
+  const finalizeTypewriter = useCallback((dropIfEmpty = false) => {
+    stopTypewriter()
+    // Flush remaining queue synchronously
+    const remaining = typewriterQueueRef.current.join("")
+    typewriterQueueRef.current = []
+    assistantContentRef.current += remaining
+    const finalContent = assistantContentRef.current
+    const visibleFinalContent = stripYamlBlocks(finalContent)
+    setMessages(prev => {
+      const msgs = [...prev]
+      const last = msgs[msgs.length - 1]
+      if (last?.role === "assistant" && last.streaming) {
+        if (dropIfEmpty && visibleFinalContent.trim() === "") return msgs.slice(0, -1)
+        msgs[msgs.length - 1] = { role: "assistant", content: finalContent, streaming: false }
+      }
+      return msgs
+    })
+    assistantContentRef.current = ""
+  }, [stopTypewriter])
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return
+    const userMsg: ChatMessage = { role: "user", content: input.trim() }
+    const historyForRequest = [...messages]
+
+    // Reset typewriter state
+    stopTypewriter()
+    typewriterQueueRef.current = []
+    assistantContentRef.current = ""
+
+    setMessages(prev => [...prev, userMsg])
+    setInput("")
+    setLoading(true)
+    setError(null)
+    setProposedYaml(null)
+    setPlaceholders([])
+    setSecretValues({})
+    setYamlStreaming(false)
+    setStreamingYaml("")
+
+    try {
+      const res = await fetch(`${hubUrl}/api/settings/ai-config/stream`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMsg.content, history: historyForRequest }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let sseBuffer = ""
+
+      // Add streaming placeholder
+      setMessages(prev => [...prev, { role: "assistant", content: "", streaming: true }])
+      let inYamlBlock = false
+      let yamlFenceConsumed = false
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        sseBuffer += decoder.decode(value, { stream: true })
+
+        const lines = sseBuffer.split("\n")
+        sseBuffer = lines.pop() ?? ""
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue
+          let parsed: Record<string, unknown>
+          try { parsed = JSON.parse(line.slice(6)) } catch { continue }
+
+          if (parsed.type === "token") {
+            const tokenText = parsed.content as string
+            // Detect start of yaml block — redirect subsequent tokens to YAML panel
+            const fullSoFar = assistantContentRef.current + typewriterQueueRef.current.join("") + tokenText
+            if (!inYamlBlock && /```ya?ml/i.test(fullSoFar)) {
+              const queued = typewriterQueueRef.current.join("")
+              if (queued) {
+                typewriterQueueRef.current = []
+                assistantContentRef.current += queued
+              }
+              inYamlBlock = true
+              yamlFenceConsumed = false
+              setYamlStreaming(true)
+              setStreamingYaml("")
+            }
+            if (inYamlBlock) {
+              // Stream to YAML panel — strip the opening fence (may be mid-token or split across tokens)
+              let content = tokenText
+              if (!yamlFenceConsumed) {
+                const fenceMatch = content.match(/```ya?ml\n?/i)
+                if (fenceMatch && fenceMatch.index !== undefined) {
+                  // Fence is in this token — drop everything up to and including the fence
+                  content = content.slice(fenceMatch.index + fenceMatch[0].length)
+                  yamlFenceConsumed = true
+                } else {
+                  // Fence was the entire previous token — mark consumed and pass content through
+                  yamlFenceConsumed = true
+                }
+              }
+              // Strip closing fence if it appears at the end
+              const hadClosingFence = /```\s*$/.test(content)
+              content = content.replace(/```\s*$/, "")
+              if (content) setStreamingYaml(prev => prev + content)
+              if (hadClosingFence) inYamlBlock = false
+              // Still push to assistant content for stripping
+              assistantContentRef.current += tokenText
+            } else {
+              // Push to typewriter queue instead of directly to state
+              const chars = tokenText.split("")
+              typewriterQueueRef.current.push(...chars)
+              startTypewriter()
+            }
+            continue
+          } else if (parsed.type === "proposed_yaml") {
+            // YAML was already streamed live via token events — just finalize
+            const yaml = parsed.yaml as string
+            setYamlStreaming(false)
+            setProposedYaml(yaml)
+            setStreamingYaml("")
+            inYamlBlock = false
+          } else if (parsed.type === "placeholders") {
+            setPlaceholders(parsed.items as string[])
+            setSecretValues({})
+          } else if (parsed.type === "error") {
+            setError(parsed.content as string)
+            finalizeTypewriter(true)
+          } else if (parsed.type === "done") {
+            // finalizeTypewriter() called in finally
+          }
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Request failed")
+    } finally {
+      finalizeTypewriter(true)
+      setYamlStreaming(false)
+      setStreamingYaml("")
+      setLoading(false)
+      setTimeout(() => chatInputRef.current?.focus(), 0)
+    }
+  }
+
+  const applyConfig = async () => {
+    if (!proposedYaml) return
+    setApplying(true)
+    setError(null)
+    try {
+      const res = await fetch(`${hubUrl}/api/settings/ai-config/apply`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ proposed_yaml: proposedYaml, secrets: secretValues }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setBackupPath(data.backup_path)
+      const cfgUrl = revealSecrets
+        ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+        : `${hubUrl}/api/settings/ai-config/current-config`
+      fetch(cfgUrl, {
+        headers: { Authorization: `Bearer ${token()}` },
+      }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
+      setProposedYaml(null)
+      setPlaceholders([])
+      setSecretValues({})
+      setApplySuccess(true)
+      setTimeout(() => setApplySuccess(false), 5000)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Apply failed")
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const revertConfig = async () => {
+    if (!backupPath) return
+    setReverting(true)
+    setError(null)
+    try {
+      const res = await fetch(`${hubUrl}/api/settings/ai-config/revert`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ backup_path: backupPath }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setBackupPath(null)
+      setApplySuccess(false)
+      const cfgUrl = revealSecrets
+        ? `${hubUrl}/api/settings/ai-config/current-config?reveal=true`
+        : `${hubUrl}/api/settings/ai-config/current-config`
+      fetch(cfgUrl, {
+        headers: { Authorization: `Bearer ${token()}` },
+      }).then(r => r.text()).then(setCurrentConfig).catch(() => {})
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Revert failed")
+    } finally {
+      setReverting(false)
+    }
+  }
+
+  const allPlaceholdersFilled = placeholders.every(p => secretValues[p]?.trim())
+  const displayedYaml = yamlStreaming ? streamingYaml : (proposedYaml ?? currentConfig)
+  const yamlLabel = yamlStreaming ? "Generating config…" : (proposedYaml ? "Proposed config" : "Current config")
+
+  return (
+    <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
+      {/* Header */}
+      <div className="px-8 pt-6 pb-3 flex-none flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
+          <p className="text-sm text-muted-foreground">
+            Describe changes in plain English. The AI will propose a hub.yaml update for you to review and apply.
+          </p>
+        </div>
+        {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground shrink-0"
+            onClick={() => {
+              setMessages([])
+              setProposedYaml(null)
+              setPlaceholders([])
+              setSecretValues({})
+              setError(null)
+              setApplySuccess(false)
+              setYamlStreaming(false)
+              setStreamingYaml("")
+              sessionStorage.removeItem("ai-config-chat-history")
+              sessionStorage.removeItem("ai-config-proposed-yaml")
+              sessionStorage.removeItem("ai-config-backup-path")
+              setBackupPath(null)
+              setTimeout(() => chatInputRef.current?.focus(), 0)
+            }}
+          >
+            <RotateCcw className="size-3.5 mr-1.5" />
+            Start over
+          </Button>
+        )}
+      </div>
+
+      {/* Status bar */}
+      {(error || applySuccess || (backupPath && !applySuccess)) && (
+        <div className="px-8 flex-none mb-2">
+          {error && (
+            <p className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</p>
+          )}
+          {applySuccess && (
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-green-600">&check; Config applied.</p>
+              {backupPath && (
+                <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
+                  <RotateCcw className="size-3.5 mr-1" />
+                  {reverting ? "Reverting\u2026" : "Revert"}
+                </Button>
+              )}
+            </div>
+          )}
+          {backupPath && !applySuccess && (
+            <div className="flex items-center gap-3">
+              <p className="text-xs text-muted-foreground">Previous backup available.</p>
+              <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
+                <RotateCcw className="size-3.5 mr-1" />
+                {reverting ? "Reverting\u2026" : "Revert to backup"}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Two-column body — fills remaining height */}
+      <div className="flex flex-1 min-h-0 px-8 pb-6 gap-4">
+
+        {/* Left: chat */}
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 border border-border rounded-lg bg-muted/10 overflow-hidden">
+          {/* Scrollable message history */}
+          <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
+            {messages.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-8">
+                Describe the config change you&apos;d like to make.
+              </p>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+                <div
+                  className={cn(
+                    "max-w-[90%] rounded-xl px-3 py-2 text-sm break-words",
+                    m.role === "user"
+                      ? "bg-primary text-primary-foreground whitespace-pre-wrap"
+                      : "bg-muted text-foreground"
+                  )}
+                >
+                  {m.role === "assistant"
+                    ? <span>{renderMarkdown(stripYamlBlocks(m.content.replace(/\u258c$/, "")))}{m.streaming && <span className="animate-pulse">&#x258c;</span>}</span>
+                    : m.content
+                  }
+                </div>
+              </div>
+            ))}
+            {loading && (messages.length === 0 || messages[messages.length - 1]?.role === "user") && (
+              <div className="flex justify-start">
+                <div className="bg-muted rounded-xl px-3 py-2 text-sm text-muted-foreground">
+                  <span className="inline-flex gap-1">
+                    <span className="animate-bounce" style={{ animationDelay: "0ms" }}>&middot;</span>
+                    <span className="animate-bounce" style={{ animationDelay: "150ms" }}>&middot;</span>
+                    <span className="animate-bounce" style={{ animationDelay: "300ms" }}>&middot;</span>
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Input pinned to bottom */}
+          <div className="flex-none border-t border-border p-3 flex gap-2">
+            <Input
+              ref={chatInputRef}
+              placeholder="e.g. Add a Linear integration for workspace acme"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
+              disabled={loading}
+              className="flex-1 text-sm"
+              autoFocus
+            />
+            <Button size="icon" onClick={sendMessage} disabled={loading || !input.trim()}>
+              <Send className="size-4" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Right: config panel */}
+        <div className="flex flex-col min-h-0 gap-3 flex-1 min-w-0">
+          {/* Label + secret toggle */}
+          <div className="flex-none flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className={cn(
+                "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
+                yamlStreaming
+                  ? "bg-blue-500/15 text-blue-500 dark:text-blue-400"
+                  : proposedYaml
+                    ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                    : "bg-muted text-muted-foreground"
+              )}>
+                {yamlLabel}
+              </span>
+              {yamlStreaming && (
+                <span className="flex gap-0.5 items-center">
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:0ms]" />
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:150ms]" />
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:300ms]" />
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {revealSecrets && (
+                <span className="text-xs text-amber-500 font-medium">Secrets visible</span>
+              )}
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-6"
+                title={revealSecrets ? "Hide secrets" : "Reveal secrets"}
+                onClick={() => setRevealSecrets(v => !v)}
+              >
+                {revealSecrets ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+              </Button>
+            </div>
+          </div>
+
+          {/* YAML display — fills available height, scrollable */}
+          <div className={cn(
+            "flex-1 min-h-0 border rounded-lg overflow-hidden bg-[#0d1117] relative transition-colors duration-300",
+            yamlStreaming ? "border-blue-500/50" : "border-border"
+          )}>
+            {yamlStreaming
+              ? <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed text-gray-300 whitespace-pre">{streamingYaml}<span className="animate-pulse text-amber-400">&#x258c;</span></pre>
+              : displayedYaml
+                ? <YamlHighlight code={displayedYaml} />
+                : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
+            }
+          </div>
+
+          {/* Placeholder secret inputs */}
+          {proposedYaml && placeholders.length > 0 && (
+            <div className="flex-none border border-border rounded-lg p-3 space-y-2 bg-background">
+              <p className="text-xs font-medium text-muted-foreground">Fill in secrets</p>
+              {placeholders.map(ph => (
+                <div key={ph}>
+                  <label className="text-xs text-muted-foreground font-mono mb-1 block">{ph}</label>
+                  <Input
+                    type="password"
+                    placeholder={`Value for ${ph}`}
+                    value={secretValues[ph] || ""}
+                    onChange={e => setSecretValues(prev => ({ ...prev, [ph]: e.target.value }))}
+                    className="font-mono text-xs h-7"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Apply / Discard buttons */}
+          {proposedYaml && (
+            <div className="flex-none flex gap-2">
+              <Button
+                onClick={applyConfig}
+                disabled={applying || !allPlaceholdersFilled}
+                className="flex-1"
+              >
+                {applying ? "Applying\u2026" : "Apply"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={applying}
+                onClick={() => {
+                  setProposedYaml(null)
+                  setPlaceholders([])
+                  setSecretValues({})
+                }}
+              >
+                Discard
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 function TemplatesSection() {
   const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])
