@@ -21,6 +21,10 @@ import (
 // ─── GitHub OAuth session token ───────────────────────────────────────────────
 
 const githubSessionExpiry = 7 * 24 * time.Hour
+const (
+	oauthStateCookieName = "oauth_state"
+	oauthNextCookieName  = "oauth_next"
+)
 
 // githubSessionPayload is the signed payload stored in OAuth session tokens.
 type githubSessionPayload struct {
@@ -97,6 +101,22 @@ func (s *Server) ghBaseURL() string {
 	return "https://api.github.com"
 }
 
+// webSessionSecret returns the HMAC key used to sign/verify web session tokens.
+// Prefer the explicit hub token for backward compatibility, and otherwise fall
+// back to the GitHub OAuth client secret so OAuth-only deployments remain secure.
+func (s *Server) webSessionSecret() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.hubCfg.Token != "" {
+		return s.hubCfg.Token
+	}
+	if s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil {
+		return s.hubCfg.Auth.GitHubOAuth.ClientSecret
+	}
+	return ""
+}
+
 // handleGitHubOAuthStart redirects to GitHub OAuth authorize URL.
 func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
@@ -116,13 +136,23 @@ func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) 
 
 	// Store state in a short-lived cookie for CSRF protection
 	http.SetCookie(w, &http.Cookie{
-		Name:     "oauth_state",
+		Name:     oauthStateCookieName,
 		Value:    state,
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Path:     "/",
 	})
+	if next := r.URL.Query().Get("next"); next != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthNextCookieName,
+			Value:    base64.RawURLEncoding.EncodeToString([]byte(next)),
+			MaxAge:   600,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Path:     "/",
+		})
+	}
 
 	authURL := fmt.Sprintf(
 		"https://github.com/login/oauth/authorize?client_id=%s&scope=read:user,read:org&state=%s",
@@ -136,8 +166,8 @@ func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.hubCfg.Auth
-	secret := s.hubCfg.Token
 	s.mu.RUnlock()
+	secret := s.webSessionSecret()
 
 	if cfg == nil || cfg.GitHubOAuth == nil {
 		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
@@ -146,17 +176,30 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 	oauthCfg := cfg.GitHubOAuth
 
 	// Validate state
-	stateCookie, err := r.Cookie("oauth_state")
+	stateCookie, err := r.Cookie(oauthStateCookieName)
 	if err != nil || r.URL.Query().Get("state") != stateCookie.Value {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
+	var next string
+	if nextCookie, err := r.Cookie(oauthNextCookieName); err == nil {
+		if decoded, err := base64.RawURLEncoding.DecodeString(nextCookie.Value); err == nil {
+			next = string(decoded)
+		}
+	}
 	// Clear the state cookie
 	http.SetCookie(w, &http.Cookie{
-		Name:    "oauth_state",
-		Value:   "",
-		MaxAge:  -1,
-		Path:    "/",
+		Name:     oauthStateCookieName,
+		Value:    "",
+		MaxAge:   -1,
+		Path:     "/",
+		HttpOnly: true,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthNextCookieName,
+		Value:    "",
+		MaxAge:   -1,
+		Path:     "/",
 		HttpOnly: true,
 	})
 
@@ -194,6 +237,10 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "access denied", http.StatusForbidden)
 		return
 	}
+	if secret == "" {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	// Issue session token
 	sessionToken, err := signGitHubSession(secret, ghUser.Login, ghUser.Name, ghUser.AvatarURL)
@@ -206,7 +253,11 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 
 	// Redirect to the web UI login page with the token as a query param.
 	// The login page will pick it up, store it in sessionStorage, and redirect to home.
-	redirectURL := fmt.Sprintf("/login?github_token=%s", url.QueryEscape(sessionToken))
+	redirectQuery := url.Values{"github_token": []string{sessionToken}}
+	if next != "" {
+		redirectQuery.Set("next", next)
+	}
+	redirectURL := "/login?" + redirectQuery.Encode()
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 

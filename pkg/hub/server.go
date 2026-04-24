@@ -308,6 +308,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		s.mu.RLock()
 		hubToken := s.hubCfg.Token
 		s.mu.RUnlock()
+		sessionSecret := s.webSessionSecret()
 
 		// Accept shared hub token (existing behavior)
 		if token == hubToken {
@@ -316,11 +317,13 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Try GitHub OAuth session token
-		if payload, ok := verifyGitHubSession(hubToken, token); ok {
-			ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
-			r = r.WithContext(ctx)
-			next(w, r)
-			return
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -363,17 +366,17 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		s.mu.RLock()
-		hubToken := s.hubCfg.Token
-		s.mu.RUnlock()
-		if payload, ok := verifyGitHubSession(hubToken, token); ok {
-			jsonOK(w, map[string]string{
-				"login":       payload.Login,
-				"name":        payload.Name,
-				"avatar_url":  payload.AvatarURL,
-				"auth_method": "github",
-			})
-			return
+		sessionSecret := s.webSessionSecret()
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				jsonOK(w, map[string]string{
+					"login":       payload.Login,
+					"name":        payload.Name,
+					"avatar_url":  payload.AvatarURL,
+					"auth_method": "github",
+				})
+				return
+			}
 		}
 	}
 	jsonOK(w, map[string]string{"auth_method": "password"})

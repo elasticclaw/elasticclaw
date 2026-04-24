@@ -13,6 +13,7 @@ function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const next = searchParams.get("next") || "/"
+  const nextParam = searchParams.get("next")
 
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
@@ -85,7 +86,11 @@ function LoginForm() {
 
   function handleGitHubSignIn() {
     const hubUrl = getHubUrl()
-    const authUrl = hubUrl ? `${hubUrl}/api/auth/github` : "/api/auth/github"
+    const authURL = new URL(hubUrl ? `${hubUrl}/api/auth/github` : "/api/auth/github", window.location.origin)
+    if (nextParam) {
+      authURL.searchParams.set("next", nextParam)
+    }
+    const authUrl = authURL.toString()
     window.location.href = authUrl
   }
 
