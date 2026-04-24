@@ -1021,6 +1021,14 @@ interface ChatMessage {
   streaming?: boolean
 }
 
+function normalizeStoredMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    content: message.content.replace(/\u258c$/, ""),
+    streaming: false,
+  }
+}
+
 // Simple markdown renderer for assistant messages (no external deps)
 function renderMarkdown(text: string): React.ReactNode[] {
   // Split off fenced code blocks first
@@ -1096,7 +1104,7 @@ function AIConfigSection() {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
       const raw = sessionStorage.getItem(SS_CHAT_KEY)
-      return raw ? (JSON.parse(raw) as ChatMessage[]).map(m => ({ ...m, streaming: false })) : []
+      return raw ? (JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage) : []
     } catch { return [] }
   })
   const [input, setInput] = useState("")
@@ -1129,7 +1137,10 @@ function AIConfigSection() {
 
   // Persist messages to sessionStorage on change
   useEffect(() => {
-    try { sessionStorage.setItem(SS_CHAT_KEY, JSON.stringify(messages)) } catch {}
+    try {
+      const persisted = messages.map(normalizeStoredMessage)
+      sessionStorage.setItem(SS_CHAT_KEY, JSON.stringify(persisted))
+    } catch {}
   }, [messages])
 
   // Persist proposedYaml
@@ -1213,6 +1224,8 @@ function AIConfigSection() {
       typewriterIntervalRef.current = null
     }
   }, [])
+
+  useEffect(() => () => { stopTypewriter() }, [stopTypewriter])
 
   // Drain remaining queue and finalize
   const finalizeTypewriter = useCallback((dropIfEmpty = false) => {
