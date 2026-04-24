@@ -1309,6 +1309,7 @@ function AIConfigSection() {
       // Add streaming placeholder
       setMessages(prev => [...prev, { role: "assistant", content: "", streaming: true }])
       let inYamlBlock = false
+      let yamlFenceConsumed = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -1329,13 +1330,27 @@ function AIConfigSection() {
             const fullSoFar = assistantContentRef.current + tokenText
             if (!inYamlBlock && /```ya?ml/i.test(fullSoFar)) {
               inYamlBlock = true
+              yamlFenceConsumed = false
               setYamlStreaming(true)
               setStreamingYaml("")
             }
             if (inYamlBlock) {
-              // Stream to YAML panel — strip the opening fence
-              const cleaned = tokenText.replace(/^```ya?ml\n?/i, "")
-              if (cleaned) setStreamingYaml(prev => prev + cleaned)
+              // Stream to YAML panel — strip the opening fence (may be mid-token or split across tokens)
+              let content = tokenText
+              if (!yamlFenceConsumed) {
+                const fenceMatch = content.match(/```ya?ml\n?/i)
+                if (fenceMatch && fenceMatch.index !== undefined) {
+                  // Fence is in this token — drop everything up to and including the fence
+                  content = content.slice(fenceMatch.index + fenceMatch[0].length)
+                  yamlFenceConsumed = true
+                } else {
+                  // Fence was the entire previous token — mark consumed and pass content through
+                  yamlFenceConsumed = true
+                }
+              }
+              // Strip closing fence if it appears at the end
+              content = content.replace(/```\s*$/, "")
+              if (content) setStreamingYaml(prev => prev + content)
               // Still push to assistant content for stripping
               assistantContentRef.current += tokenText
             } else {
@@ -1432,7 +1447,7 @@ function AIConfigSection() {
 
   const allPlaceholdersFilled = placeholders.every(p => secretValues[p]?.trim())
   const displayedYaml = yamlStreaming ? streamingYaml : (proposedYaml ?? currentConfig)
-  const yamlLabel = (proposedYaml || yamlStreaming) ? "Proposed config" : "Current config"
+  const yamlLabel = yamlStreaming ? "Generating config…" : (proposedYaml ? "Proposed config" : "Current config")
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
@@ -1561,14 +1576,25 @@ function AIConfigSection() {
         <div className="flex flex-col min-h-0 gap-3 flex-1 min-w-0">
           {/* Label + secret toggle */}
           <div className="flex-none flex items-center justify-between gap-2">
-            <span className={cn(
-              "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
-              proposedYaml
-                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
-                : "bg-muted text-muted-foreground"
-            )}>
-              {yamlLabel}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className={cn(
+                "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
+                yamlStreaming
+                  ? "bg-blue-500/15 text-blue-500 dark:text-blue-400"
+                  : proposedYaml
+                    ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                    : "bg-muted text-muted-foreground"
+              )}>
+                {yamlLabel}
+              </span>
+              {yamlStreaming && (
+                <span className="flex gap-0.5 items-center">
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:0ms]" />
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:150ms]" />
+                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:300ms]" />
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               {revealSecrets && (
                 <span className="text-xs text-amber-500 font-medium">Secrets visible</span>
@@ -1586,7 +1612,10 @@ function AIConfigSection() {
           </div>
 
           {/* YAML display — fills available height, scrollable */}
-          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117] relative">
+          <div className={cn(
+            "flex-1 min-h-0 border rounded-lg overflow-hidden bg-[#0d1117] relative transition-colors duration-300",
+            yamlStreaming ? "border-blue-500/50" : "border-border"
+          )}>
             {yamlStreaming
               ? <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed text-gray-300 whitespace-pre">{streamingYaml}<span className="animate-pulse text-amber-400">&#x258c;</span></pre>
               : displayedYaml

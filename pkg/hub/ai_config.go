@@ -220,6 +220,10 @@ func (s *Server) handleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "backup file is corrupt: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := validateHubConfig(&restoredCfg); err != nil {
+		http.Error(w, "backup validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := config.SaveHubConfigNoSecretMerge(&restoredCfg); err != nil {
 		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
@@ -521,20 +525,14 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
 	}
 	if firstKey != nil {
-		switch firstKey.Provider {
-		case "anthropic":
-			return streamAnthropic(ctx, firstKey.APIKey, systemPrompt, msgs, onToken)
-		case "openai":
-			return streamOpenAI(ctx, firstKey.APIKey, systemPrompt, msgs, onToken)
-		default:
-			// Unsupported streaming provider — fall back to blocking call
-			reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
-			if err != nil {
-				return err
-			}
-			onToken(reply)
-			return nil
+		// firstKey.Provider is neither "anthropic" nor "openai" (those paths already
+		// returned above). Fall back to blocking call for unsupported providers.
+		reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
+		if err != nil {
+			return err
 		}
+		onToken(reply)
+		return nil
 	}
 	_ = defaultModel
 	return fmt.Errorf("no LLM keys configured")
