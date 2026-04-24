@@ -1030,13 +1030,24 @@ function normalizeStoredMessage(message: ChatMessage): ChatMessage {
 }
 
 // Simple markdown renderer for assistant messages (no external deps)
-// Strip ```yaml ... ``` blocks from text (they go to the right panel, not chat)
+// Strip ```yaml ... ``` blocks and any open/incomplete yaml code block at the end.
+// Applied during streaming so YAML never appears in chat.
 function stripYamlBlocks(text: string): string {
-  return text.replace(/```ya?ml[\s\S]*?```/gi, "").replace(/```[\s\S]*?```/g, (m) => {
-    // Only strip if the block looks like a full hub.yaml (has 'url:' and 'claw_token:')
+  // Remove complete yaml blocks
+  let result = text.replace(/```ya?ml[\s\S]*?```/gi, "")
+  // Remove any block that looks like a hub.yaml (complete)
+  result = result.replace(/```[\s\S]*?```/g, (m) => {
     if (m.includes("claw_token:") || m.includes("url: http")) return ""
     return m
-  }).trim()
+  })
+  // Remove incomplete/open yaml block at the end (streaming: block started but not closed)
+  result = result.replace(/```ya?ml[\s\S]*$/i, "")
+  // Also remove any open ``` block at the end if it looks like hub.yaml
+  result = result.replace(/```[\s\S]*$/g, (m) => {
+    if (m.includes("claw_token:") || m.includes("url:") || m.includes("token:")) return ""
+    return m
+  })
+  return result.trim()
 }
 
 function renderMarkdown(text: string): React.ReactNode[] {
