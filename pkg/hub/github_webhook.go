@@ -568,8 +568,8 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	if !hasfactory {
 		tags = append(tags, "factory:"+factory.Name)
 	}
-	// Tag with GitHub PR URL for identification
-	tags = append(tags, "github_pr:"+prURL)
+	// Tag with compact GitHub PR ref: owner/repo#number
+	tags = append(tags, fmt.Sprintf("github_pr:%s#%d", repoFullName, prNumber))
 	tagsJSON, _ := json.Marshal(tags)
 
 	clawColor := factory.Color
