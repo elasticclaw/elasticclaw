@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -164,5 +165,68 @@ func TestValidateHubConfig_RequiresToken(t *testing.T) {
 	}
 	if err.Error() != "token is required" {
 		t.Fatalf("validateHubConfig() error = %q, want %q", err.Error(), "token is required")
+	}
+}
+
+func TestCheckMaskedValues_RejectsMaskedIntegrationAndFactorySecrets(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *types.HubConfig
+		wantErr string
+	}{
+		{
+			name: "linear token",
+			cfg: &types.HubConfig{
+				Integrations: &types.IntegrationsConfig{
+					Linear: []*types.LinearIntegrationConfig{
+						{Workspace: "acme", Token: "***"},
+					},
+				},
+			},
+			wantErr: "integrations.linear[0] (acme): token contains unresolved mask value",
+		},
+		{
+			name: "linear webhook secret",
+			cfg: &types.HubConfig{
+				Integrations: &types.IntegrationsConfig{
+					Linear: []*types.LinearIntegrationConfig{
+						{Workspace: "acme", WebhookSecret: "***"},
+					},
+				},
+			},
+			wantErr: "integrations.linear[0] (acme): webhook_secret contains unresolved mask value",
+		},
+		{
+			name: "shortcut token",
+			cfg: &types.HubConfig{
+				Integrations: &types.IntegrationsConfig{
+					Shortcut: []*types.ShortcutIntegrationConfig{
+						{Workspace: "ops", Token: "***"},
+					},
+				},
+			},
+			wantErr: "integrations.shortcut[0] (ops): token contains unresolved mask value",
+		},
+		{
+			name: "factory webhook secret",
+			cfg: &types.HubConfig{
+				Factories: []*types.FactoryConfig{
+					{Name: "factory-a", WebhookSecret: "***"},
+				},
+			},
+			wantErr: "factories[0] (factory-a): webhook_secret contains unresolved mask value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkMaskedValues(tt.cfg)
+			if err == nil {
+				t.Fatalf("checkMaskedValues() error = nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("checkMaskedValues() error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }

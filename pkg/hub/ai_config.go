@@ -1244,6 +1244,35 @@ func checkMaskedValues(cfg *types.HubConfig) error {
 			return fmt.Errorf("github[%d]: private_key_pem contains unresolved mask value", i)
 		}
 	}
+	if cfg.Integrations != nil {
+		for i, linear := range cfg.Integrations.Linear {
+			if linear == nil {
+				continue
+			}
+			if linear.Token == mask {
+				return fmt.Errorf("integrations.linear[%d] (%s): token contains unresolved mask value", i, linear.Workspace)
+			}
+			if linear.WebhookSecret == mask {
+				return fmt.Errorf("integrations.linear[%d] (%s): webhook_secret contains unresolved mask value", i, linear.Workspace)
+			}
+		}
+		for i, shortcut := range cfg.Integrations.Shortcut {
+			if shortcut == nil {
+				continue
+			}
+			if shortcut.Token == mask {
+				return fmt.Errorf("integrations.shortcut[%d] (%s): token contains unresolved mask value", i, shortcut.Workspace)
+			}
+		}
+	}
+	for i, factory := range cfg.Factories {
+		if factory == nil {
+			continue
+		}
+		if factory.WebhookSecret == mask {
+			return fmt.Errorf("factories[%d] (%s): webhook_secret contains unresolved mask value", i, factory.Name)
+		}
+	}
 	for k, v := range cfg.Secrets {
 		if v == mask {
 			return fmt.Errorf("secrets[%q] contains unresolved mask value", k)

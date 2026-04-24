@@ -1121,6 +1121,19 @@ const SS_CHAT_KEY = "ai-config-chat-history"
 const SS_YAML_KEY = "ai-config-proposed-yaml"
 const SS_BACKUP_KEY = "ai-config-backup-path"
 
+function extractYamlPlaceholders(yaml: string): string[] {
+  const seen = new Set<string>()
+  const placeholders: string[] = []
+  for (const match of yaml.matchAll(/__([A-Z0-9_]+)__/g)) {
+    const name = match[1]
+    if (name && !seen.has(name)) {
+      seen.add(name)
+      placeholders.push(name)
+    }
+  }
+  return placeholders
+}
+
 function AIConfigSection() {
   // Load persisted state from sessionStorage — always start empty to avoid SSR hydration mismatch,
   // then restore from sessionStorage after mount.
@@ -1138,7 +1151,11 @@ function AIConfigSection() {
       const raw = sessionStorage.getItem(SS_CHAT_KEY)
       if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
       const yaml = sessionStorage.getItem(SS_YAML_KEY)
-      if (yaml) setProposedYaml(yaml)
+      if (yaml) {
+        setProposedYaml(yaml)
+        setPlaceholders(extractYamlPlaceholders(yaml))
+        setSecretValues({})
+      }
       const backup = sessionStorage.getItem(SS_BACKUP_KEY)
       if (backup) setBackupPath(backup)
     } catch { /* ignore */ }
