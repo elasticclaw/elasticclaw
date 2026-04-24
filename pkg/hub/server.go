@@ -809,7 +809,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
 				var clawTags []string
 				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-				if !canViewClaw(accessCfg, ghLogin, clawTags) {
+				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
@@ -864,7 +864,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err == nil {
 				var clawTags []string
 				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-				if !canViewClaw(accessCfg, ghLogin, clawTags) {
+				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
