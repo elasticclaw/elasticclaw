@@ -1300,7 +1300,7 @@ function AIConfigSection() {
         </div>
 
         {/* Right: config panel */}
-        <div className="flex flex-col min-h-0 gap-3" style={{ width: "22rem" }}>
+        <div className="flex flex-col min-h-0 gap-3 flex-1 min-w-0">
           {/* Label */}
           <div className="flex-none">
             <span className={cn(
