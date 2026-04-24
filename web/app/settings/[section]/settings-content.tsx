@@ -1021,6 +1021,18 @@ interface ChatMessage {
   streaming?: boolean
 }
 
+function YamlHighlight({ code }: { code: string }) {
+  const [html, setHtml] = useState<string | null>(null)
+  useEffect(() => {
+    if (!code) return
+    import("shiki").then(({ codeToHtml }) =>
+      codeToHtml(code, { lang: "yaml", theme: "github-dark" })
+    ).then(setHtml).catch(() => setHtml(null))
+  }, [code])
+  if (!html) return <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed whitespace-pre">{code}</pre>
+  return <div className="h-full overflow-auto p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_code]:!text-xs [&_code]:!font-mono" dangerouslySetInnerHTML={{ __html: html }} />
+}
+
 function AIConfigSection() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
@@ -1314,10 +1326,11 @@ function AIConfigSection() {
           </div>
 
           {/* YAML display — fills available height, scrollable */}
-          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-muted/20">
-            <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed">
-              {displayedYaml ?? "Loading\u2026"}
-            </pre>
+          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117]">
+            {displayedYaml
+              ? <YamlHighlight code={displayedYaml} />
+              : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
+            }
           </div>
 
           {/* Placeholder secret inputs */}
