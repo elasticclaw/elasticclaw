@@ -1058,7 +1058,10 @@ function AIConfigSection() {
     fetch(`${hubUrl}/api/settings/ai-config/current-config`, {
       headers: { Authorization: `Bearer ${t}` },
     })
-      .then(r => r.text())
+      .then(r => {
+        if (!r.ok) throw new Error(`Failed to fetch current config: ${r.status}`)
+        return r.text()
+      })
       .then(text => setCurrentConfig(text))
       .catch(() => {})
 
