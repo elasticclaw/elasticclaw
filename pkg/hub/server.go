@@ -197,6 +197,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/files/view/", s.withAuth(s.handleFileView))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
+	// AI Config
+	mux.HandleFunc("/api/settings/ai-config", s.withWebAuth(s.handleAIConfig))
+	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAuth(s.handleAIConfigApply))
+	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAuth(s.handleAIConfigRevert))
+	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAuth(s.handleAIConfigBackup))
+
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
