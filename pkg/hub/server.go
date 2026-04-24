@@ -197,6 +197,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/files/view/", s.withAuth(s.handleFileView))
 	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
+	// AI Config
+	// AI Config — register sub-paths before the bare path so Go's exact-match
+	// ServeMux routes them correctly (avoids 404 on specific sub-paths).
+	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAuth(s.handleAIConfigApply))
+	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAuth(s.handleAIConfigRevert))
+	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAuth(s.handleAIConfigBackup))
+	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAuth(s.handleAIConfigStream))
+	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAuth(s.handleAIConfigCurrentConfig))
+	mux.HandleFunc("/api/settings/ai-config", s.withWebAuth(s.handleAIConfig))
+
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
