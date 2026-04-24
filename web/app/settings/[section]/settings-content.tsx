@@ -1580,16 +1580,13 @@ function AIConfigSection() {
           </div>
 
           {/* YAML display — fills available height, scrollable */}
-          <div className={cn("flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117] relative transition-opacity", yamlStreaming && "opacity-70")}>
-            {displayedYaml
-              ? <YamlHighlight code={displayedYaml} />
-              : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
+          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117] relative">
+            {yamlStreaming
+              ? <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed text-gray-300 whitespace-pre">{streamingYaml}<span className="animate-pulse text-amber-400">&#x258c;</span></pre>
+              : displayedYaml
+                ? <YamlHighlight code={displayedYaml} />
+                : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
             }
-            {yamlStreaming && (
-              <div className="absolute inset-0 pointer-events-none">
-                <span className="absolute bottom-3 right-3 text-xs text-amber-400 animate-pulse font-mono">writing…</span>
-              </div>
-            )}
           </div>
 
           {/* Placeholder secret inputs */}
