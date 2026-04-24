@@ -903,8 +903,8 @@ func maskYAMLNodeValue(node *yaml.Node) {
 	node.Content = nil
 }
 
-// extractYAMLBlock extracts the content of the first ```yaml ... ``` block.
-var yamlBlockRe = regexp.MustCompile("(?s)```yaml\n(.*?)```")
+// extractYAMLBlock extracts the content of the first ```yaml/yml/YAML ... ``` block (case-insensitive).
+var yamlBlockRe = regexp.MustCompile("(?si)```ya?ml\n(.*?)```")
 
 func extractYAMLBlock(s string) string {
 	m := yamlBlockRe.FindStringSubmatch(s)
