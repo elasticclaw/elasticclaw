@@ -1328,7 +1328,7 @@ function AIConfigSection() {
           if (parsed.type === "token") {
             const tokenText = parsed.content as string
             // Detect start of yaml block — redirect subsequent tokens to YAML panel
-            const fullSoFar = assistantContentRef.current + tokenText
+            const fullSoFar = assistantContentRef.current + typewriterQueueRef.current.join("") + tokenText
             if (!inYamlBlock && /```ya?ml/i.test(fullSoFar)) {
               inYamlBlock = true
               yamlFenceConsumed = false
@@ -1361,7 +1361,6 @@ function AIConfigSection() {
               const chars = tokenText.split("")
               typewriterQueueRef.current.push(...chars)
               startTypewriter()
-              assistantContentRef.current += tokenText
             }
             continue
           } else if (parsed.type === "proposed_yaml") {
