@@ -104,3 +104,50 @@ github:
 		t.Fatalf("app_id 202 private_key_pem = %q, want %q", gotByAppID[202], "private-key-202")
 	}
 }
+
+func TestSubstitutePlaceholders_PreservesYAMLMetacharactersInSecrets(t *testing.T) {
+	proposed := `
+token: __HUB_TOKEN__
+`
+	secrets := map[string]string{
+		"HUB_TOKEN": "sk-abc123 #note",
+	}
+
+	substituted, err := substitutePlaceholders(proposed, secrets)
+	if err != nil {
+		t.Fatalf("substitutePlaceholders() error = %v", err)
+	}
+
+	var restored types.HubConfig
+	if err := yaml.Unmarshal([]byte(substituted), &restored); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	if restored.Token != "sk-abc123 #note" {
+		t.Fatalf("token = %q, want %q", restored.Token, "sk-abc123 #note")
+	}
+}
+
+func TestSubstitutePlaceholders_PreservesNewlinesInSecrets(t *testing.T) {
+	proposed := `
+secrets:
+  webhook_secret: __WEBHOOK_SECRET__
+`
+	secrets := map[string]string{
+		"WEBHOOK_SECRET": "line1\nline2: value #tag",
+	}
+
+	substituted, err := substitutePlaceholders(proposed, secrets)
+	if err != nil {
+		t.Fatalf("substitutePlaceholders() error = %v", err)
+	}
+
+	var restored types.HubConfig
+	if err := yaml.Unmarshal([]byte(substituted), &restored); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	if restored.Secrets["webhook_secret"] != "line1\nline2: value #tag" {
+		t.Fatalf("webhook_secret = %q, want %q", restored.Secrets["webhook_secret"], "line1\nline2: value #tag")
+	}
+}

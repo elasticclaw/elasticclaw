@@ -125,7 +125,11 @@ func (s *Server) handleAIConfigApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Substitute placeholders
-	finalYAML := substitutePlaceholders(req.ProposedYAML, req.Secrets)
+	finalYAML, err := substitutePlaceholders(req.ProposedYAML, req.Secrets)
+	if err != nil {
+		http.Error(w, "invalid yaml: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Restore masked secrets (*** from sanitized config) from disk before parsing.
 	diskCfg, err := config.LoadHubConfig()
@@ -895,18 +899,44 @@ func extractPlaceholders(s string) []string {
 	return result
 }
 
-// substitutePlaceholders replaces __NAME__ with provided secret values.
-func substitutePlaceholders(yamlStr string, secrets map[string]string) string {
-	return placeholderRe.ReplaceAllStringFunc(yamlStr, func(match string) string {
-		m := placeholderRe.FindStringSubmatch(match)
-		if len(m) < 2 {
+// substitutePlaceholders replaces __NAME__ placeholders with provided values.
+func substitutePlaceholders(yamlStr string, secrets map[string]string) (string, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlStr), &root); err != nil {
+		return "", err
+	}
+
+	substitutePlaceholdersInYAMLNode(&root, secrets)
+
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func substitutePlaceholdersInYAMLNode(node *yaml.Node, secrets map[string]string) {
+	if node == nil {
+		return
+	}
+
+	switch node.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode, yaml.MappingNode:
+		for _, child := range node.Content {
+			substitutePlaceholdersInYAMLNode(child, secrets)
+		}
+	case yaml.ScalarNode:
+		node.Value = placeholderRe.ReplaceAllStringFunc(node.Value, func(match string) string {
+			m := placeholderRe.FindStringSubmatch(match)
+			if len(m) < 2 {
+				return match
+			}
+			if val, ok := secrets[m[1]]; ok {
+				return val
+			}
 			return match
-		}
-		if val, ok := secrets[m[1]]; ok {
-			return val
-		}
-		return match
-	})
+		})
+	}
 }
 
 func restoreMaskedSecretsFromDisk(yamlStr string, diskCfg *types.HubConfig) (string, error) {
