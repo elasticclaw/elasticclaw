@@ -466,12 +466,14 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		}
 	}
 
-	// Build BOOTSTRAP context — for GitHub PR claws, use only the PR context.
-	// Don't append the template BOOTSTRAP.md since it's Linear-specific.
-	// The pipeline entry inject provides the actual instructions.
+	// Write PR context to CONTEXT.md only — NOT BOOTSTRAP.md.
+	// BOOTSTRAP.md is read by OpenClaw on every session start (AGENTS.md convention),
+	// which causes the claw to re-read it as a checklist on every reconnect.
+	// CONTEXT.md is a one-time reference the pipeline inject can point to.
 	prCtx := buildGitHubPRContext(pr)
-	templateFiles["BOOTSTRAP.md"] = prCtx
 	templateFiles["CONTEXT.md"] = prCtx
+	// Keep BOOTSTRAP.md from the template if it exists (it won't for most github factories)
+	// but don't overwrite it with PR context.
 
 	// Determine claw name: "repo#123" pattern
 	repoShort := repoFullName
