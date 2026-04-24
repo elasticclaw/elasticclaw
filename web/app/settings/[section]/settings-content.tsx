@@ -1143,6 +1143,10 @@ function AIConfigSection() {
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [yamlStreaming, setYamlStreaming] = useState(false)
+  const [streamingYaml, setStreamingYaml] = useState<string>("")
+  const yamlQueueRef = useRef<string[]>([])
+  const yamlIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [applySuccess, setApplySuccess] = useState(false)
   const [revealSecrets, setRevealSecrets] = useState(false)
 
@@ -1321,7 +1325,25 @@ function AIConfigSection() {
             typewriterQueueRef.current.push(...chars)
             startTypewriter()
           } else if (parsed.type === "proposed_yaml") {
-            setProposedYaml(parsed.yaml as string)
+            // Typewriter-animate the YAML into the right panel
+            const yaml = parsed.yaml as string
+            setYamlStreaming(true)
+            setStreamingYaml("")
+            yamlQueueRef.current = yaml.split("")
+            if (yamlIntervalRef.current) clearInterval(yamlIntervalRef.current)
+            yamlIntervalRef.current = setInterval(() => {
+              const q = yamlQueueRef.current
+              if (q.length === 0) {
+                clearInterval(yamlIntervalRef.current!)
+                yamlIntervalRef.current = null
+                setYamlStreaming(false)
+                setProposedYaml(yaml)
+                setStreamingYaml("")
+                return
+              }
+              const chars = q.splice(0, 8).join("")
+              setStreamingYaml(prev => prev + chars)
+            }, 16)
           } else if (parsed.type === "placeholders") {
             setPlaceholders(parsed.items as string[])
             setSecretValues({})
@@ -1400,8 +1422,8 @@ function AIConfigSection() {
   }
 
   const allPlaceholdersFilled = placeholders.every(p => secretValues[p]?.trim())
-  const displayedYaml = proposedYaml ?? currentConfig
-  const yamlLabel = proposedYaml ? "Proposed config" : "Current config"
+  const displayedYaml = yamlStreaming ? streamingYaml : (proposedYaml ?? currentConfig)
+  const yamlLabel = (proposedYaml || yamlStreaming) ? "Proposed config" : "Current config"
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
@@ -1555,11 +1577,16 @@ function AIConfigSection() {
           </div>
 
           {/* YAML display — fills available height, scrollable */}
-          <div className="flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117]">
+          <div className={cn("flex-1 min-h-0 border border-border rounded-lg overflow-hidden bg-[#0d1117] relative transition-opacity", yamlStreaming && "opacity-70")}>
             {displayedYaml
               ? <YamlHighlight code={displayedYaml} />
               : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
             }
+            {yamlStreaming && (
+              <div className="absolute inset-0 pointer-events-none">
+                <span className="absolute bottom-3 right-3 text-xs text-amber-400 animate-pulse font-mono">writing…</span>
+              </div>
+            )}
           </div>
 
           {/* Placeholder secret inputs */}
