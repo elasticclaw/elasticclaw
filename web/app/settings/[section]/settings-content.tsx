@@ -1082,6 +1082,20 @@ function AIConfigSection() {
     if (!input.trim() || loading) return
     const userMsg: ChatMessage = { role: "user", content: input.trim() }
     const historyForRequest = [...messages]
+    let assistantContent = ""
+
+    const finalizeAssistantMessage = (dropIfEmpty = false) => {
+      setMessages(prev => {
+        const msgs = [...prev]
+        const last = msgs[msgs.length - 1]
+        if (last?.role === "assistant" && last.streaming) {
+          if (dropIfEmpty && assistantContent === "") return msgs.slice(0, -1)
+          msgs[msgs.length - 1] = { role: "assistant", content: assistantContent, streaming: false }
+        }
+        return msgs
+      })
+    }
+
     setMessages(prev => [...prev, userMsg])
     setInput("")
     setLoading(true)
@@ -1100,7 +1114,6 @@ function AIConfigSection() {
 
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
-      let assistantContent = ""
       let sseBuffer = ""
 
       // Add streaming placeholder
@@ -1136,26 +1149,14 @@ function AIConfigSection() {
             setSecretValues({})
           } else if (parsed.type === "error") {
             setError(parsed.content as string)
+            finalizeAssistantMessage(true)
           } else if (parsed.type === "done") {
-            setMessages(prev => {
-              const msgs = [...prev]
-              const last = msgs[msgs.length - 1]
-              if (last?.role === "assistant") {
-                msgs[msgs.length - 1] = { role: "assistant", content: assistantContent, streaming: false }
-              }
-              return msgs
-            })
+            finalizeAssistantMessage()
           }
         }
       }
     } catch (e) {
-      setMessages(prev => {
-        const msgs = [...prev]
-        if (msgs[msgs.length - 1]?.streaming && msgs[msgs.length - 1]?.content === "") {
-          return msgs.slice(0, -1)
-        }
-        return msgs
-      })
+      finalizeAssistantMessage(true)
       setError(e instanceof Error ? e.message : "Request failed")
     } finally {
       setLoading(false)
@@ -1218,7 +1219,7 @@ function AIConfigSection() {
   const yamlLabel = proposedYaml ? "Proposed config" : "Current config"
 
   return (
-    <div className="-mx-8 -mt-8 flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
+    <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
       {/* Header */}
       <div className="px-8 pt-6 pb-3 flex-none">
         <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
