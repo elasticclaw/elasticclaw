@@ -761,6 +761,9 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, e
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Anthropic error %d: %s", resp.StatusCode, string(data))
+	}
 	var ar anthropicResp
 	if err := json.Unmarshal(data, &ar); err != nil {
 		return "", fmt.Errorf("invalid Anthropic response: %w", err)
@@ -819,6 +822,9 @@ func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage) (string, erro
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OpenAI error %d: %s", resp.StatusCode, string(data))
+	}
 	var or openAIResp
 	if err := json.Unmarshal(data, &or); err != nil {
 		return "", fmt.Errorf("invalid OpenAI response: %w", err)
