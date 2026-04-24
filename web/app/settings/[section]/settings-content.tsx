@@ -1148,8 +1148,6 @@ function AIConfigSection() {
   const [error, setError] = useState<string | null>(null)
   const [yamlStreaming, setYamlStreaming] = useState(false)
   const [streamingYaml, setStreamingYaml] = useState<string>("")
-  const yamlQueueRef = useRef<string[]>([])
-  const yamlIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [applySuccess, setApplySuccess] = useState(false)
   const [revealSecrets, setRevealSecrets] = useState(false)
 
