@@ -135,6 +135,48 @@ func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 	}
 }
 
+func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Auth: &types.AuthConfig{
+			Access: &types.AccessConfig{
+				ViewRequiresTags:     []string{"owner={user}"},
+				InteractRequiresTags: []string{"owner={user}"},
+			},
+		},
+	}, "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-1", "test-tenant-id", "claw 1", `["owner=alice"]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "prs", method: http.MethodGet, path: "/api/claws/claw-1/prs"},
+		{name: "settings get", method: http.MethodGet, path: "/api/claws/claw-1/settings"},
+		{name: "settings patch", method: http.MethodPatch, path: "/api/claws/claw-1/settings", body: `{"autoFixCI":false}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+			req = req.WithContext(context.WithValue(req.Context(), ctxGitHubLoginKey{}, "bob"))
+			rec := httptest.NewRecorder()
+
+			s.handleClawSubresource(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+			}
+		})
+	}
+}
+
 func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",
