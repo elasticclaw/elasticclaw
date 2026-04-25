@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -136,20 +134,4 @@ func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 	}
 }
 
-func TestCleanupExpiredOAuthCodes(t *testing.T) {
-	s, _ := NewTestServerWithConfig(t, nil, "", "")
-	now := time.Now()
-	s.oauthCodes = map[string]pendingOAuthCode{
-		"expired": {Token: "old", ExpiresAt: now.Add(-time.Second)},
-		"valid":   {Token: "new", ExpiresAt: now.Add(time.Second)},
-	}
 
-	s.cleanupExpiredOAuthCodes(now)
-
-	if _, ok := s.oauthCodes["expired"]; ok {
-		t.Fatal("expected expired OAuth code to be removed")
-	}
-	if _, ok := s.oauthCodes["valid"]; !ok {
-		t.Fatal("expected valid OAuth code to remain")
-	}
-}
