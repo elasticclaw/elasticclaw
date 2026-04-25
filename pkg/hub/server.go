@@ -1071,7 +1071,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			var clawTagsMsg []string
 			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
-			if !canModifyClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -1694,7 +1694,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 					currentAccessCfg = s.hubCfg.Auth.Access
 				}
 				s.mu.RUnlock()
-				if !canModifyClaw(currentAccessCfg, ghLogin, clawTags) {
+				if !canInteractWithClaw(currentAccessCfg, ghLogin, clawTags) {
 					continue
 				}
 			}

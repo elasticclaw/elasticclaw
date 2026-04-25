@@ -201,7 +201,6 @@ func TestGitHubWritesRequireViewAndInteractAccess(t *testing.T) {
 	}{
 		{name: "patch claw", method: http.MethodPatch, path: "/api/claws/claw-1", body: `{"name":"new"}`},
 		{name: "delete claw", method: http.MethodDelete, path: "/api/claws/claw-1"},
-		{name: "post message", method: http.MethodPost, path: "/api/messages/claw-1", body: `{"content":"hello"}`},
 		{name: "patch settings", method: http.MethodPatch, path: "/api/claws/claw-1/settings", body: `{"autoFixCI":false}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,6 +226,35 @@ func TestGitHubWritesRequireViewAndInteractAccess(t *testing.T) {
 	}
 }
 
+func TestGitHubMessagesRequireInteractAccessOnly(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Auth: &types.AuthConfig{
+			Access: &types.AccessConfig{
+				ViewRequiresTags:     []string{"viewer={user}"},
+				InteractRequiresTags: []string{"operator={user}"},
+			},
+		},
+	}, "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-1", "test-tenant-id", "claw 1", `["operator=bob"]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages/claw-1", strings.NewReader(`{"content":"hello"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	req = req.WithContext(context.WithValue(req.Context(), ctxGitHubLoginKey{}, "bob"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+}
+
 func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",
@@ -236,13 +264,29 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 		},
 	}, "", "")
 
-	session, err := signGitHubSession("hub-token", "regular-user", "", "")
+	forgedSession, err := signGitHubSession("hub-token", "admin-user", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
-	req.Header.Set("Authorization", "Bearer "+session)
+	req.Header.Set("Authorization", "Bearer "+forgedSession)
 	rec := httptest.NewRecorder()
+
+	s.withWebAdminAuth(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	})(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+
+	session, err := signGitHubSession("oauth-secret", "regular-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+session)
+	rec = httptest.NewRecorder()
 
 	s.withWebAdminAuth(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
@@ -252,7 +296,7 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
 	}
 
-	adminSession, err := signGitHubSession("hub-token", "admin-user", "", "")
+	adminSession, err := signGitHubSession("oauth-secret", "admin-user", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -101,9 +101,6 @@ func (s *Server) webSessionSecret() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.hubCfg.Token != "" {
-		return s.hubCfg.Token
-	}
 	if s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil {
 		return s.hubCfg.Auth.GitHubOAuth.ClientSecret
 	}
