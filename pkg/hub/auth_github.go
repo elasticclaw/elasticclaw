@@ -264,10 +264,13 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	now := time.Now()
+	expiresAt := now.Add(oauthCodeTTL)
+	s.cleanupExpiredOAuthCodes(now)
 	s.mu.Lock()
 	s.oauthCodes[oauthCode] = pendingOAuthCode{
 		Token:     sessionToken,
-		ExpiresAt: time.Now().Add(oauthCodeTTL),
+		ExpiresAt: expiresAt,
 	}
 	s.mu.Unlock()
 
@@ -293,12 +296,8 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	}
 
 	now := time.Now()
+	s.cleanupExpiredOAuthCodes(now)
 	s.mu.Lock()
-	for key, pending := range s.oauthCodes {
-		if now.After(pending.ExpiresAt) {
-			delete(s.oauthCodes, key)
-		}
-	}
 	pending, ok := s.oauthCodes[body.Code]
 	if ok {
 		delete(s.oauthCodes, body.Code)
@@ -317,6 +316,24 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-OAuth-Code-TTL", strconv.Itoa(ttl))
 	jsonOK(w, map[string]string{"github_token": pending.Token})
+}
+
+func (s *Server) cleanupExpiredOAuthCodesLoop() {
+	ticker := time.NewTicker(oauthCodeTTL)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.cleanupExpiredOAuthCodes(time.Now())
+	}
+}
+
+func (s *Server) cleanupExpiredOAuthCodes(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, pending := range s.oauthCodes {
+		if now.After(pending.ExpiresAt) {
+			delete(s.oauthCodes, key)
+		}
+	}
 }
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────

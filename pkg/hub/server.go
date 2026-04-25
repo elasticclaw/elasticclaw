@@ -113,6 +113,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
+	go srv.cleanupExpiredOAuthCodesLoop()
 	srv.startPRWatcher()
 
 	return srv, nil
@@ -817,7 +818,11 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if ghLogin != "" {
 			var tagsJSON string
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
 				return
 			}
 			var clawTags []string
@@ -874,7 +879,11 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if ghLogin != "" {
 			var tagsJSON string
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
 				return
 			}
 			var clawTags []string
@@ -979,7 +988,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if ghLoginMsg != "" {
 			// Fetch claw tags to check interact permission
 			var tagsJSONMsg string
-			_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg); err != nil {
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
+				return
+			}
 			var clawTagsMsg []string
 			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
