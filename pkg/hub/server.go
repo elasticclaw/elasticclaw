@@ -42,7 +42,6 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// one-time oauth_code -> signed GitHub session token
 
-
 	fileAckMu       sync.Mutex
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
 	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
@@ -81,8 +80,10 @@ func gatewayReadyBool(v *bool) bool {
 }
 
 type userConn struct {
-	conn     *websocket.Conn
-	tenantID string
+	conn        *websocket.Conn
+	send        func(context.Context, types.WSMessage) error
+	tenantID    string
+	githubLogin string
 }
 
 // NewServer creates a hub server backed by a SQLite database at dbPath.
@@ -176,12 +177,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
-	mux.HandleFunc("/api/auth/config", s.handleAuthConfig) // public — no auth required
+	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
-	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
-	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
-	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
+	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
+	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -191,9 +192,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))  // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))   // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
+	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))     // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -206,12 +207,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// AI Config
 	// AI Config — register sub-paths before the bare path so Go's exact-match
 	// ServeMux routes them correctly (avoids 404 on specific sub-paths).
-	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAuth(s.handleAIConfigApply))
-	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAuth(s.handleAIConfigRevert))
-	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAuth(s.handleAIConfigBackup))
-	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAuth(s.handleAIConfigStream))
-	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAuth(s.handleAIConfigCurrentConfig))
-	mux.HandleFunc("/api/settings/ai-config", s.withWebAuth(s.handleAIConfig))
+	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAdminAuth(s.handleAIConfigApply))
+	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAdminAuth(s.handleAIConfigRevert))
+	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAdminAuth(s.handleAIConfigBackup))
+	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAdminAuth(s.handleAIConfigStream))
+	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAdminAuth(s.handleAIConfigCurrentConfig))
+	mux.HandleFunc("/api/settings/ai-config", s.withWebAdminAuth(s.handleAIConfig))
 
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +376,60 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		// Try GitHub OAuth session token
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+func isAccessAdmin(cfg *types.AccessConfig, login string) bool {
+	if login == "" || cfg == nil {
+		return false
+	}
+	for _, admin := range cfg.Admins {
+		if strings.EqualFold(admin, login) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		sessionSecret := s.webSessionSecret()
+
+		// Password-authenticated sessions keep existing admin access.
+		if token == hubToken {
+			next(w, r)
+			return
+		}
+
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				if !isAccessAdmin(accessCfg, payload.Login) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
 				r = r.WithContext(ctx)
 				next(w, r)
@@ -1536,7 +1591,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uc := &userConn{conn: conn, tenantID: tenantID}
+	uc := &userConn{
+		conn:        conn,
+		tenantID:    tenantID,
+		githubLogin: ghLogin,
+	}
 	connID := uuid.New().String()
 
 	s.mu.Lock()
@@ -1655,13 +1714,65 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) broadcastToUsers(tenantID string, msg types.WSMessage) {
+	for _, uc := range s.broadcastRecipients(tenantID, msg) {
+		_ = wsjson.Write(context.Background(), uc.conn, msg)
+	}
+}
+
+func (s *Server) broadcastRecipients(tenantID string, msg types.WSMessage) []*userConn {
+	clawID := clawIDFromWSMessage(msg)
+	clawTags := []string(nil)
+	if clawID != "" {
+		clawTags = s.clawTagsForBroadcast(tenantID, clawID)
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	recipients := make([]*userConn, 0, len(s.users))
 	for _, uc := range s.users {
-		if uc.tenantID == tenantID {
-			_ = wsjson.Write(context.Background(), uc.conn, msg)
+		if uc.tenantID != tenantID {
+			continue
 		}
+		if uc.githubLogin != "" && clawID != "" {
+			var accessCfg *types.AccessConfig
+			if s.hubCfg.Auth != nil {
+				accessCfg = s.hubCfg.Auth.Access
+			}
+			if !canViewClaw(accessCfg, uc.githubLogin, clawTags) {
+				continue
+			}
+		}
+		recipients = append(recipients, uc)
 	}
+	return recipients
+}
+
+func (s *Server) clawTagsForBroadcast(tenantID, clawID string) []string {
+	s.mu.RLock()
+	if cc := s.claws[clawID]; cc != nil && cc.tenantID == tenantID {
+		tags := append([]string(nil), cc.tags...)
+		s.mu.RUnlock()
+		return tags
+	}
+	s.mu.RUnlock()
+
+	var tagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON)
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	return tags
+}
+
+func clawIDFromWSMessage(msg types.WSMessage) string {
+	payload, err := json.Marshal(msg.Payload)
+	if err != nil {
+		return ""
+	}
+	var envelope struct {
+		ClawID string `json:"claw_id"`
+	}
+	_ = json.Unmarshal(payload, &envelope)
+	return envelope.ClawID
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

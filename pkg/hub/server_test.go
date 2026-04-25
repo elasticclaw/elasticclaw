@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -134,4 +135,74 @@ func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 	}
 }
 
+func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "hub-token",
+		Auth: &types.AuthConfig{
+			GitHubOAuth: &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
+			Access:      &types.AccessConfig{Admins: []string{"admin-user"}},
+		},
+	}, "", "")
 
+	session, err := signGitHubSession("hub-token", "regular-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+session)
+	rec := httptest.NewRecorder()
+
+	s.withWebAdminAuth(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	})(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+
+	adminSession, err := signGitHubSession("hub-token", "admin-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+adminSession)
+	rec = httptest.NewRecorder()
+
+	s.withWebAdminAuth(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, rec.Code)
+	}
+}
+
+func TestBroadcastToUsersFiltersGitHubSessionsByClawTags(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Auth: &types.AuthConfig{
+			Access: &types.AccessConfig{ViewRequiresTags: []string{"owner={user}"}},
+		},
+	}, "", "")
+
+	s.users["allowed"] = &userConn{
+		tenantID:    "test-tenant-id",
+		githubLogin: "alice",
+	}
+	s.users["denied"] = &userConn{
+		tenantID:    "test-tenant-id",
+		githubLogin: "bob",
+	}
+	s.claws["claw-1"] = &clawConn{id: "claw-1", tenantID: "test-tenant-id", tags: []string{"owner=alice"}}
+
+	recipients := s.broadcastRecipients("test-tenant-id", types.WSMessage{
+		Type:    "chunk",
+		Payload: map[string]string{"claw_id": "claw-1", "content": "secret"},
+	})
+
+	if len(recipients) != 1 {
+		t.Fatalf("expected 1 recipient, got %d", len(recipients))
+	}
+	if recipients[0].githubLogin != "alice" {
+		t.Fatalf("expected alice recipient, got %q", recipients[0].githubLogin)
+	}
+}
