@@ -39,6 +39,10 @@ func canInteractWithClaw(cfg *types.AccessConfig, userLogin string, clawTags []s
 	return matchesTags(cfg.InteractRequiresTags, userLogin, clawTags)
 }
 
+func canModifyClaw(cfg *types.AccessConfig, userLogin string, clawTags []string) bool {
+	return canViewClaw(cfg, userLogin, clawTags) && canInteractWithClaw(cfg, userLogin, clawTags)
+}
+
 // matchesTags checks if any of the required tag patterns (after {user} substitution)
 // matches any tag in clawTags. Exact string match after substitution.
 func matchesTags(requiredPatterns []string, userLogin string, clawTags []string) bool {

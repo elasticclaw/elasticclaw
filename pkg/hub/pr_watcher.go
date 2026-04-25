@@ -571,7 +571,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 		var clawTags []string
 		_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 		if sub == "settings" && r.Method != http.MethodGet {
-			if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
+			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
