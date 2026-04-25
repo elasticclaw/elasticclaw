@@ -80,9 +80,17 @@ func verifyGitHubSession(secret, token string) (*githubSessionPayload, bool) {
 
 type ctxGitHubLoginKey struct{}
 
+type ctxGitHubSessionPayloadKey struct{}
+
 // githubLoginFromContext returns the GitHub login attached to the context, if any.
 func githubLoginFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(ctxGitHubLoginKey{}).(string)
+	return v
+}
+
+// githubSessionPayloadFromContext returns the GitHub session payload attached to the context, if any.
+func githubSessionPayloadFromContext(ctx context.Context) *githubSessionPayload {
+	v, _ := ctx.Value(ctxGitHubSessionPayloadKey{}).(*githubSessionPayload)
 	return v
 }
 

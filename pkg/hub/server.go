@@ -377,6 +377,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				ctx = context.WithValue(ctx, ctxGitHubSessionPayloadKey{}, payload)
 				r = r.WithContext(ctx)
 				next(w, r)
 				return
@@ -478,31 +479,21 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
-	if login := githubLoginFromContext(r.Context()); login != "" {
-		// Decode full payload from the token to get name and avatar
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if token == "" {
-			token = r.Header.Get(webSessionHeader)
+	if payload := githubSessionPayloadFromContext(r.Context()); payload != nil {
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
 		}
-		sessionSecret := s.webSessionSecret()
-		if sessionSecret != "" {
-			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
-				s.mu.RLock()
-				var accessCfg *types.AccessConfig
-				if s.hubCfg.Auth != nil {
-					accessCfg = s.hubCfg.Auth.Access
-				}
-				s.mu.RUnlock()
-				jsonOK(w, map[string]interface{}{
-					"login":       payload.Login,
-					"name":        payload.Name,
-					"avatar_url":  payload.AvatarURL,
-					"auth_method": "github",
-					"is_admin":    isAccessAdmin(accessCfg, payload.Login),
-				})
-				return
-			}
-		}
+		s.mu.RUnlock()
+		jsonOK(w, map[string]interface{}{
+			"login":       payload.Login,
+			"name":        payload.Name,
+			"avatar_url":  payload.AvatarURL,
+			"auth_method": "github",
+			"is_admin":    isAccessAdmin(accessCfg, payload.Login),
+		})
+		return
 	}
 	jsonOK(w, map[string]interface{}{"auth_method": "password", "is_admin": true})
 }
