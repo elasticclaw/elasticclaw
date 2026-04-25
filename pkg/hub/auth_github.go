@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -368,12 +367,4 @@ func (s *Server) githubCheckTeamMembership(ctx context.Context, accessToken, org
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusNoContent, nil
-}
-
-func randomState() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }

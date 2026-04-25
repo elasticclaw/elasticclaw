@@ -690,11 +690,16 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if updatedCfg.Auth == nil {
 				updatedCfg.Auth = &types.AuthConfig{}
 			}
+			var admins []string
+			if updatedCfg.Auth.Access != nil {
+				admins = append(admins, updatedCfg.Auth.Access.Admins...)
+			}
 			updatedCfg.Auth.Access = &types.AccessConfig{
+				Admins:               admins,
 				ViewRequiresTags:     patch.Auth.Access.ViewRequiresTags,
 				InteractRequiresTags: patch.Auth.Access.InteractRequiresTags,
 			}
-			if len(updatedCfg.Auth.Access.ViewRequiresTags) == 0 && len(updatedCfg.Auth.Access.InteractRequiresTags) == 0 {
+			if len(updatedCfg.Auth.Access.Admins) == 0 && len(updatedCfg.Auth.Access.ViewRequiresTags) == 0 && len(updatedCfg.Auth.Access.InteractRequiresTags) == 0 {
 				updatedCfg.Auth.Access = nil
 				if updatedCfg.Auth.GitHubOAuth == nil {
 					updatedCfg.Auth = nil
