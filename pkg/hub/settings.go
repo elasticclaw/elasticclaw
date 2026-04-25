@@ -649,6 +649,24 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Auth config
 	if patch.Auth != nil {
+		if updatedCfg.Auth != nil {
+			authCopy := *updatedCfg.Auth
+			if authCopy.GitHubOAuth != nil {
+				githubOAuthCopy := *authCopy.GitHubOAuth
+				githubOAuthCopy.AllowedUsers = append([]string(nil), authCopy.GitHubOAuth.AllowedUsers...)
+				githubOAuthCopy.AllowedOrgs = append([]string(nil), authCopy.GitHubOAuth.AllowedOrgs...)
+				githubOAuthCopy.AllowedTeams = append([]string(nil), authCopy.GitHubOAuth.AllowedTeams...)
+				authCopy.GitHubOAuth = &githubOAuthCopy
+			}
+			if authCopy.Access != nil {
+				accessCopy := *authCopy.Access
+				accessCopy.Admins = append([]string(nil), authCopy.Access.Admins...)
+				accessCopy.ViewRequiresTags = append([]string(nil), authCopy.Access.ViewRequiresTags...)
+				accessCopy.InteractRequiresTags = append([]string(nil), authCopy.Access.InteractRequiresTags...)
+				authCopy.Access = &accessCopy
+			}
+			updatedCfg.Auth = &authCopy
+		}
 		if patch.Auth.RemoveGitHubOAuth {
 			if updatedCfg.Auth != nil {
 				updatedCfg.Auth.GitHubOAuth = nil
