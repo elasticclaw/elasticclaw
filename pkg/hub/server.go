@@ -487,17 +487,24 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 		sessionSecret := s.webSessionSecret()
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
-				jsonOK(w, map[string]string{
+				s.mu.RLock()
+				var accessCfg *types.AccessConfig
+				if s.hubCfg.Auth != nil {
+					accessCfg = s.hubCfg.Auth.Access
+				}
+				s.mu.RUnlock()
+				jsonOK(w, map[string]interface{}{
 					"login":       payload.Login,
 					"name":        payload.Name,
 					"avatar_url":  payload.AvatarURL,
 					"auth_method": "github",
+					"is_admin":    isAccessAdmin(accessCfg, payload.Login),
 				})
 				return
 			}
 		}
 	}
-	jsonOK(w, map[string]string{"auth_method": "password"})
+	jsonOK(w, map[string]interface{}{"auth_method": "password", "is_admin": true})
 }
 
 // handleAuthConfig returns public auth config (no auth required).

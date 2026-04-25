@@ -53,6 +53,7 @@ interface SidebarProps {
   onClearTagFilters: () => void
   isCollapsed: boolean
   onToggleCollapse: () => void
+  isAdmin?: boolean
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -107,6 +108,7 @@ export function Sidebar({
   onClearTagFilters,
   isCollapsed,
   onToggleCollapse,
+  isAdmin = true,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
@@ -410,15 +412,17 @@ export function Sidebar({
             <LogOut className="size-4" />
             Sign out
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-8 text-muted-foreground hover:text-foreground flex-shrink-0"
-            onClick={() => { window.location.href = "/settings" }}
-            title="Settings"
-          >
-            <Settings className="size-4" />
-          </Button>
+          {isAdmin && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground hover:text-foreground flex-shrink-0"
+              onClick={() => { window.location.href = "/settings" }}
+              title="Settings"
+            >
+              <Settings className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
     </aside>

@@ -58,6 +58,7 @@ interface SettingsData {
       allowedTeams: string[]
     }
     access?: {
+      admins: string[]
       viewRequiresTags: string[]
       interactRequiresTags: string[]
     }
@@ -605,6 +606,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   const [allowedUsers, setAllowedUsers] = useState((ghOAuth?.allowedUsers || []).join(', '))
   const [allowedOrgs, setAllowedOrgs] = useState((ghOAuth?.allowedOrgs || []).join(', '))
   const [allowedTeams, setAllowedTeams] = useState((ghOAuth?.allowedTeams || []).join(', '))
+  const [admins, setAdmins] = useState((ghAccess?.admins || []).join(', '))
   const [viewTags, setViewTags] = useState((ghAccess?.viewRequiresTags || []).join(', '))
   const [interactTags, setInteractTags] = useState((ghAccess?.interactRequiresTags || []).join(', '))
   const [ghErr, setGhErr] = useState('')
@@ -635,6 +637,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
           allowedTeams: splitList(allowedTeams),
         },
         access: {
+          admins: splitList(admins),
           viewRequiresTags: splitList(viewTags),
           interactRequiresTags: splitList(interactTags),
         },
@@ -655,6 +658,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
     setAllowedUsers((ghOAuth?.allowedUsers || []).join(', '))
     setAllowedOrgs((ghOAuth?.allowedOrgs || []).join(', '))
     setAllowedTeams((ghOAuth?.allowedTeams || []).join(', '))
+    setAdmins((ghAccess?.admins || []).join(', '))
     setViewTags((ghAccess?.viewRequiresTags || []).join(', '))
     setInteractTags((ghAccess?.interactRequiresTags || []).join(', '))
     setShowGhForm(true)
@@ -744,6 +748,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
           <div className="border-t border-border pt-3 space-y-2 text-xs text-muted-foreground">
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client ID</span><span className="font-mono">{ghOAuth.clientId}</span></div>
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client Secret</span><span>{ghOAuth.clientSecretSet ? '••••••••' : 'not set'}</span></div>
+            {ghAccess?.admins && ghAccess.admins.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Admins</span><span>{ghAccess.admins.join(', ')}</span></div>}
             {ghOAuth.allowedUsers.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed users</span><span>{ghOAuth.allowedUsers.join(', ')}</span></div>}
             {ghOAuth.allowedOrgs.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed orgs</span><span>{ghOAuth.allowedOrgs.join(', ')}</span></div>}
             {ghOAuth.allowedTeams.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed teams</span><span>{ghOAuth.allowedTeams.join(', ')}</span></div>}
@@ -798,6 +803,15 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Teams</label>
                 <Input value={allowedTeams} onChange={e => setAllowedTeams(e.target.value)} className="h-8 text-sm" placeholder="my-org/my-team" />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Admins</h4>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">GitHub Usernames</label>
+                <Input value={admins} onChange={e => setAdmins(e.target.value)} className="h-8 text-sm" placeholder="alice, bob" />
+                <p className="text-xs text-muted-foreground mt-1">Comma-separated. Admins can access Settings and bypass all tag restrictions.</p>
               </div>
             </div>
 

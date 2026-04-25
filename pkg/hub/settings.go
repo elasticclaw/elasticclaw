@@ -53,6 +53,7 @@ type GitHubOAuthView struct {
 }
 
 type AccessView struct {
+	Admins               []string `json:"admins"`
 	ViewRequiresTags     []string `json:"viewRequiresTags"`
 	InteractRequiresTags []string `json:"interactRequiresTags"`
 }
@@ -156,6 +157,7 @@ type GitHubOAuthPatch struct {
 }
 
 type AccessPatch struct {
+	Admins               []string `json:"admins"`
 	ViewRequiresTags     []string `json:"viewRequiresTags"`
 	InteractRequiresTags []string `json:"interactRequiresTags"`
 }
@@ -366,8 +368,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		if s.hubCfg.Auth.Access != nil {
 			acc := s.hubCfg.Auth.Access
 			view.Auth.Access = &AccessView{
+				Admins:               acc.Admins,
 				ViewRequiresTags:     acc.ViewRequiresTags,
 				InteractRequiresTags: acc.InteractRequiresTags,
+			}
+			if view.Auth.Access.Admins == nil {
+				view.Auth.Access.Admins = []string{}
 			}
 			if view.Auth.Access.ViewRequiresTags == nil {
 				view.Auth.Access.ViewRequiresTags = []string{}
@@ -709,9 +715,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if updatedCfg.Auth == nil {
 				updatedCfg.Auth = &types.AuthConfig{}
 			}
+			// Use patch admins if provided; otherwise preserve existing
 			var admins []string
-			if updatedCfg.Auth.Access != nil {
-				admins = append(admins, updatedCfg.Auth.Access.Admins...)
+			if patch.Auth.Access.Admins != nil {
+				admins = patch.Auth.Access.Admins
+			} else if updatedCfg.Auth.Access != nil {
+				admins = append([]string(nil), updatedCfg.Auth.Access.Admins...)
 			}
 			updatedCfg.Auth.Access = &types.AccessConfig{
 				Admins:               admins,
