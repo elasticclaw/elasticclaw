@@ -337,8 +337,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Enabled:          isFactoryEnabled(f),
 		})
 	}
-	s.mu.RUnlock()
-
 	// Auth config
 	if s.hubCfg.Auth != nil {
 		view.Auth = &AuthView{}
@@ -375,6 +373,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.mu.RUnlock()
 
 	// Secrets — names only, read from disk so manually-edited hub.yaml entries are visible
 	view.Secrets = []string{}

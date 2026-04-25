@@ -417,9 +417,9 @@ func (s *Server) githubFetchUser(ctx context.Context, accessToken string) (*gith
 }
 
 func (s *Server) githubCheckAllowlist(ctx context.Context, cfg *types.GitHubOAuthConfig, accessToken, login string) (bool, error) {
-	// If no allowlist configured at all → deny (safe default)
+	// If no allowlist is configured, allow any authenticated GitHub user.
 	if len(cfg.AllowedUsers) == 0 && len(cfg.AllowedOrgs) == 0 && len(cfg.AllowedTeams) == 0 {
-		return false, nil
+		return true, nil
 	}
 
 	// Check allowed users
