@@ -715,17 +715,29 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if updatedCfg.Auth == nil {
 				updatedCfg.Auth = &types.AuthConfig{}
 			}
-			// Use patch admins if provided; otherwise preserve existing
+			// Use patch values if provided; otherwise preserve existing
 			var admins []string
 			if patch.Auth.Access.Admins != nil {
 				admins = patch.Auth.Access.Admins
 			} else if updatedCfg.Auth.Access != nil {
 				admins = append([]string(nil), updatedCfg.Auth.Access.Admins...)
 			}
+			var viewRequiresTags []string
+			if patch.Auth.Access.ViewRequiresTags != nil {
+				viewRequiresTags = patch.Auth.Access.ViewRequiresTags
+			} else if updatedCfg.Auth.Access != nil {
+				viewRequiresTags = append([]string(nil), updatedCfg.Auth.Access.ViewRequiresTags...)
+			}
+			var interactRequiresTags []string
+			if patch.Auth.Access.InteractRequiresTags != nil {
+				interactRequiresTags = patch.Auth.Access.InteractRequiresTags
+			} else if updatedCfg.Auth.Access != nil {
+				interactRequiresTags = append([]string(nil), updatedCfg.Auth.Access.InteractRequiresTags...)
+			}
 			updatedCfg.Auth.Access = &types.AccessConfig{
 				Admins:               admins,
-				ViewRequiresTags:     patch.Auth.Access.ViewRequiresTags,
-				InteractRequiresTags: patch.Auth.Access.InteractRequiresTags,
+				ViewRequiresTags:     viewRequiresTags,
+				InteractRequiresTags: interactRequiresTags,
 			}
 			if len(updatedCfg.Auth.Access.Admins) == 0 && len(updatedCfg.Auth.Access.ViewRequiresTags) == 0 && len(updatedCfg.Auth.Access.InteractRequiresTags) == 0 {
 				updatedCfg.Auth.Access = nil

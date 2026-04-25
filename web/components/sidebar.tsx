@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
+import { clearConfig } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -398,14 +399,14 @@ export function Sidebar({
             size="sm"
             className="flex-1 justify-start gap-2 text-muted-foreground hover:text-foreground"
             onClick={async () => {
-              const token = sessionStorage.getItem("ec_hub_token") || ""
+              const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
               if (token) {
                 const { getHubUrl } = await import("@/lib/hub-url")
                 const hubUrl = getHubUrl()
                 const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
                 await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
               }
-              sessionStorage.removeItem("ec_hub_token")
+              clearConfig()
               window.location.href = "/login"
             }}
           >
