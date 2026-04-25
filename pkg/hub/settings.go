@@ -35,6 +35,25 @@ type SettingsView struct {
 	Integrations  *IntegrationsView       `json:"integrations"`
 	Factories     []FactoryView           `json:"factories"`
 	Secrets       []string                `json:"secrets"`
+	Auth          *AuthView               `json:"auth,omitempty"`
+}
+
+type AuthView struct {
+	GitHubOAuth *GitHubOAuthView `json:"githubOAuth,omitempty"`
+	Access      *AccessView      `json:"access,omitempty"`
+}
+
+type GitHubOAuthView struct {
+	ClientID        string   `json:"clientId"`
+	ClientSecretSet bool     `json:"clientSecretSet"`
+	AllowedUsers    []string `json:"allowedUsers"`
+	AllowedOrgs     []string `json:"allowedOrgs"`
+	AllowedTeams    []string `json:"allowedTeams"`
+}
+
+type AccessView struct {
+	ViewRequiresTags     []string `json:"viewRequiresTags"`
+	InteractRequiresTags []string `json:"interactRequiresTags"`
 }
 
 type IntegrationsView struct {
@@ -117,6 +136,26 @@ type SettingsPatch struct {
 	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"`
 	Integrations  *IntegrationsPatch       `json:"integrations,omitempty"`
 	Factories     []FactoryPatch           `json:"factories,omitempty"`
+	Auth          *AuthPatch               `json:"auth,omitempty"`
+}
+
+type AuthPatch struct {
+	GitHubOAuth *GitHubOAuthPatch `json:"githubOAuth,omitempty"`
+	Access      *AccessPatch      `json:"access,omitempty"`
+	RemoveGitHubOAuth bool        `json:"removeGithubOAuth,omitempty"`
+}
+
+type GitHubOAuthPatch struct {
+	ClientID     string   `json:"clientId,omitempty"`
+	ClientSecret string   `json:"clientSecret,omitempty"`
+	AllowedUsers []string `json:"allowedUsers,omitempty"`
+	AllowedOrgs  []string `json:"allowedOrgs,omitempty"`
+	AllowedTeams []string `json:"allowedTeams,omitempty"`
+}
+
+type AccessPatch struct {
+	ViewRequiresTags     []string `json:"viewRequiresTags"`
+	InteractRequiresTags []string `json:"interactRequiresTags"`
 }
 
 type IntegrationsPatch struct {
@@ -299,6 +338,43 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.mu.RUnlock()
+
+	// Auth config
+	if s.hubCfg.Auth != nil {
+		view.Auth = &AuthView{}
+		if s.hubCfg.Auth.GitHubOAuth != nil {
+			gh := s.hubCfg.Auth.GitHubOAuth
+			view.Auth.GitHubOAuth = &GitHubOAuthView{
+				ClientID:        gh.ClientID,
+				ClientSecretSet: gh.ClientSecret != "",
+				AllowedUsers:    gh.AllowedUsers,
+				AllowedOrgs:     gh.AllowedOrgs,
+				AllowedTeams:    gh.AllowedTeams,
+			}
+			if view.Auth.GitHubOAuth.AllowedUsers == nil {
+				view.Auth.GitHubOAuth.AllowedUsers = []string{}
+			}
+			if view.Auth.GitHubOAuth.AllowedOrgs == nil {
+				view.Auth.GitHubOAuth.AllowedOrgs = []string{}
+			}
+			if view.Auth.GitHubOAuth.AllowedTeams == nil {
+				view.Auth.GitHubOAuth.AllowedTeams = []string{}
+			}
+		}
+		if s.hubCfg.Auth.Access != nil {
+			acc := s.hubCfg.Auth.Access
+			view.Auth.Access = &AccessView{
+				ViewRequiresTags:     acc.ViewRequiresTags,
+				InteractRequiresTags: acc.InteractRequiresTags,
+			}
+			if view.Auth.Access.ViewRequiresTags == nil {
+				view.Auth.Access.ViewRequiresTags = []string{}
+			}
+			if view.Auth.Access.InteractRequiresTags == nil {
+				view.Auth.Access.InteractRequiresTags = []string{}
+			}
+		}
+	}
 
 	// Secrets — names only, read from disk so manually-edited hub.yaml entries are visible
 	view.Secrets = []string{}
@@ -566,6 +642,56 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		updatedCfg.Factories = factories
+	}
+
+	// Auth config
+	if patch.Auth != nil {
+		if patch.Auth.RemoveGitHubOAuth {
+			if updatedCfg.Auth != nil {
+				updatedCfg.Auth.GitHubOAuth = nil
+				if updatedCfg.Auth.Access == nil {
+					updatedCfg.Auth = nil
+				}
+			}
+		} else if patch.Auth.GitHubOAuth != nil {
+			if updatedCfg.Auth == nil {
+				updatedCfg.Auth = &types.AuthConfig{}
+			}
+			if updatedCfg.Auth.GitHubOAuth == nil {
+				updatedCfg.Auth.GitHubOAuth = &types.GitHubOAuthConfig{}
+			}
+			gh := patch.Auth.GitHubOAuth
+			if gh.ClientID != "" {
+				updatedCfg.Auth.GitHubOAuth.ClientID = gh.ClientID
+			}
+			if gh.ClientSecret != "" {
+				updatedCfg.Auth.GitHubOAuth.ClientSecret = gh.ClientSecret
+			}
+			if gh.AllowedUsers != nil {
+				updatedCfg.Auth.GitHubOAuth.AllowedUsers = gh.AllowedUsers
+			}
+			if gh.AllowedOrgs != nil {
+				updatedCfg.Auth.GitHubOAuth.AllowedOrgs = gh.AllowedOrgs
+			}
+			if gh.AllowedTeams != nil {
+				updatedCfg.Auth.GitHubOAuth.AllowedTeams = gh.AllowedTeams
+			}
+		}
+		if patch.Auth.Access != nil {
+			if updatedCfg.Auth == nil {
+				updatedCfg.Auth = &types.AuthConfig{}
+			}
+			updatedCfg.Auth.Access = &types.AccessConfig{
+				ViewRequiresTags:     patch.Auth.Access.ViewRequiresTags,
+				InteractRequiresTags: patch.Auth.Access.InteractRequiresTags,
+			}
+			if len(updatedCfg.Auth.Access.ViewRequiresTags) == 0 && len(updatedCfg.Auth.Access.InteractRequiresTags) == 0 {
+				updatedCfg.Auth.Access = nil
+				if updatedCfg.Auth.GitHubOAuth == nil {
+					updatedCfg.Auth = nil
+				}
+			}
+		}
 	}
 
 	// Save to disk before applying to in-memory config

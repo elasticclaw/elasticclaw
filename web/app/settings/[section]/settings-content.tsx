@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "llm" | "github" | "security" | "integrations" | "factories" | "secrets" | "templates" | "ai-config"
+type Section = "runtimes" | "llm" | "github" | "authentication" | "integrations" | "factories" | "secrets" | "templates" | "ai-config"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "security", "integrations", "factories", "secrets", "templates", "ai-config"]
+const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "integrations", "factories", "secrets", "templates", "ai-config"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -49,6 +49,19 @@ interface SettingsData {
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
   }>
   secrets?: string[]
+  auth?: {
+    githubOAuth?: {
+      clientId: string
+      clientSecretSet: boolean
+      allowedUsers: string[]
+      allowedOrgs: string[]
+      allowedTeams: string[]
+    }
+    access?: {
+      viewRequiresTags: string[]
+      interactRequiresTags: string[]
+    }
+  }
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -143,7 +156,7 @@ export default function SettingsSectionPage() {
     { id: "runtimes", label: "Sandbox Runtimes", icon: Cpu },
     { id: "llm", label: "LLM Keys", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
-    { id: "security", label: "Security", icon: Shield },
+    { id: "authentication", label: "Authentication", icon: Shield },
     { id: "integrations", label: "Integrations", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
     { id: "secrets", label: "Secrets", icon: Lock },
@@ -203,8 +216,8 @@ export default function SettingsSectionPage() {
           {settings && section === "github" && (
             <GitHubSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "security" && (
-            <SecuritySection onSave={save} saving={saving} />
+          {settings && section === "authentication" && (
+            <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "integrations" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
@@ -575,41 +588,200 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
   )
 }
 
-function SecuritySection({ onSave, saving }: { onSave: (p: object) => void; saving: boolean }) {
-  const [newPw, setNewPw] = useState("")
-  const [confirm, setConfirm] = useState("")
-  const [pwErr, setPwErr] = useState("")
+function AuthenticationSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const [tab, setTab] = useState<'password' | 'github'>('password')
+
+  // Password tab
+  const [newPw, setNewPw] = useState('')
+  const [pwConfirm, setPwConfirm] = useState('')
+  const [pwErr, setPwErr] = useState('')
+
+  // GitHub OAuth tab
+  const ghOAuth = settings.auth?.githubOAuth
+  const ghAccess = settings.auth?.access
+  const [clientId, setClientId] = useState(ghOAuth?.clientId || '')
+  const [clientSecret, setClientSecret] = useState('')
+  const [allowedUsers, setAllowedUsers] = useState((ghOAuth?.allowedUsers || []).join(', '))
+  const [allowedOrgs, setAllowedOrgs] = useState((ghOAuth?.allowedOrgs || []).join(', '))
+  const [allowedTeams, setAllowedTeams] = useState((ghOAuth?.allowedTeams || []).join(', '))
+  const [viewTags, setViewTags] = useState((ghAccess?.viewRequiresTags || []).join(', '))
+  const [interactTags, setInteractTags] = useState((ghAccess?.interactRequiresTags || []).join(', '))
+  const [ghErr, setGhErr] = useState('')
 
   function handlePasswordSave() {
-    setPwErr("")
-    if (newPw.length < 8) { setPwErr("Password must be at least 8 characters"); return }
-    if (newPw !== confirm) { setPwErr("Passwords don\'t match"); return }
+    setPwErr('')
+    if (newPw.length < 8) { setPwErr('Password must be at least 8 characters'); return }
+    if (newPw !== pwConfirm) { setPwErr('Passwords do not match'); return }
     onSave({ uiPassword: newPw })
-    setNewPw(""); setConfirm("")
+    setNewPw(''); setPwConfirm('')
   }
 
+  function splitList(s: string) {
+    return s.split(/[,\n]+/).map((t: string) => t.trim()).filter(Boolean)
+  }
+
+  function handleGitHubSave() {
+    setGhErr('')
+    if (!clientId.trim()) { setGhErr('Client ID is required'); return }
+    if (!ghOAuth && !clientSecret.trim()) { setGhErr('Client Secret is required for initial setup'); return }
+    const authPatch: Record<string, unknown> = {
+      githubOAuth: {
+        clientId: clientId.trim(),
+        ...(clientSecret ? { clientSecret: clientSecret.trim() } : {}),
+        allowedUsers: splitList(allowedUsers),
+        allowedOrgs: splitList(allowedOrgs),
+        allowedTeams: splitList(allowedTeams),
+      },
+      access: {
+        viewRequiresTags: splitList(viewTags),
+        interactRequiresTags: splitList(interactTags),
+      },
+    }
+    onSave({ auth: authPatch })
+    setClientSecret('')
+  }
+
+  function handleGitHubRemove() {
+    if (!window.confirm('Remove GitHub OAuth? Users will fall back to password login.')) return
+    onSave({ auth: { removeGithubOAuth: true } })
+  }
+
+  const callbackUrl = typeof window !== 'undefined'
+    ? window.location.origin + '/api/auth/github/callback'
+    : 'https://your-hub/api/auth/github/callback'
+
   return (
-    <div>
-      <h2 className="text-base font-semibold mb-1">Security</h2>
-      <p className="text-sm text-muted-foreground mb-4">Change the web UI login password.</p>
-      <div className="border border-border rounded-lg p-5 max-w-sm space-y-3">
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
-          <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
-        </div>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
-          <Input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
-        </div>
-        {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
-        <Button size="sm" disabled={saving || !newPw || !confirm} onClick={handlePasswordSave}>
-          Change Password
-        </Button>
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold mb-0.5">Authentication</h2>
+        <p className="text-sm text-muted-foreground">Configure how users log in to the hub UI.</p>
       </div>
+
+      <div className="flex gap-1 border-b border-border">
+        {(['password', 'github'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={cn(
+              'px-3 py-1.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+              tab === t
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            {t === 'password' ? 'Password' : 'GitHub OAuth'}
+            {t === 'github' && ghOAuth && (
+              <span className="ml-1.5 text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">Active</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'password' && (
+        <div className="border border-border rounded-lg p-5 max-w-sm space-y-3">
+          <p className="text-xs text-muted-foreground">Change the web UI login password.</p>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
+            <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+            <Input type="password" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
+          </div>
+          {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
+          <Button size="sm" disabled={saving || !newPw || !pwConfirm} onClick={handlePasswordSave}>
+            Change Password
+          </Button>
+        </div>
+      )}
+
+      {tab === 'github' && (
+        <div className="space-y-4 max-w-lg">
+          <p className="text-xs text-muted-foreground">
+            Allow users to log in with GitHub. Requires a{' '}
+            <a href="https://github.com/settings/developers" target="_blank" rel="noopener noreferrer" className="underline">GitHub OAuth App</a>.{' '}
+            Set the callback URL to{' '}
+            <code className="text-xs bg-muted px-1 rounded">{callbackUrl}</code>.
+          </p>
+
+          <div className="border border-border rounded-lg p-5 space-y-3">
+            <h3 className="text-sm font-medium">OAuth App Credentials</h3>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Client ID</label>
+              <Input value={clientId} onChange={e => setClientId(e.target.value)} className="h-8 text-sm font-mono" placeholder="Ov23li..." />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">
+                Client Secret{ghOAuth?.clientSecretSet && <span className="ml-1 text-green-500 text-xs">(set)</span>}
+              </label>
+              <Input
+                type="password"
+                value={clientSecret}
+                onChange={e => setClientSecret(e.target.value)}
+                className="h-8 text-sm font-mono"
+                placeholder={ghOAuth?.clientSecretSet ? 'Leave blank to keep existing' : 'Paste secret...'}
+              />
+            </div>
+          </div>
+
+          <div className="border border-border rounded-lg p-5 space-y-3">
+            <div>
+              <h3 className="text-sm font-medium">Access Allowlist</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">Leave all blank to allow any authenticated GitHub user.</p>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">GitHub Usernames</label>
+              <Input value={allowedUsers} onChange={e => setAllowedUsers(e.target.value)} className="h-8 text-sm" placeholder="alice, bob" />
+              <p className="text-xs text-muted-foreground mt-1">Comma-separated. These users always have full access.</p>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">GitHub Orgs</label>
+              <Input value={allowedOrgs} onChange={e => setAllowedOrgs(e.target.value)} className="h-8 text-sm" placeholder="my-org" />
+              <p className="text-xs text-muted-foreground mt-1">Members of these orgs can log in.</p>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">GitHub Teams</label>
+              <Input value={allowedTeams} onChange={e => setAllowedTeams(e.target.value)} className="h-8 text-sm" placeholder="my-org/my-team" />
+              <p className="text-xs text-muted-foreground mt-1">Format: org/team. Members of these teams can log in.</p>
+            </div>
+          </div>
+
+          <div className="border border-border rounded-lg p-5 space-y-3">
+            <div>
+              <h3 className="text-sm font-medium">Tag-Based Access Control <span className="text-xs font-normal text-muted-foreground">(optional)</span></h3>
+              <p className="text-xs text-muted-foreground mt-0.5">Restrict which claws each user can see or interact with based on claw tags.</p>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">View requires tag</label>
+              <Input value={viewTags} onChange={e => setViewTags(e.target.value)} className="h-8 text-sm font-mono" placeholder="user, team=frontend" />
+              <p className="text-xs text-muted-foreground mt-1">
+                A claw is visible if it has a tag matching a pattern like <code className="bg-muted px-1 rounded">user=alice</code> or <code className="bg-muted px-1 rounded">team=frontend</code>.
+              </p>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Interact requires tag</label>
+              <Input value={interactTags} onChange={e => setInteractTags(e.target.value)} className="h-8 text-sm font-mono" placeholder="user, team=frontend" />
+              <p className="text-xs text-muted-foreground mt-1">User can send messages or kill a claw only if it has a matching tag.</p>
+            </div>
+          </div>
+
+          {ghErr && <p className="text-xs text-red-500">{ghErr}</p>}
+
+          <div className="flex gap-2">
+            <Button size="sm" disabled={saving} onClick={handleGitHubSave}>
+              {ghOAuth ? 'Update GitHub OAuth' : 'Enable GitHub OAuth'}
+            </Button>
+            {ghOAuth && (
+              <Button size="sm" variant="outline" disabled={saving} onClick={handleGitHubRemove} className="text-destructive hover:text-destructive">
+                Remove
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-
 function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const linear = settings.integrations?.linear || []
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
