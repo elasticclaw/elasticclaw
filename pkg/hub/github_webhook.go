@@ -703,17 +703,12 @@ func (s *Server) mergePRForClaw(clawID string) {
 		return
 	}
 
-	ghBase := s.githubBaseURL
-	if ghBase == "" {
-		ghBase = "https://api.github.com"
-	}
-
 	body, _ := json.Marshal(map[string]string{
 		"merge_method": "squash",
 	})
 	req, err := http.NewRequest(
 		http.MethodPut,
-		fmt.Sprintf("%s/repos/%s/pulls/%d/merge", ghBase, repo, prNumber),
+		fmt.Sprintf("%s/repos/%s/pulls/%d/merge", s.ghBaseURL(), repo, prNumber),
 		bytes.NewReader(body),
 	)
 	if err != nil {

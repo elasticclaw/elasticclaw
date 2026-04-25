@@ -40,6 +40,7 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	// one-time oauth_code -> signed GitHub session token
 
 	fileAckMu       sync.Mutex
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
@@ -55,6 +56,7 @@ type clawConn struct {
 	id                   string
 	tenantID             string
 	conn                 *websocket.Conn
+	tags                 []string        // cached from DB at registration time for access-control checks
 	contextUsage         int             // 0-100, updated from heartbeats
 	gatewayReady         bool            // true once bridge reports gateway session established
 	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
@@ -78,8 +80,10 @@ func gatewayReadyBool(v *bool) bool {
 }
 
 type userConn struct {
-	conn     *websocket.Conn
-	tenantID string
+	conn        *websocket.Conn
+	send        func(context.Context, types.WSMessage) error
+	tenantID    string
+	githubLogin string
 }
 
 // NewServer creates a hub server backed by a SQLite database at dbPath.
@@ -166,16 +170,19 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
 
 	// Browser WebSocket
-	mux.HandleFunc("/api/ws", s.handleUserWS)
+	mux.HandleFunc("/api/ws", s.withAuth(s.handleUserWS))
 
 	// REST API
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
-	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
-	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))
-	mux.HandleFunc("/api/settings/status", s.withWebAuth(s.handleSettingsStatus))
+	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
+	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
+	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
+	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
+	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
+	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -185,9 +192,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents)) // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))  // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/secrets", s.withWebAuth(s.handleSecretsCRUD))   // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
+	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))     // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -200,12 +207,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// AI Config
 	// AI Config — register sub-paths before the bare path so Go's exact-match
 	// ServeMux routes them correctly (avoids 404 on specific sub-paths).
-	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAuth(s.handleAIConfigApply))
-	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAuth(s.handleAIConfigRevert))
-	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAuth(s.handleAIConfigBackup))
-	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAuth(s.handleAIConfigStream))
-	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAuth(s.handleAIConfigCurrentConfig))
-	mux.HandleFunc("/api/settings/ai-config", s.withWebAuth(s.handleAIConfig))
+	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAdminAuth(s.handleAIConfigApply))
+	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAdminAuth(s.handleAIConfigRevert))
+	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAdminAuth(s.handleAIConfigBackup))
+	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAdminAuth(s.handleAIConfigStream))
+	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAdminAuth(s.handleAIConfigCurrentConfig))
+	mux.HandleFunc("/api/settings/ai-config", s.withWebAdminAuth(s.handleAIConfig))
 
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -256,12 +263,16 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tenantID, err := s.tenantByToken(token)
-		if err != nil {
+		tenantID, githubLogin, ok := s.resolveAuthToken(token)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxTenantKey{}, tenantID))
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		if githubLogin != "" {
+			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+		}
+		r = r.WithContext(ctx)
 		next(w, r)
 	}
 }
@@ -271,6 +282,45 @@ type ctxTenantKey struct{}
 func tenantFromCtx(r *http.Request) string {
 	v, _ := r.Context().Value(ctxTenantKey{}).(string)
 	return v
+}
+
+// resolveAuthToken accepts either a tenant token (legacy/password auth)
+// or a GitHub OAuth session token and returns the resolved tenant/login.
+func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, ok bool) {
+	if token == "" {
+		return "", "", false
+	}
+	if tenantID, err := s.tenantByToken(token); err == nil {
+		return tenantID, "", true
+	}
+	sessionSecret := s.webSessionSecret()
+	if sessionSecret == "" {
+		return "", "", false
+	}
+	payload, valid := verifyGitHubSession(sessionSecret, token)
+	if !valid {
+		return "", "", false
+	}
+	tenantID, err := s.githubTenantID()
+	if err != nil {
+		return "", "", false
+	}
+	return tenantID, payload.Login, true
+}
+
+// githubTenantID resolves the tenant backing GitHub OAuth sessions.
+func (s *Server) githubTenantID() (string, error) {
+	s.mu.RLock()
+	hubToken := s.hubCfg.Token
+	s.mu.RUnlock()
+	if hubToken != "" {
+		if tenantID, err := s.tenantByToken(hubToken); err == nil {
+			return tenantID, nil
+		}
+	}
+	var tenantID string
+	err := s.db.QueryRow(`SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
+	return tenantID, err
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
@@ -308,21 +358,100 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		// Hub token doubles as the web session token — reject empty tokens even if hub token is unset
-		s.mu.RLock()
-		hubToken := s.hubCfg.Token
-		s.mu.RUnlock()
-		if token == "" || token != hubToken {
+		if token == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		s.mu.RUnlock()
+		sessionSecret := s.webSessionSecret()
+
+		// Accept shared hub token (existing behavior)
+		if token == hubToken {
+			next(w, r)
+			return
+		}
+
+		// Try GitHub OAuth session token
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				ctx = context.WithValue(ctx, ctxGitHubSessionPayloadKey{}, payload)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+func isAccessAdmin(cfg *types.AccessConfig, login string) bool {
+	if login == "" || cfg == nil {
+		return false
+	}
+	for _, admin := range cfg.Admins {
+		if strings.EqualFold(admin, login) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		sessionSecret := s.webSessionSecret()
+
+		// Password-authenticated sessions keep existing admin access.
+		if token == hubToken {
+			next(w, r)
+			return
+		}
+
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				if !isAccessAdmin(accessCfg, payload.Login) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 
 func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	disablePassword := s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth
+	s.mu.RUnlock()
+	if disablePassword {
+		http.Error(w, "password login disabled", http.StatusForbidden)
 		return
 	}
 	var body struct {
@@ -350,7 +479,35 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]string{"status": "ok"})
+	if payload := githubSessionPayloadFromContext(r.Context()); payload != nil {
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		jsonOK(w, map[string]interface{}{
+			"login":       payload.Login,
+			"name":        payload.Name,
+			"avatar_url":  payload.AvatarURL,
+			"auth_method": "github",
+			"is_admin":    isAccessAdmin(accessCfg, payload.Login),
+		})
+		return
+	}
+	jsonOK(w, map[string]interface{}{"auth_method": "password", "is_admin": true})
+}
+
+// handleAuthConfig returns public auth config (no auth required).
+func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	githubOAuthEnabled := s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil && s.hubCfg.Auth.GitHubOAuth.ClientID != ""
+	passwordAuthEnabled := s.hubCfg.Token != "" && !(s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth)
+	s.mu.RUnlock()
+	jsonOK(w, map[string]bool{
+		"github_oauth_enabled":  githubOAuthEnabled,
+		"password_auth_enabled": passwordAuthEnabled,
+	})
 }
 
 func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
@@ -494,6 +651,15 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// Resolve access config and GitHub login for tag-based filtering
+	s.mu.RLock()
+	var accessCfg *types.AccessConfig
+	if s.hubCfg.Auth != nil {
+		accessCfg = s.hubCfg.Auth.Access
+	}
+	s.mu.RUnlock()
+	ghLogin := githubLoginFromContext(r.Context())
+
 	var out []types.Claw
 	for rows.Next() {
 		var c types.Claw
@@ -522,6 +688,10 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
+		}
+		// Apply tag-based view filter (only applies to GitHub OAuth users)
+		if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, c.Tags) {
+			continue
 		}
 		out = append(out, c)
 	}
@@ -692,8 +862,34 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	if clawID == "" {
 		clawID = strings.TrimPrefix(r.URL.Path, "/api/claws/")
 	}
+	ghLogin := githubLoginFromContext(r.Context())
+	var accessCfg *types.AccessConfig
+	if ghLogin != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+	}
 
 	if r.Method == http.MethodPatch {
+		if ghLogin != "" {
+			var tagsJSON string
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
+				return
+			}
+			var clawTags []string
+			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
 		var body struct {
 			Name  *string   `json:"name"`
 			Tags  *[]string `json:"tags"`
@@ -722,6 +918,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			tagsJSON, _ := json.Marshal(normalized)
 			_, _ = s.db.Exec(`UPDATE claws SET tags = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`, string(tagsJSON), clawID, tenantID)
+			// Update in-memory cache so WS broadcast filtering stays current
+			s.mu.Lock()
+			if cc, ok := s.claws[clawID]; ok {
+				cc.tags = normalized
+			}
+			s.mu.Unlock()
 		}
 		if body.Color != nil {
 			color := resolveColor(*body.Color, clawID)
@@ -737,6 +939,23 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
+		}
+		if ghLogin != "" {
+			var tagsJSON string
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
+				return
+			}
+			var clawTags []string
+			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 		}
 
 		// Look up provider info before deleting so we can terminate the VM
@@ -783,6 +1002,10 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, c.Tags) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	c.TenantID = tenantID
 	if lastSeen.Valid {
 		c.LastSeen = lastSeen.Time
@@ -806,6 +1029,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/messages/")
+	ghLoginMsg := githubLoginFromContext(r.Context())
+	var accessCfgMsg *types.AccessConfig
+	if ghLoginMsg != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfgMsg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+	}
 
 	if r.Method == http.MethodPost {
 		var body struct {
@@ -815,6 +1047,27 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
+
+		// Apply tag-based interact filter for GitHub OAuth users
+		if ghLoginMsg != "" {
+			// Fetch claw tags to check interact permission
+			var tagsJSONMsg string
+			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg); err != nil {
+				if err == sql.ErrNoRows {
+					http.Error(w, "not found", http.StatusNotFound)
+				} else {
+					http.Error(w, "db error", http.StatusInternalServerError)
+				}
+				return
+			}
+			var clawTagsMsg []string
+			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+
 		msg := types.HubMessage{
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
@@ -835,6 +1088,20 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, msg)
 		return
+	}
+	if ghLoginMsg != "" {
+		var tagsJSONMsg string
+		err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+		if err == sql.ErrNoRows {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		var clawTagsMsg []string
+		_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+		if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	// Pagination: ?before=<created_at>&limit=<n> for older messages
@@ -947,7 +1214,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady)}
+	var registrationTagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
+	var registrationTags []string
+	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
 	s.mu.Lock()
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -1292,11 +1563,15 @@ func (w *proxyResponseWriter) WriteHeader(status int) {
 // ─── User WebSocket ───────────────────────────────────────────────────────────
 
 func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	tenantID, err := s.tenantByToken(token)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	tenantID := tenantFromCtx(r)
+	ghLogin := githubLoginFromContext(r.Context())
+	var accessCfg *types.AccessConfig
+	if ghLogin != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -1304,7 +1579,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uc := &userConn{conn: conn, tenantID: tenantID}
+	uc := &userConn{
+		conn:        conn,
+		tenantID:    tenantID,
+		githubLogin: ghLogin,
+	}
 	connID := uuid.New().String()
 
 	s.mu.Lock()
@@ -1321,14 +1600,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	type dbClaw struct {
-		id, name, status string
+		id, name, status, tagsJSON string
 	}
 	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
 	if rows != nil {
 		for rows.Next() {
 			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status)
+			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON)
 			dbClaws = append(dbClaws, c)
 		}
 		_ = rows.Close()
@@ -1337,6 +1616,10 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	connectedIDs := make(map[string]bool)
 	for _, cc := range s.claws {
 		if cc.tenantID != tenantID {
+			continue
+		}
+		// Apply tag-based view filter for GitHub OAuth users
+		if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, cc.tags) {
 			continue
 		}
 		connectedIDs[cc.id] = true
@@ -1358,6 +1641,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	for _, c := range dbClaws {
 		if connectedIDs[c.id] {
 			continue // already sent above
+		}
+		// Apply tag-based view filter for GitHub OAuth users
+		if ghLogin != "" {
+			var clawTags []string
+			_ = json.Unmarshal([]byte(c.tagsJSON), &clawTags)
+			if !canViewClaw(accessCfg, ghLogin, clawTags) {
+				continue
+			}
 		}
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
@@ -1382,6 +1673,22 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(payload, &hm); err != nil {
 				continue
 			}
+			// Apply tag-based interact filter for GitHub OAuth users
+			if ghLogin != "" {
+				var tagsJSON string
+				_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, hm.ClawID, tenantID).Scan(&tagsJSON)
+				var clawTags []string
+				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+				var currentAccessCfg *types.AccessConfig
+				s.mu.RLock()
+				if s.hubCfg.Auth != nil {
+					currentAccessCfg = s.hubCfg.Auth.Access
+				}
+				s.mu.RUnlock()
+				if !canInteractWithClaw(currentAccessCfg, ghLogin, clawTags) {
+					continue
+				}
+			}
 			hm.ID = uuid.New().String()
 			hm.TenantID = tenantID
 			hm.Role = "user"
@@ -1401,13 +1708,65 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) broadcastToUsers(tenantID string, msg types.WSMessage) {
+	for _, uc := range s.broadcastRecipients(tenantID, msg) {
+		_ = wsjson.Write(context.Background(), uc.conn, msg)
+	}
+}
+
+func (s *Server) broadcastRecipients(tenantID string, msg types.WSMessage) []*userConn {
+	clawID := clawIDFromWSMessage(msg)
+	clawTags := []string(nil)
+	if clawID != "" {
+		clawTags = s.clawTagsForBroadcast(tenantID, clawID)
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	recipients := make([]*userConn, 0, len(s.users))
 	for _, uc := range s.users {
-		if uc.tenantID == tenantID {
-			_ = wsjson.Write(context.Background(), uc.conn, msg)
+		if uc.tenantID != tenantID {
+			continue
 		}
+		if uc.githubLogin != "" && clawID != "" {
+			var accessCfg *types.AccessConfig
+			if s.hubCfg.Auth != nil {
+				accessCfg = s.hubCfg.Auth.Access
+			}
+			if !canViewClaw(accessCfg, uc.githubLogin, clawTags) {
+				continue
+			}
+		}
+		recipients = append(recipients, uc)
 	}
+	return recipients
+}
+
+func (s *Server) clawTagsForBroadcast(tenantID, clawID string) []string {
+	s.mu.RLock()
+	if cc := s.claws[clawID]; cc != nil && cc.tenantID == tenantID {
+		tags := append([]string(nil), cc.tags...)
+		s.mu.RUnlock()
+		return tags
+	}
+	s.mu.RUnlock()
+
+	var tagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON)
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	return tags
+}
+
+func clawIDFromWSMessage(msg types.WSMessage) string {
+	payload, err := json.Marshal(msg.Payload)
+	if err != nil {
+		return ""
+	}
+	var envelope struct {
+		ClawID string `json:"claw_id"`
+	}
+	_ = json.Unmarshal(payload, &envelope)
+	return envelope.ClawID
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2195,7 +2554,9 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// and would overwrite BOOTSTRAP.md if we wrote it before the script ran.
 	if len(files) > 0 {
 		fileNames := make([]string, 0, len(files))
-		for k := range files { fileNames = append(fileNames, k) }
+		for k := range files {
+			fileNames = append(fileNames, k)
+		}
 		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
 		for attempt := 1; attempt <= 3; attempt++ {
 			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {

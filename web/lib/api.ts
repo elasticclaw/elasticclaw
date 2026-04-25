@@ -17,6 +17,12 @@ export function resolveToken(): Promise<string> {
   }
 
   // Check sessionStorage first (set by login page)
+  // Prefer GitHub OAuth token over hub token when both exist
+  const githubToken = sessionStorage.getItem("ec_github_token")
+  if (githubToken) {
+    _token = githubToken
+    return Promise.resolve(_token)
+  }
   const stored = sessionStorage.getItem("ec_hub_token")
   if (stored) {
     _token = stored
@@ -47,7 +53,7 @@ export function resolveToken(): Promise<string> {
 function getTokenSync(): string {
   if (_token) return _token
   if (typeof window !== "undefined") {
-    return sessionStorage.getItem("ec_hub_token") || ""
+    return sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
   }
   return ""
 }
@@ -182,6 +188,7 @@ export function clearConfig() {
   _tokenPromise = null
   if (typeof window !== "undefined") {
     sessionStorage.removeItem("ec_hub_token")
+    sessionStorage.removeItem("ec_github_token")
   }
 }
 

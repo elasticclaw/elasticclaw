@@ -155,6 +155,30 @@ type BrandingConfig struct {
 	LogoURL string `yaml:"logo_url,omitempty" json:"logoUrl,omitempty"`
 }
 
+// AuthConfig holds GitHub OAuth and access control config for the hub web UI.
+type AuthConfig struct {
+	GitHubOAuth         *GitHubOAuthConfig `yaml:"github_oauth,omitempty"`
+	Access              *AccessConfig      `yaml:"access,omitempty"`
+	SessionSecret       string             `yaml:"session_secret,omitempty"`
+	DisablePasswordAuth bool               `yaml:"disable_password_auth,omitempty"`
+}
+
+// GitHubOAuthConfig holds GitHub OAuth app credentials and allowlist.
+type GitHubOAuthConfig struct {
+	ClientID     string   `yaml:"client_id"`
+	ClientSecret string   `yaml:"client_secret"`
+	AllowedUsers []string `yaml:"allowed_users,omitempty"` // GitHub logins
+	AllowedOrgs  []string `yaml:"allowed_orgs,omitempty"`  // GitHub org names
+	AllowedTeams []string `yaml:"allowed_teams,omitempty"` // "org/team" format
+}
+
+// AccessConfig holds tag-based RBAC rules for the hub web UI.
+type AccessConfig struct {
+	Admins               []string `yaml:"admins,omitempty"`                 // GitHub logins — bypass all tag checks
+	ViewRequiresTags     []string `yaml:"view_requires_tags,omitempty"`     // any matching tag grants view
+	InteractRequiresTags []string `yaml:"interact_requires_tags,omitempty"` // any matching tag grants interact
+}
+
 type HubConfig struct {
 	// CLI connection fields
 	URL   string `yaml:"url"`
@@ -212,6 +236,9 @@ type HubConfig struct {
 	Factories []*FactoryConfig `yaml:"factories,omitempty"`
 	// Secrets is a named map of secret values referenced by factories via webhook_secret_ref.
 	Secrets map[string]string `yaml:"secrets,omitempty"`
+
+	// Auth holds GitHub OAuth and access control config for the hub web UI.
+	Auth *AuthConfig `yaml:"auth,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

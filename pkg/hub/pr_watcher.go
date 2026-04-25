@@ -549,13 +549,43 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	clawID := parts[0]
 	sub := parts[1]
 
+	if sub != "prs" && sub != "settings" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	ghLogin := githubLoginFromContext(r.Context())
+	if ghLogin != "" {
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+
+		var tagsJSON string
+		if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantFromCtx(r)).Scan(&tagsJSON); err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		var clawTags []string
+		_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+		if sub == "settings" && r.Method != http.MethodGet {
+			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		} else if !canViewClaw(accessCfg, ghLogin, clawTags) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	switch sub {
 	case "prs":
 		s.handleClawPRs(w, r, clawID)
 	case "settings":
 		s.handleClawSettings(w, r, clawID)
-	default:
-		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 

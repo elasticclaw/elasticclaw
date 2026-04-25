@@ -19,10 +19,24 @@ export default function Home() {
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
+  const [isAdmin, setIsAdmin] = useState(true) // default true so UI doesn't flicker
 
   // Check configured on mount (needs browser for localStorage)
   useEffect(() => {
     setConfiguredState(isConfigured())
+  }, [])
+
+  // Fetch admin status
+  useEffect(() => {
+    const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+    if (!token) return
+    import("@/lib/hub-url").then(({ getHubUrl }) => {
+      const hubUrl = getHubUrl()
+      fetch(`${hubUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) setIsAdmin(data.is_admin ?? true) })
+        .catch(() => {})
+    })
   }, [])
 
   const hub = useHub(selectedClawId)
@@ -269,6 +283,7 @@ export default function Home() {
         isCollapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         onReorderClaws={reorderClaws}
+        isAdmin={isAdmin}
       />
       <ConversationView
         claw={selectedClaw}
