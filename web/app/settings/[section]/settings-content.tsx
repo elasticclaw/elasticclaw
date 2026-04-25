@@ -61,6 +61,7 @@ interface SettingsData {
       viewRequiresTags: string[]
       interactRequiresTags: string[]
     }
+    disablePasswordAuth?: boolean
   }
 }
 
@@ -675,24 +676,55 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium">Password Login</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">Always enabled. Used by the hub token and UI password.</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {settings.auth?.disablePasswordAuth ? 'Disabled — GitHub OAuth only.' : 'Enabled. Used by the hub token and UI password.'}
+            </p>
           </div>
-          <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-medium">Active</span>
+          {settings.auth?.disablePasswordAuth
+            ? <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded font-medium">Disabled</span>
+            : <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-medium">Active</span>
+          }
         </div>
-        <div className="border-t border-border pt-3 space-y-3">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
-            <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
+
+        {/* Disable/enable toggle — only show when GitHub OAuth is configured */}
+        {ghOAuth && (
+          <div className="flex items-center justify-between border border-border rounded-md px-3 py-2">
+            <div>
+              <p className="text-xs font-medium">Require GitHub OAuth</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Disable password login entirely. Make sure you can log in via GitHub first.</p>
+            </div>
+            <button
+              onClick={() => onSave({ auth: { disablePasswordAuth: !settings.auth?.disablePasswordAuth } })}
+              disabled={saving}
+              className={cn(
+                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
+                settings.auth?.disablePasswordAuth ? 'bg-primary' : 'bg-muted'
+              )}
+            >
+              <span className={cn(
+                'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-lg transform transition-transform',
+                settings.auth?.disablePasswordAuth ? 'translate-x-4' : 'translate-x-0'
+              )} />
+            </button>
           </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
-            <Input type="password" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
+        )}
+
+        {!settings.auth?.disablePasswordAuth && (
+          <div className="border-t border-border pt-3 space-y-3">
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
+              <Input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} className="h-8 text-sm" placeholder="Min 8 characters" />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+              <Input type="password" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
+            </div>
+            {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
+            <Button size="sm" disabled={saving || !newPw || !pwConfirm} onClick={handlePasswordSave}>
+              Change Password
+            </Button>
           </div>
-          {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
-          <Button size="sm" disabled={saving || !newPw || !pwConfirm} onClick={handlePasswordSave}>
-            Change Password
-          </Button>
-        </div>
+        )}
       </div>
 
       {/* GitHub OAuth card */}

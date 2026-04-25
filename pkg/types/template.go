@@ -157,8 +157,9 @@ type BrandingConfig struct {
 
 // AuthConfig holds GitHub OAuth and access control config for the hub web UI.
 type AuthConfig struct {
-	GitHubOAuth *GitHubOAuthConfig `yaml:"github_oauth,omitempty"`
-	Access      *AccessConfig      `yaml:"access,omitempty"`
+	GitHubOAuth         *GitHubOAuthConfig `yaml:"github_oauth,omitempty"`
+	Access              *AccessConfig      `yaml:"access,omitempty"`
+	DisablePasswordAuth bool               `yaml:"disable_password_auth,omitempty"`
 }
 
 // GitHubOAuthConfig holds GitHub OAuth app credentials and allowlist.

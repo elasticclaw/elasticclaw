@@ -39,8 +39,9 @@ type SettingsView struct {
 }
 
 type AuthView struct {
-	GitHubOAuth *GitHubOAuthView `json:"githubOAuth,omitempty"`
-	Access      *AccessView      `json:"access,omitempty"`
+	GitHubOAuth         *GitHubOAuthView `json:"githubOAuth,omitempty"`
+	Access              *AccessView      `json:"access,omitempty"`
+	DisablePasswordAuth bool             `json:"disablePasswordAuth"`
 }
 
 type GitHubOAuthView struct {
@@ -140,9 +141,10 @@ type SettingsPatch struct {
 }
 
 type AuthPatch struct {
-	GitHubOAuth *GitHubOAuthPatch `json:"githubOAuth,omitempty"`
-	Access      *AccessPatch      `json:"access,omitempty"`
-	RemoveGitHubOAuth bool        `json:"removeGithubOAuth,omitempty"`
+	GitHubOAuth         *GitHubOAuthPatch `json:"githubOAuth,omitempty"`
+	Access              *AccessPatch      `json:"access,omitempty"`
+	RemoveGitHubOAuth   bool              `json:"removeGithubOAuth,omitempty"`
+	DisablePasswordAuth *bool             `json:"disablePasswordAuth,omitempty"`
 }
 
 type GitHubOAuthPatch struct {
@@ -339,7 +341,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// Auth config
 	if s.hubCfg.Auth != nil {
-		view.Auth = &AuthView{}
+		view.Auth = &AuthView{
+			DisablePasswordAuth: s.hubCfg.Auth.DisablePasswordAuth,
+		}
 		if s.hubCfg.Auth.GitHubOAuth != nil {
 			gh := s.hubCfg.Auth.GitHubOAuth
 			view.Auth.GitHubOAuth = &GitHubOAuthView{
@@ -675,6 +679,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if gh.AllowedTeams != nil {
 				updatedCfg.Auth.GitHubOAuth.AllowedTeams = gh.AllowedTeams
 			}
+		}
+		if patch.Auth.DisablePasswordAuth != nil {
+			if updatedCfg.Auth == nil {
+				updatedCfg.Auth = &types.AuthConfig{}
+			}
+			updatedCfg.Auth.DisablePasswordAuth = *patch.Auth.DisablePasswordAuth
 		}
 		if patch.Auth.Access != nil {
 			if updatedCfg.Auth == nil {

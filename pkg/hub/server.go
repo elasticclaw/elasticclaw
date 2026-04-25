@@ -391,6 +391,13 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.mu.RLock()
+	disablePassword := s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth
+	s.mu.RUnlock()
+	if disablePassword {
+		http.Error(w, "password login disabled", http.StatusForbidden)
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}
@@ -442,7 +449,7 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	githubOAuthEnabled := s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil && s.hubCfg.Auth.GitHubOAuth.ClientID != ""
-	passwordAuthEnabled := s.hubCfg.Token != ""
+	passwordAuthEnabled := s.hubCfg.Token != "" && !(s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth)
 	s.mu.RUnlock()
 	jsonOK(w, map[string]bool{
 		"github_oauth_enabled":  githubOAuthEnabled,
