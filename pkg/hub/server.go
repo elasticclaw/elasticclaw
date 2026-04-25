@@ -1694,7 +1694,13 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, hm.ClawID, tenantID).Scan(&tagsJSON)
 				var clawTags []string
 				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
+				var currentAccessCfg *types.AccessConfig
+				s.mu.RLock()
+				if s.hubCfg.Auth != nil {
+					currentAccessCfg = s.hubCfg.Auth.Access
+				}
+				s.mu.RUnlock()
+				if !canInteractWithClaw(currentAccessCfg, ghLogin, clawTags) {
 					continue
 				}
 			}
