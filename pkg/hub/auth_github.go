@@ -161,10 +161,19 @@ func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	// Build redirect_uri from the incoming request so the callback lands on the
+	// correct host regardless of what's registered in the GitHub OAuth app.
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		scheme = "http"
+	}
+	redirectURI := fmt.Sprintf("%s://%s/api/auth/github/callback", scheme, r.Host)
+
 	authURL := fmt.Sprintf(
-		"https://github.com/login/oauth/authorize?client_id=%s&scope=read:user,read:org&state=%s",
+		"https://github.com/login/oauth/authorize?client_id=%s&scope=read:user,read:org&state=%s&redirect_uri=%s",
 		url.QueryEscape(oauthCfg.ClientID),
 		url.QueryEscape(state),
+		url.QueryEscape(redirectURI),
 	)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
@@ -216,8 +225,15 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Reconstruct redirect_uri to match what was sent in the authorization request
+	exchangeScheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		exchangeScheme = "http"
+	}
+	exchangeRedirectURI := fmt.Sprintf("%s://%s/api/auth/github/callback", exchangeScheme, r.Host)
+
 	// Exchange code for access token
-	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, code)
+	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, code, exchangeRedirectURI)
 	if err != nil {
 		log.Printf("[github-oauth] token exchange error: %v", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
@@ -344,11 +360,14 @@ type githubUser struct {
 	AvatarURL string `json:"avatar_url"`
 }
 
-func (s *Server) githubExchangeCode(ctx context.Context, clientID, clientSecret, code string) (string, error) {
+func (s *Server) githubExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
 	body := url.Values{}
 	body.Set("client_id", clientID)
 	body.Set("client_secret", clientSecret)
 	body.Set("code", code)
+	if redirectURI != "" {
+		body.Set("redirect_uri", redirectURI)
+	}
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(body.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
