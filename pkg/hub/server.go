@@ -57,6 +57,7 @@ type clawConn struct {
 	id                   string
 	tenantID             string
 	conn                 *websocket.Conn
+	tags                 []string        // cached from DB at registration time for access-control checks
 	contextUsage         int             // 0-100, updated from heartbeats
 	gatewayReady         bool            // true once bridge reports gateway session established
 	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
@@ -860,6 +861,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			tagsJSON, _ := json.Marshal(normalized)
 			_, _ = s.db.Exec(`UPDATE claws SET tags = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`, string(tagsJSON), clawID, tenantID)
+			// Update in-memory cache so WS broadcast filtering stays current
+			s.mu.Lock()
+			if cc, ok := s.claws[clawID]; ok {
+				cc.tags = normalized
+			}
+			s.mu.Unlock()
 		}
 		if body.Color != nil {
 			color := resolveColor(*body.Color, clawID)
@@ -1027,7 +1034,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if ghLoginMsg != "" {
 		var tagsJSONMsg string
-		_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+		err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+		if err == sql.ErrNoRows {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		var clawTagsMsg []string
 		_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 		if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
@@ -1146,7 +1157,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady)}
+	var registrationTagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
+	var registrationTags []string
+	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
 	s.mu.Lock()
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -1502,6 +1517,16 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		tenantID = resolvedTenantID
 	}
 
+	ghLogin := githubLoginFromContext(r.Context())
+	var accessCfg *types.AccessConfig
+	if ghLogin != "" {
+		s.mu.RLock()
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
@@ -1524,14 +1549,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	type dbClaw struct {
-		id, name, status string
+		id, name, status, tagsJSON string
 	}
 	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
 	if rows != nil {
 		for rows.Next() {
 			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status)
+			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON)
 			dbClaws = append(dbClaws, c)
 		}
 		_ = rows.Close()
@@ -1540,6 +1565,10 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	connectedIDs := make(map[string]bool)
 	for _, cc := range s.claws {
 		if cc.tenantID != tenantID {
+			continue
+		}
+		// Apply tag-based view filter for GitHub OAuth users
+		if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, cc.tags) {
 			continue
 		}
 		connectedIDs[cc.id] = true
@@ -1561,6 +1590,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	for _, c := range dbClaws {
 		if connectedIDs[c.id] {
 			continue // already sent above
+		}
+		// Apply tag-based view filter for GitHub OAuth users
+		if ghLogin != "" {
+			var clawTags []string
+			_ = json.Unmarshal([]byte(c.tagsJSON), &clawTags)
+			if !canViewClaw(accessCfg, ghLogin, clawTags) {
+				continue
+			}
 		}
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
@@ -1584,6 +1621,16 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			var hm types.HubMessage
 			if err := json.Unmarshal(payload, &hm); err != nil {
 				continue
+			}
+			// Apply tag-based interact filter for GitHub OAuth users
+			if ghLogin != "" {
+				var tagsJSON string
+				_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, hm.ClawID, tenantID).Scan(&tagsJSON)
+				var clawTags []string
+				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+				if !canInteractWithClaw(accessCfg, ghLogin, clawTags) {
+					continue
+				}
 			}
 			hm.ID = uuid.New().String()
 			hm.TenantID = tenantID
