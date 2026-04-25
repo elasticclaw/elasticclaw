@@ -55,6 +55,9 @@ function LoginForm() {
       return
     }
     sessionStorage.removeItem("oauth_state")
+    const storedNext = safeNextPath(sessionStorage.getItem("oauth_next"))
+    sessionStorage.removeItem("oauth_next")
+    const callbackNext = nextParam || storedNext || "/"
 
     const redirectUri = window.location.origin + "/login"
     const hubUrl = getHubUrl()
@@ -75,7 +78,7 @@ function LoginForm() {
         if (data.github_token) {
           clearConfig()
           sessionStorage.setItem("ec_github_token", data.github_token)
-          router.replace(next)
+          router.replace(callbackNext)
         } else {
           throw new Error("missing token")
         }
@@ -85,7 +88,7 @@ function LoginForm() {
       })
 
     return () => { cancelled = true }
-  }, [searchParams, next, router])
+  }, [searchParams, nextParam, router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()

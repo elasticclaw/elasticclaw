@@ -652,6 +652,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Auth.RemoveGitHubOAuth {
 			if updatedCfg.Auth != nil {
 				updatedCfg.Auth.GitHubOAuth = nil
+				updatedCfg.Auth.DisablePasswordAuth = false
 				if updatedCfg.Auth.Access == nil {
 					updatedCfg.Auth = nil
 				}
