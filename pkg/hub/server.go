@@ -1566,19 +1566,6 @@ func (w *proxyResponseWriter) WriteHeader(status int) {
 
 func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
-	if tenantID == "" {
-		token := r.URL.Query().Get("token")
-		resolvedTenantID, resolvedLogin, ok := s.resolveAuthToken(token)
-		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		tenantID = resolvedTenantID
-		if resolvedLogin != "" {
-			r = r.WithContext(context.WithValue(r.Context(), ctxGitHubLoginKey{}, resolvedLogin))
-		}
-	}
-
 	ghLogin := githubLoginFromContext(r.Context())
 	var accessCfg *types.AccessConfig
 	if ghLogin != "" {
