@@ -23,8 +23,9 @@ import (
 
 const githubSessionExpiry = 7 * 24 * time.Hour
 const (
-	oauthStateCookieName = "oauth_state"
-	oauthNextCookieName  = "oauth_next"
+	oauthStateCookieName      = "oauth_state"
+	oauthNextCookieName       = "oauth_next"
+	oauthFrontendOriginCookie = "oauth_frontend_origin"
 	oauthCodeTTL         = 2 * time.Minute
 )
 
@@ -160,6 +161,24 @@ func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) 
 			Path:     "/",
 		})
 	}
+	// Store the frontend origin so the callback redirect lands on the right host.
+	// In dev the frontend runs on a different port than the hub.
+	frontendOrigin := ""
+	if ref := r.Referer(); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			frontendOrigin = u.Scheme + "://" + u.Host
+		}
+	}
+	if frontendOrigin != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthFrontendOriginCookie,
+			Value:    frontendOrigin,
+			MaxAge:   600,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Path:     "/",
+		})
+	}
 
 	// Build redirect_uri from the incoming request so the callback lands on the
 	// correct host regardless of what's registered in the GitHub OAuth app.
@@ -203,21 +222,15 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 			next = safeNextPath(string(decoded))
 		}
 	}
-	// Clear the state cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookieName,
-		Value:    "",
-		MaxAge:   -1,
-		Path:     "/",
-		HttpOnly: true,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthNextCookieName,
-		Value:    "",
-		MaxAge:   -1,
-		Path:     "/",
-		HttpOnly: true,
-	})
+	// Read and clear the frontend origin cookie
+	var frontendOriginFromCookie string
+	if c, err := r.Cookie(oauthFrontendOriginCookie); err == nil {
+		frontendOriginFromCookie = c.Value
+	}
+	// Clear all OAuth cookies
+	for _, name := range []string{oauthStateCookieName, oauthNextCookieName, oauthFrontendOriginCookie} {
+		http.SetCookie(w, &http.Cookie{Name: name, Value: "", MaxAge: -1, Path: "/", HttpOnly: true})
+	}
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -294,7 +307,18 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 	if next != "" {
 		redirectQuery.Set("next", next)
 	}
-	redirectURL := "/login?" + redirectQuery.Encode()
+	// Redirect to the frontend /login page. In dev the hub and web run on
+	// different ports, so use the stored frontend origin cookie if present.
+	frontendBase := frontendOriginFromCookie
+	if frontendBase == "" {
+		// Fallback: same host as the hub (production case)
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+			scheme = "http"
+		}
+		frontendBase = fmt.Sprintf("%s://%s", scheme, r.Host)
+	}
+	redirectURL := frontendBase + "/login?" + redirectQuery.Encode()
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
