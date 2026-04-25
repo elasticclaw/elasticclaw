@@ -66,7 +66,7 @@ interface SettingsData {
 
 async function fetchSettings(): Promise<SettingsData> {
   const hubUrl = getHubUrl()
-  const token = sessionStorage.getItem("ec_hub_token") || ""
+  const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
   const res = await fetch(`${hubUrl}/api/settings`, {
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -76,7 +76,7 @@ async function fetchSettings(): Promise<SettingsData> {
 
 async function patchSettings(patch: object): Promise<void> {
   const hubUrl = getHubUrl()
-  const token = sessionStorage.getItem("ec_hub_token") || ""
+  const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
   const res = await fetch(`${hubUrl}/api/settings`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -117,7 +117,7 @@ export default function SettingsSectionPage() {
 
   useEffect(() => {
     const hubUrl = getHubUrl()
-    const token = sessionStorage.getItem("ec_hub_token") || ""
+    const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
     fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.json())
       .then((d) => { setVersion(d.version || "unknown"); setHubPublicUrl(d.hubUrl || "") })
@@ -1123,7 +1123,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
   const [error, setError] = useState<string | null>(null)
 
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
 
   const refresh = async () => {
     const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
@@ -1365,7 +1365,7 @@ function AIConfigSection() {
   const chatInputRef = useRef<HTMLInputElement>(null)
 
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
 
   // Persist messages to sessionStorage on change
   useEffect(() => {
@@ -1900,7 +1900,7 @@ function TemplatesSection() {
     setLoading(true)
     try {
       const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_hub_token") || ""
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
       const res = await fetch(`${hubUrl}/api/templates`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -1915,7 +1915,7 @@ function TemplatesSection() {
     setDeleting(name)
     try {
       const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_hub_token") || ""
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
       const res = await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },

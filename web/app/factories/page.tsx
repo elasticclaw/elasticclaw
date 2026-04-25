@@ -61,7 +61,7 @@ function FactoryEventsContent() {
     setLoading(true)
     try {
       const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_hub_token") || ""
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
       const res = await fetch(`${hubUrl}/api/factories/${encodeURIComponent(name)}/events`, {
         headers: { Authorization: `Bearer ${token}` },
       })
