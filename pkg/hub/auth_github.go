@@ -101,10 +101,10 @@ func (s *Server) webSessionSecret() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil {
-		return s.hubCfg.Auth.GitHubOAuth.ClientSecret
+	if s.hubCfg.Auth != nil && s.hubCfg.Auth.SessionSecret != "" {
+		return s.hubCfg.Auth.SessionSecret
 	}
-	return ""
+	return s.hubCfg.Token
 }
 
 // ─── Public endpoints ────────────────────────────────────────────────────────

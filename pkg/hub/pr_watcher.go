@@ -586,8 +586,6 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 		s.handleClawPRs(w, r, clawID)
 	case "settings":
 		s.handleClawSettings(w, r, clawID)
-	default:
-		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 

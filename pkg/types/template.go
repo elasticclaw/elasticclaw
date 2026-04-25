@@ -159,6 +159,7 @@ type BrandingConfig struct {
 type AuthConfig struct {
 	GitHubOAuth         *GitHubOAuthConfig `yaml:"github_oauth,omitempty"`
 	Access              *AccessConfig      `yaml:"access,omitempty"`
+	SessionSecret       string             `yaml:"session_secret,omitempty"`
 	DisablePasswordAuth bool               `yaml:"disable_password_auth,omitempty"`
 }
 

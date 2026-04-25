@@ -259,8 +259,9 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",
 		Auth: &types.AuthConfig{
-			GitHubOAuth: &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
-			Access:      &types.AccessConfig{Admins: []string{"admin-user"}},
+			SessionSecret: "session-secret",
+			GitHubOAuth:   &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
+			Access:        &types.AccessConfig{Admins: []string{"admin-user"}},
 		},
 	}, "", "")
 
@@ -280,7 +281,23 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
 	}
 
-	session, err := signGitHubSession("oauth-secret", "regular-user", "", "")
+	oauthSecretSession, err := signGitHubSession("oauth-secret", "admin-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+oauthSecretSession)
+	rec = httptest.NewRecorder()
+
+	s.withWebAdminAuth(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	})(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+
+	session, err := signGitHubSession("session-secret", "regular-user", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +313,7 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
 	}
 
-	adminSession, err := signGitHubSession("oauth-secret", "admin-user", "", "")
+	adminSession, err := signGitHubSession("session-secret", "admin-user", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
