@@ -41,7 +41,7 @@ type Server struct {
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// one-time oauth_code -> signed GitHub session token
-	oauthCodes map[string]pendingOAuthCode
+
 
 	fileAckMu       sync.Mutex
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
@@ -107,14 +107,12 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		identity:        id,
 		claws:           make(map[string]*clawConn),
 		users:           make(map[string]*userConn),
-		oauthCodes:      make(map[string]pendingOAuthCode),
 		fileAckWaiters:  make(map[string]chan types.FileAck),
 		fileReadWaiters: make(map[string]chan types.FileReadResp),
 	}
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
-	go srv.cleanupExpiredOAuthCodesLoop()
 	srv.startPRWatcher()
 
 	return srv, nil
@@ -179,8 +177,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig) // public — no auth required
-	mux.HandleFunc("/api/auth/github", s.handleGitHubOAuthStart)
-	mux.HandleFunc("/api/auth/github/callback", s.handleGitHubOAuthCallback)
+	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
 	mux.HandleFunc("/api/hub-config", s.withWebAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAuth(s.handleSettings))

@@ -12,7 +12,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,17 +21,6 @@ import (
 // ─── GitHub OAuth session token ───────────────────────────────────────────────
 
 const githubSessionExpiry = 7 * 24 * time.Hour
-const (
-	oauthStateCookieName      = "oauth_state"
-	oauthNextCookieName       = "oauth_next"
-	oauthFrontendOriginCookie = "oauth_frontend_origin"
-	oauthCodeTTL         = 2 * time.Minute
-)
-
-type pendingOAuthCode struct {
-	Token     string
-	ExpiresAt time.Time
-}
 
 // githubSessionPayload is the signed payload stored in OAuth session tokens.
 type githubSessionPayload struct {
@@ -99,9 +87,9 @@ func githubLoginFromContext(ctx context.Context) string {
 	return v
 }
 
-// ─── GitHub OAuth handlers ────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// githubBaseURL returns the GitHub API base URL (overridable for tests).
+// ghBaseURL returns the GitHub API base URL (overridable for tests).
 func (s *Server) ghBaseURL() string {
 	if s.githubBaseURL != "" {
 		return s.githubBaseURL
@@ -110,8 +98,6 @@ func (s *Server) ghBaseURL() string {
 }
 
 // webSessionSecret returns the HMAC key used to sign/verify web session tokens.
-// Prefer the explicit hub token for backward compatibility, and otherwise fall
-// back to the GitHub OAuth client secret so OAuth-only deployments remain secure.
 func (s *Server) webSessionSecret() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -125,128 +111,65 @@ func (s *Server) webSessionSecret() string {
 	return ""
 }
 
-// handleGitHubOAuthStart redirects to GitHub OAuth authorize URL.
-func (s *Server) handleGitHubOAuthStart(w http.ResponseWriter, r *http.Request) {
+// ─── Public endpoints ────────────────────────────────────────────────────────
+
+// handleGitHubClientID returns just the OAuth client_id (public, no secret).
+// The frontend needs this to build the GitHub authorize URL client-side.
+func (s *Server) handleGitHubClientID(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.hubCfg.Auth
 	s.mu.RUnlock()
+	if cfg == nil || cfg.GitHubOAuth == nil || cfg.GitHubOAuth.ClientID == "" {
+		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]string{"client_id": cfg.GitHubOAuth.ClientID})
+}
+
+// ─── GitHub OAuth exchange ────────────────────────────────────────────────────
+//
+// The frontend handles the GitHub OAuth redirect entirely:
+//   1. Frontend generates state, redirects user to GitHub with redirect_uri=<frontend>/login
+//   2. GitHub sends code back to <frontend>/login?code=...&state=...
+//   3. Frontend validates state, then POSTs {code, redirect_uri} to this endpoint
+//   4. Hub exchanges code with GitHub (holds client_secret), validates allowlist,
+//      and returns a signed session token directly — no Go redirects ever appear in the browser.
+
+// handleGitHubOAuthExchange accepts {code, redirect_uri} from the frontend,
+// exchanges it with GitHub, validates allowlist, and returns a session token.
+func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	cfg := s.hubCfg.Auth
+	s.mu.RUnlock()
+
 	if cfg == nil || cfg.GitHubOAuth == nil {
 		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
 		return
 	}
 	oauthCfg := cfg.GitHubOAuth
-
-	state, err := randomState()
-	if err != nil {
+	secret := s.webSessionSecret()
+	if secret == "" {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Store state in a short-lived cookie for CSRF protection
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookieName,
-		Value:    state,
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Path:     "/",
-	})
-	if next := safeNextPath(r.URL.Query().Get("next")); next != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     oauthNextCookieName,
-			Value:    base64.RawURLEncoding.EncodeToString([]byte(next)),
-			MaxAge:   600,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Path:     "/",
-		})
+	var body struct {
+		Code        string `json:"code"`
+		RedirectURI string `json:"redirect_uri"`
 	}
-	// Store the frontend origin so the callback redirect lands on the right host.
-	// In dev the frontend runs on a different port than the hub.
-	frontendOrigin := ""
-	if ref := r.Referer(); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			frontendOrigin = u.Scheme + "://" + u.Host
-		}
-	}
-	if frontendOrigin != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     oauthFrontendOriginCookie,
-			Value:    frontendOrigin,
-			MaxAge:   600,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Path:     "/",
-		})
-	}
-
-	// Build redirect_uri from the incoming request so the callback lands on the
-	// correct host regardless of what's registered in the GitHub OAuth app.
-	scheme := "https"
-	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-		scheme = "http"
-	}
-	redirectURI := fmt.Sprintf("%s://%s/api/auth/github/callback", scheme, r.Host)
-
-	authURL := fmt.Sprintf(
-		"https://github.com/login/oauth/authorize?client_id=%s&scope=read:user,read:org&state=%s&redirect_uri=%s",
-		url.QueryEscape(oauthCfg.ClientID),
-		url.QueryEscape(state),
-		url.QueryEscape(redirectURI),
-	)
-	http.Redirect(w, r, authURL, http.StatusFound)
-}
-
-// handleGitHubOAuthCallback handles the OAuth callback from GitHub.
-func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	cfg := s.hubCfg.Auth
-	s.mu.RUnlock()
-	secret := s.webSessionSecret()
-
-	if cfg == nil || cfg.GitHubOAuth == nil {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
-		return
-	}
-	oauthCfg := cfg.GitHubOAuth
-
-	// Validate state
-	stateCookie, err := r.Cookie(oauthStateCookieName)
-	if err != nil || r.URL.Query().Get("state") != stateCookie.Value {
-		http.Error(w, "invalid state", http.StatusBadRequest)
-		return
-	}
-	var next string
-	if nextCookie, err := r.Cookie(oauthNextCookieName); err == nil {
-		if decoded, err := base64.RawURLEncoding.DecodeString(nextCookie.Value); err == nil {
-			next = safeNextPath(string(decoded))
-		}
-	}
-	// Read and clear the frontend origin cookie
-	var frontendOriginFromCookie string
-	if c, err := r.Cookie(oauthFrontendOriginCookie); err == nil {
-		frontendOriginFromCookie = c.Value
-	}
-	// Clear all OAuth cookies
-	for _, name := range []string{oauthStateCookieName, oauthNextCookieName, oauthFrontendOriginCookie} {
-		http.SetCookie(w, &http.Cookie{Name: name, Value: "", MaxAge: -1, Path: "/", HttpOnly: true})
-	}
-
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		http.Error(w, "missing code", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// Reconstruct redirect_uri to match what was sent in the authorization request
-	exchangeScheme := "https"
-	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-		exchangeScheme = "http"
-	}
-	exchangeRedirectURI := fmt.Sprintf("%s://%s/api/auth/github/callback", exchangeScheme, r.Host)
-
-	// Exchange code for access token
-	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, code, exchangeRedirectURI)
+	// Exchange code for GitHub access token
+	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, body.Code, body.RedirectURI)
 	if err != nil {
 		log.Printf("[github-oauth] token exchange error: %v", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
@@ -273,12 +196,8 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "access denied", http.StatusForbidden)
 		return
 	}
-	if secret == "" {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 
-	// Issue session token
+	// Issue signed session token
 	sessionToken, err := signGitHubSession(secret, ghUser.Login, ghUser.Name, ghUser.AvatarURL)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -287,93 +206,8 @@ func (s *Server) handleGitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 
 	log.Printf("[github-oauth] login: %s (%s)", ghUser.Login, ghUser.Name)
 
-	// Exchange long-lived session token for short-lived one-time code in URL.
-	oauthCode, err := randomState()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	now := time.Now()
-	expiresAt := now.Add(oauthCodeTTL)
-	s.cleanupExpiredOAuthCodes(now)
-	s.mu.Lock()
-	s.oauthCodes[oauthCode] = pendingOAuthCode{
-		Token:     sessionToken,
-		ExpiresAt: expiresAt,
-	}
-	s.mu.Unlock()
-
-	redirectQuery := url.Values{"oauth_code": []string{oauthCode}}
-	if next != "" {
-		redirectQuery.Set("next", next)
-	}
-	// Redirect to the frontend /login page. In dev the hub and web run on
-	// different ports, so use the stored frontend origin cookie if present.
-	frontendBase := frontendOriginFromCookie
-	if frontendBase == "" {
-		// Fallback: same host as the hub (production case)
-		scheme := "https"
-		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-			scheme = "http"
-		}
-		frontendBase = fmt.Sprintf("%s://%s", scheme, r.Host)
-	}
-	redirectURL := frontendBase + "/login?" + redirectQuery.Encode()
-	http.Redirect(w, r, redirectURL, http.StatusFound)
-}
-
-func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var body struct {
-		Code string `json:"code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	now := time.Now()
-	s.cleanupExpiredOAuthCodes(now)
-	s.mu.Lock()
-	pending, ok := s.oauthCodes[body.Code]
-	if ok {
-		delete(s.oauthCodes, body.Code)
-	}
-	s.mu.Unlock()
-	if !ok || now.After(pending.ExpiresAt) {
-		http.Error(w, "invalid code", http.StatusUnauthorized)
-		return
-	}
-
-	ttl := int(time.Until(pending.ExpiresAt).Seconds())
-	if ttl < 0 {
-		ttl = 0
-	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("X-OAuth-Code-TTL", strconv.Itoa(ttl))
-	jsonOK(w, map[string]string{"github_token": pending.Token})
-}
-
-func (s *Server) cleanupExpiredOAuthCodesLoop() {
-	ticker := time.NewTicker(oauthCodeTTL)
-	defer ticker.Stop()
-	for range ticker.C {
-		s.cleanupExpiredOAuthCodes(time.Now())
-	}
-}
-
-func (s *Server) cleanupExpiredOAuthCodes(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for key, pending := range s.oauthCodes {
-		if now.After(pending.ExpiresAt) {
-			delete(s.oauthCodes, key)
-		}
-	}
+	jsonOK(w, map[string]string{"github_token": sessionToken})
 }
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────
@@ -542,21 +376,4 @@ func randomState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-func safeNextPath(next string) string {
-	if next == "" {
-		return ""
-	}
-	parsed, err := url.Parse(next)
-	if err != nil {
-		return ""
-	}
-	if parsed.IsAbs() || parsed.Host != "" {
-		return ""
-	}
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return ""
-	}
-	return next
 }

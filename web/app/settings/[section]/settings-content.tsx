@@ -660,8 +660,8 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   }
 
   const callbackUrl = typeof window !== 'undefined'
-    ? window.location.origin + '/api/auth/github/callback'
-    : 'https://your-hub/api/auth/github/callback'
+    ? window.location.origin + '/login'
+    : 'https://your-hub/login'
 
   return (
     <div className="space-y-6">
