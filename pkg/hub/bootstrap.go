@@ -226,6 +226,24 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --skip-daemon %s 2>/dev/null || true
   %s
 fi
+# Disable Bonjour/mDNS — not needed on a server VM and causes crashes
+python3 - <<'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+if not os.path.exists(path):
+    print('OpenClaw config not found; skipping Bonjour disable')
+    raise SystemExit(0)
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except Exception as e:
+    print(f'Failed to parse OpenClaw config; not disabling Bonjour: {e}')
+    raise SystemExit(1)
+cfg.setdefault('plugins', {}).setdefault('entries', {}).setdefault('bonjour', {})['enabled'] = False
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+print('Bonjour disabled')
+PYEOF
 
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
 echo "Starting OpenClaw gateway..."
