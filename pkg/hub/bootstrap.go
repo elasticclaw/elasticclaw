@@ -230,6 +230,9 @@ fi
 python3 - <<'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
+if not os.path.exists(path):
+    print('OpenClaw config not found; skipping Bonjour disable')
+    raise SystemExit(0)
 try:
     with open(path) as f:
         cfg = json.load(f)
