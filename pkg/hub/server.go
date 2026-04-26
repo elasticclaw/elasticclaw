@@ -290,6 +290,16 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 	if token == "" {
 		return "", "", false
 	}
+	// Accept the hub config token directly — this means a token change in hub.yaml
+	// takes effect immediately without requiring a DB migration.
+	s.mu.RLock()
+	hubCfgToken := s.hubCfg.Token
+	s.mu.RUnlock()
+	if token == hubCfgToken && hubCfgToken != "" {
+		if tid, err := s.githubTenantID(); err == nil {
+			return tid, "", true
+		}
+	}
 	if tenantID, err := s.tenantByToken(token); err == nil {
 		return tenantID, "", true
 	}
@@ -1781,21 +1791,32 @@ func jsonOK(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Provision creates a default tenant (for alpha single-user setup).
+// Provision creates or updates the default tenant (for alpha single-user setup).
+// If a tenant named "default" already exists, its token and claw_token are updated
+// so that hub.yaml token changes take effect without manual DB surgery.
 func (s *Server) Provision(token, clawToken string) (string, error) {
+	// Check if a default tenant already exists
+	var existingID string
+	_ = s.db.QueryRow(`SELECT id FROM tenants WHERE name = 'default'`).Scan(&existingID)
+	if existingID != "" {
+		// Update tokens to match hub.yaml
+		_, err := s.db.Exec(
+			`UPDATE tenants SET token = ?, claw_token = ? WHERE id = ?`,
+			token, clawToken, existingID,
+		)
+		if err != nil {
+			return "", fmt.Errorf("provision update: %w", err)
+		}
+		return existingID, nil
+	}
+	// No existing tenant — insert fresh
 	id := uuid.New().String()
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,?)`,
 		id, "default", token, clawToken, now(),
 	)
 	if err != nil {
 		return "", fmt.Errorf("provision: %w", err)
-	}
-	// Return existing if token already exists
-	var existingID string
-	_ = s.db.QueryRow(`SELECT id FROM tenants WHERE token = ?`, token).Scan(&existingID)
-	if existingID != "" {
-		return existingID, nil
 	}
 	return id, nil
 }
