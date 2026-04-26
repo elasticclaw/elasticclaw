@@ -236,8 +236,9 @@ if not os.path.exists(path):
 try:
     with open(path) as f:
         cfg = json.load(f)
-except Exception:
-    cfg = {}
+except Exception as e:
+    print(f'Failed to parse OpenClaw config; not disabling Bonjour: {e}')
+    raise SystemExit(1)
 cfg.setdefault('plugins', {}).setdefault('entries', {}).setdefault('bonjour', {})['enabled'] = False
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
