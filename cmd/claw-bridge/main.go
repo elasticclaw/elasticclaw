@@ -194,7 +194,7 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		// Wait up to 30s for it to appear rather than generating a mismatched identity.
 		log.Printf("[gateway] device.json not found — waiting for OpenClaw gateway to create it...")
 		var waitErr error
-		for i := 0; i < 30; i++ {
+		for i := 0; i < 120; i++ {
 			time.Sleep(time.Second)
 			devData, waitErr = os.ReadFile(devPath)
 			if waitErr == nil {
@@ -203,7 +203,7 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 			}
 		}
 		if waitErr != nil {
-			return nil, fmt.Errorf("device.json not created by gateway after 30s: %w", waitErr)
+			return nil, fmt.Errorf("device.json not created by gateway after 120s: %w", waitErr)
 		}
 		if err := json.Unmarshal(devData, &dev); err != nil {
 			return nil, fmt.Errorf("parse device.json: %w", err)

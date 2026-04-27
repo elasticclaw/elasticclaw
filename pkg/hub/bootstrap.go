@@ -233,15 +233,27 @@ export OPENCLAW_NO_RESPAWN=1
 export OPENCLAW_DISABLE_BONJOUR=1
 echo "Starting OpenClaw gateway..."
 nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   sleep 1
   if curl -sf http://localhost:18789/healthz &>/dev/null; then
     echo "OpenClaw gateway ready after ${i}s"
     break
   fi
-  if [ "$i" = "30" ]; then
-    echo "WARNING: gateway did not respond in 30s"
+  if [ "$i" = "60" ]; then
+    echo "WARNING: gateway did not respond in 60s"
     tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
+  fi
+done
+# Wait for device.json to appear (created by gateway after startup)
+echo "Waiting for device.json..."
+for i in $(seq 1 60); do
+  sleep 1
+  if [ -f "$HOME/.openclaw/identity/device.json" ]; then
+    echo "device.json ready after ${i}s"
+    break
+  fi
+  if [ "$i" = "60" ]; then
+    echo "WARNING: device.json not found after 60s"
   fi
 done
 
