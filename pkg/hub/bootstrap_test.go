@@ -73,6 +73,12 @@ func TestBootstrapScript_BridgeEnvVars(t *testing.T) {
 	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="test-gw-password"`, "gateway password env var")
 }
 
+func TestBootstrapScript_BridgeEnvFileQuotesValues(t *testing.T) {
+	script := GenerateReplicatedBootstrapScript(baseParams())
+	assertContains(t, script, `printf 'ELASTICCLAW_CLAW_NAME=%q\n' "$ELASTICCLAW_CLAW_NAME"`, "claw name quoted in persisted env")
+	assertContains(t, script, `printf 'ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password quoted in persisted env")
+}
+
 func TestBootstrapScript_NixDisabledByDefault(t *testing.T) {
 	p := baseParams()
 	p.Nix = false
@@ -178,6 +184,43 @@ func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
 	count := strings.Count(script, "super-secret-pw")
 	if count < 2 {
 		t.Errorf("gateway password should appear at least twice (top + bridge env), got %d", count)
+	}
+}
+
+func TestBootstrapScript_BridgeEnvFileEscapesValues(t *testing.T) {
+	script := GenerateReplicatedBootstrapScript(baseParams())
+	start := strings.Index(script, "# Persist env vars")
+	if start == -1 {
+		t.Fatal("persist env block not found")
+	}
+	end := strings.Index(script[start:], "chmod 600")
+	if end == -1 {
+		t.Fatal("persist env block end not found")
+	}
+	snippet := script[start : start+end]
+
+	home := t.TempDir()
+	name := "My Test Claw"
+	password := "p@ss $word `cmd` \" quote"
+	cmd := exec.Command("bash", "-c", snippet+`
+source "$HOME/.claw-bridge.env"
+printf '%s\n' "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"
+`)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"ELASTICCLAW_HUB_URL=https://hub.example.com",
+		"ELASTICCLAW_CLAW_ID=test-claw-id-1234",
+		"ELASTICCLAW_CLAW_TOKEN=test-token",
+		"ELASTICCLAW_CLAW_NAME="+name,
+		"ELASTICCLAW_GATEWAY_PASSWORD="+password,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source bridge env file: %v\n%s", err, string(out))
+	}
+	got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(got) != 2 || got[0] != name || got[1] != password {
+		t.Fatalf("sourced values mismatch: got %q, want %q", got, []string{name, password})
 	}
 }
 
