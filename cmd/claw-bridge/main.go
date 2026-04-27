@@ -218,15 +218,19 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		return nil, fmt.Errorf("parse device.json: %w", err)
 	}
 
-	// ELASTICCLAW_GATEWAY_PASSWORD env var overrides config (set by bootstrap script)
-	password := cfg.Gateway.Auth.Password
-	if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
-		password = envPw
-	}
-	token := cfg.Gateway.Auth.Token
-	// When using password auth, clear token so device payload signature is empty-token
-	if password != "" {
-		token = ""
+	// Determine auth based on the gateway's configured mode.
+	// ELASTICCLAW_GATEWAY_PASSWORD is only used when mode is password (or unset).
+	var token, password string
+	switch cfg.Gateway.Auth.Mode {
+	case "token":
+		// Token mode: use the token from config, ignore password env var
+		token = cfg.Gateway.Auth.Token
+	default:
+		// Password mode (or legacy): env var overrides config
+		password = cfg.Gateway.Auth.Password
+		if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
+			password = envPw
+		}
 	}
 
 	return &gatewayClient{
