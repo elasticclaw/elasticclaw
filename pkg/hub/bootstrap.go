@@ -181,85 +181,53 @@ print('OpenClaw config patched')
 PYEOF`, providersDict)
 }
 
-// GenerateReplicatedBootstrapScript returns the bash script that bootstraps
-// a Replicated VM into a functioning elasticclaw claw.
+// GenerateReplicatedBootstrapScript returns a minimal bash script that downloads
+// claw-bridge and execs it with --bootstrap. All VM setup logic now lives inside
+// claw-bridge itself (runBootstrap in cmd/claw-bridge/main.go).
 //
 // This is a pure function — same inputs always produce the same output.
 // All I/O (DB reads, SSH, etc.) happens in bootstrapReplicated before calling this.
 func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
-	credHelper := buildGitHubCredentialHelper(p.HubCfg, p.HubURL, p.ClawID, p.GitHubRepos)
+	nixFlag := "false"
+	if p.Nix {
+		nixFlag = "true"
+	}
+	// Encode the provider config python snippet as a single env var value so
+	// claw-bridge can receive it without heredoc escaping issues.
+	// We use a simple approach: if it's non-empty, pass it as ELASTICCLAW_PROVIDER_CONFIG.
+	// The value may contain newlines; bash's export handles that fine.
+	providerConfigLine := "# No provider config"
+	if p.ProviderConfig != "" {
+		// Escape for shell: use printf %q approach via parameter expansion in the
+		// script. Simpler: write it as a heredoc into a temp file the claw-bridge
+		// reads. But easiest: base64-encode it so there are no quoting issues.
+		providerConfigLine = fmt.Sprintf("export ELASTICCLAW_PROVIDER_CONFIG=%s",
+			shellQuote(p.ProviderConfig))
+	}
+
+	linearEnvLine := p.LinearEnv
+	if linearEnvLine == "" {
+		linearEnvLine = "# Linear not configured"
+	}
 
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# ── LLM API keys + service tokens ────────────────────────────────────────────
-export OPENCLAW_DEFAULT_MODEL="%s"
+# ── Identity + credentials ────────────────────────────────────────────────────
+export ELASTICCLAW_HUB_URL="%s"
+export ELASTICCLAW_CLAW_ID="%s"
+export ELASTICCLAW_CLAW_TOKEN="%s"
+export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
+export OPENCLAW_DEFAULT_MODEL="%s"
+export ELASTICCLAW_NIX="%s"
+export ELASTICCLAW_ONBOARD_FLAGS="%s"
 %s
 %s
-# ── Install Node.js 24 via nodesource ────────────────────────────────────────
-echo "Installing Node.js 24..."
-sudo apt-get update -qq
-sudo apt-get install -y curl ca-certificates
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
-echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
-sudo apt-get update -qq
-sudo apt-get install -y nodejs git
-echo "Node: $(node --version)"
-
 %s
-# ── Install OpenClaw ──────────────────────────────────────────────────────────
-echo "Installing OpenClaw..."
-sudo npm install -g openclaw@latest --ignore-scripts
-echo "OpenClaw: $(openclaw --version)"
-
-# ── Configure OpenClaw ────────────────────────────────────────────────────────
-mkdir -p "$HOME/.openclaw/workspace"
-if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
-  echo "Configuring OpenClaw..."
-  openclaw onboard \
-    --non-interactive --accept-risk \
-    --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon --skip-health %s 2>/dev/null || true
-  %s
-fi
-# ── Start OpenClaw gateway ────────────────────────────────────────────────────
-# Disable Bonjour/mDNS — not supported on Replicated VMs (multicast blocked),
-# causes gateway crash. Use CLI command which writes config directly.
-openclaw plugins disable bonjour 2>/dev/null || true
-export OPENCLAW_NO_RESPAWN=1
-export OPENCLAW_DISABLE_BONJOUR=1
-echo "Starting OpenClaw gateway..."
-nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
-for i in $(seq 1 60); do
-  sleep 1
-  if curl -sf http://localhost:18789/healthz &>/dev/null; then
-    echo "OpenClaw gateway ready after ${i}s"
-    break
-  fi
-  if [ "$i" = "60" ]; then
-    echo "WARNING: gateway did not respond in 60s"
-    tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
-  fi
-done
 # ── Install claw-bridge ───────────────────────────────────────────────────────
-# Kick off background wait for device.json while claw-bridge downloads.
-# Gateway creates it asynchronously ~60-80s after startup.
-(
-  for j in $(seq 1 120); do
-    sleep 1
-    if [ -f "$HOME/.openclaw/identity/device.json" ]; then
-      echo "[bg] device.json ready after ${j}s"
-      break
-    fi
-  done
-) &
-DEVICE_WAIT_PID=$!
-
 BRIDGE_SRC="%s"
-echo "Installing claw-bridge from $BRIDGE_SRC..."
+echo "Downloading claw-bridge from $BRIDGE_SRC..."
 if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
   curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
 else
@@ -269,6 +237,7 @@ else
     curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
     sudo mv /tmp/oras /usr/local/bin/oras
   fi
+  sudo apt-get install -y curl ca-certificates 2>/dev/null || true
   mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
   oras pull "$BRIDGE_SRC"
   BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
@@ -283,21 +252,11 @@ fi
 chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
-# Wait for device.json background job to finish (it started while bridge was downloading)
-wait $DEVICE_WAIT_PID 2>/dev/null || true
-if [ ! -f "$HOME/.openclaw/identity/device.json" ]; then
-  echo "WARNING: device.json still missing, bridge will wait internally"
-fi
 
-# ── Start claw-bridge ─────────────────────────────────────────────────────────
-export ELASTICCLAW_HUB_URL="%s"
-export ELASTICCLAW_CLAW_ID="%s"
-export ELASTICCLAW_CLAW_TOKEN="%s"
-export ELASTICCLAW_CLAW_NAME="%s"
-export ELASTICCLAW_GATEWAY_PASSWORD="%s"
-export OPENCLAW_DEFAULT_MODEL="%s"
-%s
-# Persist env vars so the bridge can be restarted after bootstrap exits
+# ── Bootstrap + run ───────────────────────────────────────────────────────────
+# claw-bridge --bootstrap installs Node.js, OpenClaw, configures the gateway,
+# then transitions directly into the normal bridge connect loop.
+# Persist env vars so bridge can be restarted later.
 {
   printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
   printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
@@ -306,63 +265,24 @@ export OPENCLAW_DEFAULT_MODEL="%s"
   printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
 } > "$HOME/.claw-bridge.env"
 chmod 600 "$HOME/.claw-bridge.env"
-echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
-BRIDGE_PID=$!
-echo "claw-bridge started (PID $BRIDGE_PID)"
-for i in $(seq 1 10); do
-  sleep 1
-  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
-    echo "ERROR: claw-bridge died after ${i}s"
-    echo "=== claw-bridge.log ==="
-    cat "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log)"
-    exit 1
-  fi
-  if grep -q 'connected\|registered\|ready' "$HOME/claw-bridge.log" 2>/dev/null; then
-    echo "claw-bridge connected after ${i}s"
-    break
-  fi
-done
-if kill -0 $BRIDGE_PID 2>/dev/null; then
-  echo "claw-bridge is running (PID $BRIDGE_PID)"
-  tail -10 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
-else
-  echo "ERROR: claw-bridge died"
-  cat "$HOME/claw-bridge.log" 2>/dev/null
-  exit 1
-fi
 
-# ── GitHub credential helper + repo clone ────────────────────────────────────
-# Finalize Nix (was installing in background since Node.js step)
-# Bridge is already connected so this is off the critical path.
-if [ -n "${NIX_INSTALL_PID:-}" ]; then
-  if kill -0 $NIX_INSTALL_PID 2>/dev/null; then
-    echo "Waiting for Nix install to finish..."
-    wait $NIX_INSTALL_PID 2>/dev/null || true
-  fi
-  if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-  fi
-  if ! pgrep -x nix-daemon &>/dev/null && [ -e /nix/var/nix/profiles/default/bin/nix-daemon ]; then
-    sudo /nix/var/nix/profiles/default/bin/nix-daemon &
-    sleep 2
-    export NIX_REMOTE=daemon
-  fi
-  echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
-  echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"
-fi
-# Bridge is running — hub API is reachable via proxy now
-%s
+# Run claw-bridge in bootstrap mode — this blocks until connected.
+# After bootstrap completes it transitions to bridge loop (no restart needed).
+export ELASTICCLAW_BOOTSTRAP=1
+exec /usr/local/bin/claw-bridge
 `,
-		p.DefaultModel, p.GatewayPassword, p.LLMKeyEnv, p.LinearEnv,
-		buildNixInstall(p.Nix),
-		p.OnboardFlags,
-		p.ProviderConfig,
-		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.DefaultModel, p.LLMKeyEnv,
-		credHelper,
+		p.DefaultModel, nixFlag, p.OnboardFlags,
+		p.LLMKeyEnv, linearEnvLine, providerConfigLine,
+		p.BridgeURL,
 	)
+}
+
+// shellQuote returns a single-quoted shell string safe for embedding in scripts.
+// Single quotes cannot appear inside single-quoted strings in bash, so we
+// replace them with '"'"'.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // buildOnboardFlags returns the --auth-choice flags for openclaw onboard

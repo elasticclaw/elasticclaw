@@ -31,17 +31,15 @@ func baseParams() BootstrapParams {
 
 // ── Script content tests ──────────────────────────────────────────────────────
 
-func TestBootstrapScript_ContainsNodeInstall(t *testing.T) {
+func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
+	// New flow: script downloads bridge and execs with --bootstrap;
+	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
-	assertContains(t, script, "nodesource.com/node_24.x", "Node 24 install")
-	assertContains(t, script, "nodejs git", "git install alongside node")
-}
-
-func TestBootstrapScript_ContainsOpenClaw(t *testing.T) {
-	script := GenerateReplicatedBootstrapScript(baseParams())
-	assertContains(t, script, "npm install -g openclaw@latest", "openclaw npm install")
-	assertContains(t, script, "openclaw gateway run", "openclaw gateway start")
-	assertContains(t, script, "18789", "gateway port")
+	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
+	assertContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge exec'd in bootstrap mode")
+	// Node/OpenClaw installs are NOT in the bash script anymore
+	assertNotContains(t, script, "nodesource.com", "Node install not in bash script")
+	assertNotContains(t, script, "npm install -g openclaw", "openclaw install not in bash script")
 }
 
 func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
@@ -83,39 +81,21 @@ func TestBootstrapScript_NixDisabledByDefault(t *testing.T) {
 	p := baseParams()
 	p.Nix = false
 	script := GenerateReplicatedBootstrapScript(p)
-	assertNotContains(t, script, "install.determinate.systems", "Nix not installed when disabled")
+	assertContains(t, script, `ELASTICCLAW_NIX="false"`, "Nix disabled flag passed to bridge")
 }
 
 func TestBootstrapScript_NixEnabled(t *testing.T) {
 	p := baseParams()
 	p.Nix = true
 	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "install.determinate.systems/nix", "Determinate Nix install URL")
-	assertContains(t, script, "nix-daemon.sh", "nix daemon profile sourcing")
-	assertContains(t, script, "/etc/profile.d/nix.sh", "nix persisted in profile.d")
+	assertContains(t, script, `ELASTICCLAW_NIX="true"`, "Nix enabled flag passed to bridge")
+	// Nix install itself is now in claw-bridge Go code, not bash
+	assertNotContains(t, script, "install.determinate.systems", "Nix URL not in bash script")
 }
 
-func TestBootstrapScript_NixInstalledBeforeOpenClaw(t *testing.T) {
-	// Nix must come before OpenClaw so nix-installed tools are available
-	p := baseParams()
-	p.Nix = true
-	script := GenerateReplicatedBootstrapScript(p)
-	nixIdx := strings.Index(script, "install.determinate.systems")
-	openclawIdx := strings.Index(script, "npm install -g openclaw")
-	if nixIdx == -1 {
-		t.Fatal("Nix install block not found")
-	}
-	if openclawIdx == -1 {
-		t.Fatal("OpenClaw install block not found")
-	}
-	if nixIdx > openclawIdx {
-		t.Error("Nix install must come BEFORE OpenClaw install in script")
-	}
-}
-
-func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
-	// claw-bridge must start before the credential helper because the
-	// credential helper calls the hub API via the bridge's local proxy.
+func TestBootstrapScript_BridgeExecsBeforeCredentialHelper(t *testing.T) {
+	// claw-bridge is exec'd before the credential helper section (which is a
+	// separate SSH step now, not in the generated script).
 	p := baseParams()
 	p.HubCfg = &types.HubConfig{
 		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
@@ -124,33 +104,9 @@ func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	bridgeIdx := strings.Index(script, "claw-bridge started")
-	credIdx := strings.Index(script, "elasticclaw-git-credentials")
-	if bridgeIdx == -1 {
-		t.Fatal("bridge start not found in script")
-	}
-	if credIdx == -1 {
-		t.Fatal("credential helper not found in script")
-	}
-	if credIdx < bridgeIdx {
-		t.Error("credential helper must come AFTER bridge starts")
-	}
-}
-
-func TestBootstrapScript_GitHubCredentialHelper(t *testing.T) {
-	p := baseParams()
-	p.HubCfg = &types.HubConfig{
-		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
-		ClawToken:  "test-token",
-	}
-	p.GitHubRepos = []types.GitHubRepoAccess{
-		{Repo: "owner/repo", Permissions: "write"},
-	}
-	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "elasticclaw-git-credentials", "credential helper script")
-	assertContains(t, script, "/api/github/token/", "credential helper calls hub token endpoint")
-	assertContains(t, script, "git config --global credential.helper", "git configured to use helper")
-	assertContains(t, script, "owner/repo", "repo cloned")
+	assertContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge exec'd")
+	// Credential helper is NOT in the generated script — it runs as a separate SSH step
+	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
 
 func TestBootstrapScript_NoGitHubWhenNotConfigured(t *testing.T) {
@@ -168,23 +124,26 @@ func TestBootstrapScript_LLMKeysInjected(t *testing.T) {
 	p.LLMKeyEnv = `export ANTHROPIC_API_KEY="sk-ant-real-key"
 export OPENAI_API_KEY="sk-openai-key"`
 	script := GenerateReplicatedBootstrapScript(p)
-	// LLM keys must appear at the TOP of the script (before any installs)
-	// so they're available throughout
-	topSection := script[:strings.Index(script, "Install Node")]
-	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY in top of script")
-	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY in top of script")
+	// LLM keys must appear before exec claw-bridge so they're in the environment
+	execIdx := strings.Index(script, "exec /usr/local/bin/claw-bridge")
+	if execIdx == -1 {
+		t.Fatal("exec claw-bridge not found")
+	}
+	topSection := script[:execIdx]
+	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY before bridge exec")
+	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge exec")
 }
 
 func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
-	// Gateway password must appear in bridge env (not just at top) so bridge can auth
+	// Gateway password must appear at top (so it's in env for exec) and in
+	// the persist block (so bridge can restart with it).
 	p := baseParams()
 	p.GatewayPassword = "super-secret-pw"
 	script := GenerateReplicatedBootstrapScript(p)
-	// Count occurrences — should appear at top AND in bridge env section
-	count := strings.Count(script, "super-secret-pw")
-	if count < 2 {
-		t.Errorf("gateway password should appear at least twice (top + bridge env), got %d", count)
-	}
+	// Must appear at top as literal value
+	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="super-secret-pw"`, "gateway password set at top")
+	// Must appear in persist block (as variable reference, not literal)
+	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password in persist block")
 }
 
 func TestBootstrapScript_BridgeEnvFileEscapesValues(t *testing.T) {

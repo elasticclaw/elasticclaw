@@ -2566,6 +2566,16 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 	}
 
+	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
+	// but the hub token URL is publicly accessible so it works directly).
+	if credHelper := buildGitHubCredentialHelper(s.hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+		if err := s.sshRun(sshUser, sshHost, credHelper); err != nil {
+			log.Printf("[bootstrap] warning: cred helper setup failed: %v", err)
+		} else {
+			log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		}
+	}
+
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
