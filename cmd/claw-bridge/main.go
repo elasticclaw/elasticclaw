@@ -13,7 +13,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -191,26 +190,23 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 	devData, err := os.ReadFile(devPath)
 	var dev deviceIdentity
 	if os.IsNotExist(err) {
-		// device.json not found — generate a new device identity and persist it.
-		// This happens when OpenClaw onboard didn't complete or hasn't run yet.
-		log.Printf("[gateway] device.json not found — generating new device identity")
-		pub, priv, genErr := ed25519.GenerateKey(rand.Reader)
-		if genErr != nil {
-			return nil, fmt.Errorf("generate device key: %w", genErr)
-		}
-		pubDer, _ := x509.MarshalPKIXPublicKey(pub)
-		privDer, _ := x509.MarshalPKCS8PrivateKey(priv)
-		pubPem := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDer}))
-		privPem := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDer}))
-		dev = deviceIdentity{
-			DeviceID:      randomID(),
-			PublicKeyPem:  pubPem,
-			PrivateKeyPem: privPem,
-		}
-		if mkErr := os.MkdirAll(filepath.Dir(devPath), 0700); mkErr == nil {
-			if encoded, encErr := json.Marshal(dev); encErr == nil {
-				_ = os.WriteFile(devPath, encoded, 0600)
+		// device.json doesn't exist yet — the OpenClaw gateway creates it on first start.
+		// Wait up to 30s for it to appear rather than generating a mismatched identity.
+		log.Printf("[gateway] device.json not found — waiting for OpenClaw gateway to create it...")
+		var waitErr error
+		for i := 0; i < 30; i++ {
+			time.Sleep(time.Second)
+			devData, waitErr = os.ReadFile(devPath)
+			if waitErr == nil {
+				log.Printf("[gateway] device.json appeared after %ds", i+1)
+				break
 			}
+		}
+		if waitErr != nil {
+			return nil, fmt.Errorf("device.json not created by gateway after 30s: %w", waitErr)
+		}
+		if err := json.Unmarshal(devData, &dev); err != nil {
+			return nil, fmt.Errorf("parse device.json: %w", err)
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("read device.json: %w", err)
