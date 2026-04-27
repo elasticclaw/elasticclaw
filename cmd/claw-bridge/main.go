@@ -196,10 +196,15 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		// Wait up to 120s as a fallback in case gateway creates it asynchronously.
 		log.Printf("[gateway] device.json not found — waiting (up to 120s)...")
 		var waitErr error
+		var parseErr error
 		for i := 0; i < 120; i++ {
 			time.Sleep(time.Second)
 			devData, waitErr = os.ReadFile(devPath)
-			if waitErr == nil {
+			if waitErr != nil {
+				continue
+			}
+			parseErr = json.Unmarshal(devData, &dev)
+			if parseErr == nil {
 				log.Printf("[gateway] device.json appeared after %ds", i+1)
 				break
 			}
@@ -207,8 +212,8 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		if waitErr != nil {
 			return nil, fmt.Errorf("device.json not found after 120s: %w", waitErr)
 		}
-		if err := json.Unmarshal(devData, &dev); err != nil {
-			return nil, fmt.Errorf("parse device.json: %w", err)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse device.json: %w", parseErr)
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("read device.json: %w", err)
