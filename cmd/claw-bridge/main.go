@@ -1001,7 +1001,6 @@ func stopGateway(cmd *exec.Cmd) {
 	log.Printf("[bootstrap] stopping initial gateway PID %d...", cmd.Process.Pid)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		log.Printf("[bootstrap] gateway stop warning: %v", err)
-		return
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -1035,8 +1034,8 @@ func waitForDeviceJSON() error {
 	return nil
 }
 
-// finishNix waits for the background Nix install to complete, sources the
-// daemon profile, and starts the nix-daemon if needed.
+// finishNix waits for the background Nix install to complete, updates the
+// current PATH, and starts the nix-daemon if needed.
 func finishNix(nixDone <-chan error) {
 	if nixDone == nil {
 		return
@@ -1047,7 +1046,8 @@ func finishNix(nixDone <-chan error) {
 	}
 	profile := "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 	if _, err := os.Stat(profile); err == nil {
-		_ = runShell(". " + profile)
+		nixBin := "/nix/var/nix/profiles/default/bin"
+		os.Setenv("PATH", nixBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 	if err := runShell("pgrep -x nix-daemon"); err != nil {
 		// Not running — start it
