@@ -144,20 +144,6 @@ func (s *Server) Run(opts ...RunOptions) error {
 		}
 	}
 
-	// Connect to relay if configured
-	s.mu.RLock()
-	relayURL := s.hubCfg.RelayURL
-	relaySecret := s.hubCfg.RelaySecret
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	if relayURL != "" {
-		hubID := HubID(s.identity.PublicKey)
-		relayToken := RelayToken(relaySecret, hubID, clawToken)
-		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
-		log.Printf("[relay] connecting to %s", relayURL)
-		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
-	}
-
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
@@ -1979,22 +1965,16 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 
 	// Start the bridge — it reads the gateway token from openclaw.json automatically.
 	// Use setsid to detach from exec session so it survives after exec returns.
-	hubID := HubID(s.identity.PublicKey)
 	s.mu.RLock()
-	relayURL := s.hubCfg.RelayURL
-	relaySecret := s.hubCfg.RelaySecret
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	relayToken := RelayToken(relaySecret, hubID, clawToken)
 
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-ELASTICCLAW_RELAY_URL=%q ELASTICCLAW_HUB_ID=%q ELASTICCLAW_RELAY_TOKEN=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, clawToken, clawName,
-		relayURL, hubID, relayToken)
+		s.clawHubURL(), clawID, clawToken, clawName)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
@@ -2495,7 +2475,6 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	s.mu.RLock()
 	// Inject all configured LLM keys, prioritizing the selected key if specified
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
-	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
@@ -2513,7 +2492,6 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
-		RelayEnv:        relayEnv,
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
 	})
@@ -2696,17 +2674,6 @@ echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"`
 
 // buildRelayEnv returns shell lines that export relay env vars for the bridge.
 // When relay is not configured, returns an empty comment.
-func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
-	relayURL := cfg.RelayURL
-	if relayURL == "" {
-		return "# Relay not configured"
-	}
-	hubID := HubID(publicKey)
-	relayToken := RelayToken(cfg.RelaySecret, hubID, cfg.ClawToken)
-	return fmt.Sprintf("export ELASTICCLAW_RELAY_URL=%q\nexport ELASTICCLAW_HUB_ID=%q\nexport ELASTICCLAW_RELAY_TOKEN=%q",
-		relayURL, hubID, relayToken)
-}
-
 // resolveLinearToken finds the Linear API token for the given workspace label.
 // If workspace is empty or not found, returns the first token if only one is configured.
 func resolveLinearToken(cfg *types.HubConfig, workspace string) string {

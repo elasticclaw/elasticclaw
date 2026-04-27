@@ -25,7 +25,7 @@ func baseParams() BootstrapParams {
 		GitHubRepos:     nil,
 		LLMKeyEnv:       "export ANTHROPIC_API_KEY=\"test-key\"",
 		LinearEnv:       "# Linear not configured",
-		RelayEnv:        "# Relay not configured",
+		
 	}
 }
 
@@ -155,15 +155,7 @@ func TestBootstrapScript_NoGitHubWhenNotConfigured(t *testing.T) {
 	assertNotContains(t, script, "elasticclaw-git-credentials", "no cred helper when no GitHub app")
 }
 
-func TestBootstrapScript_RelayEnv(t *testing.T) {
-	p := baseParams()
-	p.RelayEnv = `export ELASTICCLAW_RELAY_URL="wss://relay.example.com"
-export ELASTICCLAW_HUB_ID="hub123"
-export ELASTICCLAW_RELAY_TOKEN="relaytoken"`
-	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "ELASTICCLAW_RELAY_URL", "relay URL in bridge env")
-	assertContains(t, script, "wss://relay.example.com", "relay URL value")
-}
+
 
 func TestBootstrapScript_LLMKeysInjected(t *testing.T) {
 	p := baseParams()
@@ -280,11 +272,6 @@ func TestBootstrapScript_Shellcheck(t *testing.T) {
 	}{
 		{"base", baseParams()},
 		{"nix_enabled", func() BootstrapParams { p := baseParams(); p.Nix = true; return p }()},
-		{"with_relay", func() BootstrapParams {
-			p := baseParams()
-			p.RelayEnv = `export ELASTICCLAW_RELAY_URL="wss://relay.example.com"`
-			return p
-		}()},
 		{"with_github", func() BootstrapParams {
 			p := baseParams()
 			p.HubCfg = &types.HubConfig{

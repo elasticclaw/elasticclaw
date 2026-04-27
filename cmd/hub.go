@@ -126,10 +126,6 @@ func runHub(cmd *cobra.Command, args []string) error {
 	if hubCfg.PublicURL != "" {
 		fmt.Printf("  Public URL: %s\n", hubCfg.PublicURL)
 	}
-	if hubCfg.RelayURL != "" {
-		fmt.Printf("  Relay:      %s\n", hubCfg.RelayURL)
-		fmt.Printf("  Claws connect via relay — no public hub URL needed\n")
-	}
 	fmt.Printf("  Claw token: %s\n", func() string { if hubCfg.ClawToken != "" { return "(set)" }; return "(not set)" }())
 	fmt.Println()
 
