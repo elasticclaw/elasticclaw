@@ -246,14 +246,14 @@ for i in $(seq 1 60); do
 done
 # Wait for device.json to appear (created by gateway after startup)
 echo "Waiting for device.json..."
-for i in $(seq 1 60); do
+for i in $(seq 1 90); do
   sleep 1
   if [ -f "$HOME/.openclaw/identity/device.json" ]; then
     echo "device.json ready after ${i}s"
     break
   fi
-  if [ "$i" = "60" ]; then
-    echo "WARNING: device.json not found after 60s"
+  if [ "$i" = "90" ]; then
+    echo "WARNING: device.json not found after 90s — bridge will retry"
   fi
 done
 
