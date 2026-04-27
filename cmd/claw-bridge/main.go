@@ -861,15 +861,17 @@ func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
 	script := `
 set -euo pipefail
+# Single apt-get update then install everything in one pass to avoid
+# dpkg state corruption from multiple overlapping install calls.
 sudo apt-get update -qq
-sudo apt-get install -y curl ca-certificates
+sudo apt-get install -y --fix-broken curl ca-certificates git
 sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
   sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
 echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
   sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
 sudo apt-get update -qq
-sudo apt-get install -y nodejs git
+sudo apt-get install -y --fix-broken nodejs
 echo "Node: $(node --version)"
 `
 	return runShell(script)
