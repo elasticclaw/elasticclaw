@@ -25,18 +25,19 @@ func baseParams() BootstrapParams {
 		GitHubRepos:     nil,
 		LLMKeyEnv:       "export ANTHROPIC_API_KEY=\"test-key\"",
 		LinearEnv:       "# Linear not configured",
-		
 	}
 }
 
 // ── Script content tests ──────────────────────────────────────────────────────
 
 func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
-	// New flow: script downloads bridge and execs with --bootstrap;
+	// New flow: script downloads bridge and starts it with bootstrap enabled;
 	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
-	assertContains(t, script, "nohup /usr/local/bin/claw-bridge", "bridge exec'd in bootstrap mode")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge backgrounded in bootstrap mode")
+	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
+	assertNotContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge must not block SSH session")
 	// Node/OpenClaw installs are NOT in the bash script anymore
 	assertNotContains(t, script, "nodesource.com", "Node install not in bash script")
 	assertNotContains(t, script, "npm install -g openclaw", "openclaw install not in bash script")
@@ -93,8 +94,8 @@ func TestBootstrapScript_NixEnabled(t *testing.T) {
 	assertNotContains(t, script, "install.determinate.systems", "Nix URL not in bash script")
 }
 
-func TestBootstrapScript_BridgeExecsBeforeCredentialHelper(t *testing.T) {
-	// claw-bridge is exec'd before the credential helper section (which is a
+func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
+	// claw-bridge is started before the credential helper section (which is a
 	// separate SSH step now, not in the generated script).
 	p := baseParams()
 	p.HubCfg = &types.HubConfig{
@@ -104,7 +105,7 @@ func TestBootstrapScript_BridgeExecsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	assertContains(t, script, "nohup /usr/local/bin/claw-bridge", "bridge exec'd")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge started")
 	// Credential helper is NOT in the generated script — it runs as a separate SSH step
 	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
@@ -117,25 +118,23 @@ func TestBootstrapScript_NoGitHubWhenNotConfigured(t *testing.T) {
 	assertNotContains(t, script, "elasticclaw-git-credentials", "no cred helper when no GitHub app")
 }
 
-
-
 func TestBootstrapScript_LLMKeysInjected(t *testing.T) {
 	p := baseParams()
 	p.LLMKeyEnv = `export ANTHROPIC_API_KEY="sk-ant-real-key"
 export OPENAI_API_KEY="sk-openai-key"`
 	script := GenerateReplicatedBootstrapScript(p)
-	// LLM keys must appear before exec claw-bridge so they're in the environment
-	execIdx := strings.Index(script, "nohup /usr/local/bin/claw-bridge")
-	if execIdx == -1 {
-		t.Fatal("exec claw-bridge not found")
+	// LLM keys must appear before starting claw-bridge so they're in the environment
+	bridgeIdx := strings.Index(script, "/usr/local/bin/claw-bridge >>")
+	if bridgeIdx == -1 {
+		t.Fatal("claw-bridge start not found")
 	}
-	topSection := script[:execIdx]
-	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY before bridge exec")
-	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge exec")
+	topSection := script[:bridgeIdx]
+	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY before bridge start")
+	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge start")
 }
 
 func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
-	// Gateway password must appear at top (so it's in env for exec) and in
+	// Gateway password must appear at top (so it's in env for claw-bridge) and in
 	// the persist block (so bridge can restart with it).
 	p := baseParams()
 	p.GatewayPassword = "super-secret-pw"

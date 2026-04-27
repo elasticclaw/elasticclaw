@@ -1121,6 +1121,12 @@ func runBootstrap() error {
 	// Step 9: After bridge connects, finish Nix in background
 	go finishNix(nixDone)
 
+	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
+		if err := os.WriteFile(notifyFile, []byte("ok\n"), 0600); err != nil {
+			return fmt.Errorf("write bootstrap notify file: %w", err)
+		}
+	}
+
 	log.Printf("[bootstrap] bootstrap complete — continuing to bridge connect loop")
 	return nil
 }

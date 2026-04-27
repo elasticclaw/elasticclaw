@@ -266,11 +266,27 @@ echo "claw-bridge installed"
 } > "$HOME/.claw-bridge.env"
 chmod 600 "$HOME/.claw-bridge.env"
 
-# Run claw-bridge in bootstrap mode in the background so the SSH session can exit.
-# claw-bridge handles all install steps then stays running as the bridge.
+# Run claw-bridge in bootstrap mode in the background, then wait until the
+# bootstrap phase completes so the SSH session can exit and the hub can write
+# template files.
 export ELASTICCLAW_BOOTSTRAP=1
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
-echo "claw-bridge bootstrap started (PID $!)"
+export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
+rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
+nohup /usr/local/bin/claw-bridge >> "$HOME/.claw-bridge.log" 2>&1 </dev/null &
+BRIDGE_PID=$!
+for _ in {1..1800}; do
+  if [ -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE" ]; then
+    echo "claw-bridge bootstrap complete; bridge running in background"
+    exit 0
+  fi
+  if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    wait "$BRIDGE_PID"
+    exit $?
+  fi
+  sleep 1
+done
+echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
+exit 1
 `,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.DefaultModel, nixFlag,
