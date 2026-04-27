@@ -227,44 +227,11 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   %s
 fi
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
-# Start once to let openclaw write its final openclaw.json, then patch and restart.
-echo "Starting OpenClaw gateway (first pass to initialize config)..."
+# Disable Bonjour/mDNS — not supported on Replicated VMs (multicast blocked),
+# causes gateway crash. OPENCLAW_DISABLE_BONJOUR=1 is the official env var.
 export OPENCLAW_NO_RESPAWN=1
-openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
-OCPID=$!
-for i in $(seq 1 20); do
-  sleep 1
-  if curl -sf http://localhost:18789/healthz &>/dev/null; then
-    echo "OpenClaw config written after ${i}s"
-    break
-  fi
-done
-kill $OCPID 2>/dev/null || true
-wait $OCPID 2>/dev/null || true
-sleep 1
-
-# Disable Bonjour/mDNS — not needed on a server VM, causes crashes on networks
-# where mDNS multicast is blocked (e.g. Replicated CMX). Patch AFTER openclaw
-# has written its final config so the patch isn't overwritten on start.
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-if not os.path.exists(path):
-    print('OpenClaw config not found; skipping Bonjour disable')
-    raise SystemExit(0)
-try:
-    with open(path) as f:
-        cfg = json.load(f)
-except Exception as e:
-    print(f'Failed to parse OpenClaw config; not disabling Bonjour: {e}')
-    raise SystemExit(1)
-cfg.setdefault('plugins', {}).setdefault('entries', {}).setdefault('bonjour', {})['enabled'] = False
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-print('Bonjour disabled')
-PYEOF
-
-echo "Starting OpenClaw gateway (final)..."
+export OPENCLAW_DISABLE_BONJOUR=1
+echo "Starting OpenClaw gateway..."
 nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
 for i in $(seq 1 30); do
   sleep 1
