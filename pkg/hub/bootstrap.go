@@ -35,7 +35,6 @@ type BootstrapParams struct {
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
 	LinearEnv      string // pre-built export line
-	RelayEnv       string // pre-built export lines
 	ProviderConfig string // python snippet to configure models.providers
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
@@ -294,7 +293,6 @@ export ELASTICCLAW_CLAW_ID="%s"
 export ELASTICCLAW_CLAW_TOKEN="%s"
 export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
-%s
 export OPENCLAW_DEFAULT_MODEL="%s"
 %s
 echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
@@ -333,7 +331,7 @@ fi
 		p.ProviderConfig,
 		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.RelayEnv, p.DefaultModel, p.LLMKeyEnv,
+		p.DefaultModel, p.LLMKeyEnv,
 		credHelper,
 	)
 }

@@ -1228,9 +1228,6 @@ func checkMaskedValues(cfg *types.HubConfig) error {
 	if cfg.Token == mask {
 		return fmt.Errorf("token contains unresolved mask value")
 	}
-	if cfg.RelaySecret == mask {
-		return fmt.Errorf("relay_secret contains unresolved mask value")
-	}
 	if cfg.UIPassword == mask {
 		return fmt.Errorf("ui_password contains unresolved mask value")
 	}
