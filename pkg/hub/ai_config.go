@@ -863,7 +863,6 @@ var backupTimestampSuffixRe = regexp.MustCompile(`^\d+$`)
 var sensitiveYAMLFields = map[string]struct{}{
 	"token":           {},
 	"claw_token":      {},
-	"relay_secret":    {},
 	"ui_password":     {},
 	"api_key":         {},
 	"access_token":    {},
