@@ -898,7 +898,7 @@ func configureOpenClaw() error {
 	providerSnippet := os.Getenv("ELASTICCLAW_PROVIDER_CONFIG")
 
 	gatewayPassword := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD")
-	defaultModel := envOrDefault("OPENCLAW_DEFAULT_MODEL", "anthropic/claude-sonnet-4-6")
+	defaultModel := envOr("OPENCLAW_DEFAULT_MODEL", "anthropic/claude-sonnet-4-6")
 
 	// Build the python config patch.
 	// The provider snippet (if any) is inserted as a block that sets config['models'].
@@ -956,7 +956,7 @@ func onboardOpenClaw() error {
 
 // startGateway starts the openclaw gateway as a background process and waits
 // up to 60s for it to become healthy.
-func startGateway() error {
+func startGateway() (*exec.Cmd, error) {
 	log.Printf("[bootstrap] starting OpenClaw gateway...")
 
 	// Set env vars that suppress respawn / bonjour.
@@ -970,13 +970,13 @@ func startGateway() error {
 	cmd.Env = os.Environ()
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("open gateway log: %w", err)
+		return nil, fmt.Errorf("open gateway log: %w", err)
 	}
 	cmd.Stdout = f
 	cmd.Stderr = f
 	if err := cmd.Start(); err != nil {
 		f.Close()
-		return fmt.Errorf("start gateway: %w", err)
+		return nil, fmt.Errorf("start gateway: %w", err)
 	}
 	f.Close()
 	log.Printf("[bootstrap] gateway PID %d, waiting for health...", cmd.Process.Pid)
@@ -986,12 +986,37 @@ func startGateway() error {
 		time.Sleep(time.Second)
 		if checkGateway("localhost:18789") {
 			log.Printf("[bootstrap] gateway ready after %ds", i+1)
-			return nil
+			return cmd, nil
 		}
 	}
 	// Not fatal — bridge will retry.
 	log.Printf("[bootstrap] WARNING: gateway did not respond in 60s — continuing anyway")
-	return nil
+	return cmd, nil
+}
+
+func stopGateway(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	log.Printf("[bootstrap] stopping initial gateway PID %d...", cmd.Process.Pid)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		log.Printf("[bootstrap] gateway stop warning: %v", err)
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("[bootstrap] gateway stopped: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		log.Printf("[bootstrap] gateway did not stop after SIGTERM; killing")
+		_ = cmd.Process.Kill()
+		<-done
+	}
 }
 
 // waitForDeviceJSON waits up to 120s for ~/.openclaw/identity/device.json.
@@ -1071,33 +1096,33 @@ func runBootstrap() error {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
 	}
 
-	// Step 5: Configure openclaw.json (model, LLM keys, gateway auth, disable bonjour)
+	// Step 5: Start the gateway once so OpenClaw writes its final first-run config.
+	initialGateway, err := startGateway()
+	if err != nil {
+		return fmt.Errorf("startGateway initial: %w", err)
+	}
+	stopGateway(initialGateway)
+
+	// Step 6: Configure openclaw.json (model, LLM keys, gateway auth, disable bonjour)
 	if err := configureOpenClaw(); err != nil {
 		return fmt.Errorf("configureOpenClaw: %w", err)
 	}
 
-	// Step 6: Start gateway and wait for health
-	if err := startGateway(); err != nil {
+	// Step 7: Restart gateway and wait for health
+	if _, err := startGateway(); err != nil {
 		return fmt.Errorf("startGateway: %w", err)
 	}
 
-	// Step 7: Wait for device.json
+	// Step 8: Wait for device.json
 	if err := waitForDeviceJSON(); err != nil {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 8: After bridge connects, finish Nix in background
+	// Step 9: After bridge connects, finish Nix in background
 	go finishNix(nixDone)
 
 	log.Printf("[bootstrap] bootstrap complete — continuing to bridge connect loop")
 	return nil
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
