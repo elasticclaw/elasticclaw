@@ -47,13 +47,13 @@ type hubMsg struct {
 const msgQueueTTL = 10 * time.Minute
 
 type queuedMsg struct {
-	content   string
-	queuedAt  time.Time
+	content  string
+	queuedAt time.Time
 }
 
 type msgQueue struct {
-	mu    sync.Mutex
-	msgs  []queuedMsg
+	mu   sync.Mutex
+	msgs []queuedMsg
 }
 
 func (q *msgQueue) push(content string) {
@@ -166,8 +166,8 @@ func saveBridgeSession(key string) {
 
 type gatewayClient struct {
 	addr     string
-	token    string   // gateway auth token (may be empty for password auth)
-	password string   // gateway auth password (may be empty for token auth)
+	token    string // gateway auth token (may be empty for password auth)
+	password string // gateway auth password (may be empty for token auth)
 	device   *deviceIdentity
 }
 
@@ -226,10 +226,14 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		// Token mode: use the token from config, ignore password env var
 		token = cfg.Gateway.Auth.Token
 	default:
-		// Password mode (or legacy): env var overrides config
+		// Password mode (or legacy): env var overrides config, token is fallback
+		token = cfg.Gateway.Auth.Token
 		password = cfg.Gateway.Auth.Password
 		if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
 			password = envPw
+		}
+		if password != "" {
+			token = ""
 		}
 	}
 
@@ -1086,7 +1090,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				defer agentCancel()
 				reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
 					_ = wsjson.Write(connCtx, conn, hubMsg{
-						Type: "chunk",
+						Type:    "chunk",
 						Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
 					})
 				})
