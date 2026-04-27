@@ -19,7 +19,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -824,39 +823,12 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 // heredoc. After runBootstrap returns, main() continues into the normal bridge
 // connect loop — no restart required.
 
-// runCmd runs a command, streaming its stdout/stderr to the log with a prefix.
-func runCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	log.Printf("[bootstrap] $ %s %s", name, strings.Join(args, " "))
-	return cmd.Run()
-}
-
 // runShell runs a bash -c script, streaming output to log.
 func runShell(script string) error {
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// streamCmd runs a command and logs each output line with a prefix.
-func streamCmd(prefix, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	scanner := bufio.NewScanner(out)
-	for scanner.Scan() {
-		log.Printf("[%s] %s", prefix, scanner.Text())
-	}
-	return cmd.Wait()
 }
 
 // nixInstallBg starts the Nix installer in background and returns a done channel.
@@ -936,8 +908,11 @@ func configureOpenClaw() error {
 		// We run it as a subprocess.
 		configPy = providerSnippet
 	} else {
+		defaultModelJSON, _ := json.Marshal(defaultModel)
+		gatewayPasswordJSON, _ := json.Marshal(gatewayPassword)
+
 		// Minimal fallback: just set model + gateway auth.
-		configPy = fmt.Sprintf(`python3 -c "
+		configPy = fmt.Sprintf(`python3 <<'PYEOF'
 import json, os, sys
 path = os.path.expanduser('~/.openclaw/openclaw.json')
 try:
@@ -945,16 +920,16 @@ try:
         config = json.load(f)
 except:
     config = {}
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = %q
+config.setdefault('agents', {}).setdefault('defaults', {})['model'] = %s
 config.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
-gw_password = %q
+gw_password = %s
 if gw_password:
     config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched (minimal)')
-"`, defaultModel, gatewayPassword)
+PYEOF`, defaultModelJSON, gatewayPasswordJSON)
 	}
 
 	if err := runShell(configPy); err != nil {

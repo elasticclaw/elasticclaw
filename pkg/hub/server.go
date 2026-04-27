@@ -2651,27 +2651,6 @@ func (s *Server) clawHubURL() string {
 	return s.hubCfg.URL
 }
 
-// buildNixInstall returns shell script lines to start Nix install in the background.
-// Nix install runs concurrently with OpenClaw install to save ~60s.
-// Returns an empty comment when nix is not enabled.
-func buildNixInstall(enabled bool) string {
-	if !enabled {
-		return "# Nix not enabled for this template"
-	}
-	return `# ── Install Nix (Determinate Systems) in background ─────────────────────────────
-echo "Installing Nix (Determinate Systems) in background..."
-NIX_INIT_MODE="none"
-if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
-  NIX_INIT_MODE="systemd"
-fi
-(
-  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-    sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE" >> /tmp/nix-install.log 2>&1
-  echo "Nix install complete" >> /tmp/nix-install.log
-) &
-NIX_INSTALL_PID=$!`
-}
-
 // resolveLinearToken finds the Linear API token for the given workspace label.
 // If workspace is empty or not found, returns the first token if only one is configured.
 func resolveLinearToken(cfg *types.HubConfig, workspace string) string {
