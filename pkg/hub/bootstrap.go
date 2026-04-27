@@ -266,10 +266,11 @@ echo "claw-bridge installed"
 } > "$HOME/.claw-bridge.env"
 chmod 600 "$HOME/.claw-bridge.env"
 
-# Run claw-bridge in bootstrap mode — this blocks until connected.
-# After bootstrap completes it transitions to bridge loop (no restart needed).
+# Run claw-bridge in bootstrap mode in the background so the SSH session can exit.
+# claw-bridge handles all install steps then stays running as the bridge.
 export ELASTICCLAW_BOOTSTRAP=1
-exec /usr/local/bin/claw-bridge
+nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
+echo "claw-bridge bootstrap started (PID $!)"
 `,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.DefaultModel, nixFlag,

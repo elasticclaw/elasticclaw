@@ -36,7 +36,7 @@ func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
 	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
-	assertContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge exec'd in bootstrap mode")
+	assertContains(t, script, "nohup /usr/local/bin/claw-bridge", "bridge exec'd in bootstrap mode")
 	// Node/OpenClaw installs are NOT in the bash script anymore
 	assertNotContains(t, script, "nodesource.com", "Node install not in bash script")
 	assertNotContains(t, script, "npm install -g openclaw", "openclaw install not in bash script")
@@ -104,7 +104,7 @@ func TestBootstrapScript_BridgeExecsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	assertContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge exec'd")
+	assertContains(t, script, "nohup /usr/local/bin/claw-bridge", "bridge exec'd")
 	// Credential helper is NOT in the generated script — it runs as a separate SSH step
 	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
@@ -125,7 +125,7 @@ func TestBootstrapScript_LLMKeysInjected(t *testing.T) {
 export OPENAI_API_KEY="sk-openai-key"`
 	script := GenerateReplicatedBootstrapScript(p)
 	// LLM keys must appear before exec claw-bridge so they're in the environment
-	execIdx := strings.Index(script, "exec /usr/local/bin/claw-bridge")
+	execIdx := strings.Index(script, "nohup /usr/local/bin/claw-bridge")
 	if execIdx == -1 {
 		t.Fatal("exec claw-bridge not found")
 	}
