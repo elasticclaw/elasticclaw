@@ -2672,8 +2672,6 @@ echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null ||
 echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"`
 }
 
-// buildRelayEnv returns shell lines that export relay env vars for the bridge.
-// When relay is not configured, returns an empty comment.
 // resolveLinearToken finds the Linear API token for the given workspace label.
 // If workspace is empty or not found, returns the first token if only one is configured.
 func resolveLinearToken(cfg *types.HubConfig, workspace string) string {
