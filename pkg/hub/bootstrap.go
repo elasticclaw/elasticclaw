@@ -283,23 +283,6 @@ fi
 chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
-# Finalize Nix install (was running in background during openclaw+gateway+bridge download)
-if [ -n "${NIX_INSTALL_PID:-}" ]; then
-  if kill -0 $NIX_INSTALL_PID 2>/dev/null; then
-    echo "Waiting for Nix install to finish..."
-    wait $NIX_INSTALL_PID 2>/dev/null || true
-  fi
-  if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-  fi
-  if ! pgrep -x nix-daemon &>/dev/null && [ -e /nix/var/nix/profiles/default/bin/nix-daemon ]; then
-    sudo /nix/var/nix/profiles/default/bin/nix-daemon &
-    sleep 2
-    export NIX_REMOTE=daemon
-  fi
-  echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
-  echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"
-fi
 # Wait for device.json background job to finish (it started while bridge was downloading)
 wait $DEVICE_WAIT_PID 2>/dev/null || true
 if [ ! -f "$HOME/.openclaw/identity/device.json" ]; then
@@ -350,6 +333,24 @@ else
 fi
 
 # ── GitHub credential helper + repo clone ────────────────────────────────────
+# Finalize Nix (was installing in background since Node.js step)
+# Bridge is already connected so this is off the critical path.
+if [ -n "${NIX_INSTALL_PID:-}" ]; then
+  if kill -0 $NIX_INSTALL_PID 2>/dev/null; then
+    echo "Waiting for Nix install to finish..."
+    wait $NIX_INSTALL_PID 2>/dev/null || true
+  fi
+  if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+  fi
+  if ! pgrep -x nix-daemon &>/dev/null && [ -e /nix/var/nix/profiles/default/bin/nix-daemon ]; then
+    sudo /nix/var/nix/profiles/default/bin/nix-daemon &
+    sleep 2
+    export NIX_REMOTE=daemon
+  fi
+  echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
+  echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"
+fi
 # Bridge is running — hub API is reachable via proxy now
 %s
 `,
