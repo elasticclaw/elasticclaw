@@ -222,7 +222,7 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
   openclaw onboard \
     --non-interactive --accept-risk \
     --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon %s 2>/dev/null || true
+    --skip-daemon --skip-health %s 2>/dev/null || true
   %s
 fi
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
