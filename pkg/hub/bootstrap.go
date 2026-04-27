@@ -226,7 +226,26 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
     --skip-daemon %s 2>/dev/null || true
   %s
 fi
-# Disable Bonjour/mDNS — not needed on a server VM and causes crashes
+# ── Start OpenClaw gateway ────────────────────────────────────────────────────
+# Start once to let openclaw write its final openclaw.json, then patch and restart.
+echo "Starting OpenClaw gateway (first pass to initialize config)..."
+export OPENCLAW_NO_RESPAWN=1
+openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
+OCPID=$!
+for i in $(seq 1 20); do
+  sleep 1
+  if curl -sf http://localhost:18789/healthz &>/dev/null; then
+    echo "OpenClaw config written after ${i}s"
+    break
+  fi
+done
+kill $OCPID 2>/dev/null || true
+wait $OCPID 2>/dev/null || true
+sleep 1
+
+# Disable Bonjour/mDNS — not needed on a server VM, causes crashes on networks
+# where mDNS multicast is blocked (e.g. Replicated CMX). Patch AFTER openclaw
+# has written its final config so the patch isn't overwritten on start.
 python3 - <<'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
@@ -245,9 +264,7 @@ with open(path, 'w') as f:
 print('Bonjour disabled')
 PYEOF
 
-# ── Start OpenClaw gateway ────────────────────────────────────────────────────
-echo "Starting OpenClaw gateway..."
-export OPENCLAW_NO_RESPAWN=1
+echo "Starting OpenClaw gateway (final)..."
 nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
 for i in $(seq 1 30); do
   sleep 1
