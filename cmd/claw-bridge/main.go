@@ -192,7 +192,9 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 	if os.IsNotExist(err) {
 		// device.json doesn't exist yet — the OpenClaw gateway creates it on first start.
 		// Wait up to 30s for it to appear rather than generating a mismatched identity.
-		log.Printf("[gateway] device.json not found — waiting for OpenClaw gateway to create it...")
+		// device.json should have been pre-generated during bootstrap.
+		// Wait up to 120s as a fallback in case gateway creates it asynchronously.
+		log.Printf("[gateway] device.json not found — waiting (up to 120s)...")
 		var waitErr error
 		for i := 0; i < 120; i++ {
 			time.Sleep(time.Second)
@@ -203,7 +205,7 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 			}
 		}
 		if waitErr != nil {
-			return nil, fmt.Errorf("device.json not created by gateway after 120s: %w", waitErr)
+			return nil, fmt.Errorf("device.json not found after 120s: %w", waitErr)
 		}
 		if err := json.Unmarshal(devData, &dev); err != nil {
 			return nil, fmt.Errorf("parse device.json: %w", err)

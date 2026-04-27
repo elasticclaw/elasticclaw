@@ -244,20 +244,20 @@ for i in $(seq 1 60); do
     tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
   fi
 done
-# Wait for device.json to appear (created by gateway after startup)
-echo "Waiting for device.json..."
-for i in $(seq 1 90); do
-  sleep 1
-  if [ -f "$HOME/.openclaw/identity/device.json" ]; then
-    echo "device.json ready after ${i}s"
-    break
-  fi
-  if [ "$i" = "90" ]; then
-    echo "WARNING: device.json not found after 90s — bridge will retry"
-  fi
-done
-
 # ── Install claw-bridge ───────────────────────────────────────────────────────
+# Kick off background wait for device.json while claw-bridge downloads.
+# Gateway creates it asynchronously ~60-80s after startup.
+(
+  for j in $(seq 1 120); do
+    sleep 1
+    if [ -f "$HOME/.openclaw/identity/device.json" ]; then
+      echo "[bg] device.json ready after ${j}s"
+      break
+    fi
+  done
+) &
+DEVICE_WAIT_PID=$!
+
 BRIDGE_SRC="%s"
 echo "Installing claw-bridge from $BRIDGE_SRC..."
 if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
@@ -283,6 +283,11 @@ fi
 chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
+# Wait for device.json background job to finish (it started while bridge was downloading)
+wait $DEVICE_WAIT_PID 2>/dev/null || true
+if [ ! -f "$HOME/.openclaw/identity/device.json" ]; then
+  echo "WARNING: device.json still missing, bridge will wait internally"
+fi
 
 # ── Start claw-bridge ─────────────────────────────────────────────────────────
 export ELASTICCLAW_HUB_URL="%s"
