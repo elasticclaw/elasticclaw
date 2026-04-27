@@ -282,11 +282,11 @@ export OPENCLAW_DEFAULT_MODEL="%s"
 %s
 # Persist env vars so the bridge can be restarted after bootstrap exits
 {
-  printf 'ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
-  printf 'ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
-  printf 'ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
-  printf 'ELASTICCLAW_CLAW_NAME=%%q\n' "$ELASTICCLAW_CLAW_NAME"
-  printf 'ELASTICCLAW_GATEWAY_PASSWORD=%%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
+  printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
+  printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
+  printf 'export ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
+  printf 'export ELASTICCLAW_CLAW_NAME=%%q\n' "$ELASTICCLAW_CLAW_NAME"
+  printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
 } > "$HOME/.claw-bridge.env"
 chmod 600 "$HOME/.claw-bridge.env"
 echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."

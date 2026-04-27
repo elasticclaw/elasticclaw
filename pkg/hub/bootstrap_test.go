@@ -75,8 +75,8 @@ func TestBootstrapScript_BridgeEnvVars(t *testing.T) {
 
 func TestBootstrapScript_BridgeEnvFileQuotesValues(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
-	assertContains(t, script, `printf 'ELASTICCLAW_CLAW_NAME=%q\n' "$ELASTICCLAW_CLAW_NAME"`, "claw name quoted in persisted env")
-	assertContains(t, script, `printf 'ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password quoted in persisted env")
+	assertContains(t, script, `printf 'export ELASTICCLAW_CLAW_NAME=%q\n' "$ELASTICCLAW_CLAW_NAME"`, "claw name quoted in persisted env")
+	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password quoted in persisted env")
 }
 
 func TestBootstrapScript_NixDisabledByDefault(t *testing.T) {
@@ -204,7 +204,7 @@ func TestBootstrapScript_BridgeEnvFileEscapesValues(t *testing.T) {
 	password := "p@ss $word `cmd` \" quote"
 	cmd := exec.Command("bash", "-c", snippet+`
 source "$HOME/.claw-bridge.env"
-printf '%s\n' "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"
+bash -c 'printf "%s\n" "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"'
 `)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
