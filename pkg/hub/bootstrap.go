@@ -272,7 +272,7 @@ chmod 600 "$HOME/.claw-bridge.env"
 export ELASTICCLAW_BOOTSTRAP=1
 export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
 rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 </dev/null &
+nohup /usr/local/bin/claw-bridge >> "$HOME/.claw-bridge.log" 2>&1 </dev/null &
 BRIDGE_PID=$!
 for _ in {1..1800}; do
   if [ -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE" ]; then
