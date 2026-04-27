@@ -233,7 +233,7 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 			}
 			flags := buildOnboardFlags(keys, "")
 			assertContains(t, flags, "--auth-choice "+tc.authChoice, "provider auth choice")
-			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`}"`, "provider api key flag")
+			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`:-}"`, "provider api key flag")
 			assertNotContains(t, flags, "anthropic-api-key", "should not fallback to anthropic")
 		})
 	}

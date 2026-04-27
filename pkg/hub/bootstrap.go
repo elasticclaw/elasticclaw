@@ -221,9 +221,9 @@ export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
 export OPENCLAW_DEFAULT_MODEL="%s"
 export ELASTICCLAW_NIX="%s"
+%s
+%s
 export ELASTICCLAW_ONBOARD_FLAGS="%s"
-%s
-%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
 BRIDGE_SRC="%s"
@@ -272,8 +272,8 @@ export ELASTICCLAW_BOOTSTRAP=1
 exec /usr/local/bin/claw-bridge
 `,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.DefaultModel, nixFlag, p.OnboardFlags,
-		p.LLMKeyEnv, linearEnvLine, providerConfigLine,
+		p.DefaultModel, nixFlag,
+		p.LLMKeyEnv, linearEnvLine, p.OnboardFlags, providerConfigLine,
 		p.BridgeURL,
 	)
 }
@@ -297,13 +297,13 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) strin
 	case "anthropic":
 		return fmt.Sprintf(`--auth-choice anthropic-api-key --anthropic-api-key "${%s:-placeholder}"`, envVar)
 	case "fireworks":
-		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s:-}"`, envVar)
 	case "openai":
-		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "groq":
-		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s:-}"`, envVar)
 	case "deepseek":
-		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
