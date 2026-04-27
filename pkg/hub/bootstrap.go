@@ -228,7 +228,8 @@ if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
 fi
 # ── Start OpenClaw gateway ────────────────────────────────────────────────────
 # Disable Bonjour/mDNS — not supported on Replicated VMs (multicast blocked),
-# causes gateway crash. OPENCLAW_DISABLE_BONJOUR=1 is the official env var.
+# causes gateway crash. Use CLI command which writes config directly.
+openclaw plugins disable bonjour 2>/dev/null || true
 export OPENCLAW_NO_RESPAWN=1
 export OPENCLAW_DISABLE_BONJOUR=1
 echo "Starting OpenClaw gateway..."
