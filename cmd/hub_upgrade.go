@@ -114,6 +114,9 @@ func inferSSHFromProfile(profileName string) string {
 		if strings.HasPrefix(hubProfile.SSHURI, "ssh://") {
 			return hubProfile.SSHURI
 		}
+		if strings.Contains(hubProfile.SSHURI, "@") {
+			return fmt.Sprintf("ssh://%s", hubProfile.SSHURI)
+		}
 		// bare hostname — wrap as ssh://root@<host>
 		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHURI)
 	}
@@ -146,5 +149,3 @@ func parseVersionFromOutput(s string) string {
 	}
 	return "unknown"
 }
-
-
