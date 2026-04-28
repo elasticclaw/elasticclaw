@@ -1358,7 +1358,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					if shouldWake {
-						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" {
+						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}

@@ -35,7 +35,7 @@ func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
 	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
-	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge backgrounded in bootstrap mode")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/claw-bridge.log\" 2>&1 </dev/null &", "bridge backgrounded in bootstrap mode")
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
 	assertNotContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge must not block SSH session")
 	// Node/OpenClaw installs are NOT in the bash script anymore
@@ -105,7 +105,7 @@ func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge started")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/claw-bridge.log\" 2>&1 </dev/null &", "bridge started")
 	// Credential helper is NOT in the generated script — it runs as a separate SSH step
 	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
