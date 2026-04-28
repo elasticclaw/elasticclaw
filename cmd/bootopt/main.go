@@ -16,20 +16,20 @@ import (
 
 func main() {
 	var (
-		iterations    = flag.Int("iterations", 10, "Number of optimization iterations")
-		anthropicKey  = flag.String("anthropic-key", os.Getenv("ANTHROPIC_API_KEY"), "Anthropic API key")
-		testCommand   = flag.String("test-command", "go test ./pkg/hub/", "Test command to run")
-		repoRoot      = flag.String("repo", ".", "Path to repo root")
-		stateDir      = flag.String("state-dir", filepath.Join(os.TempDir(), "bootopt"), "State persistence directory")
-		sessionID     = flag.String("session", time.Now().Format("20060102-150405"), "Session ID")
-		baselineRuns  = flag.Int("baseline-runs", 10, "Number of runs for baseline measurement")
-		timingRuns    = flag.Int("timing-runs", 10, "Number of proxy runs per hypothesis (only without -vm-tests)")
-		keyFiles      = flag.String("key-files", "cmd/claw-bridge/main.go,pkg/hub/bootstrap.go,pkg/install/scripts.go", "Comma-separated key files for LLM context")
-		useVMTests    = flag.Bool("vm-tests", false, "Use real Replicated VM tests for timing (slower but accurate)")
-		vmTestRuns    = flag.Int("vm-test-runs", 3, "Number of VM tests per hypothesis (only with -vm-tests)")
-		vmHubBinary   = flag.String("vm-hub-binary", os.Getenv("ELASTICCLAW_HUB_BINARY"), "Path to elasticclaw binary for VM tests (default: elasticclaw in PATH)")
-		vmHubConfig   = flag.String("vm-hub-config", os.Getenv("ELASTICCLAW_HUB_CONFIG"), "Path to hub.yaml for VM tests (default: ~/.elasticclaw/hub.yaml)")
-		vmTemplate    = flag.String("vm-template", os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE"), "Template name for VM tests (default: base)")
+		iterations   = flag.Int("iterations", 10, "Number of optimization iterations")
+		anthropicKey = flag.String("anthropic-key", os.Getenv("ANTHROPIC_API_KEY"), "Anthropic API key")
+		testCommand  = flag.String("test-command", "go test ./pkg/hub/", "Test command to run")
+		repoRoot     = flag.String("repo", ".", "Path to repo root")
+		stateDir     = flag.String("state-dir", filepath.Join(os.TempDir(), "bootopt"), "State persistence directory")
+		sessionID    = flag.String("session", time.Now().Format("20060102-150405"), "Session ID")
+		baselineRuns = flag.Int("baseline-runs", 10, "Number of runs for baseline measurement")
+		timingRuns   = flag.Int("timing-runs", 10, "Number of proxy runs per hypothesis (only without -vm-tests)")
+		keyFiles     = flag.String("key-files", "cmd/claw-bridge/main.go,pkg/hub/bootstrap.go,pkg/install/scripts.go", "Comma-separated key files for LLM context")
+		useVMTests   = flag.Bool("vm-tests", false, "Use real Replicated VM tests for timing (slower but accurate)")
+		vmTestRuns   = flag.Int("vm-test-runs", 3, "Number of VM tests per hypothesis (only with -vm-tests)")
+		vmHubBinary  = flag.String("vm-hub-binary", os.Getenv("ELASTICCLAW_HUB_BINARY"), "Path to elasticclaw binary for VM tests (default: elasticclaw in PATH)")
+		vmHubConfig  = flag.String("vm-hub-config", os.Getenv("ELASTICCLAW_HUB_CONFIG"), "Path to hub.yaml for VM tests (default: ~/.elasticclaw/hub.yaml)")
+		vmTemplate   = flag.String("vm-template", os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE"), "Template name for VM tests (default: base)")
 	)
 	flag.Parse()
 
@@ -77,6 +77,9 @@ func main() {
 				vmResults = append(vmResults, res)
 				log.Printf("VM run %d: total=%dms phases=%v", j+1, res.TotalMs, res.Phases)
 			}
+			if len(vmResults) == 0 {
+				log.Fatalf("VM baseline failed: all VM tests failed")
+			}
 			mean, median, p95, phaseMeans := bootopt.AggregateVMBootResults(vmResults)
 			state.BaselineMeanMs = mean
 			log.Printf("VM Baseline: mean=%dms median=%dms p95=%dms", mean, median, p95)
@@ -115,11 +118,11 @@ func main() {
 
 		// Build prompt
 		promptCtx := bootopt.PromptContext{
-			Iteration:          i + 1,
-			PreviousResults:    state.Results,
-			CurrentCode:        currentCode,
-			BaselineMeanMs:     state.BaselineMeanMs,
-			KnownBottlenecks:   getKnownBottlenecks(),
+			Iteration:        i + 1,
+			PreviousResults:  state.Results,
+			CurrentCode:      currentCode,
+			BaselineMeanMs:   state.BaselineMeanMs,
+			KnownBottlenecks: getKnownBottlenecks(),
 		}
 		prompt := bootopt.BuildPrompt(promptCtx)
 
@@ -219,11 +222,11 @@ func main() {
 				log.Printf("ERROR: all VM tests failed")
 				rollback()
 				result := bootopt.HypothesisResult{
-					Hypothesis:     *hypothesis,
-					Iteration:      i + 1,
-					Correct:        true,
-					Kept:           false,
-					Reason:         "All VM tests failed",
+					Hypothesis: *hypothesis,
+					Iteration:  i + 1,
+					Correct:    true,
+					Kept:       false,
+					Reason:     "All VM tests failed",
 				}
 				state.Results = append(state.Results, result)
 				continue
@@ -271,26 +274,28 @@ func main() {
 		if mean < state.BaselineMeanMs {
 			// Improvement! Keep it.
 			saved := state.BaselineMeanMs - mean
-			result.Kept = true
-			result.Reason = fmt.Sprintf("Faster by %dms (%.1f%%)", saved, float64(saved)*100/float64(state.BaselineMeanMs))
-			state.KeptChanges = append(state.KeptChanges, bootopt.KeptChange{
-				Iteration:   i + 1,
-				Description: hypothesis.Description,
-				Diff:        hypothesis.Diff,
-				MeanMs:      mean,
-				SavedMs:     saved,
-				CommittedAt: time.Now(),
-			})
-			// Update baseline to new, faster baseline
-			state.BaselineMeanMs = mean
-			log.Printf("KEPT: %s", result.Reason)
-
-			// Commit
 			commitMsg := fmt.Sprintf("bootopt(iter-%d): %s\n\n%s\n\nSaved: %dms (%.1f%%)",
 				i+1, hypothesis.Description, hypothesis.Rationale, saved,
 				float64(saved)*100/float64(result.BaselineMeanMs))
 			if err := patchApplier.Commit(commitMsg); err != nil {
-				log.Printf("warning: commit failed: %v", err)
+				log.Printf("ERROR: commit failed: %v", err)
+				rollback()
+				result.Kept = false
+				result.Reason = fmt.Sprintf("Commit failed: %v", err)
+			} else {
+				result.Kept = true
+				result.Reason = fmt.Sprintf("Faster by %dms (%.1f%%)", saved, float64(saved)*100/float64(state.BaselineMeanMs))
+				state.KeptChanges = append(state.KeptChanges, bootopt.KeptChange{
+					Iteration:   i + 1,
+					Description: hypothesis.Description,
+					Diff:        hypothesis.Diff,
+					MeanMs:      mean,
+					SavedMs:     saved,
+					CommittedAt: time.Now(),
+				})
+				// Update baseline only after the faster code is committed.
+				state.BaselineMeanMs = mean
+				log.Printf("KEPT: %s", result.Reason)
 			}
 		} else {
 			// No improvement — rollback
@@ -323,6 +328,11 @@ func ensureCleanGit(repoRoot string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("repo has uncommitted changes")
 	}
+	cmd = exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = repoRoot
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("repo has staged changes")
+	}
 	return nil
 }
 
@@ -339,5 +349,3 @@ func getKnownBottlenecks() []string {
 		"No pre-baked VM images — every boot starts from fresh Ubuntu",
 	}
 }
-
-

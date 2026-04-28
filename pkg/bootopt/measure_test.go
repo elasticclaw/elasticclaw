@@ -44,3 +44,14 @@ func TestAggregateTiming_AllErrors(t *testing.T) {
 		t.Error("expected zeros when all runs error")
 	}
 }
+
+func TestRunTiming_AllErrorsReturnsError(t *testing.T) {
+	runner := NewTestRunner(t.TempDir(), "exit 1")
+	runs, err := runner.RunTiming(t.Context(), 2)
+	if err == nil {
+		t.Fatal("expected error when all timing runs fail")
+	}
+	if len(runs) != 2 {
+		t.Fatalf("len(runs) = %d, want 2", len(runs))
+	}
+}

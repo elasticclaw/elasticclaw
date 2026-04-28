@@ -1,12 +1,14 @@
+//go:build ignore
 // +build ignore
 
 // Manual mode for bootopt — reads hypotheses from stdin instead of LLM.
 //
 // Usage:
-//   go run ./cmd/bootopt/manual.go \
-//     -repo ~/.openclaw/workspace/elasticclaw \
-//     -baseline-runs 3 \
-//     -timing-runs 3
+//
+//	go run ./cmd/bootopt/manual.go \
+//	  -repo ~/.openclaw/workspace/elasticclaw \
+//	  -baseline-runs 3 \
+//	  -timing-runs 3
 //
 // Then paste a JSON hypothesis at the prompt.
 package main
@@ -28,11 +30,11 @@ import (
 
 func main() {
 	var (
-		repoRoot      = flag.String("repo", ".", "Path to repo root")
-		baselineRuns  = flag.Int("baseline-runs", 3, "Number of runs for baseline")
-		timingRuns    = flag.Int("timing-runs", 3, "Number of runs per hypothesis")
-		stateDir      = flag.String("state-dir", filepath.Join(os.TempDir(), "bootopt"), "State directory")
-		sessionID     = flag.String("session", time.Now().Format("20060102-150405"), "Session ID")
+		repoRoot     = flag.String("repo", ".", "Path to repo root")
+		baselineRuns = flag.Int("baseline-runs", 3, "Number of runs for baseline")
+		timingRuns   = flag.Int("timing-runs", 3, "Number of runs per hypothesis")
+		stateDir     = flag.String("state-dir", filepath.Join(os.TempDir(), "bootopt"), "State directory")
+		sessionID    = flag.String("session", time.Now().Format("20060102-150405"), "Session ID")
 	)
 	flag.Parse()
 
@@ -148,6 +150,11 @@ func main() {
 		if mean < state.BaselineMeanMs {
 			saved := state.BaselineMeanMs - mean
 			fmt.Printf("IMPROVEMENT! Saved %dms (%.1f%%)\n", saved, float64(saved)*100/float64(state.BaselineMeanMs))
+			if err := patchApplier.Commit(fmt.Sprintf("bootopt: %s", hypothesis.Description)); err != nil {
+				fmt.Printf("Commit FAILED: %v\n", err)
+				rollback()
+				continue
+			}
 			state.BaselineMeanMs = mean
 			state.KeptChanges = append(state.KeptChanges, bootopt.KeptChange{
 				Iteration:   state.CurrentIteration + 1,
@@ -157,7 +164,6 @@ func main() {
 				SavedMs:     saved,
 				CommittedAt: time.Now(),
 			})
-			patchApplier.Commit(fmt.Sprintf("bootopt: %s", hypothesis.Description))
 		} else {
 			fmt.Printf("No improvement. Rolling back.\n")
 			rollback()
@@ -177,6 +183,11 @@ func ensureCleanGit(repoRoot string) error {
 	cmd.Dir = repoRoot
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("repo has uncommitted changes")
+	}
+	cmd = exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = repoRoot
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("repo has staged changes")
 	}
 	return nil
 }

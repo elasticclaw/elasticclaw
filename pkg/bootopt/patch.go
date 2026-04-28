@@ -119,6 +119,9 @@ func (pa *PatchApplier) Commit(message string) error {
 		if strings.Contains(string(out), "nothing to commit") {
 			return nil
 		}
+		resetCmd := exec.Command("git", "reset", "--", ".")
+		resetCmd.Dir = pa.RepoRoot
+		resetCmd.Run()
 		return fmt.Errorf("git commit: %w\n%s", err, string(out))
 	}
 	return nil

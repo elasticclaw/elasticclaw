@@ -12,9 +12,9 @@ import (
 
 // TestRunner executes correctness and performance tests.
 type TestRunner struct {
-	RepoRoot      string
-	TestCommand   string   // e.g. "make test-bootstrap"
-	ContainerImage string  // e.g. "ubuntu:24.04" for container tests
+	RepoRoot       string
+	TestCommand    string // e.g. "make test-bootstrap"
+	ContainerImage string // e.g. "ubuntu:24.04" for container tests
 }
 
 // NewTestRunner creates a test runner.
@@ -27,6 +27,16 @@ func NewTestRunner(repoRoot, testCommand string) *TestRunner {
 
 // RunCorrectness runs the test suite once to verify the change works.
 func (tr *TestRunner) RunCorrectness(ctx context.Context) error {
+	if tr.TestCommand != "" {
+		cmd := exec.CommandContext(ctx, "sh", "-c", tr.TestCommand)
+		cmd.Dir = tr.RepoRoot
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("test command failed: %w\n%s", err, string(out))
+		}
+		return nil
+	}
+
 	// Run Go tests for bootstrap
 	cmd := exec.CommandContext(ctx, "go", "test", "-v", "-run", "Bootstrap", "./pkg/hub/")
 	cmd.Dir = tr.RepoRoot
@@ -65,6 +75,7 @@ func (tr *TestRunner) RunCorrectness(ctx context.Context) error {
 // RunTiming performs N timing runs and returns aggregated results.
 func (tr *TestRunner) RunTiming(ctx context.Context, runs int) ([]TimingRun, error) {
 	results := make([]TimingRun, 0, runs)
+	successes := 0
 
 	for i := 0; i < runs; i++ {
 		run, err := tr.runSingleTiming(ctx)
@@ -76,8 +87,12 @@ func (tr *TestRunner) RunTiming(ctx context.Context, runs int) ([]TimingRun, err
 			continue
 		}
 		results = append(results, run)
+		successes++
 	}
 
+	if successes == 0 {
+		return results, fmt.Errorf("all %d timing runs failed", runs)
+	}
 	return results, nil
 }
 
@@ -85,6 +100,19 @@ func (tr *TestRunner) RunTiming(ctx context.Context, runs int) ([]TimingRun, err
 func (tr *TestRunner) runSingleTiming(ctx context.Context) (TimingRun, error) {
 	start := time.Now()
 	phaseTimes := make(map[string]int64)
+
+	if tr.TestCommand != "" {
+		cmd := exec.CommandContext(ctx, "sh", "-c", tr.TestCommand)
+		cmd.Dir = tr.RepoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return TimingRun{}, fmt.Errorf("test command failed: %w\n%s", err, string(out))
+		}
+		return TimingRun{
+			StartMs:    start.UnixMilli(),
+			DurationMs: time.Since(start).Milliseconds(),
+			PhaseTimes: phaseTimes,
+		}, nil
+	}
 
 	// Phase 1: Script generation (pure Go)
 	phaseStart := time.Now()
