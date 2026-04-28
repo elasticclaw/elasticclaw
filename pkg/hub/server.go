@@ -1835,19 +1835,21 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
 	clawName := req.Name
 	go func() {
+		// Each step inside bootstrapDaytona retries 3x internally.
+		// One outer retry here handles the rare case of total step failure.
 		var lastErr error
-		for attempt := 1; attempt <= 3; attempt++ {
+		for attempt := 1; attempt <= 2; attempt++ {
 			if attempt > 1 {
-				log.Printf("[daytona] bootstrap retry %d/3 for claw %s in 15s...", attempt, clawName)
+				log.Printf("[daytona] full bootstrap retry for claw %s in 15s...", clawName)
 				time.Sleep(15 * time.Second)
 			}
 			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
 			if lastErr == nil {
 				return
 			}
-			log.Printf("[daytona] bootstrap attempt %d/3 failed for claw %s: %v", attempt, clawName, lastErr)
+			log.Printf("[daytona] bootstrap attempt %d/2 failed for claw %s: %v", attempt, clawName, lastErr)
 		}
-		log.Printf("[daytona] bootstrap failed after 3 attempts for claw %s: %v", clawName, lastErr)
+		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 	}()
 	return nil
@@ -1857,17 +1859,29 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
-		log.Printf("[daytona] %s...", label)
-		// Prefix HOME so commands run in the sandbox user's home, not the caller's
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
-		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
+		const maxAttempts = 3
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if attempt == 1 {
+				log.Printf("[daytona] %s...", label)
+			} else {
+				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
+				time.Sleep(5 * time.Second)
+			}
+			// Prefix HOME so commands run in the sandbox user's home, not the caller's
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
+			if err != nil {
+				lastErr = fmt.Errorf("%s: %w", label, err)
+				continue
+			}
+			if result.ExitCode != 0 {
+				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
+				continue
+			}
+			log.Printf("[daytona] %s done", label)
+			return nil
 		}
-		if result.ExitCode != 0 {
-			return fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
-		}
-		log.Printf("[daytona] %s done", label)
-		return nil
+		return lastErr
 	}
 
 	// Step 1: Upgrade OpenClaw to latest.
