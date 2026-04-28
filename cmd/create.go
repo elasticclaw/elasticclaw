@@ -54,6 +54,7 @@ func init() {
 	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
 	createCmd.MarkFlagRequired("name")
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
+	createCmd.MarkFlagRequired("template")
 	createCmd.Flags().StringVar(&createSource, "source", "auto", "template source: auto (local, then hub), local, or hub")
 	createCmd.Flags().StringArrayVar(&createEnvs, "env", nil, "extra env vars to inject (KEY=value)")
 	createCmd.Flags().StringVar(&createInstanceType, "instance-type", "", "override instance type (e.g. r1.small for Replicated)")
