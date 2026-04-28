@@ -28,7 +28,7 @@ func main() {
 		useVMTests   = flag.Bool("vm-tests", false, "Use real Replicated VM tests for timing (slower but accurate)")
 		vmTestRuns   = flag.Int("vm-test-runs", 3, "Number of VM tests per hypothesis (only with -vm-tests)")
 		vmHubBinary  = flag.String("vm-hub-binary", os.Getenv("ELASTICCLAW_HUB_BINARY"), "Path to elasticclaw binary for VM tests (default: elasticclaw in PATH)")
-		vmHubConfig  = flag.String("vm-hub-config", os.Getenv("ELASTICCLAW_HUB_CONFIG"), "Path to hub.yaml for VM tests (default: ~/.elasticclaw/hub.yaml)")
+		vmHubConfig  = flag.String("vm-hub-profile", os.Getenv("ELASTICCLAW_HUB_PROFILE"), "Profile name for VM tests (run: elasticclaw login --hub <url> --token <t> --profile <name>) (default: ~/.elasticclaw/hub.yaml)")
 		vmTemplate   = flag.String("vm-template", os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE"), "Template name for VM tests (default: base)")
 	)
 	flag.Parse()

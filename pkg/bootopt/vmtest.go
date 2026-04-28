@@ -17,11 +17,11 @@ import (
 // Each test provisions a real VM, waits for it to come online, measures timing,
 // then immediately destroys it.
 //
-// The hub.yaml used for testing MUST have public_url set to a URL that the
+// The autoresearch used for testing MUST have public_url set to a URL that the
 // provisioned VMs can reach. This is typically an ngrok tunnel, Cloudflare
 // tunnel, or a publicly accessible server.
 //
-// Example hub.yaml for testing with ngrok:
+// Example autoresearch for testing with ngrok:
 //
 //	url: http://localhost:8080
 //	public_url: https://my-hub.ngrok.io
@@ -34,14 +34,14 @@ import (
 // Environment variables:
 //
 //	ELASTICCLAW_HUB_BINARY  - Path to elasticclaw binary (default: "elasticclaw" in PATH)
-//	ELASTICCLAW_HUB_CONFIG  - Path to hub.yaml config (default: ~/.elasticclaw/hub.yaml)
+//	ELASTICCLAW_HUB_PROFILE  - Path to autoresearch config (default: ~/.elasticclaw/autoresearch)
 //	ELASTICCLAW_BOOTOPT_TEMPLATE - Template name for test claws (default: "base")
 //
 // Prerequisites:
 //
 //  1. elasticclaw binary must be built and in PATH (or ELASTICCLAW_HUB_BINARY set)
-//  2. hub.yaml must have Replicated CMX provider configured with valid token
-//  3. hub.yaml MUST have public_url set so VMs can reach the hub
+//  2. autoresearch must have Replicated CMX provider configured with valid token
+//  3. autoresearch MUST have public_url set so VMs can reach the hub
 //  4. Hub server must be running and accessible at public_url
 //  5. Template must be pushed to the hub (elasticclaw template push <name>)
 //
@@ -51,7 +51,7 @@ import (
 //	go build -o /usr/local/bin/elasticclaw .
 //
 //	# Configure hub with ngrok public URL
-//	cat > ~/.elasticclaw/hub.yaml <<EOF
+//	cat > ~/.elasticclaw/autoresearch <<EOF
 //	url: http://localhost:8080
 //	public_url: https://my-hub.ngrok.io
 //	token: $(openssl rand -hex 24)
@@ -62,18 +62,18 @@ import (
 //	EOF
 //
 //	# Start hub
-//	elasticclaw hub --config ~/.elasticclaw/hub.yaml
+//	elasticclaw hub --config ~/.elasticclaw/autoresearch
 //
 //	# In another terminal, start ngrok
 //	ngrok http 8080
 //
 //	# Update public_url with ngrok URL, then run tests
-//	export ELASTICCLAW_HUB_CONFIG=~/.elasticclaw/hub.yaml
+//	export ELASTICCLAW_HUB_PROFILE=~/.elasticclaw/autoresearch
 //	export ELASTICCLAW_BOOTOPT_TEMPLATE=base
 //	go run ./cmd/bootopt -vm-tests -vm-test-runs 3 -iterations 10
 type VMTestRunner struct {
 	HubBinary string // Path to elasticclaw binary
-	HubConfig string // Path to hub.yaml
+	HubProfile string // Profile name for hub connection (from ~/.elasticclaw/config.yaml)
 	Template  string // Template name for test claws
 	Timeout   time.Duration
 }
@@ -85,12 +85,12 @@ type VMTestRunner struct {
 //	Path to the elasticclaw binary. If not set, searches PATH for "elasticclaw".
 //	The binary must support: create, list, kill (no 'claw' subcommand prefix)
 //
-// ELASTICCLAW_HUB_CONFIG (optional):
+// ELASTICCLAW_HUB_PROFILE (optional):
 //
-//	Path to hub.yaml. The hub.yaml must have:
+//	Path to autoresearch. The autoresearch must have:
 //	  - providers.replicated.token: <cmx-token>
 //	  - public_url: <reachable-from-vms> (CRITICAL — VMs must ping back to this)
-//	If not set, uses ~/.elasticclaw/hub.yaml
+//	If not set, uses ~/.elasticclaw/autoresearch
 //
 // ELASTICCLAW_BOOTOPT_TEMPLATE (optional):
 //
@@ -101,10 +101,8 @@ func NewVMTestRunner() *VMTestRunner {
 	if hubBinary == "" {
 		hubBinary = "elasticclaw"
 	}
-	hubConfig := os.Getenv("ELASTICCLAW_HUB_CONFIG")
-	if hubConfig == "" {
-		hubConfig = os.ExpandEnv("$HOME/.elasticclaw/hub.yaml")
-	}
+	hubConfig := os.Getenv("ELASTICCLAW_HUB_PROFILE")
+	// No default — if not set, the CLI will use the active profile
 	template := os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE")
 	if template == "" {
 		template = "base"
@@ -114,21 +112,19 @@ func NewVMTestRunner() *VMTestRunner {
 
 // NewVMTestRunnerWithConfig creates a runner with explicit settings.
 // hubBinary: path to elasticclaw binary (or "elasticclaw" for PATH lookup)
-// hubConfig: path to hub.yaml (must have public_url + replicated.token)
+// hubConfig: path to autoresearch (must have public_url + replicated.token)
 // template: template name (must be pushed to hub)
 func NewVMTestRunnerWithConfig(hubBinary, hubConfig, template string) *VMTestRunner {
 	if hubBinary == "" {
 		hubBinary = "elasticclaw"
 	}
-	if hubConfig == "" {
-		hubConfig = os.ExpandEnv("$HOME/.elasticclaw/hub.yaml")
-	}
+	// No default for hubConfig — empty means use active profile
 	if template == "" {
 		template = "base"
 	}
 	return &VMTestRunner{
 		HubBinary: hubBinary,
-		HubConfig: hubConfig,
+		HubProfile: hubConfig,
 		Template:  template,
 		Timeout:   5 * time.Minute,
 	}
@@ -197,8 +193,8 @@ func (vtr *VMTestRunner) createClaw(ctx context.Context, name string) (string, e
 	if vtr.Template != "" {
 		args = append(args, "--template", vtr.Template)
 	}
-	if vtr.HubConfig != "" {
-		args = append(args, "--config", vtr.HubConfig)
+	if vtr.HubProfile != "" {
+		args = append(args, "--profile", vtr.HubProfile)
 	}
 
 	cmd := exec.CommandContext(ctx, vtr.HubBinary, args...)
@@ -227,8 +223,8 @@ func (vtr *VMTestRunner) waitForStatus(ctx context.Context, clawID, targetStatus
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		cmd := exec.CommandContext(ctx, vtr.HubBinary, "list", "--json")
-		if vtr.HubConfig != "" {
-			cmd.Args = append(cmd.Args, "--config", vtr.HubConfig)
+		if vtr.HubProfile != "" {
+			cmd.Args = append(cmd.Args, "--profile", vtr.HubProfile)
 		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -267,8 +263,8 @@ func statusReached(status, targetStatus string) bool {
 // Uses: elasticclaw kill <id>
 func (vtr *VMTestRunner) destroyClaw(ctx context.Context, clawID string) error {
 	cmd := exec.CommandContext(ctx, vtr.HubBinary, "kill", clawID)
-	if vtr.HubConfig != "" {
-		cmd.Args = append(cmd.Args, "--config", vtr.HubConfig)
+	if vtr.HubProfile != "" {
+		cmd.Args = append(cmd.Args, "--profile", vtr.HubProfile)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
