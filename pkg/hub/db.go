@@ -109,6 +109,8 @@ func migrate(db *sql.DB) error {
 		pr_url      TEXT NOT NULL,
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot comment ID seen
+		last_comment_at TEXT NOT NULL DEFAULT '', -- timestamp of last seen comment
+		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);
