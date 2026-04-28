@@ -1895,22 +1895,15 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	if err := exec("start openclaw install", 20*time.Second,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-NODE_VER=$(ls /usr/local/share/nvm/versions/node/ | head -1); \
-PREFIX="/usr/local/share/nvm/versions/node/${NODE_VER}"; \
-sudo "$NPM" install -g openclaw@latest --prefix "$PREFIX" --ignore-scripts > /tmp/openclaw-install.log 2>&1 & \
-echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
+	if err := exec("install openclaw", 3*time.Minute,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+sudo npm install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
 		return err
 	}
 
-	// Wait for npm install to complete — install takes ~35s, 90s is a safe margin
-	log.Printf("[daytona] waiting for openclaw install...")
-	time.Sleep(90 * time.Second)
-	log.Printf("[daytona] openclaw install wait done")
-
 	if err := exec("verify openclaw", 20*time.Second,
-		"export HOME=/home/daytona; /usr/local/share/nvm/current/bin/openclaw --version || openclaw --version"); err != nil {
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+openclaw --version`); err != nil {
 		return err
 	}
 
