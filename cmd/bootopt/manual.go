@@ -189,5 +189,12 @@ func ensureCleanGit(repoRoot string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("repo has staged changes")
 	}
+	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	cmd.Dir = repoRoot
+	if out, err := cmd.Output(); err != nil {
+		return fmt.Errorf("check untracked files: %w", err)
+	} else if strings.TrimSpace(string(out)) != "" {
+		return fmt.Errorf("repo has untracked files")
+	}
 	return nil
 }
