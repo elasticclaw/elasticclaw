@@ -137,7 +137,9 @@ func ParseHypothesis(text string) (*Hypothesis, error) {
 	if start != -1 {
 		// Skip ```json marker
 		start += 7
-		return parseHypothesisJSON(strings.TrimSpace(text[start:]))
+		if h, err := parseHypothesisJSON(strings.TrimSpace(text[start:])); err == nil {
+			return h, nil
+		}
 	}
 
 	for searchStart := 0; ; {

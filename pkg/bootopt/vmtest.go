@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -72,42 +71,10 @@ import (
 //	export ELASTICCLAW_BOOTOPT_TEMPLATE=base
 //	go run ./cmd/bootopt -vm-tests -vm-test-runs 3 -iterations 10
 type VMTestRunner struct {
-	HubBinary string // Path to elasticclaw binary
+	HubBinary  string // Path to elasticclaw binary
 	HubProfile string // Profile name for hub connection (from ~/.elasticclaw/config.yaml)
-	Template  string // Template name for test claws
-	Timeout   time.Duration
-}
-
-// NewVMTestRunner creates a runner from environment variables.
-//
-// ELASTICCLAW_HUB_BINARY (optional):
-//
-//	Path to the elasticclaw binary. If not set, searches PATH for "elasticclaw".
-//	The binary must support: create, list, kill (no 'claw' subcommand prefix)
-//
-// ELASTICCLAW_HUB_PROFILE (optional):
-//
-//	Path to autoresearch. The autoresearch must have:
-//	  - providers.replicated.token: <cmx-token>
-//	  - public_url: <reachable-from-vms> (CRITICAL — VMs must ping back to this)
-//	If not set, uses ~/.elasticclaw/autoresearch
-//
-// ELASTICCLAW_BOOTOPT_TEMPLATE (optional):
-//
-//	Template name for test claws. Default: "base"
-//	The template must be pushed to the hub (elasticclaw template push <name>)
-func NewVMTestRunner() *VMTestRunner {
-	hubBinary := os.Getenv("ELASTICCLAW_HUB_BINARY")
-	if hubBinary == "" {
-		hubBinary = "elasticclaw"
-	}
-	hubConfig := os.Getenv("ELASTICCLAW_HUB_PROFILE")
-	// No default — if not set, the CLI will use the active profile
-	template := os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE")
-	if template == "" {
-		template = "base"
-	}
-	return NewVMTestRunnerWithConfig(hubBinary, hubConfig, template)
+	Template   string // Template name for test claws
+	Timeout    time.Duration
 }
 
 // NewVMTestRunnerWithConfig creates a runner with explicit settings.
@@ -123,10 +90,10 @@ func NewVMTestRunnerWithConfig(hubBinary, hubConfig, template string) *VMTestRun
 		template = "base"
 	}
 	return &VMTestRunner{
-		HubBinary: hubBinary,
+		HubBinary:  hubBinary,
 		HubProfile: hubConfig,
-		Template:  template,
-		Timeout:   5 * time.Minute,
+		Template:   template,
+		Timeout:    5 * time.Minute,
 	}
 }
 
@@ -155,7 +122,7 @@ func (vtr *VMTestRunner) RunVMBootTest(ctx context.Context) (*VMBootResult, erro
 	_, err = vtr.waitForStatus(ctx, clawID, "provisioning", 2*time.Minute)
 	if err != nil {
 		result.Error = fmt.Sprintf("wait provisioning: %v", err)
-		vtr.destroyClaw(ctx, clawID)
+		vtr.cleanupClaw(clawID)
 		return result, err
 	}
 	result.Phases["vm_provisioning"] = time.Since(phaseStart).Milliseconds()
@@ -165,14 +132,14 @@ func (vtr *VMTestRunner) RunVMBootTest(ctx context.Context) (*VMBootResult, erro
 	_, err = vtr.waitForStatus(ctx, clawID, "online", vtr.Timeout)
 	if err != nil {
 		result.Error = fmt.Sprintf("wait online: %v", err)
-		vtr.destroyClaw(ctx, clawID)
+		vtr.cleanupClaw(clawID)
 		return result, err
 	}
 	result.Phases["bootstrap"] = time.Since(phaseStart).Milliseconds()
 	result.TotalMs = time.Since(start).Milliseconds()
 
 	// Phase 4: Cleanup — destroy immediately, we only needed timing
-	vtr.destroyClaw(ctx, clawID)
+	vtr.cleanupClaw(clawID)
 
 	return result, nil
 }
@@ -273,6 +240,12 @@ func (vtr *VMTestRunner) destroyClaw(ctx context.Context, clawID string) error {
 		return fmt.Errorf("destroy claw: %w\n%s", err, string(out))
 	}
 	return nil
+}
+
+func (vtr *VMTestRunner) cleanupClaw(clawID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = vtr.destroyClaw(cleanupCtx, clawID)
 }
 
 // parseClawStatus extracts a claw's status from JSON list output.
