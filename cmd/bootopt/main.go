@@ -205,6 +205,7 @@ func main() {
 
 		// Performance test
 		var mean, median, p95 int64
+		var proxyRuns []bootopt.TimingRun // populated in proxy path, nil for VM path
 
 		if *useVMTests {
 			log.Printf("Running VM timing test (%d runs)...", *vmTestRuns)
@@ -243,7 +244,8 @@ func main() {
 		} else {
 			log.Printf("Running proxy timing test (%d runs)...", *timingRuns)
 			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
-			proxyRuns, err := testRunner.RunTiming(ctx, *timingRuns)
+			var err error
+			proxyRuns, err = testRunner.RunTiming(ctx, *timingRuns)
 			cancel()
 
 			if err != nil {
@@ -277,6 +279,7 @@ func main() {
 			MedianMs:       median,
 			P95Ms:          p95,
 			BaselineMeanMs: state.BaselineMeanMs,
+			TimingRuns:     proxyRuns, // nil for VM tests; populated for proxy timing
 		}
 
 		if mean < state.BaselineMeanMs {

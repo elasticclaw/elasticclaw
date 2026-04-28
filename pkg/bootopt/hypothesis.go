@@ -154,17 +154,7 @@ func ParseHypothesis(text string) (*Hypothesis, error) {
 		searchStart = start + 1
 	}
 
-	start = strings.Index(text, "```")
-	if start == -1 {
-		return nil, fmt.Errorf("no JSON found in response")
-	}
-	start += 3
-	endOffset := strings.Index(text[start:], "```")
-	end := len(text)
-	if endOffset != -1 {
-		end = start + endOffset
-	}
-	return parseHypothesisJSON(strings.TrimSpace(text[start:end]))
+	return nil, fmt.Errorf("no JSON found in response")
 }
 
 func parseHypothesisJSON(jsonStr string) (*Hypothesis, error) {
