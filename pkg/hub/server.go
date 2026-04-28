@@ -2375,7 +2375,7 @@ func (s *Server) bridgeDownloadURL() string {
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
-// Not stored in DB — invisible to the user but triggers the agent to respond.
+// Stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
 	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
@@ -2387,11 +2387,17 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 5. Do NOT ask for permission at any point. Just work and keep the user informed.`
 	}
 	wakeMsg := types.HubMessage{
-		ID:      uuid.New().String(),
-		ClawID:  clawID,
-		Role:    "system",
-		Content: wakeContent,
+		ID:        uuid.New().String(),
+		ClawID:    clawID,
+		TenantID:  cc.tenantID,
+		Role:      "system",
+		Content:   wakeContent,
+		CreatedAt: now(),
 	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt,
+	)
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
 }
 
