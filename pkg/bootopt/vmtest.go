@@ -2,6 +2,7 @@ package bootopt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,7 +71,6 @@ import (
 //	export ELASTICCLAW_HUB_CONFIG=~/.elasticclaw/hub.yaml
 //	export ELASTICCLAW_BOOTOPT_TEMPLATE=base
 //	go run ./cmd/bootopt -vm-tests -vm-test-runs 3 -iterations 10
-//
 type VMTestRunner struct {
 	HubBinary string // Path to elasticclaw binary
 	HubConfig string // Path to hub.yaml
@@ -81,18 +81,21 @@ type VMTestRunner struct {
 // NewVMTestRunner creates a runner from environment variables.
 //
 // ELASTICCLAW_HUB_BINARY (optional):
-//   Path to the elasticclaw binary. If not set, searches PATH for "elasticclaw".
-//   The binary must support: claw create, claw list, claw kill
+//
+//	Path to the elasticclaw binary. If not set, searches PATH for "elasticclaw".
+//	The binary must support: claw create, claw list, claw kill
 //
 // ELASTICCLAW_HUB_CONFIG (optional):
-//   Path to hub.yaml. The hub.yaml must have:
-//     - providers.replicated.token: <cmx-token>
-//     - public_url: <reachable-from-vms> (CRITICAL — VMs must ping back to this)
-//   If not set, uses ~/.elasticclaw/hub.yaml
+//
+//	Path to hub.yaml. The hub.yaml must have:
+//	  - providers.replicated.token: <cmx-token>
+//	  - public_url: <reachable-from-vms> (CRITICAL — VMs must ping back to this)
+//	If not set, uses ~/.elasticclaw/hub.yaml
 //
 // ELASTICCLAW_BOOTOPT_TEMPLATE (optional):
-//   Template name for test claws. Default: "base"
-//   The template must be pushed to the hub (elasticclaw template push <name>)
+//
+//	Template name for test claws. Default: "base"
+//	The template must be pushed to the hub (elasticclaw template push <name>)
 func NewVMTestRunner() *VMTestRunner {
 	hubBinary := os.Getenv("ELASTICCLAW_HUB_BINARY")
 	if hubBinary == "" {
@@ -103,6 +106,23 @@ func NewVMTestRunner() *VMTestRunner {
 		hubConfig = os.ExpandEnv("$HOME/.elasticclaw/hub.yaml")
 	}
 	template := os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE")
+	if template == "" {
+		template = "base"
+	}
+	return NewVMTestRunnerWithConfig(hubBinary, hubConfig, template)
+}
+
+// NewVMTestRunnerWithConfig creates a runner with explicit settings.
+// hubBinary: path to elasticclaw binary (or "elasticclaw" for PATH lookup)
+// hubConfig: path to hub.yaml (must have public_url + replicated.token)
+// template: template name (must be pushed to hub)
+func NewVMTestRunnerWithConfig(hubBinary, hubConfig, template string) *VMTestRunner {
+	if hubBinary == "" {
+		hubBinary = "elasticclaw"
+	}
+	if hubConfig == "" {
+		hubConfig = os.ExpandEnv("$HOME/.elasticclaw/hub.yaml")
+	}
 	if template == "" {
 		template = "base"
 	}
@@ -193,6 +213,7 @@ func (vtr *VMTestRunner) createClaw(ctx context.Context, name string) (string, e
 	output := string(out)
 	parts := strings.Fields(output)
 	for _, p := range parts {
+		p = strings.Trim(p, `()[]{}.,;:"'`)
 		if len(p) == 36 && strings.Count(p, "-") == 4 {
 			return p, nil
 		}
@@ -219,7 +240,7 @@ func (vtr *VMTestRunner) waitForStatus(ctx context.Context, clawID, targetStatus
 			return "", err
 		}
 
-		if status == targetStatus {
+		if statusReached(status, targetStatus) {
 			return status, nil
 		}
 		if status == "error" || status == "deleted" {
@@ -233,6 +254,13 @@ func (vtr *VMTestRunner) waitForStatus(ctx context.Context, clawID, targetStatus
 		}
 	}
 	return "", fmt.Errorf("timeout waiting for status %s", targetStatus)
+}
+
+func statusReached(status, targetStatus string) bool {
+	if status == targetStatus {
+		return true
+	}
+	return targetStatus == "provisioning" && (status == "starting" || status == "connected" || status == "online")
 }
 
 // destroyClaw kills a claw.
@@ -250,35 +278,23 @@ func (vtr *VMTestRunner) destroyClaw(ctx context.Context, clawID string) error {
 }
 
 // parseClawStatus extracts a claw's status from JSON list output.
-// The CLI outputs a JSON array of claw objects. We do simple string search
-// to avoid importing JSON parsing overhead for this quick check.
 func parseClawStatus(jsonOutput, clawID string) (string, error) {
-	// Find the claw object with this ID
-	idPattern := fmt.Sprintf(`"id":"%s"`, clawID)
-	idx := strings.Index(jsonOutput, idPattern)
-	if idx == -1 {
-		// Also try with single quotes
-		idPattern = fmt.Sprintf(`"id":"%s"`, clawID)
-		idx = strings.Index(jsonOutput, idPattern)
-		if idx == -1 {
-			return "", fmt.Errorf("claw %s not found in list output", clawID)
+	var claws []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(jsonOutput), &claws); err != nil {
+		return "", fmt.Errorf("parse claw list JSON: %w", err)
+	}
+	for _, claw := range claws {
+		if claw.ID == clawID {
+			if claw.Status == "" {
+				return "", fmt.Errorf("status field not found for claw %s", clawID)
+			}
+			return claw.Status, nil
 		}
 	}
-
-	// Find "status":"..." after the ID
-	afterID := jsonOutput[idx:]
-	statusIdx := strings.Index(afterID, `"status":"`)
-	if statusIdx == -1 {
-		return "", fmt.Errorf("status field not found for claw %s", clawID)
-	}
-
-	statusStart := statusIdx + len(`"status":"`)
-	statusEnd := strings.Index(afterID[statusStart:], `"`)
-	if statusEnd == -1 {
-		return "", fmt.Errorf("malformed status for claw %s", clawID)
-	}
-
-	return afterID[statusStart : statusStart+statusEnd], nil
+	return "", fmt.Errorf("claw %s not found in list output", clawID)
 }
 
 // AggregateVMBootResults computes statistics from multiple VM boot tests.

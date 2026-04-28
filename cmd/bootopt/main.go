@@ -27,6 +27,9 @@ func main() {
 		keyFiles      = flag.String("key-files", "cmd/claw-bridge/main.go,pkg/hub/bootstrap.go,pkg/install/scripts.go", "Comma-separated key files for LLM context")
 		useVMTests    = flag.Bool("vm-tests", false, "Use real Replicated VM tests for timing (slower but accurate)")
 		vmTestRuns    = flag.Int("vm-test-runs", 3, "Number of VM tests per hypothesis (only with -vm-tests)")
+		vmHubBinary   = flag.String("vm-hub-binary", os.Getenv("ELASTICCLAW_HUB_BINARY"), "Path to elasticclaw binary for VM tests (default: elasticclaw in PATH)")
+		vmHubConfig   = flag.String("vm-hub-config", os.Getenv("ELASTICCLAW_HUB_CONFIG"), "Path to hub.yaml for VM tests (default: ~/.elasticclaw/hub.yaml)")
+		vmTemplate    = flag.String("vm-template", os.Getenv("ELASTICCLAW_BOOTOPT_TEMPLATE"), "Template name for VM tests (default: base)")
 	)
 	flag.Parse()
 
@@ -60,7 +63,7 @@ func main() {
 	if state.BaselineMeanMs == 0 {
 		if *useVMTests {
 			log.Printf("=== Measuring VM baseline (%d runs) ===", *vmTestRuns)
-			vmRunner := bootopt.NewVMTestRunner()
+			vmRunner := bootopt.NewVMTestRunnerWithConfig(*vmHubBinary, *vmHubConfig, *vmTemplate)
 			var vmResults []*bootopt.VMBootResult
 			for j := 0; j < *vmTestRuns; j++ {
 				log.Printf("VM baseline run %d/%d...", j+1, *vmTestRuns)
@@ -198,7 +201,7 @@ func main() {
 
 		if *useVMTests {
 			log.Printf("Running VM timing test (%d runs)...", *vmTestRuns)
-			vmRunner := bootopt.NewVMTestRunner()
+			vmRunner := bootopt.NewVMTestRunnerWithConfig(*vmHubBinary, *vmHubConfig, *vmTemplate)
 			var vmResults []*bootopt.VMBootResult
 			for j := 0; j < *vmTestRuns; j++ {
 				log.Printf("VM test run %d/%d...", j+1, *vmTestRuns)

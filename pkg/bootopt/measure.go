@@ -119,14 +119,22 @@ func (tr *TestRunner) runSingleTiming(ctx context.Context) (TimingRun, error) {
 	}
 	phaseTimes["stdin_parse"] = time.Since(phaseStart).Milliseconds()
 
-	// Phase 4: Build
+	// Phase 4: Build Go binaries (hub + bridge)
 	phaseStart = time.Now()
 	cmd = exec.CommandContext(ctx, "go", "build", "./cmd/claw-bridge")
 	cmd.Dir = tr.RepoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return TimingRun{}, fmt.Errorf("build failed: %w\n%s", err, string(out))
+		return TimingRun{}, fmt.Errorf("build claw-bridge failed: %w\n%s", err, string(out))
 	}
-	phaseTimes["go_build"] = time.Since(phaseStart).Milliseconds()
+	phaseTimes["build_bridge"] = time.Since(phaseStart).Milliseconds()
+
+	phaseStart = time.Now()
+	cmd = exec.CommandContext(ctx, "go", "build", "-o", "/tmp/elasticclaw-test", ".")
+	cmd.Dir = tr.RepoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return TimingRun{}, fmt.Errorf("build hub binary failed: %w\n%s", err, string(out))
+	}
+	phaseTimes["build_hub"] = time.Since(phaseStart).Milliseconds()
 
 	// Phase 5: Container test (if available)
 	if tr.ContainerImage != "" && os.Getenv("ELASTICCLAW_CONTAINER_TESTS") != "" {
