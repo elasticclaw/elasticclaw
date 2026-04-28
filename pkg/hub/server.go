@@ -1836,9 +1836,10 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	clawName := req.Name
 	go func() {
 		// Each step inside bootstrapDaytona retries 3x internally.
-		// One outer retry here handles the rare case of total step failure.
+		// Outer retries here handle the rare case of total step failure.
+		const maxBootstrapAttempts = 3
 		var lastErr error
-		for attempt := 1; attempt <= 2; attempt++ {
+		for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
 			if attempt > 1 {
 				log.Printf("[daytona] full bootstrap retry for claw %s in 15s...", clawName)
 				time.Sleep(15 * time.Second)
@@ -1847,7 +1848,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			if lastErr == nil {
 				return
 			}
-			log.Printf("[daytona] bootstrap attempt %d/2 failed for claw %s: %v", attempt, clawName, lastErr)
+			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
@@ -1903,8 +1904,8 @@ echo uninstalled`); err != nil {
 	}
 
 	if err := exec("install openclaw", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-sudo npm install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
+		`NPM="/usr/local/share/nvm/current/bin/npm"; \
+sudo "$NPM" install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
 		return err
 	}
 
