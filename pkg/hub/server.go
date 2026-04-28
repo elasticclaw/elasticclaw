@@ -1236,7 +1236,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
 	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
-		if s.getPipelineStage(clawID) == "" {
+		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			go s.sendWakeMessage(cc, clawID)
 		}
 	}
@@ -1358,7 +1358,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					if shouldWake {
-						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" {
+						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}
@@ -2393,6 +2393,14 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		Content: wakeContent,
 	}
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+}
+
+// clawHasMessages returns true if the claw already has message history.
+// Used to suppress the intro wake message on reconnect.
+func (s *Server) clawHasMessages(clawID string) bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id = ?`, clawID).Scan(&count)
+	return count > 0
 }
 
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
