@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"log"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -110,6 +111,13 @@ func (p *GitHubTokenProvider) FindInstallationForRepos(ctx context.Context, repo
 		return 0, fmt.Errorf("no installations found for GitHub App %d — install the App on your org or repo first", p.cfg.AppID)
 	}
 
+	installAccounts := make([]string, len(installations))
+	for i, inst := range installations {
+		installAccounts[i] = fmt.Sprintf("%s(id=%d)", inst.Account.Login, inst.ID)
+	}
+	log.Printf("[github] app_id=%d found %d installation(s): %v; looking for repos=%v",
+		p.cfg.AppID, len(installations), installAccounts, repos)
+
 	// If no repos specified, return the first installation
 	if len(repos) == 0 {
 		return installations[0].ID, nil
@@ -122,12 +130,16 @@ func (p *GitHubTokenProvider) FindInstallationForRepos(ctx context.Context, repo
 		for _, repo := range repos {
 			parts := strings.SplitN(repo, "/", 2)
 			if len(parts) == 2 && strings.ToLower(parts[0]) == owner {
+				log.Printf("[github] app_id=%d matched installation %d (%s) for repo %s",
+					p.cfg.AppID, inst.ID, inst.Account.Login, repo)
 				return inst.ID, nil
 			}
 		}
 	}
 
 	// Fallback: return first installation and let the token request fail with a clear error
+	log.Printf("[github] app_id=%d no installation matched repos %v — falling back to first installation %d (%s)",
+		p.cfg.AppID, repos, installations[0].ID, installations[0].Account.Login)
 	return installations[0].ID, nil
 }
 
@@ -193,6 +205,8 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		bodyStr = string(b)
 	}
 
+	log.Printf("[github] minting installation token: app_id=%d installation_id=%d repos=%v body=%s",
+		p.cfg.AppID, installationID, repos, bodyStr)
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(bodyStr))
 	if err != nil {
@@ -214,6 +228,10 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 	if resp.StatusCode != http.StatusCreated {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
+		// Log the full error body so we can diagnose permission issues
+		fullErr, _ := json.Marshal(errBody)
+		log.Printf("[github] InstallationToken HTTP %d for app_id=%d installation=%d repos=%v body=%s",
+			resp.StatusCode, p.cfg.AppID, installationID, repos, fullErr)
 		return "", time.Time{}, fmt.Errorf("github api %d: %v", resp.StatusCode, errBody["message"])
 	}
 
