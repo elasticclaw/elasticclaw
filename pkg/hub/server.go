@@ -1832,13 +1832,23 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
-	// Bootstrap: install OpenClaw + claw-bridge via exec
+	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
 	clawName := req.Name
 	go func() {
-		if err := s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env); err != nil {
-			log.Printf("daytona bootstrap failed for claw %s: %v", clawID, err)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		var lastErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if attempt > 1 {
+				log.Printf("[daytona] bootstrap retry %d/3 for claw %s in 15s...", attempt, clawName)
+				time.Sleep(15 * time.Second)
+			}
+			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
+			if lastErr == nil {
+				return
+			}
+			log.Printf("[daytona] bootstrap attempt %d/3 failed for claw %s: %v", attempt, clawName, lastErr)
 		}
+		log.Printf("[daytona] bootstrap failed after 3 attempts for claw %s: %v", clawName, lastErr)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
 	}()
 	return nil
 }
