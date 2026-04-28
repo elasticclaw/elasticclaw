@@ -88,6 +88,27 @@ func TestParseHypothesis_IgnoresLaterCodeBlocks(t *testing.T) {
 	}
 }
 
+func TestParseHypothesis_DiffMayContainCodeFence(t *testing.T) {
+	input := "```json\n" +
+		"{\n" +
+		"  \"description\": \"Update README example\",\n" +
+		"  \"rationale\": \"docs can include fenced code blocks\",\n" +
+		"  \"target_files\": [\"README.md\"],\n" +
+		"  \"diff\": \"--- a/README.md\\n+++ b/README.md\\n@@ -1 +1,3 @@\\n+```go\\n+fmt.Println(\\\"hi\\\")\\n+```\\n\",\n" +
+		"  \"risk_level\": \"low\",\n" +
+		"  \"expected_win\": \"0 seconds\"\n" +
+		"}\n" +
+		"```\n"
+
+	h, err := ParseHypothesis(input)
+	if err != nil {
+		t.Fatalf("parse hypothesis with fenced diff: %v", err)
+	}
+	if !strings.Contains(h.Diff, "```go") {
+		t.Error("diff should preserve fenced code block")
+	}
+}
+
 func TestParseHypothesis_FallsBackToRawJSONAfterNonJSONCodeBlock(t *testing.T) {
 	input := "Example helper:\n" +
 		"```go\n" +

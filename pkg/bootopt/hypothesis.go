@@ -137,15 +137,7 @@ func ParseHypothesis(text string) (*Hypothesis, error) {
 	if start != -1 {
 		// Skip ```json marker
 		start += 7
-		endOffset := strings.Index(text[start:], "```")
-		end := len(text)
-		if endOffset != -1 {
-			end = start + endOffset
-		}
-		if end <= start {
-			end = len(text)
-		}
-		return parseHypothesisJSON(strings.TrimSpace(text[start:end]))
+		return parseHypothesisJSON(strings.TrimSpace(text[start:]))
 	}
 
 	for searchStart := 0; ; {
