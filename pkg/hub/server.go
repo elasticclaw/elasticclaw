@@ -1851,6 +1851,13 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		// Destroy the sandbox — auto-stop is disabled so it would run forever otherwise
+		log.Printf("[daytona] destroying failed sandbox %s for claw %s", instance.ID, clawName)
+		if delErr := p.Destroy(context.Background(), instance.ID, false); delErr != nil {
+			log.Printf("[daytona] warning: failed to destroy sandbox %s: %v", instance.ID, delErr)
+		} else {
+			log.Printf("[daytona] destroyed failed sandbox %s", instance.ID)
+		}
 	}()
 	return nil
 }
