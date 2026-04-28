@@ -109,9 +109,13 @@ func inferSSHFromProfile(profileName string) string {
 	if err != nil || hubProfile == nil {
 		return ""
 	}
-	// Use explicit ssh_host if set (e.g. Tailscale address)
-	if hubProfile.SSHHost != "" {
-		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHHost)
+	// Use explicit ssh_uri if set (e.g. ssh://marc@canio-factory)
+	if hubProfile.SSHURI != "" {
+		if strings.HasPrefix(hubProfile.SSHURI, "ssh://") {
+			return hubProfile.SSHURI
+		}
+		// bare hostname — wrap as ssh://root@<host>
+		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHURI)
 	}
 	if hubProfile.URL == "" {
 		return ""

@@ -4,7 +4,7 @@ package types
 type HubProfile struct {
 	URL     string `yaml:"url"`
 	Token   string `yaml:"token"`
-	SSHHost string `yaml:"ssh_host,omitempty"` // optional override for hub upgrade SSH (e.g. Tailscale hostname)
+	SSHURI  string `yaml:"ssh_uri,omitempty"` // optional SSH target for hub upgrade (e.g. ssh://marc@canio-factory)
 }
 
 // Profile represents an execution context (legacy, kept for compat)
