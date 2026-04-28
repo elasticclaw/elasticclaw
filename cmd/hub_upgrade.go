@@ -106,10 +106,17 @@ fi
 // Pass "" to use the active profile.
 func inferSSHFromProfile(profileName string) string {
 	hubProfile, _, err := config.ResolveHub(profileName)
-	if err != nil || hubProfile == nil || hubProfile.URL == "" {
+	if err != nil || hubProfile == nil {
 		return ""
 	}
-	// Strip scheme and port to get hostname
+	// Use explicit ssh_host if set (e.g. Tailscale address)
+	if hubProfile.SSHHost != "" {
+		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHHost)
+	}
+	if hubProfile.URL == "" {
+		return ""
+	}
+	// Derive from URL
 	host := hubProfile.URL
 	host = strings.TrimPrefix(host, "https://")
 	host = strings.TrimPrefix(host, "http://")

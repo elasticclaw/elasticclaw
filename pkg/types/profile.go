@@ -2,8 +2,9 @@ package types
 
 // HubProfile holds connection details for one ElasticClaw hub.
 type HubProfile struct {
-	URL   string `yaml:"url"`
-	Token string `yaml:"token"`
+	URL     string `yaml:"url"`
+	Token   string `yaml:"token"`
+	SSHHost string `yaml:"ssh_host,omitempty"` // optional override for hub upgrade SSH (e.g. Tailscale hostname)
 }
 
 // Profile represents an execution context (legacy, kept for compat)
