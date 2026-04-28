@@ -88,11 +88,11 @@ func main() {
 			}
 		} else {
 			log.Printf("=== Measuring proxy baseline (%d runs) ===", *baselineRuns)
-			baselineRuns, err := testRunner.RunTiming(context.Background(), *baselineRuns)
+			baselineTimingRuns, err := testRunner.RunTiming(context.Background(), *baselineRuns)
 			if err != nil {
 				log.Fatalf("baseline timing failed: %v", err)
 			}
-			mean, median, p95 := bootopt.AggregateTiming(baselineRuns)
+			mean, median, p95 := bootopt.AggregateTiming(baselineTimingRuns)
 			state.BaselineMeanMs = mean
 			log.Printf("Proxy Baseline: mean=%dms median=%dms p95=%dms", mean, median, p95)
 		}
@@ -226,8 +226,8 @@ func main() {
 			if len(vmResults) == 0 {
 				log.Printf("ERROR: all VM tests failed")
 				if rbErr := rollback(); rbErr != nil {
-				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
-			}
+					log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+				}
 				result := bootopt.HypothesisResult{
 					Hypothesis: *hypothesis,
 					Iteration:  i + 1,
@@ -251,8 +251,8 @@ func main() {
 			if err != nil {
 				log.Printf("ERROR: timing test failed: %v", err)
 				if rbErr := rollback(); rbErr != nil {
-				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
-			}
+					log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+				}
 				result := bootopt.HypothesisResult{
 					Hypothesis:     *hypothesis,
 					Iteration:      i + 1,
@@ -291,8 +291,8 @@ func main() {
 			if err := patchApplier.Commit(commitMsg); err != nil {
 				log.Printf("ERROR: commit failed: %v", err)
 				if rbErr := rollback(); rbErr != nil {
-				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
-			}
+					log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+				}
 				result.Kept = false
 				result.Reason = fmt.Sprintf("Commit failed: %v", err)
 			} else {
