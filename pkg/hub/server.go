@@ -1115,23 +1115,26 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
+			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, before, limit,
+			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
 		)
 	} else if after != "" {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
+			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at ASC LIMIT ?`,
-			clawID, tenantID, after, limit,
+			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
 		)
 	} else {
 		// Default: last N messages
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
+			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, limit,
+			clawID, tenantID, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
 		)
 	}
 	if err != nil {
@@ -2371,33 +2374,38 @@ func (s *Server) bridgeDownloadURL() string {
 	return fmt.Sprintf("%s/%s/claw-bridge-linux-amd64", githubReleasesBase, Version)
 }
 
-// bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
-// claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
-// sendWakeMessage sends a silent system message to wake the agent.
-// For factory claws, it sends a task-specific prompt.
-// Stored in DB so reconnects after hub restart don't re-introduce.
-func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
-	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
-	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
-		wakeContent = `Read your BOOTSTRAP.md now. Then:
+const (
+	wakeMessageMarker  = "__WAKE_MESSAGE__"
+	defaultWakeContent = "Introduce yourself briefly and let the user know you're ready to help."
+	factoryWakeContent = `Read your BOOTSTRAP.md now. Then:
 1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
 2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
 3. If you hit something interesting or unexpected, say so.
 4. When you open a PR, summarize what you did and what the PR contains.
 5. Do NOT ask for permission at any point. Just work and keep the user informed.`
+)
+
+// sendWakeMessage sends a silent system message to wake the agent.
+// For factory claws, it sends a task-specific prompt.
+// A marker is stored in DB so reconnects after hub restart don't re-introduce.
+func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
+	wakeContent := defaultWakeContent
+	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
+		wakeContent = factoryWakeContent
 	}
 	wakeMsg := types.HubMessage{
 		ID:        uuid.New().String(),
 		ClawID:    clawID,
 		TenantID:  cc.tenantID,
 		Role:      "system",
-		Content:   wakeContent,
+		Content:   wakeMessageMarker,
 		CreatedAt: now(),
 	}
 	_, _ = s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
 		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt,
 	)
+	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
 }
 
@@ -2409,6 +2417,8 @@ func (s *Server) clawHasMessages(clawID string) bool {
 	return count > 0
 }
 
+// bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
+// claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
