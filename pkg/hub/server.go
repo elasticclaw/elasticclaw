@@ -2376,14 +2376,6 @@ func (s *Server) bridgeDownloadURL() string {
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
 // Not stored in DB — invisible to the user but triggers the agent to respond.
-// clawHasMessages returns true if the claw already has message history.
-// Used to suppress the intro wake message on reconnect.
-func (s *Server) clawHasMessages(clawID string) bool {
-	var count int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id = ?`, clawID).Scan(&count)
-	return count > 0
-}
-
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
 	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
@@ -2401,6 +2393,14 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		Content: wakeContent,
 	}
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+}
+
+// clawHasMessages returns true if the claw already has message history.
+// Used to suppress the intro wake message on reconnect.
+func (s *Server) clawHasMessages(clawID string) bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id = ?`, clawID).Scan(&count)
+	return count > 0
 }
 
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
