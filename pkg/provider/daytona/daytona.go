@@ -71,10 +71,13 @@ func (p *Provider) Info() types.ProviderInfo {
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
 	// Create sandbox params - use SnapshotParams for default snapshot-based creation.
 	// req.FromImage maps to the Daytona snapshot name (e.g. "daytona-medium").
+	// Disable auto-stop (default is 15 min inactivity which kills long-running agent sessions)
+	autoStopDisabled := 0
 	params := daytonatypes.SnapshotParams{
 		SandboxBaseParams: daytonatypes.SandboxBaseParams{
-			Name:    req.Name,
-			EnvVars: req.Env,
+			Name:             req.Name,
+			EnvVars:          req.Env,
+			AutoStopInterval: &autoStopDisabled, // 0 = no auto-stop
 		},
 		Snapshot: req.FromImage, // snapshot name — empty string uses Daytona default
 	}
