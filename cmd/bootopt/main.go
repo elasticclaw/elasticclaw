@@ -163,7 +163,9 @@ func main() {
 		// Verify build
 		if err := patchApplier.VerifyBuild(); err != nil {
 			log.Printf("ERROR: build failed: %v", err)
-			rollback()
+			if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 			result := bootopt.HypothesisResult{
 				Hypothesis:     *hypothesis,
 				Iteration:      i + 1,
@@ -184,7 +186,9 @@ func main() {
 
 		if correctnessErr != nil {
 			log.Printf("ERROR: correctness test failed: %v", correctnessErr)
-			rollback()
+			if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 			result := bootopt.HypothesisResult{
 				Hypothesis:     *hypothesis,
 				Iteration:      i + 1,
@@ -220,7 +224,9 @@ func main() {
 			}
 			if len(vmResults) == 0 {
 				log.Printf("ERROR: all VM tests failed")
-				rollback()
+				if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 				result := bootopt.HypothesisResult{
 					Hypothesis: *hypothesis,
 					Iteration:  i + 1,
@@ -242,7 +248,9 @@ func main() {
 
 			if err != nil {
 				log.Printf("ERROR: timing test failed: %v", err)
-				rollback()
+				if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 				result := bootopt.HypothesisResult{
 					Hypothesis:     *hypothesis,
 					Iteration:      i + 1,
@@ -279,7 +287,9 @@ func main() {
 				float64(saved)*100/float64(result.BaselineMeanMs))
 			if err := patchApplier.Commit(commitMsg); err != nil {
 				log.Printf("ERROR: commit failed: %v", err)
-				rollback()
+				if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 				result.Kept = false
 				result.Reason = fmt.Sprintf("Commit failed: %v", err)
 			} else {
@@ -302,7 +312,9 @@ func main() {
 			result.Kept = false
 			result.Reason = fmt.Sprintf("No improvement (mean %dms >= baseline %dms)", mean, state.BaselineMeanMs)
 			log.Printf("DISCARDED: %s", result.Reason)
-			rollback()
+			if rbErr := rollback(); rbErr != nil {
+				log.Fatalf("FATAL: rollback failed, working tree dirty: %v", rbErr)
+			}
 		}
 
 		state.Results = append(state.Results, result)

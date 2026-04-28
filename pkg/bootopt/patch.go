@@ -48,10 +48,17 @@ func (pa *PatchApplier) Apply(diff string) (rollback func() error, err error) {
 
 	// Build rollback function
 	rollback = func() error {
+		// Restore modified tracked files
 		cmd := exec.Command("git", "checkout", "--", ".")
 		cmd.Dir = pa.RepoRoot
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("rollback failed: %w\n%s", err, string(out))
+			return fmt.Errorf("rollback (checkout) failed: %w\n%s", err, string(out))
+		}
+		// Remove untracked files added by the patch (e.g. new .go files)
+		clean := exec.Command("git", "clean", "-fd")
+		clean.Dir = pa.RepoRoot
+		if out, err := clean.CombinedOutput(); err != nil {
+			return fmt.Errorf("rollback (clean) failed: %w\n%s", err, string(out))
 		}
 		return nil
 	}
