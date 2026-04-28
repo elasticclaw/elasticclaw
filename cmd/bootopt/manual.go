@@ -134,7 +134,7 @@ func main() {
 		// Timing
 		fmt.Printf("Running timing test (%d runs)...\n", *timingRuns)
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
-		timingRuns, err := testRunner.RunTiming(ctx, *timingRuns)
+		runs, err := testRunner.RunTiming(ctx, *timingRuns)
 		cancel()
 
 		if err != nil {
@@ -143,7 +143,7 @@ func main() {
 			continue
 		}
 
-		mean, median, p95 := bootopt.AggregateTiming(timingRuns)
+		mean, median, p95 := bootopt.AggregateTiming(runs)
 		fmt.Printf("Timing: mean=%dms median=%dms p95=%dms (baseline: %dms)\n",
 			mean, median, p95, state.BaselineMeanMs)
 

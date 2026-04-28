@@ -63,6 +63,31 @@ func TestParseHypothesis_Valid(t *testing.T) {
 	}
 }
 
+func TestParseHypothesis_IgnoresLaterCodeBlocks(t *testing.T) {
+	input := "```json\n" +
+		"{\n" +
+		"  \"description\": \"Parallelize apt and npm installs\",\n" +
+		"  \"rationale\": \"apt and npm are independent, can run in parallel\",\n" +
+		"  \"target_files\": [\"cmd/claw-bridge/main.go\"],\n" +
+		"  \"diff\": \"--- a/cmd/claw-bridge/main.go\\n+++ b/cmd/claw-bridge/main.go\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\n" +
+		"  \"risk_level\": \"low\",\n" +
+		"  \"expected_win\": \"3-5 seconds\"\n" +
+		"}\n" +
+		"```\n\n" +
+		"Here's why:\n" +
+		"```go\n" +
+		"// example\n" +
+		"```\n"
+
+	h, err := ParseHypothesis(input)
+	if err != nil {
+		t.Fatalf("parse hypothesis with later code block: %v", err)
+	}
+	if h.Description != "Parallelize apt and npm installs" {
+		t.Errorf("description mismatch: %q", h.Description)
+	}
+}
+
 func TestParseHypothesis_NoJSON(t *testing.T) {
 	_, err := ParseHypothesis("no json here")
 	if err == nil {

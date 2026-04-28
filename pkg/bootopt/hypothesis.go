@@ -152,8 +152,12 @@ func ParseHypothesis(text string) (*Hypothesis, error) {
 		start += 3
 	}
 
-	end := strings.LastIndex(text, "```")
-	if end == -1 || end <= start {
+	endOffset := strings.Index(text[start:], "```")
+	end := len(text)
+	if endOffset != -1 {
+		end = start + endOffset
+	}
+	if end <= start {
 		end = len(text)
 	}
 
