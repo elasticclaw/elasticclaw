@@ -26,6 +26,8 @@ ElasticClaw runs a **hub** — a single Go binary with an embedded web UI — th
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and workflow.
 
+> **Note:** This repository is managed by AI agents (claws) via the ElasticClaw factory system. PRs may be authored by autonomous claws working from Linear issues.
+
 ## License
 
 [Apache 2.0](LICENSE)
