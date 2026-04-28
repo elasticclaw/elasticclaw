@@ -8,44 +8,44 @@ import (
 
 // Hypothesis represents a proposed optimization from the LLM.
 type Hypothesis struct {
-	Description string   `json:"description"`     // Human-readable summary
-	Rationale   string   `json:"rationale"`       // Why this should improve boot time
-	TargetFiles []string `json:"target_files"`    // Files to modify (relative paths)
-	Diff        string   `json:"diff"`            // Unified diff format
-	RiskLevel   string   `json:"risk_level"`      // low|medium|high
-	ExpectedWin string   `json:"expected_win"`    // e.g. "5-10 seconds"
+	Description string   `json:"description"`  // Human-readable summary
+	Rationale   string   `json:"rationale"`    // Why this should improve boot time
+	TargetFiles []string `json:"target_files"` // Files to modify (relative paths)
+	Diff        string   `json:"diff"`         // Unified diff format
+	RiskLevel   string   `json:"risk_level"`   // low|medium|high
+	ExpectedWin string   `json:"expected_win"` // e.g. "5-10 seconds"
 }
 
 // HypothesisResult tracks the outcome of testing a hypothesis.
 type HypothesisResult struct {
 	Hypothesis     Hypothesis  `json:"hypothesis"`
 	Iteration      int         `json:"iteration"`
-	Correct        bool        `json:"correct"`        // Did 1-run test pass?
+	Correct        bool        `json:"correct"` // Did 1-run test pass?
 	CorrectnessErr string      `json:"correctness_err,omitempty"`
-	TimingRuns     []TimingRun `json:"timing_runs"`    // 10 runs
+	TimingRuns     []TimingRun `json:"timing_runs"` // 10 runs
 	MeanMs         int64       `json:"mean_ms"`
 	MedianMs       int64       `json:"median_ms"`
 	P95Ms          int64       `json:"p95_ms"`
 	BaselineMeanMs int64       `json:"baseline_mean_ms"`
-	Kept           bool        `json:"kept"`           // Did we keep this change?
-	Reason         string      `json:"reason"`         // Why kept or discarded
+	Kept           bool        `json:"kept"`   // Did we keep this change?
+	Reason         string      `json:"reason"` // Why kept or discarded
 }
 
 // TimingRun is a single timed execution.
 type TimingRun struct {
-	StartMs    int64             `json:"start_ms"`     // Unix millis
-	DurationMs int64             `json:"duration_ms"`
-	PhaseTimes map[string]int64  `json:"phase_times"`  // per-phase breakdown
-	Error      string            `json:"error,omitempty"`
+	StartMs    int64            `json:"start_ms"` // Unix millis
+	DurationMs int64            `json:"duration_ms"`
+	PhaseTimes map[string]int64 `json:"phase_times"` // per-phase breakdown
+	Error      string           `json:"error,omitempty"`
 }
 
 // PromptContext holds the current codebase state for LLM prompting.
 type PromptContext struct {
-	Iteration       int                `json:"iteration"`
-	PreviousResults []HypothesisResult `json:"previous_results"`
-	CurrentCode     map[string]string  `json:"current_code"`  // file path → content
-	BaselineMeanMs  int64              `json:"baseline_mean_ms"`
-	KnownBottlenecks []string          `json:"known_bottlenecks"`
+	Iteration        int                `json:"iteration"`
+	PreviousResults  []HypothesisResult `json:"previous_results"`
+	CurrentCode      map[string]string  `json:"current_code"` // file path → content
+	BaselineMeanMs   int64              `json:"baseline_mean_ms"`
+	KnownBottlenecks []string           `json:"known_bottlenecks"`
 }
 
 // BuildPrompt constructs the full prompt for hypothesis generation.
@@ -134,37 +134,48 @@ Current known bottlenecks:
 func ParseHypothesis(text string) (*Hypothesis, error) {
 	// Try to find JSON block
 	start := strings.Index(text, "```json")
-	if start == -1 {
-		start = strings.Index(text, "```")
+	if start != -1 {
+		// Skip ```json marker
+		start += 7
+		endOffset := strings.Index(text[start:], "```")
+		end := len(text)
+		if endOffset != -1 {
+			end = start + endOffset
+		}
+		if end <= start {
+			end = len(text)
+		}
+		return parseHypothesisJSON(strings.TrimSpace(text[start:end]))
 	}
-	if start == -1 {
-		// Try raw JSON
-		start = strings.Index(text, "{")
+
+	for searchStart := 0; ; {
+		start = strings.Index(text[searchStart:], "{")
+		if start == -1 {
+			break
+		}
+		start += searchStart
+		if h, err := parseHypothesisJSON(strings.TrimSpace(text[start:])); err == nil {
+			return h, nil
+		}
+		searchStart = start + 1
 	}
+
+	start = strings.Index(text, "```")
 	if start == -1 {
 		return nil, fmt.Errorf("no JSON found in response")
 	}
-
-	// Skip ```json marker
-	if strings.HasPrefix(text[start:], "```json") {
-		start += 7
-	} else if strings.HasPrefix(text[start:], "```") {
-		start += 3
-	}
-
+	start += 3
 	endOffset := strings.Index(text[start:], "```")
 	end := len(text)
 	if endOffset != -1 {
 		end = start + endOffset
 	}
-	if end <= start {
-		end = len(text)
-	}
+	return parseHypothesisJSON(strings.TrimSpace(text[start:end]))
+}
 
-	jsonStr := strings.TrimSpace(text[start:end])
-
+func parseHypothesisJSON(jsonStr string) (*Hypothesis, error) {
 	var h Hypothesis
-	if err := json.Unmarshal([]byte(jsonStr), &h); err != nil {
+	if err := json.NewDecoder(strings.NewReader(jsonStr)).Decode(&h); err != nil {
 		return nil, fmt.Errorf("parse hypothesis JSON: %w", err)
 	}
 

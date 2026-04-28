@@ -11,7 +11,7 @@ func TestBuildPrompt(t *testing.T) {
 		CurrentCode: map[string]string{
 			"cmd/claw-bridge/main.go": "package main\n",
 		},
-		BaselineMeanMs: 5000,
+		BaselineMeanMs:   5000,
 		KnownBottlenecks: []string{"apt-get update slow"},
 	}
 
@@ -82,6 +82,30 @@ func TestParseHypothesis_IgnoresLaterCodeBlocks(t *testing.T) {
 	h, err := ParseHypothesis(input)
 	if err != nil {
 		t.Fatalf("parse hypothesis with later code block: %v", err)
+	}
+	if h.Description != "Parallelize apt and npm installs" {
+		t.Errorf("description mismatch: %q", h.Description)
+	}
+}
+
+func TestParseHypothesis_FallsBackToRawJSONAfterNonJSONCodeBlock(t *testing.T) {
+	input := "Example helper:\n" +
+		"```go\n" +
+		"func main() {}\n" +
+		"```\n\n" +
+		"Use this hypothesis:\n" +
+		"{\n" +
+		"  \"description\": \"Parallelize apt and npm installs\",\n" +
+		"  \"rationale\": \"apt and npm are independent, can run in parallel\",\n" +
+		"  \"target_files\": [\"cmd/claw-bridge/main.go\"],\n" +
+		"  \"diff\": \"--- a/cmd/claw-bridge/main.go\\n+++ b/cmd/claw-bridge/main.go\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\n" +
+		"  \"risk_level\": \"low\",\n" +
+		"  \"expected_win\": \"3-5 seconds\"\n" +
+		"}\n"
+
+	h, err := ParseHypothesis(input)
+	if err != nil {
+		t.Fatalf("parse hypothesis after non-JSON code block: %v", err)
 	}
 	if h.Description != "Parallelize apt and npm installs" {
 		t.Errorf("description mismatch: %q", h.Description)

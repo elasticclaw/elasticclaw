@@ -2299,13 +2299,23 @@ func (s *Server) syncReplicatedVMs() {
 			// 404 means VM was deleted externally — clean up the claw
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) — marking claw %s offline", c.providerID, c.id[:8])
-				_, _ = s.db.Exec(`UPDATE claws SET status='offline' WHERE id=?`, c.id)
-				s.mu.Lock()
-				if cc, ok := s.claws[c.id]; ok {
-					cc.conn.Close(websocket.StatusGoingAway, "VM not found")
-					delete(s.claws, c.id)
+				res, execErr := s.db.Exec(
+					`UPDATE claws SET status='offline' WHERE id=? AND status IN ('provisioning','starting')`,
+					c.id)
+				if execErr == nil {
+					if n, _ := res.RowsAffected(); n > 0 {
+						s.mu.Lock()
+						if cc, ok := s.claws[c.id]; ok {
+							cc.conn.Close(websocket.StatusGoingAway, "VM not found")
+							delete(s.claws, c.id)
+						}
+						s.mu.Unlock()
+						s.broadcastToUsers(c.tenantID, types.WSMessage{
+							Type:    "claw_status",
+							Payload: map[string]string{"claw_id": c.id, "status": "offline"},
+						})
+					}
 				}
-				s.mu.Unlock()
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
