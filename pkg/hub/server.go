@@ -2019,8 +2019,13 @@ ELASTICCLAW_EOF`,
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
-response=$(curl -sf %q)
-if [ $? -ne 0 ] || [ -z "$response" ]; then exit 1; fi
+# Retry up to 10 times — proxy may not be ready immediately after bridge connects
+for i in $(seq 1 10); do
+  response=$(curl -sf --max-time 35 %q)
+  if [ $? -eq 0 ] && [ -n "$response" ]; then break; fi
+  sleep 3
+done
+if [ -z "$response" ]; then exit 1; fi
 token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 echo "protocol=https"
 echo "host=github.com"
@@ -2032,11 +2037,12 @@ git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 echo 'credential helper installed'`, tokenURL)
 		// Wait for the bridge to connect and register with hub (needed for HTTP proxy)
 		log.Printf("[daytona] waiting for bridge to connect...")
-		for i := 0; i < 20; i++ {
+		for i := 0; i < 30; i++ {
 			s.mu.RLock()
 			_, connected := s.claws[clawID]
 			s.mu.RUnlock()
 			if connected {
+				log.Printf("[daytona] bridge connected after %ds", i*3)
 				break
 			}
 			time.Sleep(3 * time.Second)
