@@ -71,16 +71,6 @@ func (pa *PatchApplier) VerifyBuild() error {
 }
 
 // VerifyTests runs the specified test pattern.
-func (pa *PatchApplier) VerifyTests(pattern string) error {
-	cmd := exec.Command("go", "test", "-run", pattern, "./...")
-	cmd.Dir = pa.RepoRoot
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("go test failed: %w\n%s", err, string(out))
-	}
-	return nil
-}
-
 // GetFileContent reads a file relative to repo root.
 func (pa *PatchApplier) GetFileContent(relPath string) (string, error) {
 	path := filepath.Join(pa.RepoRoot, relPath)

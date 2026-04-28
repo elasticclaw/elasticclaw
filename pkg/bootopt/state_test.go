@@ -3,6 +3,7 @@ package bootopt
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,10 +45,10 @@ func TestStateManager(t *testing.T) {
 
 	// Summary
 	summary := state2.Summary()
-	if !contains(summary, "3 iterations") {
+	if !strings.Contains(summary, "3 iterations") {
 		t.Errorf("summary missing iteration count: %s", summary)
 	}
-	if !contains(summary, "500ms total saved") {
+	if !strings.Contains(summary, "500ms total saved") {
 		t.Errorf("summary missing saved time: %s", summary)
 	}
 }
@@ -94,15 +95,4 @@ func TestStateManager_Persistence(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
 
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

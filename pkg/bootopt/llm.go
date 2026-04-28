@@ -10,11 +10,6 @@ import (
 	"time"
 )
 
-// LLMClient generates optimization hypotheses.
-type LLMClient interface {
-	GenerateHypothesis(ctx context.Context, prompt string) (string, error)
-}
-
 // AnthropicClient uses the Anthropic Messages API.
 type AnthropicClient struct {
 	APIKey  string
@@ -106,19 +101,4 @@ type anthropicResponse struct {
 	} `json:"usage"`
 }
 
-// ManualClient allows manual hypothesis input for testing.
-type ManualClient struct {
-	Input func() (string, error)
-}
 
-// NewManualClient creates a client that reads from a function.
-func NewManualClient(input func() (string, error)) *ManualClient {
-	return &ManualClient{Input: input}
-}
-
-// GenerateHypothesis returns the manually provided hypothesis.
-func (c *ManualClient) GenerateHypothesis(ctx context.Context, prompt string) (string, error) {
-	_ = ctx
-	_ = prompt
-	return c.Input()
-}
