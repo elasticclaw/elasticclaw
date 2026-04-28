@@ -83,7 +83,7 @@ type VMTestRunner struct {
 // ELASTICCLAW_HUB_BINARY (optional):
 //
 //	Path to the elasticclaw binary. If not set, searches PATH for "elasticclaw".
-//	The binary must support: claw create, claw list, claw kill
+//	The binary must support: create, list, kill (no 'claw' subcommand prefix)
 //
 // ELASTICCLAW_HUB_CONFIG (optional):
 //
@@ -191,9 +191,9 @@ type VMBootResult struct {
 }
 
 // createClaw provisions a new claw via the elasticclaw CLI.
-// Uses: elasticclaw claw create <name> --provider replicated --template <tmpl>
+// Uses: elasticclaw create --name <name> --template <tmpl>
 func (vtr *VMTestRunner) createClaw(ctx context.Context, name string) (string, error) {
-	args := []string{"claw", "create", name, "--provider", "replicated"}
+	args := []string{"create", "--name", name}
 	if vtr.Template != "" {
 		args = append(args, "--template", vtr.Template)
 	}
@@ -222,11 +222,11 @@ func (vtr *VMTestRunner) createClaw(ctx context.Context, name string) (string, e
 }
 
 // waitForStatus polls the hub until the claw reaches the target status.
-// Uses: elasticclaw claw list --json
+// Uses: elasticclaw list --json
 func (vtr *VMTestRunner) waitForStatus(ctx context.Context, clawID, targetStatus string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		cmd := exec.CommandContext(ctx, vtr.HubBinary, "claw", "list", "--json")
+		cmd := exec.CommandContext(ctx, vtr.HubBinary, "list", "--json")
 		if vtr.HubConfig != "" {
 			cmd.Args = append(cmd.Args, "--config", vtr.HubConfig)
 		}
@@ -264,9 +264,9 @@ func statusReached(status, targetStatus string) bool {
 }
 
 // destroyClaw kills a claw.
-// Uses: elasticclaw claw kill <id>
+// Uses: elasticclaw kill <id>
 func (vtr *VMTestRunner) destroyClaw(ctx context.Context, clawID string) error {
-	cmd := exec.CommandContext(ctx, vtr.HubBinary, "claw", "kill", clawID)
+	cmd := exec.CommandContext(ctx, vtr.HubBinary, "kill", clawID)
 	if vtr.HubConfig != "" {
 		cmd.Args = append(cmd.Args, "--config", vtr.HubConfig)
 	}
