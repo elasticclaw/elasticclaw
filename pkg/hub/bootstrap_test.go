@@ -133,6 +133,15 @@ export OPENAI_API_KEY="sk-openai-key"`
 	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge start")
 }
 
+func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
+	p := baseParams()
+	p.OnboardFlags = buildOnboardFlags(nil, "")
+	script := GenerateReplicatedBootstrapScript(p)
+
+	assertContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'`, "onboard flags shell quoted")
+	assertNotContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS="--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}""`, "onboard flags must not use nested double quotes")
+}
+
 func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
 	// Gateway password must appear at top (so it's in env for claw-bridge) and in
 	// the persist block (so bridge can restart with it).

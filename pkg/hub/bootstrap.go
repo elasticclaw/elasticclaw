@@ -223,7 +223,7 @@ export OPENCLAW_DEFAULT_MODEL="%s"
 export ELASTICCLAW_NIX="%s"
 %s
 %s
-export ELASTICCLAW_ONBOARD_FLAGS="%s"
+export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
 BRIDGE_SRC="%s"
@@ -290,7 +290,7 @@ exit 1
 `,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.DefaultModel, nixFlag,
-		p.LLMKeyEnv, linearEnvLine, p.OnboardFlags, providerConfigLine,
+		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		p.BridgeURL,
 	)
 }
