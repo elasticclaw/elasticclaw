@@ -199,7 +199,8 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 				"pull_requests": contentsPermission,
 				"metadata":      "read",
 				"checks":        "read", // needed for gh pr checks / CI status
-				"statuses":      "read", // needed for commit status checks
+				// Note: "statuses" is intentionally omitted — it's a separate permission
+				// not granted by default. The "checks" API covers modern CI status.
 			},
 		})
 		bodyStr = string(b)
