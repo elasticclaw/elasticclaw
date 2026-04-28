@@ -34,3 +34,4 @@ bin/
 internal/webui/out/
 web/out/
 memory/
+bootopt
