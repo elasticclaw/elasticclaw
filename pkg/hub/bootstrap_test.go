@@ -25,23 +25,22 @@ func baseParams() BootstrapParams {
 		GitHubRepos:     nil,
 		LLMKeyEnv:       "export ANTHROPIC_API_KEY=\"test-key\"",
 		LinearEnv:       "# Linear not configured",
-		RelayEnv:        "# Relay not configured",
 	}
 }
 
 // ── Script content tests ──────────────────────────────────────────────────────
 
-func TestBootstrapScript_ContainsNodeInstall(t *testing.T) {
+func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
+	// New flow: script downloads bridge and starts it with bootstrap enabled;
+	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
-	assertContains(t, script, "nodesource.com/node_24.x", "Node 24 install")
-	assertContains(t, script, "nodejs git", "git install alongside node")
-}
-
-func TestBootstrapScript_ContainsOpenClaw(t *testing.T) {
-	script := GenerateReplicatedBootstrapScript(baseParams())
-	assertContains(t, script, "npm install -g openclaw@latest", "openclaw npm install")
-	assertContains(t, script, "openclaw gateway run", "openclaw gateway start")
-	assertContains(t, script, "18789", "gateway port")
+	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge backgrounded in bootstrap mode")
+	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
+	assertNotContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge must not block SSH session")
+	// Node/OpenClaw installs are NOT in the bash script anymore
+	assertNotContains(t, script, "nodesource.com", "Node install not in bash script")
+	assertNotContains(t, script, "npm install -g openclaw", "openclaw install not in bash script")
 }
 
 func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
@@ -73,43 +72,31 @@ func TestBootstrapScript_BridgeEnvVars(t *testing.T) {
 	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="test-gw-password"`, "gateway password env var")
 }
 
+func TestBootstrapScript_BridgeEnvFileQuotesValues(t *testing.T) {
+	script := GenerateReplicatedBootstrapScript(baseParams())
+	assertContains(t, script, `printf 'export ELASTICCLAW_CLAW_NAME=%q\n' "$ELASTICCLAW_CLAW_NAME"`, "claw name quoted in persisted env")
+	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password quoted in persisted env")
+}
+
 func TestBootstrapScript_NixDisabledByDefault(t *testing.T) {
 	p := baseParams()
 	p.Nix = false
 	script := GenerateReplicatedBootstrapScript(p)
-	assertNotContains(t, script, "install.determinate.systems", "Nix not installed when disabled")
+	assertContains(t, script, `ELASTICCLAW_NIX="false"`, "Nix disabled flag passed to bridge")
 }
 
 func TestBootstrapScript_NixEnabled(t *testing.T) {
 	p := baseParams()
 	p.Nix = true
 	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "install.determinate.systems/nix", "Determinate Nix install URL")
-	assertContains(t, script, "nix-daemon.sh", "nix daemon profile sourcing")
-	assertContains(t, script, "/etc/profile.d/nix.sh", "nix persisted in profile.d")
-}
-
-func TestBootstrapScript_NixInstalledBeforeOpenClaw(t *testing.T) {
-	// Nix must come before OpenClaw so nix-installed tools are available
-	p := baseParams()
-	p.Nix = true
-	script := GenerateReplicatedBootstrapScript(p)
-	nixIdx := strings.Index(script, "install.determinate.systems")
-	openclawIdx := strings.Index(script, "npm install -g openclaw")
-	if nixIdx == -1 {
-		t.Fatal("Nix install block not found")
-	}
-	if openclawIdx == -1 {
-		t.Fatal("OpenClaw install block not found")
-	}
-	if nixIdx > openclawIdx {
-		t.Error("Nix install must come BEFORE OpenClaw install in script")
-	}
+	assertContains(t, script, `ELASTICCLAW_NIX="true"`, "Nix enabled flag passed to bridge")
+	// Nix install itself is now in claw-bridge Go code, not bash
+	assertNotContains(t, script, "install.determinate.systems", "Nix URL not in bash script")
 }
 
 func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
-	// claw-bridge must start before the credential helper because the
-	// credential helper calls the hub API via the bridge's local proxy.
+	// claw-bridge is started before the credential helper section (which is a
+	// separate SSH step now, not in the generated script).
 	p := baseParams()
 	p.HubCfg = &types.HubConfig{
 		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
@@ -118,33 +105,9 @@ func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	bridgeIdx := strings.Index(script, "claw-bridge started")
-	credIdx := strings.Index(script, "elasticclaw-git-credentials")
-	if bridgeIdx == -1 {
-		t.Fatal("bridge start not found in script")
-	}
-	if credIdx == -1 {
-		t.Fatal("credential helper not found in script")
-	}
-	if credIdx < bridgeIdx {
-		t.Error("credential helper must come AFTER bridge starts")
-	}
-}
-
-func TestBootstrapScript_GitHubCredentialHelper(t *testing.T) {
-	p := baseParams()
-	p.HubCfg = &types.HubConfig{
-		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
-		ClawToken:  "test-token",
-	}
-	p.GitHubRepos = []types.GitHubRepoAccess{
-		{Repo: "owner/repo", Permissions: "write"},
-	}
-	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "elasticclaw-git-credentials", "credential helper script")
-	assertContains(t, script, "/api/github/token/", "credential helper calls hub token endpoint")
-	assertContains(t, script, "git config --global credential.helper", "git configured to use helper")
-	assertContains(t, script, "owner/repo", "repo cloned")
+	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/.claw-bridge.log\" 2>&1 </dev/null &", "bridge started")
+	// Credential helper is NOT in the generated script — it runs as a separate SSH step
+	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
 
 func TestBootstrapScript_NoGitHubWhenNotConfigured(t *testing.T) {
@@ -155,37 +118,76 @@ func TestBootstrapScript_NoGitHubWhenNotConfigured(t *testing.T) {
 	assertNotContains(t, script, "elasticclaw-git-credentials", "no cred helper when no GitHub app")
 }
 
-func TestBootstrapScript_RelayEnv(t *testing.T) {
-	p := baseParams()
-	p.RelayEnv = `export ELASTICCLAW_RELAY_URL="wss://relay.example.com"
-export ELASTICCLAW_HUB_ID="hub123"
-export ELASTICCLAW_RELAY_TOKEN="relaytoken"`
-	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, "ELASTICCLAW_RELAY_URL", "relay URL in bridge env")
-	assertContains(t, script, "wss://relay.example.com", "relay URL value")
-}
-
 func TestBootstrapScript_LLMKeysInjected(t *testing.T) {
 	p := baseParams()
 	p.LLMKeyEnv = `export ANTHROPIC_API_KEY="sk-ant-real-key"
 export OPENAI_API_KEY="sk-openai-key"`
 	script := GenerateReplicatedBootstrapScript(p)
-	// LLM keys must appear at the TOP of the script (before any installs)
-	// so they're available throughout
-	topSection := script[:strings.Index(script, "Install Node")]
-	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY in top of script")
-	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY in top of script")
+	// LLM keys must appear before starting claw-bridge so they're in the environment
+	bridgeIdx := strings.Index(script, "/usr/local/bin/claw-bridge >>")
+	if bridgeIdx == -1 {
+		t.Fatal("claw-bridge start not found")
+	}
+	topSection := script[:bridgeIdx]
+	assertContains(t, topSection, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY before bridge start")
+	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge start")
+}
+
+func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
+	p := baseParams()
+	p.OnboardFlags = buildOnboardFlags(nil, "")
+	script := GenerateReplicatedBootstrapScript(p)
+
+	assertContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'`, "onboard flags shell quoted")
+	assertNotContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS="--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}""`, "onboard flags must not use nested double quotes")
 }
 
 func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
-	// Gateway password must appear in bridge env (not just at top) so bridge can auth
+	// Gateway password must appear at top (so it's in env for claw-bridge) and in
+	// the persist block (so bridge can restart with it).
 	p := baseParams()
 	p.GatewayPassword = "super-secret-pw"
 	script := GenerateReplicatedBootstrapScript(p)
-	// Count occurrences — should appear at top AND in bridge env section
-	count := strings.Count(script, "super-secret-pw")
-	if count < 2 {
-		t.Errorf("gateway password should appear at least twice (top + bridge env), got %d", count)
+	// Must appear at top as literal value
+	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="super-secret-pw"`, "gateway password set at top")
+	// Must appear in persist block (as variable reference, not literal)
+	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password in persist block")
+}
+
+func TestBootstrapScript_BridgeEnvFileEscapesValues(t *testing.T) {
+	script := GenerateReplicatedBootstrapScript(baseParams())
+	start := strings.Index(script, "# Persist env vars")
+	if start == -1 {
+		t.Fatal("persist env block not found")
+	}
+	end := strings.Index(script[start:], "chmod 600")
+	if end == -1 {
+		t.Fatal("persist env block end not found")
+	}
+	snippet := script[start : start+end]
+
+	home := t.TempDir()
+	name := "My Test Claw"
+	password := "p@ss $word `cmd` \" quote"
+	cmd := exec.Command("bash", "-c", snippet+`
+source "$HOME/.claw-bridge.env"
+bash -c 'printf "%s\n" "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"'
+`)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"ELASTICCLAW_HUB_URL=https://hub.example.com",
+		"ELASTICCLAW_CLAW_ID=test-claw-id-1234",
+		"ELASTICCLAW_CLAW_TOKEN=test-token",
+		"ELASTICCLAW_CLAW_NAME="+name,
+		"ELASTICCLAW_GATEWAY_PASSWORD="+password,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source bridge env file: %v\n%s", err, string(out))
+	}
+	got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(got) != 2 || got[0] != name || got[1] != password {
+		t.Fatalf("sourced values mismatch: got %q, want %q", got, []string{name, password})
 	}
 }
 
@@ -239,7 +241,7 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 			}
 			flags := buildOnboardFlags(keys, "")
 			assertContains(t, flags, "--auth-choice "+tc.authChoice, "provider auth choice")
-			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`}"`, "provider api key flag")
+			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`:-}"`, "provider api key flag")
 			assertNotContains(t, flags, "anthropic-api-key", "should not fallback to anthropic")
 		})
 	}
@@ -280,11 +282,6 @@ func TestBootstrapScript_Shellcheck(t *testing.T) {
 	}{
 		{"base", baseParams()},
 		{"nix_enabled", func() BootstrapParams { p := baseParams(); p.Nix = true; return p }()},
-		{"with_relay", func() BootstrapParams {
-			p := baseParams()
-			p.RelayEnv = `export ELASTICCLAW_RELAY_URL="wss://relay.example.com"`
-			return p
-		}()},
 		{"with_github", func() BootstrapParams {
 			p := baseParams()
 			p.HubCfg = &types.HubConfig{

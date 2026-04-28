@@ -3,10 +3,19 @@
 //
 // Environment variables:
 //
-//	ELASTICCLAW_HUB_URL    - hub WebSocket URL (e.g. ws://hub.example.com)
-//	ELASTICCLAW_CLAW_ID    - claw ID assigned by the hub
-//	ELASTICCLAW_CLAW_TOKEN - authentication token for the hub
-//	ELASTICCLAW_GATEWAY    - local OpenClaw gateway address (default: localhost:18789)
+//	ELASTICCLAW_HUB_URL       - hub WebSocket URL (e.g. ws://hub.example.com)
+//	ELASTICCLAW_CLAW_ID       - claw ID assigned by the hub
+//	ELASTICCLAW_CLAW_TOKEN    - authentication token for the hub
+//	ELASTICCLAW_GATEWAY       - local OpenClaw gateway address (default: localhost:18789)
+//
+// Bootstrap mode (--bootstrap or ELASTICCLAW_BOOTSTRAP=1):
+//
+//	ELASTICCLAW_BOOTSTRAP         - set to "1" to run bootstrap before normal bridge loop
+//	ELASTICCLAW_NIX               - set to "true" to install Nix in background
+//	ELASTICCLAW_GATEWAY_PASSWORD  - OpenClaw gateway password
+//	ELASTICCLAW_ONBOARD_FLAGS     - extra flags for openclaw onboard
+//	OPENCLAW_DEFAULT_MODEL        - default agent model
+//	(all LLM key env vars, LINEAR_API_KEY, etc. are passed through transparently)
 package main
 
 import (
@@ -21,6 +30,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -46,13 +56,13 @@ type hubMsg struct {
 const msgQueueTTL = 10 * time.Minute
 
 type queuedMsg struct {
-	content   string
-	queuedAt  time.Time
+	content  string
+	queuedAt time.Time
 }
 
 type msgQueue struct {
-	mu    sync.Mutex
-	msgs  []queuedMsg
+	mu   sync.Mutex
+	msgs []queuedMsg
 }
 
 func (q *msgQueue) push(content string) {
@@ -165,8 +175,8 @@ func saveBridgeSession(key string) {
 
 type gatewayClient struct {
 	addr     string
-	token    string   // gateway auth token (may be empty for password auth)
-	password string   // gateway auth password (may be empty for token auth)
+	token    string // gateway auth token (may be empty for password auth)
+	password string // gateway auth password (may be empty for token auth)
 	device   *deviceIdentity
 }
 
@@ -188,23 +198,56 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 
 	devPath := filepath.Join(home, ".openclaw", "identity", "device.json")
 	devData, err := os.ReadFile(devPath)
-	if err != nil {
-		return nil, fmt.Errorf("read device.json: %w", err)
-	}
 	var dev deviceIdentity
-	if err := json.Unmarshal(devData, &dev); err != nil {
+	if os.IsNotExist(err) {
+		// device.json doesn't exist yet — the OpenClaw gateway creates it on first start.
+		// Wait up to 30s for it to appear rather than generating a mismatched identity.
+		// device.json should have been pre-generated during bootstrap.
+		// Wait up to 120s as a fallback in case gateway creates it asynchronously.
+		log.Printf("[gateway] device.json not found — waiting (up to 120s)...")
+		var waitErr error
+		var parseErr error
+		for i := 0; i < 120; i++ {
+			time.Sleep(time.Second)
+			devData, waitErr = os.ReadFile(devPath)
+			if waitErr != nil {
+				continue
+			}
+			parseErr = json.Unmarshal(devData, &dev)
+			if parseErr == nil {
+				log.Printf("[gateway] device.json appeared after %ds", i+1)
+				break
+			}
+		}
+		if waitErr != nil {
+			return nil, fmt.Errorf("device.json not found after 120s: %w", waitErr)
+		}
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse device.json: %w", parseErr)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("read device.json: %w", err)
+	} else if err := json.Unmarshal(devData, &dev); err != nil {
 		return nil, fmt.Errorf("parse device.json: %w", err)
 	}
 
-	// ELASTICCLAW_GATEWAY_PASSWORD env var overrides config (set by bootstrap script)
-	password := cfg.Gateway.Auth.Password
-	if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
-		password = envPw
-	}
-	token := cfg.Gateway.Auth.Token
-	// When using password auth, clear token so device payload signature is empty-token
-	if password != "" {
-		token = ""
+	// Determine auth based on the gateway's configured mode.
+	// ELASTICCLAW_GATEWAY_PASSWORD is only used when mode is password (or unset).
+	var token, password string
+	switch cfg.Gateway.Auth.Mode {
+	case "token":
+		// Token mode: use the token from config, ignore password env var
+		token = cfg.Gateway.Auth.Token
+	default:
+		// Password mode (or legacy): env var overrides config, token is fallback
+		token = cfg.Gateway.Auth.Token
+		password = cfg.Gateway.Auth.Password
+		if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
+			password = envPw
+		}
+		if password != "" {
+			token = ""
+		}
 	}
 
 	return &gatewayClient{
@@ -774,6 +817,330 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	}
 }
 
+// ─── bootstrap mode ─────────────────────────────────────────────────────────
+//
+// runBootstrap performs all VM setup steps that previously lived in the bash
+// heredoc. After runBootstrap returns, main() continues into the normal bridge
+// connect loop — no restart required.
+
+// runShell runs a bash -c script, streaming output to log.
+func runShell(script string) error {
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// nixInstallBg starts the Nix installer in background and returns a done channel.
+// The channel receives an error (or nil) when the install finishes.
+func nixInstallBg() <-chan error {
+	ch := make(chan error, 1)
+	go func() {
+		log.Printf("[bootstrap] starting Nix (Determinate Systems) in background...")
+		script := `
+NIX_INIT_MODE="none"
+if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
+  NIX_INIT_MODE="systemd"
+fi
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+  sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE" >> /tmp/nix-install.log 2>&1
+`
+		err := runShell(script)
+		if err != nil {
+			log.Printf("[bootstrap] Nix install failed: %v", err)
+		} else {
+			log.Printf("[bootstrap] Nix install complete")
+		}
+		ch <- err
+	}()
+	return ch
+}
+
+// installNodeGit installs Node.js 24 and git via apt.
+func installNodeGit() error {
+	log.Printf("[bootstrap] installing Node.js 24 + git...")
+	script := `
+set -euo pipefail
+# Single apt-get update then install everything in one pass to avoid
+# dpkg state corruption from multiple overlapping install calls.
+sudo apt-get update -qq
+sudo apt-get install -y --fix-broken curl ca-certificates git
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
+  sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+sudo apt-get update -qq
+sudo apt-get install -y --fix-broken nodejs
+echo "Node: $(node --version)"
+`
+	return runShell(script)
+}
+
+// installOpenClaw installs openclaw@latest via npm.
+func installOpenClaw() error {
+	log.Printf("[bootstrap] installing openclaw@latest...")
+	if err := runShell("sudo npm install -g openclaw@latest --ignore-scripts"); err != nil {
+		return fmt.Errorf("npm install openclaw: %w", err)
+	}
+	out, _ := exec.Command("openclaw", "--version").Output()
+	log.Printf("[bootstrap] OpenClaw: %s", strings.TrimSpace(string(out)))
+	return nil
+}
+
+// configureOpenClaw patches ~/.openclaw/openclaw.json with model, LLM keys,
+// gateway auth, and disables the bonjour plugin.
+func configureOpenClaw() error {
+	log.Printf("[bootstrap] configuring OpenClaw...")
+
+	// Collect all ELASTICCLAW_PROVIDER_CONFIG env var lines into the python script.
+	// ELASTICCLAW_PROVIDER_CONFIG_B64 holds a base64-encoded python snippet that
+	// was generated by the hub (the same snippet buildOpenClawProviderConfig returned).
+	// If it's not set, we fall back to a minimal config patch.
+	providerSnippet := os.Getenv("ELASTICCLAW_PROVIDER_CONFIG")
+
+	gatewayPassword := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD")
+	defaultModel := envOr("OPENCLAW_DEFAULT_MODEL", "anthropic/claude-sonnet-4-6")
+
+	// Build the python config patch.
+	// The provider snippet (if any) is inserted as a block that sets config['models'].
+	var configPy string
+	if providerSnippet != "" {
+		// providerSnippet is the full python << 'PYEOF' ... PYEOF block from the hub.
+		// We run it as a subprocess.
+		configPy = providerSnippet
+	} else {
+		defaultModelJSON, _ := json.Marshal(defaultModel)
+		gatewayPasswordJSON, _ := json.Marshal(gatewayPassword)
+
+		// Minimal fallback: just set model + gateway auth.
+		configPy = fmt.Sprintf(`python3 <<'PYEOF'
+import json, os, sys
+path = os.path.expanduser('~/.openclaw/openclaw.json')
+try:
+    with open(path) as f:
+        config = json.load(f)
+except:
+    config = {}
+config.setdefault('agents', {}).setdefault('defaults', {})['model'] = %s
+config.setdefault('gateway', {})['bind'] = 'loopback'
+config['gateway']['port'] = 18789
+gw_password = %s
+if gw_password:
+    config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
+with open(path, 'w') as f:
+    json.dump(config, f, indent=2)
+print('OpenClaw config patched (minimal)')
+PYEOF`, defaultModelJSON, gatewayPasswordJSON)
+	}
+
+	if err := runShell(configPy); err != nil {
+		return fmt.Errorf("configure openclaw.json: %w", err)
+	}
+
+	// Disable bonjour plugin — not supported on Replicated VMs.
+	_ = runShell("openclaw plugins disable bonjour 2>/dev/null || true")
+
+	return nil
+}
+
+// onboardOpenClaw runs openclaw onboard to initialize the identity/config.
+func onboardOpenClaw() error {
+	log.Printf("[bootstrap] running openclaw onboard...")
+
+	onboardFlags := os.Getenv("ELASTICCLAW_ONBOARD_FLAGS")
+	script := fmt.Sprintf(
+		`openclaw onboard --non-interactive --accept-risk --gateway-bind loopback --gateway-port 18789 --skip-daemon --skip-health %s 2>/dev/null || true`,
+		onboardFlags,
+	)
+	return runShell(script)
+}
+
+// startGateway starts the openclaw gateway as a background process and waits
+// up to 60s for it to become healthy.
+func startGateway() (*exec.Cmd, error) {
+	log.Printf("[bootstrap] starting OpenClaw gateway...")
+
+	// Set env vars that suppress respawn / bonjour.
+	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
+	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
+
+	home, _ := os.UserHomeDir()
+	logFile := filepath.Join(home, "openclaw-gateway.log")
+
+	cmd := exec.Command("openclaw", "gateway", "run")
+	cmd.Env = os.Environ()
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open gateway log: %w", err)
+	}
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("start gateway: %w", err)
+	}
+	f.Close()
+	log.Printf("[bootstrap] gateway PID %d, waiting for health...", cmd.Process.Pid)
+
+	// Poll /healthz up to 60s.
+	for i := 0; i < 60; i++ {
+		time.Sleep(time.Second)
+		if checkGateway("localhost:18789") {
+			log.Printf("[bootstrap] gateway ready after %ds", i+1)
+			return cmd, nil
+		}
+	}
+	// Not fatal — bridge will retry.
+	log.Printf("[bootstrap] WARNING: gateway did not respond in 60s — continuing anyway")
+	return cmd, nil
+}
+
+func stopGateway(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	log.Printf("[bootstrap] stopping initial gateway PID %d...", cmd.Process.Pid)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		log.Printf("[bootstrap] gateway stop warning: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("[bootstrap] gateway stopped: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		log.Printf("[bootstrap] gateway did not stop after SIGTERM; killing")
+		_ = cmd.Process.Kill()
+		<-done
+	}
+}
+
+// waitForDeviceJSON waits up to 120s for ~/.openclaw/identity/device.json.
+func waitForDeviceJSON() error {
+	home, _ := os.UserHomeDir()
+	devPath := filepath.Join(home, ".openclaw", "identity", "device.json")
+	log.Printf("[bootstrap] waiting for device.json...")
+	for i := 0; i < 120; i++ {
+		if _, err := os.Stat(devPath); err == nil {
+			log.Printf("[bootstrap] device.json ready after %ds", i)
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	log.Printf("[bootstrap] WARNING: device.json not found after 120s — bridge will poll internally")
+	return nil
+}
+
+// finishNix waits for the background Nix install to complete, updates the
+// current PATH, and starts the nix-daemon if needed.
+func finishNix(nixDone <-chan error) {
+	if nixDone == nil {
+		return
+	}
+	log.Printf("[bootstrap] waiting for Nix install...")
+	if err := <-nixDone; err != nil {
+		log.Printf("[bootstrap] Nix install error: %v", err)
+	}
+	profile := "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+	if _, err := os.Stat(profile); err == nil {
+		nixBin := "/nix/var/nix/profiles/default/bin"
+		os.Setenv("PATH", nixBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	if err := runShell("pgrep -x nix-daemon"); err != nil {
+		// Not running — start it
+		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
+		time.Sleep(2 * time.Second)
+		os.Setenv("NIX_REMOTE", "daemon")
+	}
+	// Persist Nix profile for future shells.
+	_ = runShell(
+		`echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' |` +
+			` sudo tee /etc/profile.d/nix.sh > /dev/null`,
+	)
+	out, _ := exec.Command("nix", "--version").Output()
+	log.Printf("[bootstrap] Nix: %s", strings.TrimSpace(string(out)))
+}
+
+// runBootstrap executes all VM bootstrap steps, then returns so the caller
+// can continue into the normal bridge connect loop.
+func runBootstrap() error {
+	log.Printf("[bootstrap] starting claw-bridge bootstrap mode")
+
+	// Step 1: Install Node.js 24 + git (serial)
+	if err := installNodeGit(); err != nil {
+		return fmt.Errorf("installNodeGit: %w", err)
+	}
+
+	// Step 2: Start Nix install in background (if requested)
+	var nixDone <-chan error
+	if os.Getenv("ELASTICCLAW_NIX") == "true" {
+		nixDone = nixInstallBg()
+	}
+
+	// Step 3: Install OpenClaw (needs Node)
+	if err := installOpenClaw(); err != nil {
+		return fmt.Errorf("installOpenClaw: %w", err)
+	}
+
+	// Step 4: Run openclaw onboard (initializes ~/.openclaw directory)
+	home, _ := os.UserHomeDir()
+	ocCfgPath := filepath.Join(home, ".openclaw", "openclaw.json")
+	if _, err := os.Stat(ocCfgPath); os.IsNotExist(err) {
+		if err := onboardOpenClaw(); err != nil {
+			log.Printf("[bootstrap] onboard warning: %v (continuing)", err)
+		}
+	} else {
+		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+
+	// Step 5: Start the gateway once so OpenClaw writes its final first-run config.
+	initialGateway, err := startGateway()
+	if err != nil {
+		return fmt.Errorf("startGateway initial: %w", err)
+	}
+	stopGateway(initialGateway)
+
+	// Step 6: Configure openclaw.json (model, LLM keys, gateway auth, disable bonjour)
+	if err := configureOpenClaw(); err != nil {
+		return fmt.Errorf("configureOpenClaw: %w", err)
+	}
+
+	// Step 7: Restart gateway and wait for health
+	gateway, err := startGateway()
+	if err != nil {
+		return fmt.Errorf("startGateway: %w", err)
+	}
+	go func() {
+		if err := gateway.Wait(); err != nil {
+			log.Printf("[bootstrap] gateway exited: %v", err)
+		} else {
+			log.Printf("[bootstrap] gateway exited")
+		}
+	}()
+
+	// Step 8: Wait for device.json
+	if err := waitForDeviceJSON(); err != nil {
+		return fmt.Errorf("waitForDeviceJSON: %w", err)
+	}
+
+	// Step 9: After bridge connects, finish Nix in background
+	go finishNix(nixDone)
+
+	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
+		if err := os.WriteFile(notifyFile, []byte("ok\n"), 0600); err != nil {
+			return fmt.Errorf("write bootstrap notify file: %w", err)
+		}
+	}
+
+	log.Printf("[bootstrap] bootstrap complete — continuing to bridge connect loop")
+	return nil
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 // ─── Local HTTP proxy ───────────────────────────────────────────────────────
@@ -893,42 +1260,36 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	hubURL := envOr("ELASTICCLAW_HUB_URL", "") // optional when relay is configured
+	// Bootstrap mode: run all VM setup steps before entering the bridge loop.
+	// Activated by --bootstrap flag or ELASTICCLAW_BOOTSTRAP=1 env var.
+	bootstrapMode := os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
+	for _, arg := range os.Args[1:] {
+		if arg == "--bootstrap" {
+			bootstrapMode = true
+		}
+	}
+	if bootstrapMode {
+		if err := runBootstrap(); err != nil {
+			log.Fatalf("[bootstrap] fatal: %v", err)
+		}
+	}
+
+	hubURL := mustEnv("ELASTICCLAW_HUB_URL")
 	clawID := mustEnv("ELASTICCLAW_CLAW_ID")
 	token := mustEnv("ELASTICCLAW_CLAW_TOKEN")
 	gatewayAddr := envOr("ELASTICCLAW_GATEWAY", "localhost:18789")
 	clawName := envOr("ELASTICCLAW_CLAW_NAME", clawID)
 	templateName := envOr("ELASTICCLAW_TEMPLATE", "")
 
-	// Build WebSocket URL — either relay endpoint or direct hub /claw/ws
-	var wsURL string
-	relayURL := envOr("ELASTICCLAW_RELAY_URL", "")
-	hubID := envOr("ELASTICCLAW_HUB_ID", "")
-	if relayURL == "" && hubURL == "" {
-		log.Fatalf("ERROR: must set either ELASTICCLAW_HUB_URL (direct) or ELASTICCLAW_RELAY_URL + ELASTICCLAW_HUB_ID (relay)")
+	// Build WebSocket URL from hub URL directly
+	wsURL := strings.TrimRight(hubURL, "/")
+	if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	} else if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
 	}
-	if relayURL != "" && hubID != "" {
-		// Relay mode: bridge dials relay instead of hub directly
-		relayBase := strings.TrimRight(relayURL, "/")
-		if strings.HasPrefix(relayBase, "http://") {
-			relayBase = "ws://" + relayBase[7:]
-		} else if strings.HasPrefix(relayBase, "https://") {
-			relayBase = "wss://" + relayBase[8:]
-		}
-		wsURL = fmt.Sprintf("%s/bridge?id=%s&token=%s", relayBase, hubID, token)
-		log.Printf("  Mode:    relay")
-		log.Printf("  Relay:   %s (id=%s...)", relayURL, hubID[:8])
-	} else {
-		// Direct mode: bridge dials hub /claw/ws directly
-		wsURL = strings.TrimRight(hubURL, "/")
-		if strings.HasPrefix(wsURL, "http://") {
-			wsURL = "ws://" + wsURL[7:]
-		} else if strings.HasPrefix(wsURL, "https://") {
-			wsURL = "wss://" + wsURL[8:]
-		}
-		wsURL += "/claw/ws"
-		log.Printf("  Mode:    direct")
-	}
+	wsURL += "/claw/ws"
+	log.Printf("  Mode:    direct")
 
 	log.Printf("claw-bridge starting")
 	log.Printf("  Hub:     %s", wsURL)
@@ -1060,7 +1421,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				defer agentCancel()
 				reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
 					_ = wsjson.Write(connCtx, conn, hubMsg{
-						Type: "chunk",
+						Type:    "chunk",
 						Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
 					})
 				})

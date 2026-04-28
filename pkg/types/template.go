@@ -214,13 +214,6 @@ type HubConfig struct {
 	//         -----BEGIN RSA PRIVATE KEY-----
 	//         ...
 	//         -----END RSA PRIVATE KEY-----
-	// RelayURL is the relay server for NAT traversal.
-	// Defaults to wss://relay.elasticclaw.ai if not set.
-	RelayURL string `yaml:"relay_url,omitempty"`
-
-	// RelaySecret is the HMAC secret for deriving relay tokens (must match RELAY_SECRET on the relay server).
-	RelaySecret string `yaml:"relay_secret,omitempty"`
-
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 
 	// UIPassword is the password for the web UI. If not set, defaults to "admin".

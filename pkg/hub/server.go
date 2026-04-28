@@ -144,20 +144,6 @@ func (s *Server) Run(opts ...RunOptions) error {
 		}
 	}
 
-	// Connect to relay if configured
-	s.mu.RLock()
-	relayURL := s.hubCfg.RelayURL
-	relaySecret := s.hubCfg.RelaySecret
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	if relayURL != "" {
-		hubID := HubID(s.identity.PublicKey)
-		relayToken := RelayToken(relaySecret, hubID, clawToken)
-		log.Printf("[relay] hub ID: %s", hubID[:8]+"...")
-		log.Printf("[relay] connecting to %s", relayURL)
-		go s.connectRelay(context.Background(), relayURL, hubID, relayToken)
-	}
-
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
@@ -1979,22 +1965,16 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 
 	// Start the bridge — it reads the gateway token from openclaw.json automatically.
 	// Use setsid to detach from exec session so it survives after exec returns.
-	hubID := HubID(s.identity.PublicKey)
 	s.mu.RLock()
-	relayURL := s.hubCfg.RelayURL
-	relaySecret := s.hubCfg.RelaySecret
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	relayToken := RelayToken(relaySecret, hubID, clawToken)
 
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-ELASTICCLAW_RELAY_URL=%q ELASTICCLAW_HUB_ID=%q ELASTICCLAW_RELAY_TOKEN=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
-		s.clawHubURL(), clawID, clawToken, clawName,
-		relayURL, hubID, relayToken)
+		s.clawHubURL(), clawID, clawToken, clawName)
 	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
 		return err
 	}
@@ -2495,7 +2475,6 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	s.mu.RLock()
 	// Inject all configured LLM keys, prioritizing the selected key if specified
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
-	relayEnv := buildRelayEnv(s.hubCfg, s.identity.PublicKey)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
@@ -2513,7 +2492,6 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
-		RelayEnv:        relayEnv,
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
 	})
@@ -2585,6 +2563,16 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			} else {
 				time.Sleep(5 * time.Second)
 			}
+		}
+	}
+
+	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
+	// but the hub token URL is publicly accessible so it works directly).
+	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+		if err := s.sshRun(sshUser, sshHost, credHelper); err != nil {
+			log.Printf("[bootstrap] warning: cred helper setup failed: %v", err)
+		} else {
+			log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 		}
 	}
 
@@ -2661,50 +2649,6 @@ func (s *Server) clawHubURL() string {
 		return s.hubCfg.PublicURL
 	}
 	return s.hubCfg.URL
-}
-
-// buildNixInstall returns shell script lines to install Determinate Systems Nix.
-// Returns an empty comment when nix is not enabled.
-func buildNixInstall(enabled bool) string {
-	if !enabled {
-		return "# Nix not enabled for this template"
-	}
-	return `# ── Install Nix (Determinate Systems) ──────────────────────────────────────────
-echo "Installing Nix (Determinate Systems)..."
-# Use systemd init if available, otherwise start daemon manually
-NIX_INIT_MODE="none"
-if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
-  NIX_INIT_MODE="systemd"
-fi
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE"
-# Source profile to get nix in PATH
-if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
-  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-fi
-# Start daemon manually when systemd is not available
-if [ "$NIX_INIT_MODE" = "none" ]; then
-  echo "Starting nix daemon (no systemd)..."
-  sudo /nix/var/nix/profiles/default/bin/nix-daemon &
-  sleep 3
-  export NIX_REMOTE=daemon
-fi
-# Persist Nix in PATH for all future shells
-echo '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true' | sudo tee /etc/profile.d/nix.sh > /dev/null
-echo "Nix: $(nix --version 2>/dev/null || echo 'installed')"`
-}
-
-// buildRelayEnv returns shell lines that export relay env vars for the bridge.
-// When relay is not configured, returns an empty comment.
-func buildRelayEnv(cfg *types.HubConfig, publicKey string) string {
-	relayURL := cfg.RelayURL
-	if relayURL == "" {
-		return "# Relay not configured"
-	}
-	hubID := HubID(publicKey)
-	relayToken := RelayToken(cfg.RelaySecret, hubID, cfg.ClawToken)
-	return fmt.Sprintf("export ELASTICCLAW_RELAY_URL=%q\nexport ELASTICCLAW_HUB_ID=%q\nexport ELASTICCLAW_RELAY_TOKEN=%q",
-		relayURL, hubID, relayToken)
 }
 
 // resolveLinearToken finds the Linear API token for the given workspace label.

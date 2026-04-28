@@ -35,7 +35,6 @@ type BootstrapParams struct {
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
 	LinearEnv      string // pre-built export line
-	RelayEnv       string // pre-built export lines
 	ProviderConfig string // python snippet to configure models.providers
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
@@ -182,88 +181,53 @@ print('OpenClaw config patched')
 PYEOF`, providersDict)
 }
 
-// GenerateReplicatedBootstrapScript returns the bash script that bootstraps
-// a Replicated VM into a functioning elasticclaw claw.
+// GenerateReplicatedBootstrapScript returns a minimal bash script that downloads
+// claw-bridge and execs it with --bootstrap. All VM setup logic now lives inside
+// claw-bridge itself (runBootstrap in cmd/claw-bridge/main.go).
 //
 // This is a pure function — same inputs always produce the same output.
 // All I/O (DB reads, SSH, etc.) happens in bootstrapReplicated before calling this.
 func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
-	credHelper := buildGitHubCredentialHelper(p.HubCfg, p.HubURL, p.ClawID, p.GitHubRepos)
+	nixFlag := "false"
+	if p.Nix {
+		nixFlag = "true"
+	}
+	// Encode the provider config python snippet as a single env var value so
+	// claw-bridge can receive it without heredoc escaping issues.
+	// We use a simple approach: if it's non-empty, pass it as ELASTICCLAW_PROVIDER_CONFIG.
+	// The value may contain newlines; bash's export handles that fine.
+	providerConfigLine := "# No provider config"
+	if p.ProviderConfig != "" {
+		// Escape for shell: use printf %q approach via parameter expansion in the
+		// script. Simpler: write it as a heredoc into a temp file the claw-bridge
+		// reads. But easiest: base64-encode it so there are no quoting issues.
+		providerConfigLine = fmt.Sprintf("export ELASTICCLAW_PROVIDER_CONFIG=%s",
+			shellQuote(p.ProviderConfig))
+	}
+
+	linearEnvLine := p.LinearEnv
+	if linearEnvLine == "" {
+		linearEnvLine = "# Linear not configured"
+	}
 
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
-# ── LLM API keys + service tokens ────────────────────────────────────────────
-export OPENCLAW_DEFAULT_MODEL="%s"
+# ── Identity + credentials ────────────────────────────────────────────────────
+export ELASTICCLAW_HUB_URL="%s"
+export ELASTICCLAW_CLAW_ID="%s"
+export ELASTICCLAW_CLAW_TOKEN="%s"
+export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
+export OPENCLAW_DEFAULT_MODEL="%s"
+export ELASTICCLAW_NIX="%s"
 %s
 %s
-# ── Install Node.js 24 via nodesource ────────────────────────────────────────
-echo "Installing Node.js 24..."
-sudo apt-get update -qq
-sudo apt-get install -y curl ca-certificates
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
-echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
-sudo apt-get update -qq
-sudo apt-get install -y nodejs git
-echo "Node: $(node --version)"
-
+export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
-# ── Install OpenClaw ──────────────────────────────────────────────────────────
-echo "Installing OpenClaw..."
-sudo npm install -g openclaw@latest --ignore-scripts
-echo "OpenClaw: $(openclaw --version)"
-
-# ── Configure OpenClaw ────────────────────────────────────────────────────────
-mkdir -p "$HOME/.openclaw/workspace"
-if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
-  echo "Configuring OpenClaw..."
-  openclaw onboard \
-    --non-interactive --accept-risk \
-    --gateway-bind loopback --gateway-port 18789 \
-    --skip-daemon %s 2>/dev/null || true
-  %s
-fi
-# Disable Bonjour/mDNS — not needed on a server VM and causes crashes
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-if not os.path.exists(path):
-    print('OpenClaw config not found; skipping Bonjour disable')
-    raise SystemExit(0)
-try:
-    with open(path) as f:
-        cfg = json.load(f)
-except Exception as e:
-    print(f'Failed to parse OpenClaw config; not disabling Bonjour: {e}')
-    raise SystemExit(1)
-cfg.setdefault('plugins', {}).setdefault('entries', {}).setdefault('bonjour', {})['enabled'] = False
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-print('Bonjour disabled')
-PYEOF
-
-# ── Start OpenClaw gateway ────────────────────────────────────────────────────
-echo "Starting OpenClaw gateway..."
-export OPENCLAW_NO_RESPAWN=1
-nohup openclaw gateway run >> "$HOME/openclaw-gateway.log" 2>&1 &
-for i in $(seq 1 30); do
-  sleep 1
-  if curl -sf http://localhost:18789/healthz &>/dev/null; then
-    echo "OpenClaw gateway ready after ${i}s"
-    break
-  fi
-  if [ "$i" = "30" ]; then
-    echo "WARNING: gateway did not respond in 30s"
-    tail -10 "$HOME/openclaw-gateway.log" 2>/dev/null || true
-  fi
-done
-
 # ── Install claw-bridge ───────────────────────────────────────────────────────
 BRIDGE_SRC="%s"
-echo "Installing claw-bridge from $BRIDGE_SRC..."
+echo "Downloading claw-bridge from $BRIDGE_SRC..."
 if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
   curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
 else
@@ -273,6 +237,7 @@ else
     curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
     sudo mv /tmp/oras /usr/local/bin/oras
   fi
+  sudo apt-get install -y curl ca-certificates 2>/dev/null || true
   mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
   oras pull "$BRIDGE_SRC"
   BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
@@ -288,54 +253,53 @@ chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
 echo "claw-bridge installed"
 
-# ── Start claw-bridge ─────────────────────────────────────────────────────────
-export ELASTICCLAW_HUB_URL="%s"
-export ELASTICCLAW_CLAW_ID="%s"
-export ELASTICCLAW_CLAW_TOKEN="%s"
-export ELASTICCLAW_CLAW_NAME="%s"
-export ELASTICCLAW_GATEWAY_PASSWORD="%s"
-%s
-export OPENCLAW_DEFAULT_MODEL="%s"
-%s
-echo "Starting claw-bridge (HUB_URL=$ELASTICCLAW_HUB_URL)..."
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
-BRIDGE_PID=$!
-echo "claw-bridge started (PID $BRIDGE_PID)"
-for i in $(seq 1 10); do
-  sleep 1
-  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
-    echo "ERROR: claw-bridge died after ${i}s"
-    echo "=== claw-bridge.log ==="
-    cat "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log)"
-    exit 1
-  fi
-  if grep -q 'connected\|registered\|ready' "$HOME/claw-bridge.log" 2>/dev/null; then
-    echo "claw-bridge connected after ${i}s"
-    break
-  fi
-done
-if kill -0 $BRIDGE_PID 2>/dev/null; then
-  echo "claw-bridge is running (PID $BRIDGE_PID)"
-  tail -10 "$HOME/claw-bridge.log" 2>/dev/null || echo "(no log yet)"
-else
-  echo "ERROR: claw-bridge died"
-  cat "$HOME/claw-bridge.log" 2>/dev/null
-  exit 1
-fi
+# ── Bootstrap + run ───────────────────────────────────────────────────────────
+# claw-bridge --bootstrap installs Node.js, OpenClaw, configures the gateway,
+# then transitions directly into the normal bridge connect loop.
+# Persist env vars so bridge can be restarted later.
+{
+  printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
+  printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
+  printf 'export ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
+  printf 'export ELASTICCLAW_CLAW_NAME=%%q\n' "$ELASTICCLAW_CLAW_NAME"
+  printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
+} > "$HOME/.claw-bridge.env"
+chmod 600 "$HOME/.claw-bridge.env"
 
-# ── GitHub credential helper + repo clone ────────────────────────────────────
-# Bridge is running — hub API is reachable via proxy now
-%s
+# Run claw-bridge in bootstrap mode in the background, then wait until the
+# bootstrap phase completes so the SSH session can exit and the hub can write
+# template files.
+export ELASTICCLAW_BOOTSTRAP=1
+export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
+rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
+nohup /usr/local/bin/claw-bridge >> "$HOME/.claw-bridge.log" 2>&1 </dev/null &
+BRIDGE_PID=$!
+for _ in {1..1800}; do
+  if [ -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE" ]; then
+    echo "claw-bridge bootstrap complete; bridge running in background"
+    exit 0
+  fi
+  if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    wait "$BRIDGE_PID"
+    exit $?
+  fi
+  sleep 1
+done
+echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
+exit 1
 `,
-		p.DefaultModel, p.GatewayPassword, p.LLMKeyEnv, p.LinearEnv,
-		buildNixInstall(p.Nix),
-		p.OnboardFlags,
-		p.ProviderConfig,
-		p.BridgeURL,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.RelayEnv, p.DefaultModel, p.LLMKeyEnv,
-		credHelper,
+		p.DefaultModel, nixFlag,
+		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
+		p.BridgeURL,
 	)
+}
+
+// shellQuote returns a single-quoted shell string safe for embedding in scripts.
+// Single quotes cannot appear inside single-quoted strings in bash, so we
+// replace them with '"'"'.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // buildOnboardFlags returns the --auth-choice flags for openclaw onboard
@@ -350,13 +314,13 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) strin
 	case "anthropic":
 		return fmt.Sprintf(`--auth-choice anthropic-api-key --anthropic-api-key "${%s:-placeholder}"`, envVar)
 	case "fireworks":
-		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s:-}"`, envVar)
 	case "openai":
-		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "groq":
-		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s:-}"`, envVar)
 	case "deepseek":
-		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s}"`, envVar)
+		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
