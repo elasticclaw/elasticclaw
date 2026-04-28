@@ -1832,12 +1832,32 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
-	// Bootstrap: install OpenClaw + claw-bridge via exec
+	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
 	clawName := req.Name
 	go func() {
-		if err := s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env); err != nil {
-			log.Printf("daytona bootstrap failed for claw %s: %v", clawID, err)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		// Each step inside bootstrapDaytona retries 3x internally.
+		// Outer retries here handle the rare case of total step failure.
+		const maxBootstrapAttempts = 3
+		var lastErr error
+		for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
+			if attempt > 1 {
+				log.Printf("[daytona] full bootstrap retry for claw %s in 15s...", clawName)
+				time.Sleep(15 * time.Second)
+			}
+			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
+			if lastErr == nil {
+				return
+			}
+			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
+		}
+		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		// Destroy the sandbox — auto-stop is disabled so it would run forever otherwise
+		log.Printf("[daytona] destroying failed sandbox %s for claw %s", instance.ID, clawName)
+		if delErr := p.Destroy(context.Background(), instance.ID, false); delErr != nil {
+			log.Printf("[daytona] warning: failed to destroy sandbox %s: %v", instance.ID, delErr)
+		} else {
+			log.Printf("[daytona] destroyed failed sandbox %s", instance.ID)
 		}
 	}()
 	return nil
@@ -1847,17 +1867,29 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
-		log.Printf("[daytona] %s...", label)
-		// Prefix HOME so commands run in the sandbox user's home, not the caller's
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
-		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
+		const maxAttempts = 3
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if attempt == 1 {
+				log.Printf("[daytona] %s...", label)
+			} else {
+				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
+				time.Sleep(5 * time.Second)
+			}
+			// Prefix HOME so commands run in the sandbox user's home, not the caller's
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
+			if err != nil {
+				lastErr = fmt.Errorf("%s: %w", label, err)
+				continue
+			}
+			if result.ExitCode != 0 {
+				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
+				continue
+			}
+			log.Printf("[daytona] %s done", label)
+			return nil
 		}
-		if result.ExitCode != 0 {
-			return fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
-		}
-		log.Printf("[daytona] %s done", label)
-		return nil
+		return lastErr
 	}
 
 	// Step 1: Upgrade OpenClaw to latest.
@@ -1871,22 +1903,15 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	if err := exec("start openclaw install", 20*time.Second,
+	if err := exec("install openclaw", 3*time.Minute,
 		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-NODE_VER=$(ls /usr/local/share/nvm/versions/node/ | head -1); \
-PREFIX="/usr/local/share/nvm/versions/node/${NODE_VER}"; \
-sudo "$NPM" install -g openclaw@latest --prefix "$PREFIX" --ignore-scripts > /tmp/openclaw-install.log 2>&1 & \
-echo $! > /tmp/openclaw-install.pid && echo 'install started'`); err != nil {
+sudo "$NPM" install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
 		return err
 	}
 
-	// Wait for npm install to complete — install takes ~35s, 90s is a safe margin
-	log.Printf("[daytona] waiting for openclaw install...")
-	time.Sleep(90 * time.Second)
-	log.Printf("[daytona] openclaw install wait done")
-
 	if err := exec("verify openclaw", 20*time.Second,
-		"export HOME=/home/daytona; /usr/local/share/nvm/current/bin/openclaw --version || openclaw --version"); err != nil {
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+openclaw --version`); err != nil {
 		return err
 	}
 
