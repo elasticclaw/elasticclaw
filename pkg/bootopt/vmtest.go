@@ -226,9 +226,11 @@ func (vtr *VMTestRunner) waitForStatus(ctx context.Context, clawID, targetStatus
 		if vtr.HubProfile != "" {
 			cmd.Args = append(cmd.Args, "--profile", vtr.HubProfile)
 		}
-		out, err := cmd.CombinedOutput()
+		// Use Output() not CombinedOutput() — stderr has "Using config file:" noise
+		// that would corrupt the JSON. Errors still come through in err.
+		out, err := cmd.Output()
 		if err != nil {
-			return "", fmt.Errorf("list claws: %w\n%s", err, string(out))
+			return "", fmt.Errorf("list claws: %w", err)
 		}
 
 		status, err := parseClawStatus(string(out), clawID)
