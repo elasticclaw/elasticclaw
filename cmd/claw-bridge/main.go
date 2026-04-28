@@ -1111,9 +1111,17 @@ func runBootstrap() error {
 	}
 
 	// Step 7: Restart gateway and wait for health
-	if _, err := startGateway(); err != nil {
+	gateway, err := startGateway()
+	if err != nil {
 		return fmt.Errorf("startGateway: %w", err)
 	}
+	go func() {
+		if err := gateway.Wait(); err != nil {
+			log.Printf("[bootstrap] gateway exited: %v", err)
+		} else {
+			log.Printf("[bootstrap] gateway exited")
+		}
+	}()
 
 	// Step 8: Wait for device.json
 	if err := waitForDeviceJSON(); err != nil {
