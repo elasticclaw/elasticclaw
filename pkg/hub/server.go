@@ -1236,7 +1236,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
 	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
-		if s.getPipelineStage(clawID) == "" {
+		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			go s.sendWakeMessage(cc, clawID)
 		}
 	}
@@ -2376,6 +2376,14 @@ func (s *Server) bridgeDownloadURL() string {
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
 // Not stored in DB — invisible to the user but triggers the agent to respond.
+// clawHasMessages returns true if the claw already has message history.
+// Used to suppress the intro wake message on reconnect.
+func (s *Server) clawHasMessages(clawID string) bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id = ?`, clawID).Scan(&count)
+	return count > 0
+}
+
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := "Introduce yourself briefly and let the user know you're ready to help."
 	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
