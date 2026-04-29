@@ -121,7 +121,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 	}
 
 	// ── Write hub config ──────────────────────────────────────────────────────
-	run("write config", install.ScriptWriteConfig(params))
+	run("write config", install.ScriptWriteConfig(params, false))
 	assertFile("/root/.elasticclaw/hub.yaml", "test-hub-token-abc")
 	assertFile("/root/.elasticclaw/hub.yaml", "test-claw-token-def")
 	assertFile("/root/.elasticclaw/hub.yaml", "hub.test.example.com")
