@@ -122,7 +122,13 @@ func ScriptInstallCaddy() string {
       *) echo "unsupported architecture for automatic Caddy install: $ARCH" >&2; exit 1 ;;
     esac
 
-    curl -fsSL 'https://github.com/caddyserver/caddy/releases/latest/download/caddy_linux_'"$CADDY_ARCH"'.tar.gz' -o /tmp/caddy.tar.gz
+    CADDY_VERSION=$(curl -fsSL https://api.github.com/repos/caddyserver/caddy/releases/latest | awk -F '"' '/"tag_name":/ {print $4; exit}')
+    if [ -z "$CADDY_VERSION" ]; then
+      echo "failed to determine latest Caddy version" >&2
+      exit 1
+    fi
+
+    curl -fsSL 'https://github.com/caddyserver/caddy/releases/download/'"$CADDY_VERSION"'/caddy_'"${CADDY_VERSION#v}"'_linux_'"$CADDY_ARCH"'.tar.gz' -o /tmp/caddy.tar.gz
     tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
     install -m 0755 /tmp/caddy /usr/local/bin/caddy
     install -d /etc/caddy
