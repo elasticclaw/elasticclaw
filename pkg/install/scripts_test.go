@@ -83,6 +83,7 @@ func TestScriptInstallBinary(t *testing.T) {
 
 func TestScriptWriteConfig(t *testing.T) {
 	s := install.ScriptWriteConfig(testParams, false)
+	assertContains(t, s, "/tmp/hub.yaml", "temp config path")
 	assertContains(t, s, "mkdir -p", "create dir")
 	assertContains(t, s, ".elasticclaw", "config dir")
 	assertContains(t, s, "hub.yaml", "config path")
@@ -93,6 +94,9 @@ func TestScriptWriteConfig(t *testing.T) {
 func TestScriptWriteConfig_UsesRootHomeWithSudo(t *testing.T) {
 	s := install.ScriptWriteConfig(testParams, true)
 	assertContains(t, s, "/root/.elasticclaw", "root config dir for sudo installs")
+	assertContains(t, s, "sudo ", "sudo prefix for root config writes")
+	assertContains(t, s, "mkdir -p \"/root/.elasticclaw\"", "mkdir root config dir")
+	assertContains(t, s, "mv /tmp/hub.yaml \"/root/.elasticclaw\"/hub.yaml", "move temp config into root config dir")
 }
 
 func TestScriptInstallSystemd(t *testing.T) {

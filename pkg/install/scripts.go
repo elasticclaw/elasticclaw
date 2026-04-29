@@ -82,12 +82,14 @@ chmod +x /tmp/elasticclaw-bin
 // ScriptWriteConfig returns the shell script to write the hub config.
 func ScriptWriteConfig(p Params, useSudo bool) string {
 	configDir := "$HOME/.elasticclaw"
+	sudo := sudoPrefix(useSudo)
 	if useSudo {
 		configDir = "/root/.elasticclaw"
 	}
-	return fmt.Sprintf(`mkdir -p %q
-cat > %q/hub.yaml << 'HUBEOF'
-%sHUBEOF`, configDir, configDir, HubConfig(p))
+	return fmt.Sprintf(`cat > /tmp/hub.yaml << 'HUBEOF'
+%sHUBEOF
+%s mkdir -p %q
+%s mv /tmp/hub.yaml %q/hub.yaml`, HubConfig(p), sudo, configDir, sudo, configDir)
 }
 
 // ScriptInstallSystemd returns the shell script to install and start the systemd service.
