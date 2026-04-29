@@ -1927,7 +1927,7 @@ openclaw --version`); err != nil {
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	s.mu.RUnlock()
 	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
