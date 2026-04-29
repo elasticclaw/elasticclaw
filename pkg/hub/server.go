@@ -1903,10 +1903,14 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
+	openclawVersion := Version
+	if openclawVersion == "" || openclawVersion == "dev" {
+		openclawVersion = "latest"
+	}
 	if err := exec("install openclaw", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
-sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@latest --prefix "$PREFIX" --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
+sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1 && echo 'install done'`, openclawVersion)); err != nil {
 		return err
 	}
 
@@ -1949,30 +1953,6 @@ openclaw --version`); err != nil {
 		log.Printf("[daytona] onboard openclaw done")
 	}
 
-	dumpOpenClawState := func(reason string) {
-		diagCmd := fmt.Sprintf(`export HOME=/home/daytona; \
- echo "=== %s ==="; \
- echo "HOME=$HOME"; \
- echo "pwd=$(pwd)"; \
- echo "--- ~/.openclaw ---"; \
- ls -la "$HOME/.openclaw" 2>&1 || true; \
- echo "--- ~/.openclaw tree ---"; \
- find "$HOME/.openclaw" -maxdepth 3 -mindepth 1 -print 2>&1 || true; \
- echo "--- openclaw.json ---"; \
- cat "$HOME/.openclaw/openclaw.json" 2>&1 || true; \
- echo "--- gateway.log ---"; \
- tail -n 100 "$HOME/.openclaw/gateway.log" 2>&1 || true`, reason)
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", diagCmd}, 30*time.Second)
-		if err != nil {
-			log.Printf("[daytona] warning: failed to collect OpenClaw diagnostics (%s): %v", reason, err)
-			return
-		}
-		if strings.TrimSpace(result.Stdout) != "" {
-			log.Printf("[daytona] diagnostics (%s):\n%s", reason, result.Stdout)
-		}
-	}
-
-	dumpOpenClawState("post-onboard")
 	if providerConfigScript != "" {
 		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
@@ -1994,8 +1974,13 @@ print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-sleep 8
-curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`
+for i in $(seq 1 20); do
+  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway ready' && exit 0
+  sleep 2
+done
+echo 'gateway not ready'
+tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
+exit 1`
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}
