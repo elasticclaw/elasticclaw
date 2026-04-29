@@ -146,7 +146,7 @@ cat > /etc/systemd/system/elasticclaw.service << 'SVCEOF'
 	// ── Verify hub binary URL is correct ─────────────────────────────────────
 	// We don't actually download the binary in the container test (slow + network)
 	// but verify the install script would use the right URL
-	script := install.ScriptInstallBinary(params.Version)
+	script := install.ScriptInstallBinary(params.Version, false)
 	if !strings.Contains(script, "v0.0.3") {
 		t.Error("install script missing version in URL")
 	}
