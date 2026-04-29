@@ -102,19 +102,55 @@ func ScriptInstallCaddy() string {
 
   if command -v apt-get >/dev/null 2>&1; then
     install -d /usr/share/keyrings /etc/apt/sources.list.d
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
     apt-get update -qq
     apt-get install -y caddy
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y 'dnf-command(copr)' curl
-    dnf copr enable -y @caddy/caddy
-    dnf install -y caddy
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y yum-plugin-copr curl
-    yum copr enable -y @caddy/caddy
-    yum install -y caddy
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    PKG_MGR=dnf
+    if ! command -v dnf >/dev/null 2>&1; then
+      PKG_MGR=yum
+    fi
+
+    $PKG_MGR install -y curl tar
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+      x86_64) CADDY_ARCH=amd64 ;;
+      aarch64|arm64) CADDY_ARCH=arm64 ;;
+      *) echo "unsupported architecture for automatic Caddy install: $ARCH" >&2; exit 1 ;;
+    esac
+
+    curl -fsSL 'https://github.com/caddyserver/caddy/releases/latest/download/caddy_linux_'"$CADDY_ARCH"'.tar.gz' -o /tmp/caddy.tar.gz
+    tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+    install -m 0755 /tmp/caddy /usr/local/bin/caddy
+    install -d /etc/caddy
+
+    cat > /etc/systemd/system/caddy.service <<'CADDYSVC'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+CADDYSVC
+
+    systemctl daemon-reload
+    systemctl enable caddy
   else
     echo "unsupported Linux distribution for automatic Caddy install (ID=${OS_ID:-unknown}, ID_LIKE=${OS_LIKE:-unknown})" >&2
     exit 1
