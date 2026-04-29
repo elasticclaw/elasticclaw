@@ -1935,18 +1935,19 @@ openclaw --version`); err != nil {
 	}
 
 	dumpOpenClawState := func(reason string) {
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; \
-+echo "=== ` + reason + ` ==="; \
-+echo "HOME=$HOME"; \
-+echo "pwd=$(pwd)"; \
-+echo "--- ~/.openclaw ---"; \
-+ls -la "$HOME/.openclaw" 2>&1 || true; \
-+echo "--- ~/.openclaw tree ---"; \
-+find "$HOME/.openclaw" -maxdepth 3 -mindepth 1 -print 2>&1 || true; \
-+echo "--- openclaw.json ---"; \
-+cat "$HOME/.openclaw/openclaw.json" 2>&1 || true; \
-+echo "--- gateway.log ---"; \
-+tail -n 100 "$HOME/.openclaw/gateway.log" 2>&1 || true`}, 30*time.Second)
+		diagCmd := fmt.Sprintf(`export HOME=/home/daytona; \
+ echo "=== %s ==="; \
+ echo "HOME=$HOME"; \
+ echo "pwd=$(pwd)"; \
+ echo "--- ~/.openclaw ---"; \
+ ls -la "$HOME/.openclaw" 2>&1 || true; \
+ echo "--- ~/.openclaw tree ---"; \
+ find "$HOME/.openclaw" -maxdepth 3 -mindepth 1 -print 2>&1 || true; \
+ echo "--- openclaw.json ---"; \
+ cat "$HOME/.openclaw/openclaw.json" 2>&1 || true; \
+ echo "--- gateway.log ---"; \
+ tail -n 100 "$HOME/.openclaw/gateway.log" 2>&1 || true`, reason)
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", diagCmd}, 30*time.Second)
 		if err != nil {
 			log.Printf("[daytona] warning: failed to collect OpenClaw diagnostics (%s): %v", reason, err)
 			return
