@@ -105,6 +105,20 @@ func TestScriptWriteCaddyfile(t *testing.T) {
 	assertContains(t, s, "systemctl reload caddy", "caddy reload")
 }
 
+func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
+	s := install.ScriptInstallCaddy()
+	assertContains(t, s, "command -v apt-get", "apt detection")
+	assertContains(t, s, "command -v dnf", "dnf detection")
+	assertContains(t, s, "command -v yum", "yum detection")
+	assertContains(t, s, "apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true", "non-fatal apt prereq install")
+	assertContains(t, s, "https://api.github.com/repos/caddyserver/caddy/releases/latest", "latest caddy release lookup")
+	assertContains(t, s, "https://github.com/caddyserver/caddy/releases/download/", "versioned caddy asset download")
+	assertContains(t, s, "caddy_'\"${CADDY_VERSION#v}\"'_linux_", "versioned caddy asset filename")
+	assertContains(t, s, "install -m 0755 /tmp/caddy /usr/local/bin/caddy", "static caddy binary install")
+	assertContains(t, s, "systemctl enable caddy", "caddy service enable")
+	assertContains(t, s, "unsupported Linux distribution", "unsupported distro message")
+}
+
 // ── Shellcheck ────────────────────────────────────────────────────────────────
 
 func TestScripts_Shellcheck(t *testing.T) {

@@ -91,11 +91,76 @@ sudo systemctl restart elasticclaw`, SystemdUnit())
 // ScriptInstallCaddy returns the shell script to install Caddy if not present.
 func ScriptInstallCaddy() string {
 	return `which caddy >/dev/null 2>&1 || (
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -qq
-  apt-get install -y caddy
+  set -eu
+
+  OS_ID=""
+  OS_LIKE=""
+  if [ -f /etc/os-release ]; then
+    OS_ID=$(awk -F= '/^ID=/{gsub(/"/, "", $2); print $2}' /etc/os-release)
+    OS_LIKE=$(awk -F= '/^ID_LIKE=/{gsub(/"/, "", $2); print $2}' /etc/os-release)
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    install -d /usr/share/keyrings /etc/apt/sources.list.d
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+    apt-get update -qq
+    apt-get install -y caddy
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    PKG_MGR=dnf
+    if ! command -v dnf >/dev/null 2>&1; then
+      PKG_MGR=yum
+    fi
+
+    $PKG_MGR install -y curl tar
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+      x86_64) CADDY_ARCH=amd64 ;;
+      aarch64|arm64) CADDY_ARCH=arm64 ;;
+      *) echo "unsupported architecture for automatic Caddy install: $ARCH" >&2; exit 1 ;;
+    esac
+
+    CADDY_VERSION=$(curl -fsSL https://api.github.com/repos/caddyserver/caddy/releases/latest | awk -F '"' '/"tag_name":/ {print $4; exit}')
+    if [ -z "$CADDY_VERSION" ]; then
+      echo "failed to determine latest Caddy version" >&2
+      exit 1
+    fi
+
+    curl -fsSL 'https://github.com/caddyserver/caddy/releases/download/'"$CADDY_VERSION"'/caddy_'"${CADDY_VERSION#v}"'_linux_'"$CADDY_ARCH"'.tar.gz' -o /tmp/caddy.tar.gz
+    tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+    install -m 0755 /tmp/caddy /usr/local/bin/caddy
+    install -d /etc/caddy
+
+    cat > /etc/systemd/system/caddy.service <<'CADDYSVC'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+CADDYSVC
+
+    systemctl daemon-reload
+    systemctl enable caddy
+  else
+    echo "unsupported Linux distribution for automatic Caddy install (ID=${OS_ID:-unknown}, ID_LIKE=${OS_LIKE:-unknown})" >&2
+    exit 1
+  fi
 )`
 }
 
