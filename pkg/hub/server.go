@@ -1904,8 +1904,9 @@ echo uninstalled`); err != nil {
 	}
 
 	if err := exec("install openclaw", 3*time.Minute,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-sudo "$NPM" install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
+sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@latest --prefix "$PREFIX" --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
 		return err
 	}
 
@@ -1926,12 +1927,16 @@ openclaw --version`); err != nil {
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	s.mu.RUnlock()
 	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1 || true",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1",
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
 	if err := exec("onboard openclaw", 2*time.Minute, onboardCmd); err != nil {
-		return err
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
+			return err
+		}
+		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
 	}
 
 	dumpOpenClawState := func(reason string) {
@@ -1958,13 +1963,6 @@ openclaw --version`); err != nil {
 	}
 
 	dumpOpenClawState("post-onboard")
-
-	// Step 2b: Wait for OpenClaw to materialize its config, then patch it.
-	if err := exec("wait for openclaw config", 30*time.Second,
-		`export HOME=/home/daytona; for i in $(seq 1 30); do [ -f "$HOME/.openclaw/openclaw.json" ] && exit 0; sleep 1; done; echo "openclaw config file not created"; exit 1`); err != nil {
-		dumpOpenClawState("missing-openclaw-config")
-		return err
-	}
 	if providerConfigScript != "" {
 		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
