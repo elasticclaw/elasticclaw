@@ -251,11 +251,19 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 }
 
 func detectRemotePrivilegeMode(client *gossh.Client) (bool, error) {
-	out, err := sshRunClient(client, "id -u")
+	out, err := sshRunClient(client, "sh -c 'printf __EC_UID__ ; id -u ; printf __EC_DONE__'")
 	if err != nil {
 		return false, fmt.Errorf("failed to detect remote uid: %w", err)
 	}
-	if strings.TrimSpace(out) == "0" {
+
+	start := strings.Index(out, "__EC_UID__")
+	end := strings.Index(out, "__EC_DONE__")
+	if start == -1 || end == -1 || end <= start+len("__EC_UID__") {
+		return false, fmt.Errorf("failed to parse remote uid probe output")
+	}
+
+	uid := strings.TrimSpace(out[start+len("__EC_UID__") : end])
+	if uid == "0" {
 		return false, nil
 	}
 
