@@ -123,7 +123,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		script string
 	}{
 		{"Installing hub binary", install.ScriptInstallBinary(version, useSudo)},
-		{"Writing hub config", install.ScriptWriteConfig(params)},
+		{"Writing hub config", install.ScriptWriteConfig(params, useSudo)},
 		{"Installing systemd service", install.ScriptInstallSystemd(useSudo)},
 	}
 	skipCaddy, _ := cmd.Flags().GetBool("skip-caddy")

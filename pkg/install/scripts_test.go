@@ -82,12 +82,17 @@ func TestScriptInstallBinary(t *testing.T) {
 }
 
 func TestScriptWriteConfig(t *testing.T) {
-	s := install.ScriptWriteConfig(testParams)
+	s := install.ScriptWriteConfig(testParams, false)
 	assertContains(t, s, "mkdir -p", "create dir")
 	assertContains(t, s, ".elasticclaw", "config dir")
 	assertContains(t, s, "hub.yaml", "config path")
 	assertContains(t, s, "test-hub-token", "token embedded")
 	assertContains(t, s, "HUBEOF", "heredoc markers")
+}
+
+func TestScriptWriteConfig_UsesRootHomeWithSudo(t *testing.T) {
+	s := install.ScriptWriteConfig(testParams, true)
+	assertContains(t, s, "/root/.elasticclaw", "root config dir for sudo installs")
 }
 
 func TestScriptInstallSystemd(t *testing.T) {
@@ -138,7 +143,7 @@ func TestScripts_Shellcheck(t *testing.T) {
 
 	scripts := map[string]string{
 		"install_binary":   install.ScriptInstallBinary("v0.0.3", true),
-		"write_config":     install.ScriptWriteConfig(testParams),
+		"write_config":     install.ScriptWriteConfig(testParams, true),
 		"install_systemd":  install.ScriptInstallSystemd(true),
 		"install_caddy":    install.ScriptInstallCaddy(true),
 		"write_caddyfile":  install.ScriptWriteCaddyfile("hub.example.com", true),
