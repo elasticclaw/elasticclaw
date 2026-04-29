@@ -91,11 +91,34 @@ sudo systemctl restart elasticclaw`, SystemdUnit())
 // ScriptInstallCaddy returns the shell script to install Caddy if not present.
 func ScriptInstallCaddy() string {
 	return `which caddy >/dev/null 2>&1 || (
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -qq
-  apt-get install -y caddy
+  set -eu
+
+  OS_ID=""
+  OS_LIKE=""
+  if [ -f /etc/os-release ]; then
+    OS_ID=$(awk -F= '/^ID=/{gsub(/"/, "", $2); print $2}' /etc/os-release)
+    OS_LIKE=$(awk -F= '/^ID_LIKE=/{gsub(/"/, "", $2); print $2}' /etc/os-release)
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    install -d /usr/share/keyrings /etc/apt/sources.list.d
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+    apt-get update -qq
+    apt-get install -y caddy
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y 'dnf-command(copr)' curl
+    dnf copr enable -y @caddy/caddy
+    dnf install -y caddy
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y yum-plugin-copr curl
+    yum copr enable -y @caddy/caddy
+    yum install -y caddy
+  else
+    echo "unsupported Linux distribution for automatic Caddy install (ID=${OS_ID:-unknown}, ID_LIKE=${OS_LIKE:-unknown})" >&2
+    exit 1
+  fi
 )`
 }
 

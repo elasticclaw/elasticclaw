@@ -105,6 +105,16 @@ func TestScriptWriteCaddyfile(t *testing.T) {
 	assertContains(t, s, "systemctl reload caddy", "caddy reload")
 }
 
+func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
+	s := install.ScriptInstallCaddy()
+	assertContains(t, s, "command -v apt-get", "apt detection")
+	assertContains(t, s, "command -v dnf", "dnf detection")
+	assertContains(t, s, "command -v yum", "yum detection")
+	assertContains(t, s, "dnf copr enable -y @caddy/caddy", "dnf caddy repo enable")
+	assertContains(t, s, "yum copr enable -y @caddy/caddy", "yum caddy repo enable")
+	assertContains(t, s, "unsupported Linux distribution", "unsupported distro message")
+}
+
 // ── Shellcheck ────────────────────────────────────────────────────────────────
 
 func TestScripts_Shellcheck(t *testing.T) {
