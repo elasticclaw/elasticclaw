@@ -1934,11 +1934,15 @@ openclaw --version`); err != nil {
 		return err
 	}
 
-	// Step 2b: Patch OpenClaw config with dynamic provider model list
+	// Step 2b: Wait for OpenClaw to materialize its config, then patch it.
+	if err := exec("wait for openclaw config", 30*time.Second,
+		`export HOME=/home/daytona; for i in $(seq 1 30); do [ -f "$HOME/.openclaw/openclaw.json" ] && exit 0; sleep 1; done; echo "openclaw config file not created"; exit 1`); err != nil {
+		return err
+	}
 	if providerConfigScript != "" {
 		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
-			log.Printf("[daytona] warning: failed to configure model: %v", err)
+			return err
 		}
 	}
 	// Let openclaw self-heal any remaining config schema issues
