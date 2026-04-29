@@ -1979,12 +1979,6 @@ openclaw --version`); err != nil {
 			return err
 		}
 	}
-	// Let openclaw self-heal any remaining config schema issues
-	_ = exec("openclaw doctor fix", 20*time.Second,
-		"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
-			"export PATH=$NVM_DIR/current/bin:$PATH; "+
-			"openclaw doctor --fix 2>&1 || true")
-
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
