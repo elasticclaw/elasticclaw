@@ -974,9 +974,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			delete(s.claws, clawID)
 		}
 		s.mu.Unlock()
-		// Terminate the provider VM asynchronously
-		if provider == "replicated" && providerID != "" {
-			go s.terminateReplicatedVM(providerID)
+		// Terminate the provider instance asynchronously
+		if providerID != "" {
+			go s.terminateVM(provider, providerID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
