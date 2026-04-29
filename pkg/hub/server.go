@@ -1934,9 +1934,34 @@ openclaw --version`); err != nil {
 		return err
 	}
 
+	dumpOpenClawState := func(reason string) {
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; \
++echo "=== ` + reason + ` ==="; \
++echo "HOME=$HOME"; \
++echo "pwd=$(pwd)"; \
++echo "--- ~/.openclaw ---"; \
++ls -la "$HOME/.openclaw" 2>&1 || true; \
++echo "--- ~/.openclaw tree ---"; \
++find "$HOME/.openclaw" -maxdepth 3 -mindepth 1 -print 2>&1 || true; \
++echo "--- openclaw.json ---"; \
++cat "$HOME/.openclaw/openclaw.json" 2>&1 || true; \
++echo "--- gateway.log ---"; \
++tail -n 100 "$HOME/.openclaw/gateway.log" 2>&1 || true`}, 30*time.Second)
+		if err != nil {
+			log.Printf("[daytona] warning: failed to collect OpenClaw diagnostics (%s): %v", reason, err)
+			return
+		}
+		if strings.TrimSpace(result.Stdout) != "" {
+			log.Printf("[daytona] diagnostics (%s):\n%s", reason, result.Stdout)
+		}
+	}
+
+	dumpOpenClawState("post-onboard")
+
 	// Step 2b: Wait for OpenClaw to materialize its config, then patch it.
 	if err := exec("wait for openclaw config", 30*time.Second,
 		`export HOME=/home/daytona; for i in $(seq 1 30); do [ -f "$HOME/.openclaw/openclaw.json" ] && exit 0; sleep 1; done; echo "openclaw config file not created"; exit 1`); err != nil {
+		dumpOpenClawState("missing-openclaw-config")
 		return err
 	}
 	if providerConfigScript != "" {
