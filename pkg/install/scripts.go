@@ -86,7 +86,8 @@ func ScriptWriteConfig(p Params, useSudo bool) string {
 	if useSudo {
 		configDir = "/root/.elasticclaw"
 	}
-	return fmt.Sprintf(`cat > /tmp/hub.yaml << 'HUBEOF'
+	return fmt.Sprintf(`umask 077
+cat > /tmp/hub.yaml << 'HUBEOF'
 %sHUBEOF
 %s mkdir -p %q
 %s mv /tmp/hub.yaml %q/hub.yaml`, HubConfig(p), sudo, configDir, sudo, configDir)

@@ -83,6 +83,7 @@ func TestScriptInstallBinary(t *testing.T) {
 
 func TestScriptWriteConfig(t *testing.T) {
 	s := install.ScriptWriteConfig(testParams, false)
+	assertContains(t, s, "umask 077", "restrict temp config permissions")
 	assertContains(t, s, "/tmp/hub.yaml", "temp config path")
 	assertContains(t, s, "mkdir -p", "create dir")
 	assertContains(t, s, ".elasticclaw", "config dir")
