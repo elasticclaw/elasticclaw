@@ -1931,12 +1931,22 @@ openclaw --version`); err != nil {
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
-	if err := exec("onboard openclaw", 2*time.Minute, onboardCmd); err != nil {
+	log.Printf("[daytona] onboard openclaw...")
+	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
+	if onboardErr != nil {
 		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
-			return err
+			return fmt.Errorf("onboard openclaw: %w", onboardErr)
+		}
+		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
+	} else if onboardResult.ExitCode != 0 {
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
+			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, onboardResult.Stdout)
 		}
 		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
+	} else {
+		log.Printf("[daytona] onboard openclaw done")
 	}
 
 	dumpOpenClawState := func(reason string) {
