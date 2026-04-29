@@ -113,19 +113,24 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	defer client.Close()
 	fmt.Println("OK")
 
+	useSudo, err := detectRemotePrivilegeMode(client)
+	if err != nil {
+		return err
+	}
+
 	steps := []struct {
 		name   string
 		script string
 	}{
-		{"Installing hub binary", install.ScriptInstallBinary(version)},
-		{"Writing hub config", install.ScriptWriteConfig(params)},
-		{"Installing systemd service", install.ScriptInstallSystemd()},
+		{"Installing hub binary", install.ScriptInstallBinary(version, useSudo)},
+		{"Writing hub config", install.ScriptWriteConfig(params, useSudo)},
+		{"Installing systemd service", install.ScriptInstallSystemd(useSudo)},
 	}
 	skipCaddy, _ := cmd.Flags().GetBool("skip-caddy")
 	if !skipCaddy {
 		steps = append(steps,
-			struct{ name, script string }{"Installing Caddy", install.ScriptInstallCaddy()},
-			struct{ name, script string }{"Configuring Caddy", install.ScriptWriteCaddyfile(installDomain)},
+			struct{ name, script string }{"Installing Caddy", install.ScriptInstallCaddy(useSudo)},
+			struct{ name, script string }{"Configuring Caddy", install.ScriptWriteCaddyfile(installDomain, useSudo)},
 		)
 	}
 
@@ -243,6 +248,30 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 		Timeout:         15 * time.Second,
 	}
 	return gossh.Dial("tcp", addr, cfg)
+}
+
+func detectRemotePrivilegeMode(client *gossh.Client) (bool, error) {
+	out, err := sshRunClient(client, "sh -c 'printf __EC_UID__ ; id -u ; printf __EC_DONE__'")
+	if err != nil {
+		return false, fmt.Errorf("failed to detect remote uid: %w", err)
+	}
+
+	start := strings.Index(out, "__EC_UID__")
+	end := strings.Index(out, "__EC_DONE__")
+	if start == -1 || end == -1 || end <= start+len("__EC_UID__") {
+		return false, fmt.Errorf("failed to parse remote uid probe output")
+	}
+
+	uid := strings.TrimSpace(out[start+len("__EC_UID__") : end])
+	if uid == "0" {
+		return false, nil
+	}
+
+	if _, err := sshRunClient(client, "sudo -n true"); err != nil {
+		return false, fmt.Errorf("remote user is not root and passwordless sudo is unavailable")
+	}
+
+	return true, nil
 }
 
 func sshRunClient(client *gossh.Client, script string) (string, error) {

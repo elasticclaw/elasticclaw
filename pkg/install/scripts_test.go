@@ -73,7 +73,7 @@ func TestCaddyfile(t *testing.T) {
 // ── Script generation ─────────────────────────────────────────────────────────
 
 func TestScriptInstallBinary(t *testing.T) {
-	s := install.ScriptInstallBinary("v0.0.3")
+	s := install.ScriptInstallBinary("v0.0.3", true)
 	assertContains(t, s, "set -e", "fail fast")
 	assertContains(t, s, "curl -fsSL", "curl download")
 	assertContains(t, s, "v0.0.3", "version in URL")
@@ -82,7 +82,9 @@ func TestScriptInstallBinary(t *testing.T) {
 }
 
 func TestScriptWriteConfig(t *testing.T) {
-	s := install.ScriptWriteConfig(testParams)
+	s := install.ScriptWriteConfig(testParams, false)
+	assertContains(t, s, "umask 077", "restrict temp config permissions")
+	assertContains(t, s, "/tmp/hub.yaml", "temp config path")
 	assertContains(t, s, "mkdir -p", "create dir")
 	assertContains(t, s, ".elasticclaw", "config dir")
 	assertContains(t, s, "hub.yaml", "config path")
@@ -90,8 +92,16 @@ func TestScriptWriteConfig(t *testing.T) {
 	assertContains(t, s, "HUBEOF", "heredoc markers")
 }
 
+func TestScriptWriteConfig_UsesRootHomeWithSudo(t *testing.T) {
+	s := install.ScriptWriteConfig(testParams, true)
+	assertContains(t, s, "/root/.elasticclaw", "root config dir for sudo installs")
+	assertContains(t, s, "sudo ", "sudo prefix for root config writes")
+	assertContains(t, s, "mkdir -p \"/root/.elasticclaw\"", "mkdir root config dir")
+	assertContains(t, s, "mv /tmp/hub.yaml \"/root/.elasticclaw\"/hub.yaml", "move temp config into root config dir")
+}
+
 func TestScriptInstallSystemd(t *testing.T) {
-	s := install.ScriptInstallSystemd()
+	s := install.ScriptInstallSystemd(true)
 	assertContains(t, s, "/etc/systemd/system/elasticclaw.service", "service path")
 	assertContains(t, s, "systemctl daemon-reload", "daemon reload")
 	assertContains(t, s, "systemctl enable elasticclaw", "enable service")
@@ -99,14 +109,23 @@ func TestScriptInstallSystemd(t *testing.T) {
 }
 
 func TestScriptWriteCaddyfile(t *testing.T) {
-	s := install.ScriptWriteCaddyfile("hub.example.com")
+	s := install.ScriptWriteCaddyfile("hub.example.com", true)
 	assertContains(t, s, "/etc/caddy/Caddyfile", "caddyfile path")
 	assertContains(t, s, "hub.example.com", "domain in config")
 	assertContains(t, s, "systemctl reload caddy", "caddy reload")
 }
 
+func TestScriptHelpers_SudoPrefix(t *testing.T) {
+	if s := install.ScriptInstallBinary("v0.0.3", false); strings.Contains(s, "sudo") {
+		t.Error("did not expect sudo for root install path")
+	}
+	if s := install.ScriptInstallBinary("v0.0.3", true); !strings.Contains(s, "sudo ") {
+		t.Error("expected sudo for non-root install path")
+	}
+}
+
 func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
-	s := install.ScriptInstallCaddy()
+	s := install.ScriptInstallCaddy(true)
 	assertContains(t, s, "command -v apt-get", "apt detection")
 	assertContains(t, s, "command -v dnf", "dnf detection")
 	assertContains(t, s, "command -v yum", "yum detection")
@@ -115,6 +134,7 @@ func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
 	assertContains(t, s, "https://github.com/caddyserver/caddy/releases/download/", "versioned caddy asset download")
 	assertContains(t, s, "caddy_'\"${CADDY_VERSION#v}\"'_linux_", "versioned caddy asset filename")
 	assertContains(t, s, "install -m 0755 /tmp/caddy /usr/local/bin/caddy", "static caddy binary install")
+	assertContains(t, s, "SUDO=\"sudo \"", "sudo mode wiring")
 	assertContains(t, s, "systemctl enable caddy", "caddy service enable")
 	assertContains(t, s, "unsupported Linux distribution", "unsupported distro message")
 }
@@ -127,11 +147,11 @@ func TestScripts_Shellcheck(t *testing.T) {
 	}
 
 	scripts := map[string]string{
-		"install_binary":   install.ScriptInstallBinary("v0.0.3"),
-		"write_config":     install.ScriptWriteConfig(testParams),
-		"install_systemd":  install.ScriptInstallSystemd(),
-		"install_caddy":    install.ScriptInstallCaddy(),
-		"write_caddyfile":  install.ScriptWriteCaddyfile("hub.example.com"),
+		"install_binary":   install.ScriptInstallBinary("v0.0.3", true),
+		"write_config":     install.ScriptWriteConfig(testParams, true),
+		"install_systemd":  install.ScriptInstallSystemd(true),
+		"install_caddy":    install.ScriptInstallCaddy(true),
+		"write_caddyfile":  install.ScriptWriteCaddyfile("hub.example.com", true),
 	}
 
 	for name, script := range scripts {

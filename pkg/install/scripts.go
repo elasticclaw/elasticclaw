@@ -62,36 +62,62 @@ func Caddyfile(domain string) string {
 `, domain)
 }
 
+func sudoPrefix(useSudo bool) string {
+	if useSudo {
+		return "sudo "
+	}
+	return ""
+}
+
 // ScriptInstallBinary returns the shell script to download and install the hub binary.
-func ScriptInstallBinary(version string) string {
+func ScriptInstallBinary(version string, useSudo bool) string {
 	url := HubBinaryURL(version)
+	sudo := sudoPrefix(useSudo)
 	return fmt.Sprintf(`set -ex
 curl -fsSL %q -o /tmp/elasticclaw-bin
 chmod +x /tmp/elasticclaw-bin
-sudo mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw`, url)
+%s mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw`, url, sudo)
 }
 
 // ScriptWriteConfig returns the shell script to write the hub config.
-func ScriptWriteConfig(p Params) string {
-	return fmt.Sprintf(`mkdir -p "$HOME/.elasticclaw"
-cat > "$HOME/.elasticclaw/hub.yaml" << 'HUBEOF'
-%sHUBEOF`, HubConfig(p))
+func ScriptWriteConfig(p Params, useSudo bool) string {
+	configDir := "$HOME/.elasticclaw"
+	sudo := sudoPrefix(useSudo)
+	if useSudo {
+		configDir = "/root/.elasticclaw"
+	}
+	return fmt.Sprintf(`umask 077
+cat > /tmp/hub.yaml << 'HUBEOF'
+%sHUBEOF
+%s mkdir -p %q
+%s mv /tmp/hub.yaml %q/hub.yaml`, HubConfig(p), sudo, configDir, sudo, configDir)
 }
 
 // ScriptInstallSystemd returns the shell script to install and start the systemd service.
-func ScriptInstallSystemd() string {
+func ScriptInstallSystemd(useSudo bool) string {
+	sudo := sudoPrefix(useSudo)
 	return fmt.Sprintf(`cat > /tmp/elasticclaw.service << 'SVCEOF'
 %sSVCEOF
-sudo mv /tmp/elasticclaw.service /etc/systemd/system/elasticclaw.service
-sudo systemctl daemon-reload
-sudo systemctl enable elasticclaw
-sudo systemctl restart elasticclaw`, SystemdUnit())
+%s mv /tmp/elasticclaw.service /etc/systemd/system/elasticclaw.service
+%s systemctl daemon-reload
+%s systemctl enable elasticclaw
+%s systemctl restart elasticclaw`, SystemdUnit(), sudo, sudo, sudo, sudo)
 }
 
 // ScriptInstallCaddy returns the shell script to install Caddy if not present.
-func ScriptInstallCaddy() string {
-	return `which caddy >/dev/null 2>&1 || (
+func ScriptInstallCaddy(useSudo bool) string {
+	sudo := sudoPrefix(useSudo)
+	return fmt.Sprintf(`which caddy >/dev/null 2>&1 || (
   set -eu
+
+  SUDO=%q
+  sh_c() {
+    if [ -n "$SUDO" ]; then
+      sudo sh -c "$1"
+    else
+      sh -c "$1"
+    fi
+  }
 
   OS_ID=""
   OS_LIKE=""
@@ -101,19 +127,19 @@ func ScriptInstallCaddy() string {
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
-    install -d /usr/share/keyrings /etc/apt/sources.list.d
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-    apt-get update -qq
-    apt-get install -y caddy
+    sh_c 'install -d /usr/share/keyrings /etc/apt/sources.list.d'
+    sh_c 'apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true'
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sh_c 'gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg'
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sh_c 'tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null'
+    sh_c 'apt-get update -qq'
+    sh_c 'apt-get install -y caddy'
   elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
     PKG_MGR=dnf
     if ! command -v dnf >/dev/null 2>&1; then
       PKG_MGR=yum
     fi
 
-    $PKG_MGR install -y curl tar
+    sh_c "$PKG_MGR install -y curl tar"
 
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -130,10 +156,10 @@ func ScriptInstallCaddy() string {
 
     curl -fsSL 'https://github.com/caddyserver/caddy/releases/download/'"$CADDY_VERSION"'/caddy_'"${CADDY_VERSION#v}"'_linux_'"$CADDY_ARCH"'.tar.gz' -o /tmp/caddy.tar.gz
     tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
-    install -m 0755 /tmp/caddy /usr/local/bin/caddy
-    install -d /etc/caddy
+    sh_c 'install -m 0755 /tmp/caddy /usr/local/bin/caddy'
+    sh_c 'install -d /etc/caddy'
 
-    cat > /etc/systemd/system/caddy.service <<'CADDYSVC'
+    cat > /tmp/caddy.service <<'CADDYSVC'
 [Unit]
 Description=Caddy
 Documentation=https://caddyserver.com/docs/
@@ -155,19 +181,21 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 CADDYSVC
 
-    systemctl daemon-reload
-    systemctl enable caddy
+    sh_c 'mv /tmp/caddy.service /etc/systemd/system/caddy.service'
+    sh_c 'systemctl daemon-reload'
+    sh_c 'systemctl enable caddy'
   else
     echo "unsupported Linux distribution for automatic Caddy install (ID=${OS_ID:-unknown}, ID_LIKE=${OS_LIKE:-unknown})" >&2
     exit 1
   fi
-)`
+)`, sudo)
 }
 
 // ScriptWriteCaddyfile returns the shell script to write the Caddyfile and reload Caddy.
-func ScriptWriteCaddyfile(domain string) string {
+func ScriptWriteCaddyfile(domain string, useSudo bool) string {
+	sudo := sudoPrefix(useSudo)
 	return fmt.Sprintf(`cat > /tmp/Caddyfile << 'CADDYEOF'
 %sCADDYEOF
-sudo mv /tmp/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl reload caddy || sudo systemctl restart caddy`, Caddyfile(domain))
+%s mv /tmp/Caddyfile /etc/caddy/Caddyfile
+%s systemctl reload caddy || %s systemctl restart caddy`, Caddyfile(domain), sudo, sudo, sudo)
 }

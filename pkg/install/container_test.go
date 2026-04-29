@@ -121,7 +121,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 	}
 
 	// ── Write hub config ──────────────────────────────────────────────────────
-	run("write config", install.ScriptWriteConfig(params))
+	run("write config", install.ScriptWriteConfig(params, false))
 	assertFile("/root/.elasticclaw/hub.yaml", "test-hub-token-abc")
 	assertFile("/root/.elasticclaw/hub.yaml", "test-claw-token-def")
 	assertFile("/root/.elasticclaw/hub.yaml", "hub.test.example.com")
@@ -146,7 +146,7 @@ cat > /etc/systemd/system/elasticclaw.service << 'SVCEOF'
 	// ── Verify hub binary URL is correct ─────────────────────────────────────
 	// We don't actually download the binary in the container test (slow + network)
 	// but verify the install script would use the right URL
-	script := install.ScriptInstallBinary(params.Version)
+	script := install.ScriptInstallBinary(params.Version, false)
 	if !strings.Contains(script, "v0.0.3") {
 		t.Error("install script missing version in URL")
 	}
