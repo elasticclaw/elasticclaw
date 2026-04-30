@@ -9,6 +9,7 @@ import (
 )
 
 var hubUpgradeServer string
+var hubUpgradeSSHKey string
 
 var hubUpgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -24,12 +25,19 @@ Examples:
 func init() {
 	hubCmd.AddCommand(hubUpgradeCmd)
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeServer, "server", "", "SSH target, e.g. ssh://root@host (required)")
+	hubUpgradeCmd.Flags().StringVar(&hubUpgradeSSHKey, "ssh-key", "", "SSH private key path (optional; defaults to profile ssh_key when available)")
 }
 
 func runHubUpgrade(cmd *cobra.Command, args []string) error {
-	if hubUpgradeServer == "" {
+	if hubUpgradeServer == "" || hubUpgradeSSHKey == "" {
 		// Try to infer from --profile (or active profile)
-		hubUpgradeServer = inferSSHFromProfile(profile)
+		inferredServer, inferredKey := inferSSHFromProfile(profile)
+		if hubUpgradeServer == "" {
+			hubUpgradeServer = inferredServer
+		}
+		if hubUpgradeSSHKey == "" {
+			hubUpgradeSSHKey = inferredKey
+		}
 	}
 	if hubUpgradeServer == "" {
 		return fmt.Errorf("--server required, e.g. --server ssh://root@elasticclaw.example.com")
@@ -42,7 +50,7 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Connecting to %s@%s...\n", user, host)
 
-	client, err := dialSSH(user, host, "")
+	client, err := dialSSH(user, host, hubUpgradeSSHKey)
 	if err != nil {
 		return fmt.Errorf("SSH connection failed: %w", err)
 	}
@@ -102,23 +110,23 @@ fi
 	return nil
 }
 
-// inferSSHFromProfile tries to guess the SSH target from the given profile's hub URL.
+// inferSSHFromProfile tries to guess the SSH target and key from the given profile's hub config.
 // Pass "" to use the active profile.
-func inferSSHFromProfile(profileName string) string {
+func inferSSHFromProfile(profileName string) (string, string) {
 	hubProfile, _, err := config.ResolveHub(profileName)
 	if err != nil || hubProfile == nil {
-		return ""
+		return "", ""
 	}
 	// Use explicit ssh_uri if set (e.g. ssh://marc@canio-factory)
 	if hubProfile.SSHURI != "" {
 		if strings.HasPrefix(hubProfile.SSHURI, "ssh://") {
-			return hubProfile.SSHURI
+			return hubProfile.SSHURI, hubProfile.SSHKey
 		}
 		// bare hostname — wrap as ssh://root@<host>
-		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHURI)
+		return fmt.Sprintf("ssh://root@%s", hubProfile.SSHURI), hubProfile.SSHKey
 	}
 	if hubProfile.URL == "" {
-		return ""
+		return "", hubProfile.SSHKey
 	}
 	// Derive from URL
 	host := hubProfile.URL
@@ -127,9 +135,9 @@ func inferSSHFromProfile(profileName string) string {
 	host = strings.SplitN(host, "/", 2)[0]
 	host = strings.SplitN(host, ":", 2)[0]
 	if host == "" || host == "localhost" || host == "127.0.0.1" {
-		return ""
+		return "", hubProfile.SSHKey
 	}
-	return fmt.Sprintf("ssh://root@%s", host)
+	return fmt.Sprintf("ssh://root@%s", host), hubProfile.SSHKey
 }
 
 // parseVersionFromOutput extracts the version tag from "elasticclaw vX.Y.Z ..." output.
