@@ -1178,6 +1178,7 @@ func newHTTPProxy(send func(hubMsg) error) *httpProxy {
 }
 
 func (p *httpProxy) deliver(res httpProxyRes) {
+	log.Printf("[bridge-proxy] deliver req_id=%s status=%d body_len=%d", res.ReqID, res.Status, len(res.Body))
 	p.mu.Lock()
 	ch, ok := p.pending[res.ReqID]
 	if ok {
@@ -1186,6 +1187,8 @@ func (p *httpProxy) deliver(res httpProxyRes) {
 	p.mu.Unlock()
 	if ok {
 		ch <- res
+	} else {
+		log.Printf("[bridge-proxy] deliver dropped req_id=%s (no pending waiter)", res.ReqID)
 	}
 }
 
@@ -1196,6 +1199,7 @@ func (p *httpProxy) ready() bool {
 }
 
 func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[bridge-proxy] incoming %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 	// Wait up to 30s for the bridge to connect to the hub
 	for i := 0; i < 30; i++ {
 		if p.ready() {
@@ -1204,6 +1208,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second)
 	}
 	if !p.ready() {
+		log.Printf("[bridge-proxy] not ready for %s %s", r.Method, r.URL.Path)
 		http.Error(w, "bridge not connected to hub", http.StatusServiceUnavailable)
 		return
 	}
@@ -1236,10 +1241,13 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sendFn := p.send
 	p.mu.Unlock()
 	if sendFn == nil {
+		log.Printf("[bridge-proxy] sendFn nil req_id=%s", reqID)
 		http.Error(w, "bridge not connected", http.StatusServiceUnavailable)
 		return
 	}
+	log.Printf("[bridge-proxy] forwarding req_id=%s path=%s", reqID, req.Path)
 	if err := sendFn(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
+		log.Printf("[bridge-proxy] send error req_id=%s err=%v", reqID, err)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()
@@ -1249,9 +1257,11 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case res := <-ch:
+		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d", reqID, res.Status, len(res.Body))
 		w.WriteHeader(res.Status)
 		_, _ = w.Write([]byte(res.Body))
 	case <-time.After(10 * time.Second):
+		log.Printf("[bridge-proxy] timeout req_id=%s path=%s", reqID, req.Path)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()

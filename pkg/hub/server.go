@@ -1506,8 +1506,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Header map[string]string `json:"header"`
 					}
 					if err := json.Unmarshal(rawPayload, &req); err != nil {
+						log.Printf("[hub-proxy] bad req payload: %v", err)
 						return
 					}
+					log.Printf("[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
 					// Build an internal HTTP request
 					urls := req.Path
 					if req.Query != "" {
@@ -1515,6 +1517,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 					if err != nil {
+						log.Printf("[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
 						s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 						return
 					}
@@ -1529,6 +1532,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}
 					s.mux.ServeHTTP(w, httpReq)
+					if w.status == 0 {
+						w.status = 200
+					}
+					log.Printf("[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
 					s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
 				}(mustJSONRaw(msg.Payload), conn)
 			}
