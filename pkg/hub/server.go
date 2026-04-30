@@ -2089,17 +2089,6 @@ echo 'credential helper installed'`, tokenURL)
 			time.Sleep(3 * time.Second)
 		}
 
-		waitTokenProxy := fmt.Sprintf(`export HOME=/home/daytona
-for i in $(seq 1 20); do
-  curl -sf --max-time 10 %q >/dev/null && exit 0
-  sleep 2
-done
-echo 'token proxy not ready'
-exit 1`, tokenURL)
-		if err := exec("wait for github token proxy", 45*time.Second, waitTokenProxy); err != nil {
-			return fmt.Errorf("github token proxy not ready: %w", err)
-		}
-
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			return fmt.Errorf("install git credential helper: %w", err)
 		} else {
