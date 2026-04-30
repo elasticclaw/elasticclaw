@@ -2194,6 +2194,20 @@ gh auth status`
 			if ghStatusResult.ExitCode != 0 {
 				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, ghStatusResult.Stdout)
 			}
+			if len(githubRepos) > 0 {
+				verifyReposScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; set -x; "
+				for _, repo := range githubRepos {
+					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", repo.Repo)
+				}
+				log.Printf("[daytona] verify configured github repos (no retries)...")
+				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
+				if verifyReposErr != nil {
+					return fmt.Errorf("verify configured github repos: %w", verifyReposErr)
+				}
+				if verifyReposResult.ExitCode != 0 {
+					return fmt.Errorf("verify configured github repos failed (exit %d): %s", verifyReposResult.ExitCode, verifyReposResult.Stdout)
+				}
+			}
 			log.Printf("[daytona] verify gh auth done")
 
 			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
