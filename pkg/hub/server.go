@@ -2173,18 +2173,32 @@ command -v gh
 [ -n "$GH_TOKEN" ]
 printf 'gh_token_len=%s\n' "${#GH_TOKEN}"
 gh --version
-echo "$GH_TOKEN" | gh auth login --with-token`
-			if err := exec("auth gh cli", 30*time.Second, ghAuthScript); err != nil {
-				return fmt.Errorf("auth gh cli: %w", err)
+gh auth logout -h github.com || true
+echo "$GH_TOKEN" | gh auth login --hostname github.com --with-token`
+			log.Printf("[daytona] auth gh cli (no retries)...")
+			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghAuthScript}, 30*time.Second)
+			if ghAuthErr != nil {
+				return fmt.Errorf("auth gh cli: %w", ghAuthErr)
 			}
+			if ghAuthResult.ExitCode != 0 {
+				return fmt.Errorf("auth gh cli failed (exit %d): %s", ghAuthResult.ExitCode, ghAuthResult.Stdout)
+			}
+			log.Printf("[daytona] auth gh cli done")
 
 			ghStatusScript := `export HOME=/home/daytona
 set -x
 . /etc/profile.d/elasticclaw-github.sh
-gh auth status`
-			if err := exec("verify gh auth", 20*time.Second, ghStatusScript); err != nil {
-				return fmt.Errorf("verify gh auth: %w", err)
+gh auth status
+gh repo view can-io/canio >/dev/null`
+			log.Printf("[daytona] verify gh auth (no retries)...")
+			ghStatusResult, ghStatusErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghStatusScript}, 20*time.Second)
+			if ghStatusErr != nil {
+				return fmt.Errorf("verify gh auth: %w", ghStatusErr)
 			}
+			if ghStatusResult.ExitCode != 0 {
+				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, ghStatusResult.Stdout)
+			}
+			log.Printf("[daytona] verify gh auth done")
 
 			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
 			for _, repo := range githubRepos {
