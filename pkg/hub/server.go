@@ -1198,8 +1198,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		clawID = uuid.New().String()
 	}
 
+	var bootstrapOK int
+	var provider string
+	_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&bootstrapOK, &provider)
+
 	// Upsert claw and keep terminal/watching states sticky across reconnects.
 	desiredStatus := initialStatus(rp.GatewayReady)
+	if provider == "daytona" && bootstrapOK != 1 {
+		desiredStatus = "starting"
+	}
 	currentStatus := desiredStatus
 	_ = s.db.QueryRow(
 		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
@@ -1215,9 +1222,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var registrationTagsJSON string
-	var bootstrapOK int
-	var provider string
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]'), COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON, &bootstrapOK, &provider)
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
 	allowWake := bootstrapOK == 1 || provider != "daytona"
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
@@ -1993,8 +1998,8 @@ exit 1`
 		return err
 	}
 
-	// Step 3: Download and start claw-bridge
-	// Download synchronously first, then background the process.
+	// Step 3: Download claw-bridge now, but do not start it until the workspace,
+	// template files, and bootstrap gating are fully ready.
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
@@ -2016,23 +2021,12 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 		return err
 	}
 
-	// Start the bridge — it reads the gateway token from openclaw.json automatically.
-	// Use setsid to detach from exec session so it survives after exec returns.
 	s.mu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
 
-	startCmd := fmt.Sprintf(
-		`export HOME=/home/daytona; \
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
-echo started`,
-		s.clawHubURL(), clawID, clawToken, clawName)
-	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
-		return err
-	}
-
-	// Write template files (SOUL.md, AGENTS.md, etc.) to the workspace
+	// Write template files (SOUL.md, AGENTS.md, etc.) to the workspace before
+	// the bridge starts so BOOTSTRAP.md and friends are present for the first turn.
 	var filesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var templateFiles map[string]string
@@ -2062,14 +2056,16 @@ ELASTICCLAW_EOF`,
 		_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
 		_ = json.Unmarshal([]byte(reposJSON), &githubRepos)
 
-		// Use local HTTP proxy (bridge listens on 18790, proxies to hub)
-		tokenURL := fmt.Sprintf("http://localhost:18790/api/github/token/%s?claw_token=%s", clawID, clawToken)
+		// Use the hub directly during bootstrap. The bridge is intentionally not
+		// started yet so startup cannot race ahead of template file writes and
+		// bootstrap_ok gating.
+		tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", s.clawHubURL(), clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
-# Retry up to 10 times — proxy may not be ready immediately after bridge connects
+# Retry up to 10 times — hub token endpoint may not be ready immediately
 for i in $(seq 1 10); do
   response=$(curl -sf --max-time 35 %q)
   if [ $? -eq 0 ] && [ -n "$response" ]; then break; fi
@@ -2085,19 +2081,6 @@ CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 echo 'credential helper installed'`, tokenURL)
-		// Wait for the bridge to connect and register with hub (needed for HTTP proxy)
-		log.Printf("[daytona] waiting for bridge to connect...")
-		for i := 0; i < 30; i++ {
-			s.mu.RLock()
-			_, connected := s.claws[clawID]
-			s.mu.RUnlock()
-			if connected {
-				log.Printf("[daytona] bridge connected after %ds", i*3)
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
-
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			return fmt.Errorf("install git credential helper: %w", err)
 		} else {
@@ -2240,6 +2223,20 @@ gh auth status`
 	}
 
 	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
+	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
+
+	// Start the bridge last so the first registration happens only after the
+	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
+	startCmd := fmt.Sprintf(
+		`export HOME=/home/daytona; \
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
+setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
+echo started`,
+		s.clawHubURL(), clawID, clawToken, clawName)
+	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
+		return err
+	}
+
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
