@@ -232,6 +232,9 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	for _, p := range keyPaths {
 		key, err := os.ReadFile(p)
 		if err != nil {
+			if keyPath != "" && os.IsNotExist(err) {
+				return nil, fmt.Errorf("ssh key file not found: %s", p)
+			}
 			continue // key doesn't exist, skip
 		}
 		signer, err := gossh.ParsePrivateKey(key)
