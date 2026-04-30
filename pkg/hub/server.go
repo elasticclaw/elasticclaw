@@ -2102,6 +2102,26 @@ exit 1`, tokenURL)
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			return fmt.Errorf("install git credential helper: %w", err)
 		} else {
+			installGhScript := `export HOME=/home/daytona
+if command -v gh >/dev/null 2>&1; then
+  gh --version >/dev/null 2>&1
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update -qq && sudo apt-get install -y gh
+elif command -v dnf >/dev/null 2>&1; then
+  sudo dnf install -y gh
+elif command -v yum >/dev/null 2>&1; then
+  sudo yum install -y gh
+else
+  echo 'unsupported package manager for gh install'
+  exit 1
+fi
+command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
+			if err := exec("install gh cli", 2*time.Minute, installGhScript); err != nil {
+				return fmt.Errorf("install gh cli: %w", err)
+			}
+
 			// Step 5b: fetch one bootstrap token and reuse it for gh + clone
 			bootstrapGitHubAuth := fmt.Sprintf(`export HOME=/home/daytona
 response=$(curl -sf --max-time 35 %q)
@@ -2110,9 +2130,8 @@ token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdi
 [ -n "$token" ] || exit 1
 printf 'export GH_TOKEN=%s\n' "$token" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
 sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-if command -v gh &>/dev/null; then
-  echo "$token" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
-fi
+command -v gh >/dev/null 2>&1 || exit 1
+echo "$token" | gh auth login --with-token >/dev/null 2>&1 || exit 1
 if [ `+fmt.Sprintf("%d", len(githubRepos))+` -gt 0 ]; then
   cd ~/.openclaw/workspace
   FAILED=0
