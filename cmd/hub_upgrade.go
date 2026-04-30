@@ -56,6 +56,11 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
+	useSudo, err := detectRemotePrivilegeMode(client)
+	if err != nil {
+		return err
+	}
+
 	// Check current version on server
 	fmt.Println("Checking remote version...")
 	remoteVerOut, err := sshRunClient(client, "elasticclaw version 2>/dev/null || echo 'unknown'")
@@ -83,19 +88,30 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 		latest,
 	)
 
+	moveCmd := "mv /tmp/elasticclaw-new \"$SELF\""
+	versionCmd := "elasticclaw version 2>/dev/null"
+	restartCheckCmd := "systemctl is-active --quiet elasticclaw 2>/dev/null"
+	restartCmd := "systemctl restart elasticclaw"
+	if useSudo {
+		moveCmd = "sudo mv /tmp/elasticclaw-new \"$SELF\""
+		versionCmd = "sudo elasticclaw version 2>/dev/null"
+		restartCheckCmd = "sudo systemctl is-active --quiet elasticclaw 2>/dev/null"
+		restartCmd = "sudo systemctl restart elasticclaw"
+	}
+
 	script := fmt.Sprintf(`set -euo pipefail
 echo "Downloading %s..."
 curl -fsSL %q -o /tmp/elasticclaw-new
 chmod +x /tmp/elasticclaw-new
 SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
-mv /tmp/elasticclaw-new "$SELF"
-echo "Upgraded to $(elasticclaw version 2>/dev/null)"
-if systemctl is-active --quiet elasticclaw 2>/dev/null; then
+%s
+echo "Upgraded to $(%s)"
+if %s; then
   echo "Restarting hub service..."
-  systemctl restart elasticclaw
+  %s
   echo "Hub service restarted."
 fi
-`, latest, downloadURL)
+`, latest, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
 
 	fmt.Printf("Upgrading remote hub to %s...\n", latest)
 	out, err := sshRunClient(client, script)
