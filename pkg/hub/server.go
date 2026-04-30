@@ -2112,16 +2112,37 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 				return fmt.Errorf("install gh cli: %w", err)
 			}
 
-			bootstrapGitHubToken := fmt.Sprintf(`export HOME=/home/daytona
-response=$(curl -sf --max-time 35 %q)
-[ -n "$response" ] || exit 1
-token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-[ -n "$token" ] || exit 1
-printf 'export GH_TOKEN=%%s\n' "$token" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
-sudo chmod +x /etc/profile.d/elasticclaw-github.sh
+			fetchGitHubTokenJSON := fmt.Sprintf(`export HOME=/home/daytona
+curl -sf --max-time 35 %q -o /tmp/elasticclaw-github-token.json
+[ -s /tmp/elasticclaw-github-token.json ] || exit 1
 `, tokenURL)
-			if err := exec("fetch github bootstrap token", 45*time.Second, bootstrapGitHubToken); err != nil {
-				return fmt.Errorf("fetch github bootstrap token: %w", err)
+			if err := exec("fetch github bootstrap token json", 45*time.Second, fetchGitHubTokenJSON); err != nil {
+				return fmt.Errorf("fetch github bootstrap token json: %w", err)
+			}
+
+			parseGitHubToken := `export HOME=/home/daytona
+python3 - <<'PYEOF' > /tmp/elasticclaw-github-token.txt
+import json
+with open('/tmp/elasticclaw-github-token.json') as f:
+    data = json.load(f)
+token = data.get('token', '')
+if not token:
+    raise SystemExit(1)
+print(token)
+PYEOF
+[ -s /tmp/elasticclaw-github-token.txt ] || exit 1`
+			if err := exec("parse github bootstrap token", 20*time.Second, parseGitHubToken); err != nil {
+				return fmt.Errorf("parse github bootstrap token: %w", err)
+			}
+
+			writeGitHubTokenEnv := `export HOME=/home/daytona
+TOKEN=$(cat /tmp/elasticclaw-github-token.txt)
+[ -n "$TOKEN" ] || exit 1
+printf 'export GH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
+sudo chmod +x /etc/profile.d/elasticclaw-github.sh
+[ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
+			if err := exec("write github token env", 20*time.Second, writeGitHubTokenEnv); err != nil {
+				return fmt.Errorf("write github token env: %w", err)
 			}
 
 			ghAuthScript := `export HOME=/home/daytona
