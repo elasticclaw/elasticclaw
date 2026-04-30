@@ -1902,6 +1902,9 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
 				continue
 			}
+			if strings.Contains(label, "write ") && result.Stdout != "" {
+				log.Printf("[daytona] %s output: %s", label, result.Stdout)
+			}
 			log.Printf("[daytona] %s done", label)
 			return nil
 		}
