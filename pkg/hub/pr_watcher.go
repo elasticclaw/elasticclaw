@@ -143,6 +143,9 @@ func (s *Server) pollAllPRs() {
 		WHERE cl.status NOT IN ('deleted','error','offline')
 	`)
 	if err != nil {
+		if strings.Contains(err.Error(), "database is closed") {
+			return
+		}
 		log.Printf("[pr-watcher] poll query error: %v", err)
 		return
 	}

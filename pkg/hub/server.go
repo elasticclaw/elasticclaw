@@ -114,6 +114,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
+	go srv.keepAliveDaytonaSandboxes()
 	srv.startPRWatcher()
 
 	return srv, nil
@@ -1214,7 +1215,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var registrationTagsJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
+	var bootstrapOK int
+	var provider string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]'), COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON, &bootstrapOK, &provider)
+	allowWake := bootstrapOK == 1 || provider != "daytona"
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
@@ -1233,12 +1237,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
 	usedPipelineEntryInject := false
-	if cc.gatewayReady && currentStatus == "connected" {
+	if allowWake && cc.gatewayReady && currentStatus == "connected" {
 		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
 	}
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
-	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
+	if allowWake && cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
 		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			go s.sendWakeMessage(cc, clawID)
 		}
@@ -1320,7 +1324,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
-							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
+							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
@@ -1504,8 +1508,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Header map[string]string `json:"header"`
 					}
 					if err := json.Unmarshal(rawPayload, &req); err != nil {
+						log.Printf("[hub-proxy] bad req payload: %v", err)
 						return
 					}
+					log.Printf("[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
 					// Build an internal HTTP request
 					urls := req.Path
 					if req.Query != "" {
@@ -1513,6 +1519,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 					if err != nil {
+						log.Printf("[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
 						s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 						return
 					}
@@ -1527,6 +1534,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}
 					s.mux.ServeHTTP(w, httpReq)
+					if w.status == 0 {
+						w.status = 200
+					}
+					log.Printf("[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
 					s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
 				}(mustJSONRaw(msg.Payload), conn)
 			}
@@ -1851,7 +1862,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_ok=0 WHERE id=?`, clawID)
 		// Destroy the sandbox — auto-stop is disabled so it would run forever otherwise
 		log.Printf("[daytona] destroying failed sandbox %s for claw %s", instance.ID, clawName)
 		if delErr := p.Destroy(context.Background(), instance.ID, false); delErr != nil {
@@ -1903,9 +1914,11 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
+	const daytonaOpenClawVersion = "2026.4.27"
 	if err := exec("install openclaw", 3*time.Minute,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-sudo "$NPM" install -g openclaw@latest --ignore-scripts 2>&1 && echo 'install done'`); err != nil {
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
+sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1 && echo 'install done'`, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -1926,27 +1939,34 @@ openclaw --version`); err != nil {
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	s.mu.RUnlock()
 	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon %s 2>&1 || true",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
-	if err := exec("onboard openclaw", 2*time.Minute, onboardCmd); err != nil {
-		return err
+	log.Printf("[daytona] onboard openclaw...")
+	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
+	if onboardErr != nil {
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
+			return fmt.Errorf("onboard openclaw: %w", onboardErr)
+		}
+		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
+	} else if onboardResult.ExitCode != 0 {
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
+			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, onboardResult.Stdout)
+		}
+		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
+	} else {
+		log.Printf("[daytona] onboard openclaw done")
 	}
 
-	// Step 2b: Patch OpenClaw config with dynamic provider model list
 	if providerConfigScript != "" {
 		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
-			log.Printf("[daytona] warning: failed to configure model: %v", err)
+			return err
 		}
 	}
-	// Let openclaw self-heal any remaining config schema issues
-	_ = exec("openclaw doctor fix", 20*time.Second,
-		"export HOME=/home/daytona NVM_DIR=/usr/local/share/nvm; "+
-			"export PATH=$NVM_DIR/current/bin:$PATH; "+
-			"openclaw doctor --fix 2>&1 || true")
-
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
@@ -1962,8 +1982,13 @@ print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-sleep 8
-curl -sf http://localhost:18789/healthz && echo 'gateway ready' || echo 'gateway not ready yet'`
+for i in $(seq 1 20); do
+  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway ready' && exit 0
+  sleep 2
+done
+echo 'gateway not ready'
+tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
+exit 1`
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}
@@ -2074,36 +2099,134 @@ echo 'credential helper installed'`, tokenURL)
 		}
 
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
-			log.Printf("[daytona] warning: credential helper install failed: %v", err)
+			return fmt.Errorf("install git credential helper: %w", err)
 		} else {
-			// Step 5b: authenticate gh CLI
-			ghAuthScript := `export HOME=/home/daytona
-if command -v gh &>/dev/null; then
-  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-  if [ -n "$GH_TOKEN" ]; then
-    echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
-    printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
-    sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-  fi
+			installGhScript := `export HOME=/home/daytona
+if command -v gh >/dev/null 2>&1; then
+  gh --version >/dev/null 2>&1
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update -qq && sudo apt-get install -y gh
+elif command -v dnf >/dev/null 2>&1; then
+  sudo dnf install -y gh
+elif command -v yum >/dev/null 2>&1; then
+  sudo yum install -y gh
 else
-  echo 'gh not installed'
-fi`
-			if err := exec("auth gh cli", 20*time.Second, ghAuthScript); err != nil {
-				log.Printf("[daytona] warning: gh auth failed: %v", err)
+  echo 'unsupported package manager for gh install'
+  exit 1
+fi
+command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
+			if err := exec("install gh cli", 2*time.Minute, installGhScript); err != nil {
+				return fmt.Errorf("install gh cli: %w", err)
 			}
 
-			// Step 5c: clone repos into workspace
+			fetchGitHubTokenJSON := fmt.Sprintf(`export HOME=/home/daytona
+rm -f /tmp/elasticclaw-github-token.json
+curl -sf --max-time 35 %q -o /tmp/elasticclaw-github-token.json
+status=$?
+echo "curl_exit=$status"
+ls -l /tmp/elasticclaw-github-token.json 2>&1 || true
+[ $status -eq 0 ] || exit $status
+[ -s /tmp/elasticclaw-github-token.json ] || exit 1
+`, tokenURL)
+			if err := exec("fetch github bootstrap token json", 45*time.Second, fetchGitHubTokenJSON); err != nil {
+				return fmt.Errorf("fetch github bootstrap token json: %w", err)
+			}
+
+			parseGitHubToken := `export HOME=/home/daytona
+python3 - <<'PYEOF' > /tmp/elasticclaw-github-token.txt
+import json
+with open('/tmp/elasticclaw-github-token.json') as f:
+    data = json.load(f)
+print(data.get('token', ''))
+PYEOF
+status=$?
+echo "python_exit=$status"
+ls -l /tmp/elasticclaw-github-token.txt 2>&1 || true
+[ $status -eq 0 ] || exit $status
+[ -s /tmp/elasticclaw-github-token.txt ] || exit 1`
+			if err := exec("parse github bootstrap token", 20*time.Second, parseGitHubToken); err != nil {
+				return fmt.Errorf("parse github bootstrap token: %w", err)
+			}
+
+			writeGitHubTokenEnv := `export HOME=/home/daytona
+TOKEN=$(cat /tmp/elasticclaw-github-token.txt)
+[ -n "$TOKEN" ] || exit 1
+printf 'export GH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
+sudo chmod +x /etc/profile.d/elasticclaw-github.sh
+[ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
+			if err := exec("write github token env", 20*time.Second, writeGitHubTokenEnv); err != nil {
+				return fmt.Errorf("write github token env: %w", err)
+			}
+
+			ghAuthScript := `export HOME=/home/daytona
+set -x
+. /etc/profile.d/elasticclaw-github.sh
+command -v gh
+[ -n "$GH_TOKEN" ]
+gh --version
+TOKEN="$(cat /tmp/elasticclaw-github-token.txt)"
+[ -n "$TOKEN" ]
+unset GH_TOKEN
+gh auth logout -h github.com || true
+printf '%s\n' "$TOKEN" | gh auth login --hostname github.com --with-token
+export GH_TOKEN="$TOKEN"`
+			log.Printf("[daytona] auth gh cli (no retries)...")
+			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghAuthScript}, 30*time.Second)
+			if ghAuthErr != nil {
+				return fmt.Errorf("auth gh cli: %w", ghAuthErr)
+			}
+			if ghAuthResult.ExitCode != 0 {
+				return fmt.Errorf("auth gh cli failed (exit %d): %s", ghAuthResult.ExitCode, ghAuthResult.Stdout)
+			}
+			log.Printf("[daytona] auth gh cli done")
+
+			ghStatusScript := `export HOME=/home/daytona
+set -x
+. /etc/profile.d/elasticclaw-github.sh
+gh auth status
+gh repo view can-io/canio >/dev/null`
+			log.Printf("[daytona] verify gh auth (no retries)...")
+			ghStatusResult, ghStatusErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghStatusScript}, 20*time.Second)
+			if ghStatusErr != nil {
+				return fmt.Errorf("verify gh auth: %w", ghStatusErr)
+			}
+			if ghStatusResult.ExitCode != 0 {
+				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, ghStatusResult.Stdout)
+			}
+			log.Printf("[daytona] verify gh auth done")
+
+			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
+			for _, repo := range githubRepos {
+				repoParts := strings.SplitN(repo.Repo, "/", 2)
+				repoName := repo.Repo
+				if len(repoParts) == 2 {
+					repoName = repoParts[1]
+				}
+				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$GH_TOKEN@github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
+			}
+			if err := exec("clone repos", 2*time.Minute, cloneScript); err != nil {
+				return fmt.Errorf("clone repos: %w", err)
+			}
 			if len(githubRepos) > 0 {
-				cloneScript := buildGitHubCloneScript(githubRepos)
-				if cloneScript != "" {
-					if err := exec("clone repos", 2*time.Minute, "export HOME=/home/daytona; cd ~/.openclaw/workspace; "+cloneScript); err != nil {
-						log.Printf("[daytona] warning: repo clone failed: %v", err)
+				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+				for _, repo := range githubRepos {
+					repoParts := strings.SplitN(repo.Repo, "/", 2)
+					repoName := repo.Repo
+					if len(repoParts) == 2 {
+						repoName = repoParts[1]
 					}
+					verifyCloneScript += fmt.Sprintf("[ -d %q/.git ] || exit 1; ", repoName)
+				}
+				if err := exec("verify cloned repos", 20*time.Second, verifyCloneScript); err != nil {
+					return fmt.Errorf("verify cloned repos: %w", err)
 				}
 			}
 		}
 	}
 
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
@@ -2278,6 +2401,59 @@ func (s *Server) pollProviderStatus() {
 	defer ticker.Stop()
 	for range ticker.C {
 		s.syncReplicatedVMs()
+	}
+}
+
+func (s *Server) keepAliveDaytonaSandboxes() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.petDaytonaSandboxes()
+	}
+}
+
+func (s *Server) petDaytonaSandboxes() {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT c.id, c.name, c.provider_id
+		FROM claws c
+		JOIN claw_prs cp ON cp.claw_id = c.id
+		WHERE c.provider = 'daytona'
+		  AND c.provider_id != ''
+		  AND c.status NOT IN ('idle','deleted','error','offline')
+	`)
+	if err != nil {
+		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type clawRow struct{ id, name, providerID string }
+	var claws []clawRow
+	for rows.Next() {
+		var c clawRow
+		if err := rows.Scan(&c.id, &c.name, &c.providerID); err == nil {
+			claws = append(claws, c)
+		}
+	}
+	if len(claws) == 0 {
+		return
+	}
+
+	p, err := daytona.New(nil)
+	if err != nil {
+		log.Printf("keepAliveDaytonaSandboxes: provider init error: %v", err)
+		return
+	}
+
+	for _, c := range claws {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := p.ExecWithTimeout(ctx, c.providerID, []string{"bash", "-lc", "true"}, 20*time.Second)
+		cancel()
+		if err != nil {
+			log.Printf("[daytona] keepalive failed for %s (%s): %v", c.name, c.id[:8], err)
+			continue
+		}
+		log.Printf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
 	}
 }
 
@@ -3299,7 +3475,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d (url=%s) for claw %s", appCfg.AppID, appCfg.URL, clawID[:8])
+		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,

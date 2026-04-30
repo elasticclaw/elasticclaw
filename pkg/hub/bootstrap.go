@@ -158,10 +158,13 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	return fmt.Sprintf(`python3 << 'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
 try:
     with open(path) as f:
         config = json.load(f)
-except:
+except FileNotFoundError:
+    config = {}
+except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
 config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
