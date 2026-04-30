@@ -2090,30 +2090,33 @@ echo 'credential helper installed'`, tokenURL)
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			log.Printf("[daytona] warning: credential helper install failed: %v", err)
 		} else {
-			// Step 5b: authenticate gh CLI
-			ghAuthScript := `export HOME=/home/daytona
+			// Step 5b: fetch one bootstrap token and reuse it for gh + clone
+			bootstrapGitHubAuth := fmt.Sprintf(`export HOME=/home/daytona
+response=$(curl -sf --max-time 35 %q)
+[ -n "$response" ] || exit 1
+token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+[ -n "$token" ] || exit 1
+printf 'export GH_TOKEN=%s\n' "$token" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
+sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 if command -v gh &>/dev/null; then
-  GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)
-  if [ -n "$GH_TOKEN" ]; then
-    echo "$GH_TOKEN" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
-    printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
-    sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-  fi
-else
-  echo 'gh not installed'
-fi`
-			if err := exec("auth gh cli", 20*time.Second, ghAuthScript); err != nil {
-				log.Printf("[daytona] warning: gh auth failed: %v", err)
-			}
-
-			// Step 5c: clone repos into workspace
-			if len(githubRepos) > 0 {
-				cloneScript := buildGitHubCloneScript(githubRepos)
-				if cloneScript != "" {
-					if err := exec("clone repos", 2*time.Minute, "export HOME=/home/daytona; cd ~/.openclaw/workspace; "+cloneScript); err != nil {
-						log.Printf("[daytona] warning: repo clone failed: %v", err)
-					}
+  echo "$token" | gh auth login --with-token 2>/dev/null && echo 'gh CLI authenticated' || echo 'gh auth failed'
+fi
+if [ `+fmt.Sprintf("%d", len(githubRepos))+` -gt 0 ]; then
+  cd ~/.openclaw/workspace
+  FAILED=0
+`, tokenURL)
+			for _, repo := range githubRepos {
+				repoParts := strings.SplitN(repo.Repo, "/", 2)
+				repoName := repo.Repo
+				if len(repoParts) == 2 {
+					repoName = repoParts[1]
 				}
+				bootstrapGitHubAuth += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$token@github.com/%s %s && echo 'Cloned %s' || FAILED=1; else git -C %s pull --ff-only && echo 'Updated %s' || FAILED=1; fi\n",
+					repoName, repo.Repo, repoName, repo.Repo, repoName, repo.Repo)
+			}
+			bootstrapGitHubAuth += "exit $FAILED\nfi\n"
+			if err := exec("auth gh cli and clone repos", 2*time.Minute, bootstrapGitHubAuth); err != nil {
+				log.Printf("[daytona] warning: bootstrap GitHub auth/clone failed: %v", err)
 			}
 		}
 	}
