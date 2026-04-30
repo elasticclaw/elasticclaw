@@ -2113,7 +2113,14 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 			}
 
 			fetchGitHubTokenJSON := fmt.Sprintf(`export HOME=/home/daytona
-curl -sf --max-time 35 %q -o /tmp/elasticclaw-github-token.json
+rm -f /tmp/elasticclaw-github-token.json
+curl -sv --max-time 35 %q -o /tmp/elasticclaw-github-token.json
+status=$?
+echo "curl_exit=$status"
+ls -l /tmp/elasticclaw-github-token.json 2>&1 || true
+echo '--- token json ---'
+cat /tmp/elasticclaw-github-token.json 2>&1 || true
+[ $status -eq 0 ] || exit $status
 [ -s /tmp/elasticclaw-github-token.json ] || exit 1
 `, tokenURL)
 			if err := exec("fetch github bootstrap token json", 45*time.Second, fetchGitHubTokenJSON); err != nil {
@@ -2125,11 +2132,18 @@ python3 - <<'PYEOF' > /tmp/elasticclaw-github-token.txt
 import json
 with open('/tmp/elasticclaw-github-token.json') as f:
     data = json.load(f)
-token = data.get('token', '')
-if not token:
-    raise SystemExit(1)
-print(token)
+print(data.get('token', ''))
 PYEOF
+status=$?
+echo "python_exit=$status"
+ls -l /tmp/elasticclaw-github-token.txt 2>&1 || true
+echo '--- parsed token length ---'
+python3 - <<'PYEOF'
+from pathlib import Path
+p = Path('/tmp/elasticclaw-github-token.txt')
+print(len(p.read_text().strip()) if p.exists() else 0)
+PYEOF
+[ $status -eq 0 ] || exit $status
 [ -s /tmp/elasticclaw-github-token.txt ] || exit 1`
 			if err := exec("parse github bootstrap token", 20*time.Second, parseGitHubToken); err != nil {
 				return fmt.Errorf("parse github bootstrap token: %w", err)
