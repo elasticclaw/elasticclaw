@@ -2112,33 +2112,45 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 				return fmt.Errorf("install gh cli: %w", err)
 			}
 
-			// Step 5b: fetch one bootstrap token and reuse it for gh + clone
-			bootstrapGitHubAuth := fmt.Sprintf(`export HOME=/home/daytona
+			bootstrapGitHubToken := fmt.Sprintf(`export HOME=/home/daytona
 response=$(curl -sf --max-time 35 %q)
 [ -n "$response" ] || exit 1
 token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 [ -n "$token" ] || exit 1
-printf 'export GH_TOKEN=%s\n' "$token" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
+printf 'export GH_TOKEN=%%s\n' "$token" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
 sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-command -v gh >/dev/null 2>&1 || exit 1
-echo "$token" | gh auth login --with-token >/dev/null 2>&1 || exit 1
-if [ `+fmt.Sprintf("%d", len(githubRepos))+` -gt 0 ]; then
-  cd ~/.openclaw/workspace
-  FAILED=0
 `, tokenURL)
+			if err := exec("fetch github bootstrap token", 45*time.Second, bootstrapGitHubToken); err != nil {
+				return fmt.Errorf("fetch github bootstrap token: %w", err)
+			}
+
+			ghAuthScript := `export HOME=/home/daytona
+. /etc/profile.d/elasticclaw-github.sh
+command -v gh >/dev/null 2>&1 || exit 1
+[ -n "$GH_TOKEN" ] || exit 1
+echo "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1`
+			if err := exec("auth gh cli", 30*time.Second, ghAuthScript); err != nil {
+				return fmt.Errorf("auth gh cli: %w", err)
+			}
+
+			ghStatusScript := `export HOME=/home/daytona
+. /etc/profile.d/elasticclaw-github.sh
+gh auth status >/dev/null 2>&1`
+			if err := exec("verify gh auth", 20*time.Second, ghStatusScript); err != nil {
+				return fmt.Errorf("verify gh auth: %w", err)
+			}
+
+			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; "
 			for _, repo := range githubRepos {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
 				if len(repoParts) == 2 {
 					repoName = repoParts[1]
 				}
-				bootstrapGitHubAuth += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$token@github.com/%s %s && echo 'Cloned %s' || FAILED=1; else git -C %s pull --ff-only && echo 'Updated %s' || FAILED=1; fi\n",
-					repoName, repo.Repo, repoName, repo.Repo, repoName, repo.Repo)
+				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
 			}
-			bootstrapGitHubAuth += "git config --global --get credential.helper >/dev/null || exit 1\n"
-			bootstrapGitHubAuth += "exit $FAILED\nfi\n"
-			if err := exec("auth gh cli and clone repos", 2*time.Minute, bootstrapGitHubAuth); err != nil {
-				return fmt.Errorf("bootstrap GitHub auth/clone failed: %w", err)
+			if err := exec("clone repos", 2*time.Minute, cloneScript); err != nil {
+				return fmt.Errorf("clone repos: %w", err)
 			}
 			if len(githubRepos) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
