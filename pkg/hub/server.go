@@ -114,6 +114,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
+	go srv.keepAliveDaytonaSandboxes()
 	srv.startPRWatcher()
 
 	return srv, nil
@@ -2295,6 +2296,59 @@ func (s *Server) pollProviderStatus() {
 	defer ticker.Stop()
 	for range ticker.C {
 		s.syncReplicatedVMs()
+	}
+}
+
+func (s *Server) keepAliveDaytonaSandboxes() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.petDaytonaSandboxes()
+	}
+}
+
+func (s *Server) petDaytonaSandboxes() {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT c.id, c.name, c.provider_id
+		FROM claws c
+		JOIN claw_prs cp ON cp.claw_id = c.id
+		WHERE c.provider = 'daytona'
+		  AND c.provider_id != ''
+		  AND c.status NOT IN ('idle','deleted','error','offline')
+	`)
+	if err != nil {
+		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type clawRow struct{ id, name, providerID string }
+	var claws []clawRow
+	for rows.Next() {
+		var c clawRow
+		if err := rows.Scan(&c.id, &c.name, &c.providerID); err == nil {
+			claws = append(claws, c)
+		}
+	}
+	if len(claws) == 0 {
+		return
+	}
+
+	p, err := daytona.New(nil)
+	if err != nil {
+		log.Printf("keepAliveDaytonaSandboxes: provider init error: %v", err)
+		return
+	}
+
+	for _, c := range claws {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := p.ExecWithTimeout(ctx, c.providerID, []string{"bash", "-lc", "true"}, 20*time.Second)
+		cancel()
+		if err != nil {
+			log.Printf("[daytona] keepalive failed for %s (%s): %v", c.name, c.id[:8], err)
+			continue
+		}
+		log.Printf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
 	}
 }
 
