@@ -2096,11 +2096,11 @@ done
 echo 'token proxy not ready'
 exit 1`, tokenURL)
 		if err := exec("wait for github token proxy", 45*time.Second, waitTokenProxy); err != nil {
-			log.Printf("[daytona] warning: github token proxy not ready: %v", err)
+			return fmt.Errorf("github token proxy not ready: %w", err)
 		}
 
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
-			log.Printf("[daytona] warning: credential helper install failed: %v", err)
+			return fmt.Errorf("install git credential helper: %w", err)
 		} else {
 			// Step 5b: fetch one bootstrap token and reuse it for gh + clone
 			bootstrapGitHubAuth := fmt.Sprintf(`export HOME=/home/daytona
@@ -2126,9 +2126,24 @@ if [ `+fmt.Sprintf("%d", len(githubRepos))+` -gt 0 ]; then
 				bootstrapGitHubAuth += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$token@github.com/%s %s && echo 'Cloned %s' || FAILED=1; else git -C %s pull --ff-only && echo 'Updated %s' || FAILED=1; fi\n",
 					repoName, repo.Repo, repoName, repo.Repo, repoName, repo.Repo)
 			}
+			bootstrapGitHubAuth += "git config --global --get credential.helper >/dev/null || exit 1\n"
 			bootstrapGitHubAuth += "exit $FAILED\nfi\n"
 			if err := exec("auth gh cli and clone repos", 2*time.Minute, bootstrapGitHubAuth); err != nil {
-				log.Printf("[daytona] warning: bootstrap GitHub auth/clone failed: %v", err)
+				return fmt.Errorf("bootstrap GitHub auth/clone failed: %w", err)
+			}
+			if len(githubRepos) > 0 {
+				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+				for _, repo := range githubRepos {
+					repoParts := strings.SplitN(repo.Repo, "/", 2)
+					repoName := repo.Repo
+					if len(repoParts) == 2 {
+						repoName = repoParts[1]
+					}
+					verifyCloneScript += fmt.Sprintf("[ -d %q/.git ] || exit 1; ", repoName)
+				}
+				if err := exec("verify cloned repos", 20*time.Second, verifyCloneScript); err != nil {
+					return fmt.Errorf("verify cloned repos: %w", err)
+				}
 			}
 		}
 	}
