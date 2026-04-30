@@ -1216,7 +1216,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var registrationTagsJSON string
 	var bootstrapOK int
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]'), COALESCE(bootstrap_ok,0) FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON, &bootstrapOK)
+	var provider string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]'), COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON, &bootstrapOK, &provider)
+	allowWake := bootstrapOK == 1 || provider != "daytona"
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
@@ -1235,12 +1237,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
 	usedPipelineEntryInject := false
-	if bootstrapOK == 1 && cc.gatewayReady && currentStatus == "connected" {
+	if allowWake && cc.gatewayReady && currentStatus == "connected" {
 		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
 	}
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
-	if bootstrapOK == 1 && cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
+	if allowWake && cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
 		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			go s.sendWakeMessage(cc, clawID)
 		}
