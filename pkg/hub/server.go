@@ -1215,7 +1215,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var registrationTagsJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
+	var bootstrapOK int
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]'), COALESCE(bootstrap_ok,0) FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON, &bootstrapOK)
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
@@ -1234,12 +1235,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
 	usedPipelineEntryInject := false
-	if cc.gatewayReady && currentStatus == "connected" {
+	if bootstrapOK == 1 && cc.gatewayReady && currentStatus == "connected" {
 		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
 	}
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
-	if cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
+	if bootstrapOK == 1 && cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
 		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			go s.sendWakeMessage(cc, clawID)
 		}
@@ -1321,7 +1322,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
-							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting'`, clawID)
+							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
@@ -1852,7 +1853,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_ok=0 WHERE id=?`, clawID)
 		// Destroy the sandbox — auto-stop is disabled so it would run forever otherwise
 		log.Printf("[daytona] destroying failed sandbox %s for claw %s", instance.ID, clawName)
 		if delErr := p.Destroy(context.Background(), instance.ID, false); delErr != nil {
@@ -2167,6 +2168,7 @@ if [ `+fmt.Sprintf("%d", len(githubRepos))+` -gt 0 ]; then
 		}
 	}
 
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
