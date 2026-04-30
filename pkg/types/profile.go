@@ -2,9 +2,10 @@ package types
 
 // HubProfile holds connection details for one ElasticClaw hub.
 type HubProfile struct {
-	URL     string `yaml:"url"`
-	Token   string `yaml:"token"`
-	SSHURI  string `yaml:"ssh_uri,omitempty"` // optional SSH target for hub upgrade (e.g. ssh://marc@canio-factory)
+	URL    string `yaml:"url"`
+	Token  string `yaml:"token"`
+	SSHURI string `yaml:"ssh_uri,omitempty"` // optional SSH target for hub upgrade (e.g. ssh://marc@canio-factory)
+	SSHKey string `yaml:"ssh_key,omitempty"` // optional SSH private key path for hub upgrade
 }
 
 // Profile represents an execution context (legacy, kept for compat)
