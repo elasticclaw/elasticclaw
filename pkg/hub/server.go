@@ -2185,8 +2185,7 @@ export GH_TOKEN="$TOKEN"`
 			ghStatusScript := `export HOME=/home/daytona
 set -x
 . /etc/profile.d/elasticclaw-github.sh
-gh auth status
-gh repo view can-io/canio >/dev/null`
+gh auth status`
 			log.Printf("[daytona] verify gh auth (no retries)...")
 			ghStatusResult, ghStatusErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghStatusScript}, 20*time.Second)
 			if ghStatusErr != nil {
