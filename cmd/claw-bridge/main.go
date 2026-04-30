@@ -1245,7 +1245,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bridge not connected", http.StatusServiceUnavailable)
 		return
 	}
-	log.Printf("[bridge-proxy] forwarding req_id=%s path=%s", reqID, req.Path)
+	log.Printf("[bridge-proxy] forwarding req_id=%s method=%s path=%s query=%s headers=%v body_len=%d", reqID, req.Method, req.Path, req.Query, req.Header, len(req.Body))
 	if err := sendFn(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
 		log.Printf("[bridge-proxy] send error req_id=%s err=%v", reqID, err)
 		p.mu.Lock()
@@ -1257,7 +1257,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case res := <-ch:
-		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d", reqID, res.Status, len(res.Body))
+		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d body=%q", reqID, res.Status, len(res.Body), res.Body)
 		w.WriteHeader(res.Status)
 		_, _ = w.Write([]byte(res.Body))
 	case <-time.After(10 * time.Second):
