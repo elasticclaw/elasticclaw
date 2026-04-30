@@ -2182,14 +2182,14 @@ gh auth status >/dev/null 2>&1`
 				return fmt.Errorf("verify gh auth: %w", err)
 			}
 
-			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; "
+			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
 			for _, repo := range githubRepos {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
 				if len(repoParts) == 2 {
 					repoName = repoParts[1]
 				}
-				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
+				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$GH_TOKEN@github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
 			}
 			if err := exec("clone repos", 2*time.Minute, cloneScript); err != nil {
 				return fmt.Errorf("clone repos: %w", err)
