@@ -2167,17 +2167,21 @@ sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 			}
 
 			ghAuthScript := `export HOME=/home/daytona
+set -x
 . /etc/profile.d/elasticclaw-github.sh
-command -v gh >/dev/null 2>&1 || exit 1
-[ -n "$GH_TOKEN" ] || exit 1
-echo "$GH_TOKEN" | gh auth login --with-token >/dev/null 2>&1`
+command -v gh
+[ -n "$GH_TOKEN" ]
+printf 'gh_token_len=%s\n' "${#GH_TOKEN}"
+gh --version
+echo "$GH_TOKEN" | gh auth login --with-token`
 			if err := exec("auth gh cli", 30*time.Second, ghAuthScript); err != nil {
 				return fmt.Errorf("auth gh cli: %w", err)
 			}
 
 			ghStatusScript := `export HOME=/home/daytona
+set -x
 . /etc/profile.d/elasticclaw-github.sh
-gh auth status >/dev/null 2>&1`
+gh auth status`
 			if err := exec("verify gh auth", 20*time.Second, ghStatusScript); err != nil {
 				return fmt.Errorf("verify gh auth: %w", err)
 			}
