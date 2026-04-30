@@ -2035,12 +2035,16 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 			name := name
 			content := content
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; echo "[DEBUG] HOME=$HOME pwd=$(pwd) writing %s"; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
 %s
-ELASTICCLAW_EOF`,
-				name, content)
+ELASTICCLAW_EOF
+ls -la ~/.openclaw/workspace/%s 2>/dev/null || echo "[DEBUG] MISSING in ~/.openclaw/workspace/%s"
+ls -la ~/%s 2>/dev/null || echo "[DEBUG] MISSING in ~/%s"`,
+				name, name, content, name, name, name, name)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+			} else {
+				log.Printf("[daytona] wrote %s", name)
 			}
 		}
 		log.Printf("[daytona] template files written for claw %s", clawID)
