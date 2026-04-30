@@ -1257,7 +1257,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case res := <-ch:
-		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d body=%q", reqID, res.Status, len(res.Body), res.Body)
+		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d", reqID, res.Status, len(res.Body))
 		w.WriteHeader(res.Status)
 		_, _ = w.Write([]byte(res.Body))
 	case <-time.After(10 * time.Second):

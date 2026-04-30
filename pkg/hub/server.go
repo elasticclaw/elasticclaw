@@ -2121,12 +2121,10 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 
 			fetchGitHubTokenJSON := fmt.Sprintf(`export HOME=/home/daytona
 rm -f /tmp/elasticclaw-github-token.json
-curl -sv --max-time 35 %q -o /tmp/elasticclaw-github-token.json
+curl -sf --max-time 35 %q -o /tmp/elasticclaw-github-token.json
 status=$?
 echo "curl_exit=$status"
 ls -l /tmp/elasticclaw-github-token.json 2>&1 || true
-echo '--- token json ---'
-cat /tmp/elasticclaw-github-token.json 2>&1 || true
 [ $status -eq 0 ] || exit $status
 [ -s /tmp/elasticclaw-github-token.json ] || exit 1
 `, tokenURL)
@@ -2144,12 +2142,6 @@ PYEOF
 status=$?
 echo "python_exit=$status"
 ls -l /tmp/elasticclaw-github-token.txt 2>&1 || true
-echo '--- parsed token length ---'
-python3 - <<'PYEOF'
-from pathlib import Path
-p = Path('/tmp/elasticclaw-github-token.txt')
-print(len(p.read_text().strip()) if p.exists() else 0)
-PYEOF
 [ $status -eq 0 ] || exit $status
 [ -s /tmp/elasticclaw-github-token.txt ] || exit 1`
 			if err := exec("parse github bootstrap token", 20*time.Second, parseGitHubToken); err != nil {
@@ -2171,7 +2163,6 @@ set -x
 . /etc/profile.d/elasticclaw-github.sh
 command -v gh
 [ -n "$GH_TOKEN" ]
-printf 'gh_token_len=%s\n' "${#GH_TOKEN}"
 gh --version
 TOKEN="$(cat /tmp/elasticclaw-github-token.txt)"
 [ -n "$TOKEN" ]
@@ -3482,7 +3473,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d (url=%s) for claw %s", appCfg.AppID, appCfg.URL, clawID[:8])
+		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
