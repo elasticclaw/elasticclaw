@@ -2031,19 +2031,41 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var templateFiles map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err == nil && len(templateFiles) > 0 {
+		log.Printf("[daytona] writing %d template files for claw %s: %v", len(templateFiles), clawID, func() []string {
+			names := make([]string, 0, len(templateFiles))
+			for k := range templateFiles {
+				names = append(names, k)
+			}
+			return names
+		}())
 		for name, content := range templateFiles {
 			name := name
 			content := content
 			writeCmd := fmt.Sprintf(
 				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
 %s
-ELASTICCLAW_EOF`,
-				name, content)
+ELASTICCLAW_EOF
+ls -la ~/.openclaw/workspace/%s || echo "VERIFY_FAILED: %s not found"`,
+				name, content, name, name)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+			} else {
+				log.Printf("[daytona] wrote %s for claw %s", name, clawID)
 			}
 		}
 		log.Printf("[daytona] template files written for claw %s", clawID)
+	} else if err != nil {
+		log.Printf("[daytona] warning: failed to unmarshal template_files for claw %s: %v", clawID, err)
+	} else {
+		log.Printf("[daytona] no template files to write for claw %s", clawID)
+	}
+
+	// Verify workspace files exist before starting bridge
+	verifyCmd := `export HOME=/home/daytona; echo "===WORKSPACE_FILES==="; ls -la ~/.openclaw/workspace/ 2>/dev/null || echo "NO_WORKSPACE_DIR"; echo "===HOME_FILES==="; ls -la ~/BOOTSTRAP.md ~/AGENTS.md ~/CONTEXT.md 2>/dev/null || echo "NO_HOME_FILES"`
+	if verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCmd}, 10*time.Second); verifyErr == nil {
+		log.Printf("[daytona] workspace verification for claw %s: exit=%d stdout=%s", clawID, verifyResult.ExitCode, verifyResult.Stdout)
+	} else {
+		log.Printf("[daytona] workspace verification failed for claw %s: %v", clawID, verifyErr)
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
