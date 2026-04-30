@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -214,6 +215,12 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	// Load all available keys (explicit path or all standard ~/.ssh/ keys)
 	keyPaths := []string{}
 	if keyPath != "" {
+		if strings.HasPrefix(keyPath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				keyPath = filepath.Join(home, keyPath[2:])
+			}
+		}
+		keyPath = os.ExpandEnv(keyPath)
 		keyPaths = []string{keyPath}
 	} else {
 		home, _ := os.UserHomeDir()
