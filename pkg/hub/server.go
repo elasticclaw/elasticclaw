@@ -2173,8 +2173,12 @@ command -v gh
 [ -n "$GH_TOKEN" ]
 printf 'gh_token_len=%s\n' "${#GH_TOKEN}"
 gh --version
+TOKEN="$(cat /tmp/elasticclaw-github-token.txt)"
+[ -n "$TOKEN" ]
+unset GH_TOKEN
 gh auth logout -h github.com || true
-gh auth login --hostname github.com --with-token < /tmp/elasticclaw-github-token.txt`
+printf '%s\n' "$TOKEN" | gh auth login --hostname github.com --with-token
+export GH_TOKEN="$TOKEN"`
 			log.Printf("[daytona] auth gh cli (no retries)...")
 			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghAuthScript}, 30*time.Second)
 			if ghAuthErr != nil {
