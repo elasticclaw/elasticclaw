@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
+import { BrandingPageTitle } from '@/components/branding-page-title'
 import './globals.css'
 
 const _geist = Geist({ subsets: ["latin"] });
@@ -36,6 +37,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark h-full">
       <body className="font-sans antialiased h-full overflow-hidden">
+        <BrandingPageTitle />
         {children}
       </body>
     </html>
