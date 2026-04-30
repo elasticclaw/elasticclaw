@@ -2038,16 +2038,12 @@ cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bri
 			name := name
 			content := content
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; echo "[DEBUG] HOME=$HOME pwd=$(pwd) writing %s"; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
 %s
-ELASTICCLAW_EOF
-ls -la ~/.openclaw/workspace/%s 2>/dev/null || echo "[DEBUG] MISSING in ~/.openclaw/workspace/%s"
-ls -la ~/%s 2>/dev/null || echo "[DEBUG] MISSING in ~/%s"`,
-				name, name, content, name, name, name, name)
+ELASTICCLAW_EOF`,
+				name, content)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
-			} else {
-				log.Printf("[daytona] wrote %s", name)
 			}
 		}
 		log.Printf("[daytona] template files written for claw %s", clawID)
@@ -2623,7 +2619,7 @@ func (s *Server) bridgeDownloadURL() string {
 const (
 	wakeMessageMarker  = "__WAKE_MESSAGE__"
 	defaultWakeContent = "Introduce yourself briefly and let the user know you're ready to help."
-	factoryWakeContent = `Read your BOOTSTRAP.md now. Then:
+	factoryWakeContent = `You've been assigned an issue. Use your tools to read the full details, then:
 1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
 2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
 3. If you hit something interesting or unexpected, say so.

@@ -291,10 +291,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	}
 
-	// Inject issue context as BOOTSTRAP.md (picked up by standard AGENTS.md first-run flow)
-	// and as CONTEXT.md for persistent reference after bootstrap is deleted.
+	// Inject issue context as CONTEXT.md for persistent reference.
+	// BOOTSTRAP.md is intentionally omitted — the pipeline inject message tells
+	// the agent to fetch issue details via Linear tools instead of reading a file
+	// that races with first-run cleanup.
 	issueContext := buildLinearContext(payload)
-	templateFiles["BOOTSTRAP.md"] = issueContext
 	templateFiles["CONTEXT.md"] = issueContext
 
 	// Determine claw name
