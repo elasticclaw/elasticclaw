@@ -2465,7 +2465,14 @@ func (s *Server) petDaytonaSandboxes() {
 		return
 	}
 
-	p, err := daytona.New(nil)
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["daytona"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("keepAliveDaytonaSandboxes: no daytona provider configured")
+		return
+	}
+	p, err := newDaytonaProvider(cfg)
 	if err != nil {
 		log.Printf("keepAliveDaytonaSandboxes: provider init error: %v", err)
 		return
