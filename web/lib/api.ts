@@ -228,3 +228,15 @@ export async function patchClawAutoSettings(clawId: string, patch: { autoFixCI?:
     body: JSON.stringify(patch),
   })
 }
+
+export interface ModelInfo {
+  id: string
+  name: string
+}
+
+export type ProviderModels = Record<string, ModelInfo[]>
+
+export async function fetchModels(provider?: string): Promise<ProviderModels | { provider: string; models: ModelInfo[] }> {
+  const qs = provider ? `?provider=${encodeURIComponent(provider)}` : ""
+  return apiFetch(`/api/models${qs}`)
+}

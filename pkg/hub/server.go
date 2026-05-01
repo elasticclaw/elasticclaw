@@ -200,6 +200,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAdminAuth(s.handleAIConfigBackup))
 	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAdminAuth(s.handleAIConfigStream))
 	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAdminAuth(s.handleAIConfigCurrentConfig))
+	mux.HandleFunc("/api/models", s.withWebAuth(s.handleModels))
 	mux.HandleFunc("/api/settings/ai-config", s.withWebAdminAuth(s.handleAIConfig))
 
 	// Health

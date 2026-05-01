@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
+import { fetchModels, type ModelInfo, type ProviderModels } from "@/lib/api"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -377,21 +378,11 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
+  { value: "openai",     label: "OpenAI",     placeholder: "sk-..." },
+  { value: "groq",       label: "Groq",       placeholder: "gsk_..." },
+  { value: "deepseek",   label: "DeepSeek",   placeholder: "sk-..." },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
-
-const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
-  anthropic: [
-    { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-    { id: "anthropic/claude-opus-4-5",   name: "Claude Opus 4.5" },
-    { id: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
-  ],
-  fireworks: [
-    { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2" },
-    { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B" },
-    { id: "fireworks/accounts/fireworks/models/deepseek-v3",                name: "DeepSeek V3" },
-  ],
-}
 
 function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const llmKeys = settings.llmKeys || []
@@ -401,6 +392,21 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [newKey, setNewKey] = useState("")
   const [newDefault, setNewDefault] = useState(false)
   const [newDefaultModel, setNewDefaultModel] = useState("")
+  const [providerModels, setProviderModels] = useState<ProviderModels>({})
+  const [modelsLoading, setModelsLoading] = useState(false)
+
+  // Fetch available models on mount
+  useEffect(() => {
+    setModelsLoading(true)
+    fetchModels()
+      .then((data) => {
+        if (data && "providers" in data) {
+          setProviderModels((data as unknown as { providers: ProviderModels }).providers)
+        }
+      })
+      .catch(() => {})
+      .finally(() => setModelsLoading(false))
+  }, [])
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
@@ -477,14 +483,16 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
         </div>
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
-          {PROVIDER_MODELS[newProvider] ? (
+          {modelsLoading ? (
+            <div className="h-8 flex items-center text-xs text-muted-foreground">Loading models…</div>
+          ) : providerModels[newProvider] ? (
             <select
               value={newDefaultModel}
               onChange={e => setNewDefaultModel(e.target.value)}
               className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
             >
               <option value="">— use provider default —</option>
-              {PROVIDER_MODELS[newProvider].map(m => (
+              {providerModels[newProvider].map((m: ModelInfo) => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
