@@ -53,17 +53,18 @@ type Server struct {
 }
 
 type clawConn struct {
-	id                   string
-	tenantID             string
-	conn                 *websocket.Conn
-	tags                 []string        // cached from DB at registration time for access-control checks
-	contextUsage         int             // 0-100, updated from heartbeats
-	gatewayReady         bool            // true once bridge reports gateway session established
-	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID       string          // pre-assigned message ID for the current stream
-	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
+	id                    string
+	tenantID              string
+	conn                  *websocket.Conn
+	tags                  []string        // cached from DB at registration time for access-control checks
+	contextUsage          int             // 0-100, updated from heartbeats
+	gatewayReady          bool            // true once bridge reports gateway session established
+	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
+	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID        string          // pre-assigned message ID for the current stream
+	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -1317,7 +1318,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
 						// Log only on status changes, not every heartbeat
-						prevHealthy := cc.gatewayReady
 						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
@@ -1338,12 +1338,24 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								shouldWake = true
 								wakeConn = cc
 							}
-						} else if !hb.GatewayHealthy && prevHealthy {
-							// Gateway went unhealthy
-							log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
-						} else if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
-							// Log context usage only when crossing 80% threshold
-							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
+						} else if !hb.GatewayHealthy {
+							cc.gatewayUnhealthyCount++
+							if cc.gatewayUnhealthyCount == 1 {
+								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
+							} else if cc.gatewayUnhealthyCount%4 == 0 {
+								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+							}
+							if cc.gatewayUnhealthyCount == 4 {
+								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
+							}
+						} else {
+							if cc.gatewayUnhealthyCount > 0 {
+								log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+								cc.gatewayUnhealthyCount = 0
+							}
+							if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
+								log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
+							}
 						}
 					}
 					// Inject context warning once per streaming turn when usage is >=95%
