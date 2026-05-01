@@ -65,6 +65,7 @@ type clawConn struct {
 	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
+	gatewayNudgeSent      bool            // true once the gateway-unhealthy nudge has been injected this turn
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -1345,7 +1346,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							} else if cc.gatewayUnhealthyCount%4 == 0 {
 								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
 							}
-							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
+							if cc.gatewayUnhealthyCount >= 4 && !cc.streamingStartedAt.IsZero() && !cc.gatewayNudgeSent {
+								cc.gatewayNudgeSent = true
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
 						}
@@ -1414,6 +1416,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.streamingStartedAt = time.Now()
 							cc.streamingTimeoutSent = false
 							cc.contextWarningSent = false
+							cc.gatewayNudgeSent = false
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1449,6 +1452,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					cc.streamingStartedAt = time.Time{}
 					cc.streamingTimeoutSent = false
 					cc.contextWarningSent = false
+					cc.gatewayNudgeSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
