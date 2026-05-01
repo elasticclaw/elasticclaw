@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -261,6 +262,18 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload) error {
 	issueID := payload.Data.Identifier
 
+	// Verify we can read the issue before spending money on a sandbox.
+	// Non-negotiable: if the issue is unreadable, we can't do any work.
+	linearToken := s.resolveLinearTokenForFactory(factory)
+	if linearToken != "" {
+		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
+			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
+		}
+		log.Printf("[factory:%s] verified issue %s is readable", factory.Name, issueID)
+	} else {
+		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
+	}
+
 	// Enforce 1:1 — check if a claw already exists for this issue
 	var existingID string
 	_ = s.db.QueryRow(
@@ -291,10 +304,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	}
 
-	// Inject issue context as BOOTSTRAP.md (picked up by standard AGENTS.md first-run flow)
-	// and as CONTEXT.md for persistent reference after bootstrap is deleted.
+	// Inject issue context as CONTEXT.md for persistent reference.
+	// BOOTSTRAP.md is intentionally omitted — the pipeline inject message tells
+	// the agent to fetch issue details via Linear tools instead of reading a file
+	// that races with first-run cleanup.
 	issueContext := buildLinearContext(payload)
-	templateFiles["BOOTSTRAP.md"] = issueContext
 	templateFiles["CONTEXT.md"] = issueContext
 
 	// Determine claw name
@@ -323,9 +337,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("no provider configured")
 	}
 
-	// Find Linear token for this workspace
-	linearToken := s.resolveLinearTokenForFactory(factory)
-
+	// linearToken was already resolved in the pre-flight check above.
 	// Build env vars
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
@@ -333,6 +345,18 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 	if linearToken != "" {
 		env["LINEAR_API_KEY"] = linearToken
+	}
+
+	// Inject template-requested secrets from hub.yaml secrets:
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, secretName := range tmplCfg.Secrets {
+			if val, ok := s.hubCfg.Secrets[secretName]; ok {
+				env[secretName] = val
+				log.Printf("[factory:%s] injected secret %s into claw env", factory.Name, secretName)
+			} else {
+				log.Printf("[factory:%s] warning: requested secret %s not found in hub secrets", factory.Name, secretName)
+			}
+		}
 	}
 
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
@@ -368,6 +392,23 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			autoFixBugbot = 0
 		}
 	}
+	// Build SECRETS.md so the agent knows which env vars are available.
+	// Values are NOT written — they stay in env only.
+	var secretList []string
+	if linearToken != "" {
+		secretList = append(secretList, "- `LINEAR_API_KEY` — Linear API token")
+	}
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, name := range tmplCfg.Secrets {
+			if _, ok := s.hubCfg.Secrets[name]; ok {
+				secretList = append(secretList, fmt.Sprintf("- `%s` — injected from hub secrets", name))
+			}
+		}
+	}
+	if len(secretList) > 0 {
+		templateFiles["SECRETS.md"] = "## Available Secrets\n\nThe following API keys are available as environment variables:\n\n" + strings.Join(secretList, "\n") + "\n\nUse these with your tools as needed. Values are in the environment, not in files.\n"
+	}
+
 	// Resolve default model: template > llm_key lookup > hub default
 	if defaultModel == "" && llmKey != "" {
 		s.mu.RLock()
@@ -911,4 +952,70 @@ func (s *Server) handleFactoryEvents(w http.ResponseWriter, r *http.Request) {
 		events = []FactoryEvent{}
 	}
 	jsonOK(w, events)
+}
+
+// linearIssueDetails holds the fields we fetch for pipeline template rendering.
+type linearIssueDetails struct {
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+}
+
+// fetchLinearIssueDetails looks up an issue by its Linear identifier (e.g. "CAN-61")
+// and returns the fields needed for pipeline template rendering.
+func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linearIssueDetails, error) {
+	base := s.linearBaseURL
+	if base == "" {
+		base = "https://api.linear.app"
+	}
+
+	// Log key prefix for debugging (never log full key)
+	keyPrefix := "<empty>"
+	if len(token) > 12 {
+		keyPrefix = token[:12] + "..."
+	} else if len(token) >= 4 {
+		keyPrefix = token[:4] + "..."
+	} else if token != "" {
+		keyPrefix = token + "..."
+	}
+	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
+
+	queryBody := map[string]interface{}{
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
+		"variables": map[string]string{
+			"id": issueIdentifier,
+		},
+	}
+	queryJSON, _ := json.Marshal(queryBody)
+	req, _ := http.NewRequest("POST", base+"/graphql", strings.NewReader(string(queryJSON)))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[linear] fetchLinearIssueDetails HTTP error for %s: %v", issueIdentifier, err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf("[linear] fetchLinearIssueDetails response for %s: status=%d len=%d", issueIdentifier, resp.StatusCode, len(bodyBytes))
+
+	var result struct {
+		Data struct {
+			Issue linearIssueDetails `json:"issue"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		log.Printf("[linear] fetchLinearIssueDetails JSON decode error for %s: %v", issueIdentifier, err)
+		return nil, err
+	}
+	if result.Data.Issue.Identifier == "" {
+		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
+		return nil, fmt.Errorf("issue %s not found", issueIdentifier)
+	}
+	log.Printf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, result.Data.Issue.Identifier, result.Data.Issue.Title)
+	return &result.Data.Issue, nil
 }

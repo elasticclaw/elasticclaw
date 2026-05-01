@@ -527,9 +527,12 @@ function ClawBoardCard({
                 }
                 if (message.role === "hub") {
                   return (
-                    <div key={message.id} className="flex items-center gap-1.5 py-0.5">
-                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40" />
-                      <span className="text-[10px] italic text-muted-foreground/60 leading-tight">{message.content}</span>
+                    <div key={message.id} className="flex items-start gap-1.5 py-0.5">
+                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40 mt-0.5" />
+                      <span className={cn(
+                        "text-[10px] italic text-muted-foreground/60 leading-tight",
+                        message.format === "pre" && "whitespace-pre-wrap"
+                      )}>{message.content}</span>
                     </div>
                   )
                 }
@@ -873,9 +876,12 @@ const MessageBubble = memo(function MessageBubble({
 
   if (isHub) {
     return (
-      <div className="flex items-center gap-2 py-1">
-        <div className="flex items-center gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]">
-          <Settings2 className="size-3 shrink-0 text-muted-foreground/50" />
+      <div className="flex items-start gap-2 py-1">
+        <div className={cn(
+          "flex items-start gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]",
+          message.format === "pre" && "whitespace-pre-wrap"
+        )}>
+          <Settings2 className="size-3 shrink-0 text-muted-foreground/50 mt-0.5" />
           <span className="text-muted-foreground/80">{message.content}</span>
         </div>
       </div>

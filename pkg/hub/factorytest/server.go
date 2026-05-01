@@ -71,6 +71,14 @@ func NewTestServer(t *testing.T) *TestServer {
 				DoneStatus:    "done-state-id",
 				Template:      "elasticclaw",
 				Provider:      "noop",
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
 			},
 		},
 		Integrations: &types.IntegrationsConfig{

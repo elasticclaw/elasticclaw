@@ -478,9 +478,13 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 	}
 
 	msgID := uuid.New().String()
+	format := ""
+	if role == "hub" {
+		format = "pre"
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		msgID, clawID, tenantID, role, content, now(),
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		msgID, clawID, tenantID, role, content, format, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to insert message: %v", err)
@@ -507,6 +511,7 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 			"tenant_id":  tenantID,
 			"role":       role,
 			"content":    content,
+			"format":     format,
 			"created_at": now(),
 		},
 	})

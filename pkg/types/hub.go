@@ -26,6 +26,7 @@ type HubMessage struct {
 	TenantID       string    `json:"tenant_id" db:"tenant_id"`
 	Role           string    `json:"role" db:"role"` // "user" | "claw"
 	Content        string    `json:"content" db:"content"`
+	Format         string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
 	CreatedAt      time.Time `json:"created_at" db:"created_at"`
 }
 

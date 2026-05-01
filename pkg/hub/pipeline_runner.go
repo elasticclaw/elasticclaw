@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
+	"text/template"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -32,7 +34,50 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 // move is skipped silently.
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
-		s.injectHubMessageByID(clawID, strings.TrimRight(stage.OnEnter.Inject, "\n"))
+		injectMsg := stage.OnEnter.Inject
+
+		// Render {{issue.identifier}}, {{issue.title}}, {{issue.url}} if this is a Linear claw
+		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
+			linearToken := s.resolveLinearTokenForFactory(factory)
+			if linearToken != "" {
+				details, err := s.fetchLinearIssueDetails(linearToken, issueID)
+				if err != nil {
+					log.Printf("[pipeline] fetchLinearIssueDetails FAILED for %s: %v", issueID, err)
+				} else if details == nil {
+					log.Printf("[pipeline] fetchLinearIssueDetails returned nil details for %s", issueID)
+				} else {
+					log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
+					log.Printf("[pipeline] RAW TEMPLATE for claw %s:\n%s", clawID[:8], injectMsg)
+					tmpl, err := template.New("inject").Parse(injectMsg)
+					if err != nil {
+						log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
+						log.Printf("[pipeline] FALLING BACK to raw template for claw %s", clawID[:8])
+					} else {
+						var buf bytes.Buffer
+						data := struct {
+							Issue *linearIssueDetails
+						}{
+							Issue: details,
+						}
+						log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], data.Issue.Identifier, data.Issue.Title, data.Issue.URL)
+						if err := tmpl.Execute(&buf, data); err != nil {
+							log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
+							log.Printf("[pipeline] FALLING BACK to raw template for claw %s", clawID[:8])
+						} else {
+							injectMsg = buf.String()
+							log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
+						}
+					}
+				}
+			} else {
+				log.Printf("[pipeline] no linear token for factory %q, skipping template render", factory.Name)
+			}
+		} else {
+			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
+		}
+
+		s.injectHubMessageByID(clawID, injectMsg)
 	}
 
 	if stage.OnEnter.MergePR {
