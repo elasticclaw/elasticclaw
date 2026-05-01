@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -261,6 +262,18 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload) error {
 	issueID := payload.Data.Identifier
 
+	// Verify we can read the issue before spending money on a sandbox.
+	// Non-negotiable: if the issue is unreadable, we can't do any work.
+	linearToken := s.resolveLinearTokenForFactory(factory)
+	if linearToken != "" {
+		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
+			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
+		}
+		log.Printf("[factory:%s] verified issue %s is readable", factory.Name, issueID)
+	} else {
+		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
+	}
+
 	// Enforce 1:1 — check if a claw already exists for this issue
 	var existingID string
 	_ = s.db.QueryRow(
@@ -324,9 +337,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("no provider configured")
 	}
 
-	// Find Linear token for this workspace
-	linearToken := s.resolveLinearTokenForFactory(factory)
-
+	// linearToken was already resolved in the pre-flight check above.
 	// Build env vars
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
@@ -959,6 +970,15 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		base = "https://api.linear.app"
 	}
 
+	// Log key prefix for debugging (never log full key)
+	keyPrefix := "<empty>"
+	if len(token) > 12 {
+		keyPrefix = token[:12] + "..."
+	} else if token != "" {
+		keyPrefix = token[:4] + "..."
+	}
+	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
+
 	queryBody := map[string]interface{}{
 		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
 		"variables": map[string]string{
@@ -970,22 +990,30 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[linear] fetchLinearIssueDetails HTTP error for %s: %v", issueIdentifier, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf("[linear] fetchLinearIssueDetails response for %s: status=%d len=%d", issueIdentifier, resp.StatusCode, len(bodyBytes))
 
 	var result struct {
 		Data struct {
 			Issue linearIssueDetails `json:"issue"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		log.Printf("[linear] fetchLinearIssueDetails JSON decode error for %s: %v", issueIdentifier, err)
 		return nil, err
 	}
 	if result.Data.Issue.Identifier == "" {
+		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
 		return nil, fmt.Errorf("issue %s not found", issueIdentifier)
 	}
+	log.Printf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, result.Data.Issue.Identifier, result.Data.Issue.Title)
 	return &result.Data.Issue, nil
 }

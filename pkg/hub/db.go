@@ -43,6 +43,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -90,6 +91,7 @@ func migrate(db *sql.DB) error {
 		tenant_id  TEXT NOT NULL,
 		role       TEXT NOT NULL,
 		content    TEXT NOT NULL,
+		format     TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL
 	);
 

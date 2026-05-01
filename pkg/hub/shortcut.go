@@ -381,6 +381,13 @@ func (s *Server) shortcutStateName(token string, stateID int64) string {
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
 func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string) error {
+	// Verify we can read the story before spending money on a sandbox.
+	// Non-negotiable: if the story is unreadable, we can't do any work.
+	if _, err := shortcutAPI(fmt.Sprintf("stories/%s", storyID), token); err != nil {
+		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
+	}
+	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
+
 	// Enforce 1:1
 	var existingID string
 	_ = s.db.QueryRow(

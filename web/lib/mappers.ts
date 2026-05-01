@@ -120,6 +120,7 @@ export function mapApiMessage(apiMsg: ApiMessage): Message {
     id: apiMsg.id,
     role: apiMsg.role,
     content: apiMsg.content,
+    format: apiMsg.format,
     timestamp: new Date(apiMsg.created_at),
     claw_id: apiMsg.claw_id,
     tenant_id: apiMsg.tenant_id,

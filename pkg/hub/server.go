@@ -1902,9 +1902,6 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
 				continue
 			}
-			if strings.Contains(label, "write ") && result.Stdout != "" {
-				log.Printf("[daytona] %s output: %s", label, result.Stdout)
-			}
 			log.Printf("[daytona] %s done", label)
 			return nil
 		}
@@ -3522,11 +3519,12 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 		TenantID:  cc.tenantID,
 		Role:      "hub",
 		Content:   text,
+		Format:    "pre",
 		CreatedAt: now(),
 	}
 	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})

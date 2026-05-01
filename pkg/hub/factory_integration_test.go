@@ -63,8 +63,8 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 	// Connect fake bridge
 	bridge := factorytest.ConnectFakeBridge(t, ts.URL(), clawID, issueID, ts.ClawToken())
 
-	// Wait for wake message (BOOTSTRAP is in the wake message content for factory claws)
-	bridge.WaitForMessage(t, "BOOTSTRAP", 5*time.Second)
+	// Wait for wake message (pipeline injects the entry stage message)
+	bridge.WaitForMessage(t, "CONTEXT.md", 5*time.Second)
 
 	// Fake agent does work
 	bridge.SendMessage("Reading the issue context...")
@@ -156,8 +156,8 @@ func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
 	clawID := ts.WaitForClawWithIssue(t, issueID, 5*time.Second)
 	bridge := factorytest.ConnectFakeBridge(t, ts.URL(), clawID, issueID, ts.ClawToken())
 
-	// Wait for wake message
-	bridge.WaitForMessage(t, "BOOTSTRAP", 5*time.Second)
+	// Wait for wake message (pipeline injects the entry stage message)
+	bridge.WaitForMessage(t, "CONTEXT.md", 5*time.Second)
 
 	// Send [DONE] — no GH App configured so no PR validation, accepted immediately
 	bridge.SendDone("https://github.com/testorg/testrepo/pull/42")
