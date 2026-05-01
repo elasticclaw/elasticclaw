@@ -336,6 +336,18 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		env["LINEAR_API_KEY"] = linearToken
 	}
 
+	// Inject template-requested secrets from hub.yaml secrets:
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, secretName := range tmplCfg.Secrets {
+			if val, ok := s.hubCfg.Secrets[secretName]; ok {
+				env[secretName] = val
+				log.Printf("[factory:%s] injected secret %s into claw env", factory.Name, secretName)
+			} else {
+				log.Printf("[factory:%s] warning: requested secret %s not found in hub secrets", factory.Name, secretName)
+			}
+		}
+	}
+
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
 	// Factory-level overrides (color, tags) take precedence over template config.
 	var (
