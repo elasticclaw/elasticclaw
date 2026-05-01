@@ -28,7 +28,7 @@ import (
 	"time"
 )
 
-const linearAPIURL = "https://api.linear.app/graphql"
+var linearAPIURL = "https://api.linear.app/graphql"
 
 func runLinearCLI(args []string) int {
 	apiKey := os.Getenv("LINEAR_API_KEY")
