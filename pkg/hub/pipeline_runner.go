@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
+	"text/template"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -32,7 +34,32 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 // move is skipped silently.
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
-		s.injectHubMessageByID(clawID, strings.TrimRight(stage.OnEnter.Inject, "\n"))
+		injectMsg := strings.TrimRight(stage.OnEnter.Inject, "\n")
+
+		// Render {{issue.identifier}}, {{issue.title}}, {{issue.url}} if this is a Linear claw
+		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+			linearToken := s.resolveLinearTokenForFactory(factory)
+			if linearToken != "" {
+				if details, err := s.fetchLinearIssueDetails(linearToken, issueID); err == nil && details != nil {
+					tmpl, err := template.New("inject").Parse(injectMsg)
+					if err == nil {
+						var buf bytes.Buffer
+						data := map[string]interface{}{
+							"issue": details,
+						}
+						if err := tmpl.Execute(&buf, data); err == nil {
+							injectMsg = buf.String()
+						} else {
+							log.Printf("[pipeline] template render failed for claw %s: %v", clawID[:8], err)
+						}
+					}
+				} else {
+					log.Printf("[pipeline] could not fetch issue %s for template: %v", issueID, err)
+				}
+			}
+		}
+
+		s.injectHubMessageByID(clawID, injectMsg)
 	}
 
 	if stage.OnEnter.MergePR {

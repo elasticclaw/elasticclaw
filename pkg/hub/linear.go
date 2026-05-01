@@ -913,3 +913,50 @@ func (s *Server) handleFactoryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, events)
 }
+
+// linearIssueDetails holds the fields we fetch for pipeline template rendering.
+type linearIssueDetails struct {
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+}
+
+// fetchLinearIssueDetails looks up an issue by its Linear identifier (e.g. "CAN-61")
+// and returns the fields needed for pipeline template rendering.
+func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linearIssueDetails, error) {
+	base := s.linearBaseURL
+	if base == "" {
+		base = "https://api.linear.app"
+	}
+
+	queryBody := map[string]interface{}{
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
+		"variables": map[string]string{
+			"id": issueIdentifier,
+		},
+	}
+	queryJSON, _ := json.Marshal(queryBody)
+	req, _ := http.NewRequest("POST", base+"/graphql", strings.NewReader(string(queryJSON)))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data struct {
+			Issue linearIssueDetails `json:"issue"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if result.Data.Issue.Identifier == "" {
+		return nil, fmt.Errorf("issue %s not found", issueIdentifier)
+	}
+	return &result.Data.Issue, nil
+}
