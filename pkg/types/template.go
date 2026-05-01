@@ -104,6 +104,10 @@ type TemplateConfig struct {
 	//         cyan, sky, blue, indigo, violet, purple, pink, rose
 	// If unset, a color is auto-assigned from the claw name.
 	Color string `yaml:"color,omitempty"`
+	// Secrets is a list of named secrets from hub.yaml secrets: to inject
+	// as environment variables into the claw. The secret name becomes the
+	// env var name (uppercased if needed).
+	Secrets []string `yaml:"secrets,omitempty"`
 }
 
 type TemplateResources struct {

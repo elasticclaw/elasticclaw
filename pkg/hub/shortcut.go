@@ -381,6 +381,13 @@ func (s *Server) shortcutStateName(token string, stateID int64) string {
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
 func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string) error {
+	// Verify we can read the story before spending money on a sandbox.
+	// Non-negotiable: if the story is unreadable, we can't do any work.
+	if _, err := shortcutAPI(fmt.Sprintf("stories/%s", storyID), token); err != nil {
+		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
+	}
+	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
+
 	// Enforce 1:1
 	var existingID string
 	_ = s.db.QueryRow(
@@ -444,6 +451,18 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	if token != "" {
 		env["SHORTCUT_API_KEY"] = token
+	}
+
+	// Inject template-requested secrets from hub.yaml secrets:
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, secretName := range tmplCfg.Secrets {
+			if val, ok := s.hubCfg.Secrets[secretName]; ok {
+				env[secretName] = val
+				log.Printf("[factory:%s] injected secret %s into claw env", factory.Name, secretName)
+			} else {
+				log.Printf("[factory:%s] warning: requested secret %s not found in hub secrets", factory.Name, secretName)
+			}
+		}
 	}
 
 	// Resolve template config fields (from elasticclaw-config.yaml if present).

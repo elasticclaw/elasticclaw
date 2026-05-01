@@ -27,6 +27,7 @@ export interface Message {
   id: string
   role: "user" | "claw" | "system" | "hub"
   content: string
+  format?: string // "pre" = preserve whitespace
   timestamp: Date
   // API fields
   claw_id?: string
@@ -56,6 +57,7 @@ export interface ApiMessage {
   tenant_id: string
   role: "user" | "claw" | "hub"
   content: string
+  format?: string
   created_at: string
 }
 
