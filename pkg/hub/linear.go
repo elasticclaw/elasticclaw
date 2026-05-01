@@ -381,6 +381,23 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 			autoFixBugbot = 0
 		}
 	}
+	// Build SECRETS.md so the agent knows which env vars are available.
+	// Values are NOT written — they stay in env only.
+	var secretList []string
+	if linearToken != "" {
+		secretList = append(secretList, "- `LINEAR_API_KEY` — Linear API token")
+	}
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, name := range tmplCfg.Secrets {
+			if _, ok := s.hubCfg.Secrets[name]; ok {
+				secretList = append(secretList, fmt.Sprintf("- `%s` — injected from hub secrets", name))
+			}
+		}
+	}
+	if len(secretList) > 0 {
+		templateFiles["SECRETS.md"] = "## Available Secrets\n\nThe following API keys are available as environment variables:\n\n" + strings.Join(secretList, "\n") + "\n\nUse these with your tools as needed. Values are in the environment, not in files.\n"
+	}
+
 	// Resolve default model: template > llm_key lookup > hub default
 	if defaultModel == "" && llmKey != "" {
 		s.mu.RLock()
