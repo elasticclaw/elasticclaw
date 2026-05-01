@@ -104,10 +104,11 @@ type TemplateConfig struct {
 	//         cyan, sky, blue, indigo, violet, purple, pink, rose
 	// If unset, a color is auto-assigned from the claw name.
 	Color string `yaml:"color,omitempty"`
-	// Secrets is a list of named secrets from hub.yaml secrets: to inject
-	// as environment variables into the claw. The secret name becomes the
-	// env var name (uppercased if needed).
-	Secrets []string `yaml:"secrets,omitempty"`
+	// Secrets is a list of secret references to inject as environment variables
+	// into the claw. Each entry can be a plain string (legacy: secret name from
+	// hub.yaml secrets, injected with that name) or a typed SecretRef that
+	// resolves the right secret and maps it to the correct env var name.
+	Secrets SecretRefList `yaml:"secrets,omitempty"`
 }
 
 type TemplateResources struct {
@@ -127,6 +128,72 @@ type LinearConfig struct {
 type LinearTemplateConfig struct {
 	Workspace string `yaml:"workspace,omitempty"` // match against hub.yaml linear[].workspace
 	Team      string `yaml:"team,omitempty"`      // optional team name for context
+}
+
+// SecretRef is a typed reference to a secret that should be injected into a claw.
+// Use in template/factory secrets lists to resolve the right secret and map it
+// to the correct env var name without hardcoding token values or env var names.
+type SecretRef struct {
+	// Type is the secret kind: "linear", "shortcut", "github", or "custom".
+	// For integration types (linear, shortcut, github), the hub resolves the
+	// actual token from integrations config using Workspace as a selector.
+	// For "custom", Name is the key in HubConfig.Secrets.
+	Type string `yaml:"type"`
+	// Name is the hub secret key for type="custom". Ignored for integration types.
+	Name string `yaml:"name,omitempty"`
+	// Workspace selects which integration workspace to use (for linear, shortcut).
+	// If empty, the first matching integration config is used.
+	Workspace string `yaml:"workspace,omitempty"`
+	// As is the env var name to inject the secret as. If empty, a default is
+	// used based on Type (e.g. LINEAR_API_KEY for linear).
+	As string `yaml:"as,omitempty"`
+}
+
+// EnvVarName returns the environment variable name for this secret ref.
+// Returns "" for invalid refs (e.g. custom with no name).
+func (r SecretRef) EnvVarName() string {
+	if r.As != "" {
+		return r.As
+	}
+	switch r.Type {
+	case "linear":
+		return "LINEAR_API_KEY"
+	case "shortcut":
+		return "SHORTCUT_API_KEY"
+	case "github":
+		return "GITHUB_TOKEN"
+	case "custom":
+		if r.Name == "" {
+			return ""
+		}
+		return strings.ToUpper(r.Name)
+	default:
+		return ""
+	}
+}
+
+// SecretRefList is a custom YAML type that accepts both legacy plain strings
+// and typed SecretRef objects in the same list.
+type SecretRefList []SecretRef
+
+func (l *SecretRefList) UnmarshalYAML(value *yaml.Node) error {
+	// Try list of SecretRef first
+	var refs []SecretRef
+	if err := value.Decode(&refs); err == nil {
+		*l = refs
+		return nil
+	}
+	// Fall back to legacy list of strings: each string becomes a custom SecretRef
+	var names []string
+	if err := value.Decode(&names); err != nil {
+		return fmt.Errorf("secrets: expected list of {type,workspace,name,as} or legacy list of secret names: %w", err)
+	}
+	refs = make([]SecretRef, len(names))
+	for i, n := range names {
+		refs[i] = SecretRef{Type: "custom", Name: n}
+	}
+	*l = refs
+	return nil
 }
 
 // GitHubAppConfig holds GitHub App credentials for one GitHub App.

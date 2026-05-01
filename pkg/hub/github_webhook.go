@@ -511,14 +511,15 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
 	}
 
-	// Inject template-requested secrets from hub.yaml secrets:
+	// Resolve and inject template-requested secrets (typed refs + legacy)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		for _, secretName := range tmplCfg.Secrets {
-			if val, ok := s.hubCfg.Secrets[secretName]; ok {
-				env[secretName] = val
-				log.Printf("[factory:%s] injected secret %s into claw env", factory.Name, secretName)
+		for _, ref := range tmplCfg.Secrets {
+			val, envName, ok := s.resolveSecretRef(ref, factory)
+			if ok {
+				env[envName] = val
+				log.Printf("[factory:%s] injected secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
-				log.Printf("[factory:%s] warning: requested secret %s not found in hub secrets", factory.Name, secretName)
+				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
 			}
 		}
 	}

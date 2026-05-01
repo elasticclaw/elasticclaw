@@ -347,14 +347,17 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		env["LINEAR_API_KEY"] = linearToken
 	}
 
-	// Inject template-requested secrets from hub.yaml secrets:
+	// Resolve and inject template-requested secrets (typed refs + legacy)
+	resolvedSecrets := make(map[string]string) // envName → value (also used for SECRETS.md)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		for _, secretName := range tmplCfg.Secrets {
-			if val, ok := s.hubCfg.Secrets[secretName]; ok {
-				env[secretName] = val
-				log.Printf("[factory:%s] injected secret %s into claw env", factory.Name, secretName)
+		for _, ref := range tmplCfg.Secrets {
+			val, envName, ok := s.resolveSecretRef(ref, factory)
+			if ok {
+				env[envName] = val
+				resolvedSecrets[envName] = val
+				log.Printf("[factory:%s] injected secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
-				log.Printf("[factory:%s] warning: requested secret %s not found in hub secrets", factory.Name, secretName)
+				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
 			}
 		}
 	}
@@ -398,12 +401,20 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	if linearToken != "" {
 		secretList = append(secretList, "- `LINEAR_API_KEY` — Linear API token")
 	}
-	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		for _, name := range tmplCfg.Secrets {
-			if _, ok := s.hubCfg.Secrets[name]; ok {
-				secretList = append(secretList, fmt.Sprintf("- `%s` — injected from hub secrets", name))
+	for envName, val := range resolvedSecrets {
+		// Find the ref that produced this envName for type info
+		var refType string
+		for _, ref := range tmplCfg.Secrets {
+			if ref.EnvVarName() == envName {
+				refType = ref.Type
+				break
 			}
 		}
+		if refType == "" {
+			refType = "custom"
+		}
+		secretList = append(secretList, fmt.Sprintf("- `%s` — %s secret", envName, refType))
+		_ = val // value intentionally not logged/written
 	}
 	if len(secretList) > 0 {
 		templateFiles["SECRETS.md"] = "## Available Secrets\n\nThe following API keys are available as environment variables:\n\n" + strings.Join(secretList, "\n") + "\n\nUse these with your tools as needed. Values are in the environment, not in files.\n"
@@ -569,6 +580,57 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 		}
 	}
 	return ""
+}
+
+// resolveSecretRef resolves a typed SecretRef to its value and env var name.
+// Returns (value, envName, ok). envName may be "" for misconfigured refs.
+func (s *Server) resolveSecretRef(ref types.SecretRef, factory *types.FactoryConfig) (string, string, bool) {
+	envName := ref.EnvVarName()
+	if envName == "" {
+		// Misconfigured ref (e.g. custom with no name, unknown type)
+		return "", "", false
+	}
+	switch ref.Type {
+	case "linear":
+		if s.hubCfg.Integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, li := range s.hubCfg.Integrations.Linear {
+			if ws == "" || strings.EqualFold(li.Workspace, ws) {
+				return li.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "shortcut":
+		if s.hubCfg.Integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, si := range s.hubCfg.Integrations.Shortcut {
+			if ws == "" || strings.EqualFold(si.Workspace, ws) {
+				return si.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "github":
+		// GitHub tokens are minted per-installation; not stored in integrations.
+		// For now, fall through to custom lookup in hub secrets.
+		fallthrough
+	case "custom":
+		if val, ok := s.hubCfg.Secrets[ref.Name]; ok {
+			return val, envName, true
+		}
+		return "", envName, false
+	default:
+		return "", envName, false
+	}
 }
 
 func escapeLikeWildcards(s string) string {
