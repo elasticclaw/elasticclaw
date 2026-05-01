@@ -250,10 +250,16 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 				issue { id identifier state { name } }
 			}
 		}`
-		_, err = linearQuery(apiKey, mut, map[string]interface{}{"id": id, "stateId": sid})
+		updateResult, err := linearQuery(apiKey, mut, map[string]interface{}{"id": id, "stateId": sid})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error updating state: %v\n", err)
 			return 1
+		}
+		if payload, _ := dig(updateResult, "data", "issueUpdate").(map[string]interface{}); payload != nil {
+			if ok, _ := payload["success"].(bool); !ok {
+				fmt.Fprintf(os.Stderr, "issueUpdate returned success=false for %s\n", identifier)
+				return 1
+			}
 		}
 		fmt.Printf("Updated %s state → %s\n", identifier, stateName)
 	}
@@ -266,10 +272,16 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 				comment { id body }
 			}
 		}`
-		_, err = linearQuery(apiKey, mut, map[string]interface{}{"issueId": id, "body": comment})
+		commentResult, err := linearQuery(apiKey, mut, map[string]interface{}{"issueId": id, "body": comment})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error adding comment: %v\n", err)
 			return 1
+		}
+		if payload, _ := dig(commentResult, "data", "commentCreate").(map[string]interface{}); payload != nil {
+			if ok, _ := payload["success"].(bool); !ok {
+				fmt.Fprintf(os.Stderr, "commentCreate returned success=false for %s\n", identifier)
+				return 1
+			}
 		}
 		fmt.Printf("Added comment to %s\n", identifier)
 	}
