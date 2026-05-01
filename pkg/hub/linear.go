@@ -990,7 +990,10 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		},
 	}
 	queryJSON, _ := json.Marshal(queryBody)
-	req, _ := http.NewRequest("POST", base+"/graphql", strings.NewReader(string(queryJSON)))
+	req, err := http.NewRequest("POST", base+"/graphql", strings.NewReader(string(queryJSON)))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
 
