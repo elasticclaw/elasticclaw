@@ -38,9 +38,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 
 		// Render {{issue.identifier}}, {{issue.title}}, {{issue.url}} if this is a Linear claw
 		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken != "" {
 				if details, err := s.fetchLinearIssueDetails(linearToken, issueID); err == nil && details != nil {
+					log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
 					tmpl, err := template.New("inject").Parse(injectMsg)
 					if err == nil {
 						var buf bytes.Buffer
@@ -49,14 +51,21 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 						}
 						if err := tmpl.Execute(&buf, data); err == nil {
 							injectMsg = buf.String()
+							log.Printf("[pipeline] template rendered successfully for claw %s", clawID[:8])
 						} else {
 							log.Printf("[pipeline] template render failed for claw %s: %v", clawID[:8], err)
 						}
+					} else {
+						log.Printf("[pipeline] template parse failed for claw %s: %v", clawID[:8], err)
 					}
 				} else {
 					log.Printf("[pipeline] could not fetch issue %s for template: %v", issueID, err)
 				}
+			} else {
+				log.Printf("[pipeline] no linear token for factory %q, skipping template render", factory.Name)
 			}
+		} else {
+			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
 
 		s.injectHubMessageByID(clawID, injectMsg)
