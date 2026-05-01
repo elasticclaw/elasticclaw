@@ -1554,7 +1554,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 }
 
 func checkGateway(addr string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/healthz", addr), nil)
 	resp, err := http.DefaultClient.Do(req)
