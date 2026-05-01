@@ -1345,17 +1345,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							} else if cc.gatewayUnhealthyCount%4 == 0 {
 								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
 							}
-							if cc.gatewayUnhealthyCount == 4 {
+							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-						} else {
-							if cc.gatewayUnhealthyCount > 0 {
-								log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
-								cc.gatewayUnhealthyCount = 0
-							}
-							if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
-								log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
-							}
+						}
+						// Log context usage on every heartbeat when it crosses the 80% threshold,
+						// regardless of gateway health — don't silence diagnostics during outages.
+						if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
+							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
+						}
+						if hb.GatewayHealthy && cc.gatewayUnhealthyCount > 0 {
+							log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+							cc.gatewayUnhealthyCount = 0
 						}
 					}
 					// Inject context warning once per streaming turn when usage is >=95%
