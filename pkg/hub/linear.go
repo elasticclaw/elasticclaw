@@ -974,8 +974,10 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	keyPrefix := "<empty>"
 	if len(token) > 12 {
 		keyPrefix = token[:12] + "..."
-	} else if token != "" {
+	} else if len(token) >= 4 {
 		keyPrefix = token[:4] + "..."
+	} else if token != "" {
+		keyPrefix = token + "..."
 	}
 	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
 
