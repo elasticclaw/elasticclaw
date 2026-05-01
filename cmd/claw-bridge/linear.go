@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const linearAPIURL = "https://api.linear.app/graphql"
@@ -66,7 +67,9 @@ func runLinearCLI(args []string) int {
 				fmt.Fprintln(os.Stderr, "usage: claw-bridge linear issue search <query>")
 				return 1
 			}
-			return linearIssueSearch(apiKey, args[2])
+			// Join all remaining args so multi-word queries work without quoting.
+			queryStr := strings.Join(args[2:], " ")
+			return linearIssueSearch(apiKey, queryStr)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown issue subcommand: %s\n", args[1])
 			return 1
@@ -78,6 +81,9 @@ func runLinearCLI(args []string) int {
 		return 1
 	}
 }
+
+// linearClient is a shared HTTP client with a reasonable timeout.
+var linearClient = &http.Client{Timeout: 15 * time.Second}
 
 // linearQuery performs a GraphQL query/mutation against Linear's API.
 func linearQuery(apiKey, query string, variables map[string]interface{}) (map[string]interface{}, error) {
@@ -94,7 +100,7 @@ func linearQuery(apiKey, query string, variables map[string]interface{}) (map[st
 	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := linearClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +173,10 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 		}
 	}
 
-	// Resolve issue ID from identifier
+	// Resolve issue ID and team ID from identifier
 	query := `query($identifier: String!) {
 		issues(filter: { identifier: { eq: $identifier } }) {
-			nodes { id }
+			nodes { id team { id name } }
 		}
 	}`
 	result, err := linearQuery(apiKey, query, map[string]interface{}{"identifier": identifier})
@@ -193,15 +199,33 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 		return 1
 	}
 
+	// Extract team ID for state scoping
+	var teamID string
+	if teamData, ok := issue0["team"].(map[string]interface{}); ok {
+		teamID, _ = teamData["id"].(string)
+	}
+
 	// Update state if requested
 	if stateName != "" {
-		// Find state ID by name
-		statesQuery := `query($name: String!) {
-			workflowStates(filter: { name: { eq: $name } }) {
-				nodes { id name }
-			}
-		}`
-		statesResult, err := linearQuery(apiKey, statesQuery, map[string]interface{}{"name": stateName})
+		// Find state ID by name, scoped to the issue's team
+		var statesQuery string
+		var statesVars map[string]interface{}
+		if teamID != "" {
+			statesQuery = `query($name: String!, $teamId: String!) {
+				workflowStates(filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }) {
+					nodes { id name team { name } }
+				}
+			}`
+			statesVars = map[string]interface{}{"name": stateName, "teamId": teamID}
+		} else {
+			statesQuery = `query($name: String!) {
+				workflowStates(filter: { name: { eq: $name } }) {
+					nodes { id name team { name } }
+				}
+			}`
+			statesVars = map[string]interface{}{"name": stateName}
+		}
+		statesResult, err := linearQuery(apiKey, statesQuery, statesVars)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error finding state '%s': %v\n", stateName, err)
 			return 1
@@ -209,7 +233,11 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 		states := dig(statesResult, "data", "workflowStates", "nodes")
 		statesList, _ := states.([]interface{})
 		if len(statesList) == 0 {
-			fmt.Fprintf(os.Stderr, "state '%s' not found\n", stateName)
+			if teamID != "" {
+				fmt.Fprintf(os.Stderr, "state '%s' not found for this issue's team\n", stateName)
+			} else {
+				fmt.Fprintf(os.Stderr, "state '%s' not found\n", stateName)
+			}
 			return 1
 		}
 		state0, _ := statesList[0].(map[string]interface{})
