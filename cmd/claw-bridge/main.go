@@ -1270,6 +1270,11 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Subcommand dispatch: linear CLI embedded in the bridge binary.
+	if len(os.Args) > 1 && os.Args[1] == "linear" {
+		os.Exit(runLinearCLI(os.Args[2:]))
+	}
+
 	// Bootstrap mode: run all VM setup steps before entering the bridge loop.
 	// Activated by --bootstrap flag or ELASTICCLAW_BOOTSTRAP=1 env var.
 	bootstrapMode := os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
