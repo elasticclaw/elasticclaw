@@ -171,6 +171,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
+	mux.HandleFunc("/api/models", s.withWebAuth(s.handleModels))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -3548,4 +3549,31 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
+}
+
+// ─── Models API ─────────────────────────────────────────────────────────────
+
+// handleModels returns all available LLM models per provider.
+// GET /api/models — returns {providers: [{name, label, models: [{id, name, api}]}]}
+// Auth: web session (withWebAuth) or hub token (withAuth).
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Collect unique providers from configured LLM keys
+	s.mu.RLock()
+	seen := make(map[string]bool)
+	var configuredProviders []string
+	for _, k := range s.hubCfg.LLMKeys {
+		if !seen[k.Provider] {
+			seen[k.Provider] = true
+			configuredProviders = append(configuredProviders, k.Provider)
+		}
+	}
+	s.mu.RUnlock()
+
+	resp := buildModelsResponse(configuredProviders)
+	jsonOK(w, resp)
 }

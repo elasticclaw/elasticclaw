@@ -258,15 +258,15 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 
 	assertContains(t, snippet, `'openai': {`, "openai provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "openai baseUrl")
-	assertContains(t, snippet, "{'id': 'gpt-4o',      'name': 'GPT-4o'}", "openai models")
+	assertContains(t, snippet, "{'id': 'openai/gpt-4o', 'name': 'GPT-4o', 'api': 'openai-completions'}", "openai models")
 
 	assertContains(t, snippet, `'groq': {`, "groq provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.groq.com/openai/v1'", "groq baseUrl")
-	assertContains(t, snippet, "{'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}", "groq models")
+	assertContains(t, snippet, "{'id': 'groq/llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B', 'api': 'openai-completions'}", "groq models")
 
 	assertContains(t, snippet, `'deepseek': {`, "deepseek provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.deepseek.com/v1'", "deepseek baseUrl")
-	assertContains(t, snippet, "{'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}", "deepseek models")
+	assertContains(t, snippet, "{'id': 'deepseek/deepseek-chat', 'name': 'DeepSeek Chat', 'api': 'openai-completions'}", "deepseek models")
 }
 
 // ── Shellcheck test ───────────────────────────────────────────────────────────

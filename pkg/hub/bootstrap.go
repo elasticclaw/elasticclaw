@@ -80,6 +80,22 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	// Helper: build a single provider dict as a python literal.
 	buildEntry := func(k *types.LLMKeyConfig) string {
 		envVar := k.EnvVarName()
+		providerInfo := ProviderModels[k.Provider]
+
+		// Build models list from centralized ProviderModels
+		var modelsPy []string
+		for _, m := range providerInfo {
+			api := m.API
+			if api == "" {
+				api = "openai-completions"
+			}
+			modelsPy = append(modelsPy, fmt.Sprintf(
+				"{'id': '%s', 'name': '%s', 'api': '%s'}",
+				m.ID, m.Name, api,
+			))
+		}
+		modelsList := strings.Join(modelsPy, ",\n                ")
+
 		switch k.Provider {
 		case "anthropic":
 			return fmt.Sprintf(`'anthropic': {
@@ -87,50 +103,45 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
             'baseUrl': 'https://api.anthropic.com',
             'api': 'anthropic-messages',
             'models': [
-                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
-                {'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages'},
-                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
+                %s
             ]
-        }`, envVar)
+        }`, envVar, modelsList)
 		case "fireworks":
 			return fmt.Sprintf(`'fireworks': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.fireworks.ai/inference/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2'},
-                {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B'},
-                {'id': 'accounts/fireworks/models/deepseek-v3',                'name': 'DeepSeek V3'}
+                %s
             ]
-        }`, envVar)
+        }`, envVar, modelsList)
 		case "openai":
 			return fmt.Sprintf(`'openai': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.openai.com/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'gpt-4o',      'name': 'GPT-4o'},
-                {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini'}
+                %s
             ]
-        }`, envVar)
+        }`, envVar, modelsList)
 		case "groq":
 			return fmt.Sprintf(`'groq': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.groq.com/openai/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}
+                %s
             ]
-        }`, envVar)
+        }`, envVar, modelsList)
 		case "deepseek":
 			return fmt.Sprintf(`'deepseek': {
             'apiKey': os.environ.get('%s', ''),
             'baseUrl': 'https://api.deepseek.com/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}
+                %s
             ]
-        }`, envVar)
+        }`, envVar, modelsList)
 		default:
 			return fmt.Sprintf(`'%s': {
             'apiKey': os.environ.get('%s', ''),
