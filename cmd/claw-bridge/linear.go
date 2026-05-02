@@ -173,6 +173,11 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 		}
 	}
 
+	if stateName == "" && comment == "" {
+		fmt.Fprintln(os.Stderr, "nothing to do: specify --state=<name> and/or --comment=<text>")
+		return 1
+	}
+
 	// Resolve issue ID and team ID from identifier
 	query := `query($identifier: String!) {
 		issues(filter: { identifier: { eq: $identifier } }) {
