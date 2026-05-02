@@ -266,18 +266,10 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Non-negotiable: if the issue is unreadable, we can't do any work.
 	linearToken := s.resolveLinearTokenForFactory(factory)
 	if linearToken != "" {
-		tokenPrefix := "<empty>"
-		if len(linearToken) > 12 {
-			tokenPrefix = linearToken[:12] + "..."
-		} else if len(linearToken) >= 4 {
-			tokenPrefix = linearToken[:4] + "..."
-		}
-		log.Printf("[factory:%s] pre-flight check: issue=%s workspace=%q tokenPrefix=%s", factory.Name, issueID, factory.Workspace, tokenPrefix)
 		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
 			log.Printf("[factory:%s] pre-flight FAILED for %s: %v", factory.Name, issueID, err)
 			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
 		}
-		log.Printf("[factory:%s] verified issue %s is readable", factory.Name, issueID)
 	} else {
 		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
 	}
@@ -1053,7 +1045,6 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
-	log.Printf("[linear] fetchLinearIssueDetails: building GraphQL query for identifier=%q", issueIdentifier)
 	queryBody := map[string]interface{}{
 		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
 		"variables": map[string]string{
@@ -1077,14 +1068,6 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
-	bodyStr := string(bodyBytes)
-	if len(bodyStr) > 500 {
-		bodyStr = bodyStr[:500] + "... [truncated]"
-	}
-	log.Printf("[linear] fetchLinearIssueDetails response for %s: status=%d len=%d body=%q", issueIdentifier, resp.StatusCode, len(bodyBytes), bodyStr)
-	if resp.StatusCode != 200 {
-		log.Printf("[linear] fetchLinearIssueDetails NON-200 for %s: status=%d fullBody=%s", issueIdentifier, resp.StatusCode, string(bodyBytes))
-	}
 
 	var result struct {
 		Data struct {
@@ -1103,7 +1086,10 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		for _, e := range result.Errors {
 			errMsgs = append(errMsgs, e.Message)
 		}
-		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, strings.Join(errMsgs, "; "))
+		combined := strings.Join(errMsgs, "; ")
+		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, combined)
+		log.Printf("[linear] fetchLinearIssueDetails response body for %s: %s", issueIdentifier, string(bodyBytes))
+		return nil, fmt.Errorf("GraphQL error: %s", combined)
 	}
 	if result.Data.Issue.Identifier == "" {
 		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
