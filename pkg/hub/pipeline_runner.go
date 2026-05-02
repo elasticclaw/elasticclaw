@@ -36,7 +36,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
 
-		// Render {{issue.identifier}}, {{issue.title}}, {{issue.url}} if this is a Linear claw
+		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
 		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
 			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
 			linearToken := s.resolveLinearTokenForFactory(factory)
