@@ -416,9 +416,34 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		secretList = append(secretList, fmt.Sprintf("- `%s` — %s secret", envName, refType))
 		_ = val // value intentionally not logged/written
 	}
-	if len(secretList) > 0 {
-		templateFiles["SECRETS.md"] = "## Available Secrets\n\nThe following API keys are available as environment variables:\n\n" + strings.Join(secretList, "\n") + "\n\nUse these with your tools as needed. Values are in the environment, not in files.\n"
+	// Build SECRETS.md so the agent knows which env vars are available.
+	// Also inject Linear CLI instructions when this is a Linear factory claw.
+	secretsContent := "## Available Secrets\n\nThe following API keys are available as environment variables:\n\n" + strings.Join(secretList, "\n") + "\n\nUse these with your tools as needed. Values are in the environment, not in files.\n"
+
+	// When spawned from a Linear factory, the agent MUST use the embedded
+	// claw-bridge Linear CLI — never the browser or raw API. This ensures
+	// updates/comments are correctly attributed and the hub stays in sync.
+	if factory.Integration == "linear" {
+		secretsContent += "\n## Linear Tools (REQUIRED)\n\n" +
+			"You are working on a Linear issue. You MUST use the built-in Linear CLI to interact with Linear.\n\n" +
+			"**Never** use the browser, web_search, or raw HTTP/GraphQL to access Linear.\n\n" +
+			"The CLI is pre-installed in this environment:\n\n" +
+			"```bash\n" +
+			"# Get issue details (replace ELA-123 with the actual issue ID)\n" +
+			"claw-bridge linear issue get ELA-123\n\n" +
+			"# Update issue state\n" +
+			"claw-bridge linear issue update ELA-123 --state=\"In Progress\"\n\n" +
+			"# Add a comment\n" +
+			"claw-bridge linear issue update ELA-123 --comment=\"your comment here\"\n\n" +
+			"# Search for related issues\n" +
+			"claw-bridge linear issue search \"some query\"\n\n" +
+			"# List teams\n" +
+			"claw-bridge linear teams\n" +
+			"```\n\n" +
+			"Always use these commands for any Linear interaction.\n"
 	}
+
+	templateFiles["SECRETS.md"] = secretsContent
 
 	// Resolve default model: template > llm_key lookup > hub default
 	if defaultModel == "" && llmKey != "" {

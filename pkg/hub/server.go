@@ -1083,6 +1083,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.mu.RUnlock()
 		if cc != nil {
 			_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+			// Immediately signal to UI that agent is working, before first chunk arrives
+			s.broadcastToUsers(tenantID, types.WSMessage{
+				Type: "agent_typing",
+				Payload: map[string]string{
+					"claw_id": clawID,
+					"status":  "typing",
+				},
+			})
 		}
 		jsonOK(w, msg)
 		return
@@ -1283,6 +1291,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				Content: partialContent, CreatedAt: interruptedAt,
 			}})
 		}
+		// Clear typing indicator so the UI doesn't show a stuck "typing" state
+		// if the claw disconnects mid-response.
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type: "agent_typing",
+			Payload: map[string]string{
+				"claw_id": clawID,
+				"status":  "idle",
+			},
+		})
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
@@ -1468,6 +1485,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				// Clear typing indicator now that response is complete
+				s.broadcastToUsers(tenantID, types.WSMessage{
+					Type: "agent_typing",
+					Payload: map[string]string{
+						"claw_id": clawID,
+						"status":  "idle",
+					},
+				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
 					go s.handleClawDoneSignal(clawID, hm.Content)
@@ -1905,8 +1930,12 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
 				time.Sleep(5 * time.Second)
 			}
-			// Prefix HOME so commands run in the sandbox user's home, not the caller's
-			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
+			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
+			// Also source nvm and pin Node 24 LTS — Daytona snapshots may ship with
+			// non-LTS Node (e.g. v25) and each exec is a fresh shell session.
+			// If nvm use 24 fails (not installed yet), we install it on the fly.
+			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + cmd}, timeout)
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", label, err)
 				continue
@@ -1985,6 +2014,24 @@ openclaw --version`); err != nil {
 			return err
 		}
 	}
+	// Step 2a: Preflight required commands and environment.
+	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
+	if err := exec("preflight required commands", 30*time.Second,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+for cmd in node npm git python3 curl; do command -v "$cmd" >/dev/null || { echo "missing: $cmd"; exit 1; }; done; \
+echo "preflight ok"`); err != nil {
+		return fmt.Errorf("daytona sandbox missing required commands: %w", err)
+	}
+	// Step 2b: Pre-stage plugin runtime dependencies before starting gateway.
+	// This prevents the gateway from doing expensive npm installs while
+	// clients are connected, which causes event-loop delays and connection drops.
+	if err := exec("stage openclaw plugin deps", 3*time.Minute,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
+openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
+		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
+	}
+
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
@@ -2000,10 +2047,30 @@ print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-for i in $(seq 1 20); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway ready' && exit 0
-  sleep 2
+# Phase 1: wait for HTTP server to be listening (quick)
+for i in $(seq 1 30); do
+  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
+  sleep 1
 done
+curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
+# Phase 2: wait for gateway to be truly ready (plugins loaded, channels up)
+for i in $(seq 1 30); do
+  health=$(openclaw health --json --timeout 5000 2>/dev/null)
+  if [ -n "$health" ]; then
+    plugins_loaded=$(echo "$health" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("plugins",{}).get("loaded",[])))' 2>/dev/null)
+    if [ "${plugins_loaded:-0}" -gt 0 ]; then
+      echo "gateway ready (plugins=$plugins_loaded)"
+      exit 0
+    fi
+  fi
+  sleep 1
+done
+# Fallback: if plugins are empty but the gateway is still listening and healthy,
+# don't fail the bootstrap — a zero-plugin gateway is still a valid gateway.
+if curl -sf http://localhost:18789/healthz >/dev/null; then
+  echo "gateway ready (no plugins loaded)"
+  exit 0
+fi
 echo 'gateway not ready'
 tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
 exit 1`

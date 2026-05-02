@@ -126,38 +126,35 @@ func linearQuery(apiKey, query string, variables map[string]interface{}) (map[st
 // linearIssueGet fetches an issue by identifier (e.g. "CAN-61").
 func linearIssueGet(apiKey, identifier string) int {
 	query := `
-		query($identifier: String!) {
-			issues(filter: { identifier: { eq: $identifier } }) {
-				nodes {
-					id
-					identifier
-					title
-					description
-					state { name }
-					priority
-					url
-					team { name key }
-					assignee { name }
-					createdAt
-					updatedAt
-				}
+		query($id: String!) {
+			issue(id: $id) {
+				id
+				identifier
+				title
+				description
+				state { name }
+				priority
+				url
+				team { name key }
+				assignee { name }
+				createdAt
+				updatedAt
 			}
 		}
 	`
-	result, err := linearQuery(apiKey, query, map[string]interface{}{"identifier": identifier})
+	result, err := linearQuery(apiKey, query, map[string]interface{}{"id": identifier})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 
-	data := dig(result, "data", "issues", "nodes")
-	issues, ok := data.([]interface{})
-	if !ok || len(issues) == 0 {
+	data := dig(result, "data", "issue")
+	if data == nil {
 		fmt.Fprintf(os.Stderr, "issue %s not found\n", identifier)
 		return 1
 	}
 
-	b, _ := json.MarshalIndent(issues[0], "", "  ")
+	b, _ := json.MarshalIndent(data, "", "  ")
 	fmt.Println(string(b))
 	return 0
 }
@@ -179,24 +176,24 @@ func linearIssueUpdate(apiKey, identifier string, flags []string) int {
 	}
 
 	// Resolve issue ID and team ID from identifier
-	query := `query($identifier: String!) {
-		issues(filter: { identifier: { eq: $identifier } }) {
-			nodes { id team { id name } }
+	query := `query($id: String!) {
+		issue(id: $id) {
+			id
+			team { id name }
 		}
 	}`
-	result, err := linearQuery(apiKey, query, map[string]interface{}{"identifier": identifier})
+	result, err := linearQuery(apiKey, query, map[string]interface{}{"id": identifier})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error resolving issue: %v\n", err)
 		return 1
 	}
 
-	data := dig(result, "data", "issues", "nodes")
-	issues, ok := data.([]interface{})
-	if !ok || len(issues) == 0 {
+	data := dig(result, "data", "issue")
+	if data == nil {
 		fmt.Fprintf(os.Stderr, "issue %s not found\n", identifier)
 		return 1
 	}
-	issue0, _ := issues[0].(map[string]interface{})
+	issue0, _ := data.(map[string]interface{})
 	issueID := issue0["id"]
 	id, _ := issueID.(string)
 	if id == "" {

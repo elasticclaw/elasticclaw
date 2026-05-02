@@ -307,15 +307,19 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 	return nil
 }
 
-// StartOpenClaw starts the OpenClaw gateway in the sandbox
+// StartOpenClaw starts the OpenClaw gateway in the sandbox.
+// Note: this is a standalone helper; the main bootstrap path in
+// bootstrapDaytona (pkg/hub/server.go) handles full two-phase startup.
 func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir string) error {
 	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
 
-	// Start gateway in background
-	cmd := fmt.Sprintf("bash -c 'cd %s && source ~/.openclaw/env 2>/dev/null; nohup openclaw gateway start > ~/.openclaw/gateway.log 2>&1 &'", workdir)
+	// Use gateway run (foreground mode) with setsid/nohup so the gateway
+	// stays alive after the exec session ends.  gateway start is for
+	// systemd/launchd service installation and is not appropriate here.
+	cmd := fmt.Sprintf("bash -c 'cd %s && source ~/.openclaw/env 2>/dev/null; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &'", workdir)
 	response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start gateway: %w", err)

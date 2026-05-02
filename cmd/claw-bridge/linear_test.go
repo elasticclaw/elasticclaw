@@ -80,13 +80,13 @@ func TestLinearCLI_IssueGet(t *testing.T) {
 		json.Unmarshal(b, &body)
 
 		vars, _ := body["variables"].(map[string]interface{})
-		id, _ := vars["identifier"].(string)
+		id, _ := vars["id"].(string)
 		if id != "CAN-61" {
-			t.Errorf("expected identifier CAN-61, got %s", id)
+			t.Errorf("expected id CAN-61, got %s", id)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"data":{"issues":{"nodes":[{"id":"issue-uuid","identifier":"CAN-61","title":"Fix auth","state":{"name":"In Progress"},"team":{"name":"Engineering","key":"ENG"}}]}}}`)
+		fmt.Fprintln(w, `{"data":{"issue":{"id":"issue-uuid","identifier":"CAN-61","title":"Fix auth","state":{"name":"In Progress"},"team":{"name":"Engineering","key":"ENG"}}}}`)
 	}))
 	defer ts.Close()
 
