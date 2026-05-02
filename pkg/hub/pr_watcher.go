@@ -500,6 +500,14 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 			Type:    "message",
 			Payload: map[string]string{"role": role, "content": content},
 		})
+		// Signal to UI that agent is working on the injected message
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type: "agent_typing",
+			Payload: map[string]string{
+				"claw_id": clawID,
+				"status":  "typing",
+			},
+		})
 	}
 
 	// Broadcast to dashboard
