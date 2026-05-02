@@ -1291,6 +1291,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				Content: partialContent, CreatedAt: interruptedAt,
 			}})
 		}
+		// Clear typing indicator so the UI doesn't show a stuck "typing" state
+		// if the claw disconnects mid-response.
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type: "agent_typing",
+			Payload: map[string]string{
+				"claw_id": clawID,
+				"status":  "idle",
+			},
+		})
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
@@ -2043,6 +2052,7 @@ for i in $(seq 1 30); do
   curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
   sleep 1
 done
+curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
 # Phase 2: wait for gateway to be truly ready (plugins loaded, channels up)
 for i in $(seq 1 30); do
   health=$(openclaw health --json --timeout 5000 2>/dev/null)
