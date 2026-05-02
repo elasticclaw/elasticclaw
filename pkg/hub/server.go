@@ -1921,8 +1921,12 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
 				time.Sleep(5 * time.Second)
 			}
-			// Prefix HOME so commands run in the sandbox user's home, not the caller's
-			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + cmd}, timeout)
+			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
+			// Also source nvm and pin Node 24 LTS — Daytona snapshots may ship with
+			// non-LTS Node (e.g. v25) and each exec is a fresh shell session.
+			// If nvm use 24 fails (not installed yet), we install it on the fly.
+			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + cmd}, timeout)
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", label, err)
 				continue
@@ -2001,21 +2005,7 @@ openclaw --version`); err != nil {
 			return err
 		}
 	}
-	// Step 2a: Ensure Node 24 LTS is active. Daytona snapshots may ship with
-	// non-LTS Node (e.g. v25) which causes compatibility issues.
-	if err := exec("ensure node 24 lts", 2*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; \
-CURRENT=$(node --version 2>/dev/null || echo "none"); \
-if [ "$CURRENT" != "v24."* ]; then \
-  nvm install 24 2>&1 && nvm alias default 24 2>&1 && nvm use 24 2>&1 && echo "switched to node 24"; \
-else \
-  echo "node 24 already active ($CURRENT)"; \
-fi; \
-node --version`); err != nil {
-		log.Printf("[daytona] warning: node 24 setup failed: %v", err)
-	}
-
-	// Step 2b: Preflight required commands and environment.
+	// Step 2a: Preflight required commands and environment.
 	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
 	if err := exec("preflight required commands", 30*time.Second,
 		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
