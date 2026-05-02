@@ -1083,6 +1083,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.mu.RUnlock()
 		if cc != nil {
 			_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+			// Immediately signal to UI that agent is working, before first chunk arrives
+			s.broadcastToUsers(tenantID, types.WSMessage{
+				Type: "agent_typing",
+				Payload: map[string]string{
+					"claw_id": clawID,
+					"status":  "typing",
+				},
+			})
 		}
 		jsonOK(w, msg)
 		return
@@ -1468,6 +1476,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				// Clear typing indicator now that response is complete
+				s.broadcastToUsers(tenantID, types.WSMessage{
+					Type: "agent_typing",
+					Payload: map[string]string{
+						"claw_id": clawID,
+						"status":  "idle",
+					},
+				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
 					go s.handleClawDoneSignal(clawID, hm.Content)
@@ -1985,7 +2001,21 @@ openclaw --version`); err != nil {
 			return err
 		}
 	}
-	// Step 2a: Preflight required commands and environment.
+	// Step 2a: Ensure Node 24 LTS is active. Daytona snapshots may ship with
+	// non-LTS Node (e.g. v25) which causes compatibility issues.
+	if err := exec("ensure node 24 lts", 2*time.Minute,
+		`export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; \
+CURRENT=$(node --version 2>/dev/null || echo "none"); \
+if [ "$CURRENT" != "v24."* ]; then \
+  nvm install 24 2>&1 && nvm alias default 24 2>&1 && nvm use 24 2>&1 && echo "switched to node 24"; \
+else \
+  echo "node 24 already active ($CURRENT)"; \
+fi; \
+node --version`); err != nil {
+		log.Printf("[daytona] warning: node 24 setup failed: %v", err)
+	}
+
+	// Step 2b: Preflight required commands and environment.
 	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
 	if err := exec("preflight required commands", 30*time.Second,
 		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
