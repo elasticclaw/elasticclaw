@@ -1052,10 +1052,10 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
 
 	// Linear's issue(id:) expects a UUID, not a display identifier like "CAN-61".
-	// Use the issues(filter:) query with identifier.eq instead.
+	// Use issues() with the identifier argument directly (not inside a filter).
 	log.Printf("[linear] fetchLinearIssueDetails: building GraphQL query for identifier=%q", issueIdentifier)
 	queryBody := map[string]interface{}{
-		"query": "query($identifier: String!) { issues(filter: { identifier: { eq: $identifier } }) { nodes { identifier title url description } } }",
+		"query": "query($identifier: String!) { issues(identifier: $identifier) { nodes { identifier title url description } } }",
 		"variables": map[string]string{
 			"identifier": issueIdentifier,
 		},
