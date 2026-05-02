@@ -2065,6 +2065,12 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
+# Fallback: if plugins are empty but the gateway is still listening and healthy,
+# don't fail the bootstrap — a zero-plugin gateway is still a valid gateway.
+if curl -sf http://localhost:18789/healthz >/dev/null; then
+  echo "gateway ready (no plugins loaded)"
+  exit 0
+fi
 echo 'gateway not ready'
 tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
 exit 1`
