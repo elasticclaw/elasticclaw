@@ -1051,13 +1051,13 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	}
 	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
 
-	// Linear's issue(id:) expects a UUID, not a display identifier like "CAN-61".
-	// Use issues() with the identifier argument directly (not inside a filter).
+	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
+	// directly (not just UUID). This is documented in Linear's GraphQL examples.
 	log.Printf("[linear] fetchLinearIssueDetails: building GraphQL query for identifier=%q", issueIdentifier)
 	queryBody := map[string]interface{}{
-		"query": "query($identifier: String!) { issues(identifier: $identifier) { nodes { identifier title url description } } }",
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
 		"variables": map[string]string{
-			"identifier": issueIdentifier,
+			"id": issueIdentifier,
 		},
 	}
 	queryJSON, _ := json.Marshal(queryBody)
@@ -1088,9 +1088,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 
 	var result struct {
 		Data struct {
-			Issues struct {
-				Nodes []linearIssueDetails `json:"nodes"`
-			} `json:"issues"`
+			Issue linearIssueDetails `json:"issue"`
 		} `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
@@ -1107,11 +1105,10 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		}
 		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, strings.Join(errMsgs, "; "))
 	}
-	if len(result.Data.Issues.Nodes) == 0 {
-		log.Printf("[linear] fetchLinearIssueDetails: no issue found for %s", issueIdentifier)
+	if result.Data.Issue.Identifier == "" {
+		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
 		return nil, fmt.Errorf("issue %s not found", issueIdentifier)
 	}
-	issue := result.Data.Issues.Nodes[0]
-	log.Printf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, issue.Identifier, issue.Title)
-	return &issue, nil
+	log.Printf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, result.Data.Issue.Identifier, result.Data.Issue.Title)
+	return &result.Data.Issue, nil
 }
