@@ -1985,6 +1985,24 @@ openclaw --version`); err != nil {
 			return err
 		}
 	}
+	// Step 2a: Preflight required commands and environment.
+	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
+	if err := exec("preflight required commands", 30*time.Second,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+for cmd in node npm git python3 curl; do command -v "$cmd" >/dev/null || { echo "missing: $cmd"; exit 1; }; done; \
+echo "preflight ok"`); err != nil {
+		return fmt.Errorf("daytona sandbox missing required commands: %w", err)
+	}
+	// Step 2b: Pre-stage plugin runtime dependencies before starting gateway.
+	// This prevents the gateway from doing expensive npm installs while
+	// clients are connected, which causes event-loop delays and connection drops.
+	if err := exec("stage openclaw plugin deps", 3*time.Minute,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
+openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
+		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
+	}
+
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
@@ -2000,9 +2018,22 @@ print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-for i in $(seq 1 20); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway ready' && exit 0
-  sleep 2
+# Phase 1: wait for HTTP server to be listening (quick)
+for i in $(seq 1 30); do
+  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
+  sleep 1
+done
+# Phase 2: wait for gateway to be truly ready (plugins loaded, channels up)
+for i in $(seq 1 30); do
+  health=$(openclaw health --json --timeout 5000 2>/dev/null)
+  if [ -n "$health" ]; then
+    plugins_loaded=$(echo "$health" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("plugins",{}).get("loaded",[])))' 2>/dev/null)
+    if [ "${plugins_loaded:-0}" -gt 0 ]; then
+      echo "gateway ready (plugins=$plugins_loaded)"
+      exit 0
+    fi
+  fi
+  sleep 1
 done
 echo 'gateway not ready'
 tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
