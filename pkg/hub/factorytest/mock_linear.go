@@ -65,22 +65,18 @@ func NewMockLinear(t *testing.T) *MockLinear {
 			})
 			return
 		}
-		// issue query — support both legacy issue(id:) and new issues(filter:) queries
-		if strings.Contains(bodyStr, "issue(") || strings.Contains(bodyStr, `"issue"`) || strings.Contains(bodyStr, "issues(filter") {
+		// issue(id:) query — returns a single issue directly
+		if strings.Contains(bodyStr, "issue(") || strings.Contains(bodyStr, `"issue"`) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
-					"issues": map[string]interface{}{
-						"nodes": []map[string]interface{}{
-							{
-								"id":          "issue-uuid-123",
-								"identifier":  "ELA-123",
-								"title":       "Add hello world to README",
-								"description": "Please add a 'Hello World' section to the README.md file.",
-								"url":         "https://linear.app/test/issue/ELA-123",
-								"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
-								"team":        map[string]interface{}{"name": "Engineering", "key": "ELA"},
-							},
-						},
+					"issue": map[string]interface{}{
+						"id":          "issue-uuid-123",
+						"identifier":  "ELA-123",
+						"title":       "Add hello world to README",
+						"description": "Please add a 'Hello World' section to the README.md file.",
+						"url":         "https://linear.app/test/issue/ELA-123",
+						"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
+						"team":        map[string]interface{}{"name": "Engineering", "key": "ELA"},
 					},
 				},
 			})
