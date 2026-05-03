@@ -282,6 +282,7 @@ func TestBootstrapScript_Shellcheck(t *testing.T) {
 	}{
 		{"base", baseParams()},
 		{"nix_enabled", func() BootstrapParams { p := baseParams(); p.Nix = true; return p }()},
+		{"docker_enabled", func() BootstrapParams { p := baseParams(); p.Docker = true; return p }()},
 		{"with_github", func() BootstrapParams {
 			p := baseParams()
 			p.HubCfg = &types.HubConfig{
@@ -353,6 +354,7 @@ func TestBootstrapScript_StdinExec(t *testing.T) {
 			return p
 		}()},
 		{"nix_enabled", func() BootstrapParams { p := baseParams(); p.Nix = true; return p }()},
+		{"docker_enabled", func() BootstrapParams { p := baseParams(); p.Docker = true; return p }()},
 		// Regression: GitHub App configured but no repos — was producing empty { } group command
 		{"github_app_no_repos", func() BootstrapParams {
 			p := baseParams()

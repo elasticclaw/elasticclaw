@@ -33,6 +33,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_repos TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_workspace TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN nix INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN docker INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`)
@@ -73,6 +74,7 @@ func migrate(db *sql.DB) error {
 		github_repos   TEXT NOT NULL DEFAULT '',
 		linear_workspace TEXT NOT NULL DEFAULT '',
 		nix              INTEGER NOT NULL DEFAULT 0,
+		docker           INTEGER NOT NULL DEFAULT 0,
 		tags             TEXT NOT NULL DEFAULT '[]',
 		color            TEXT NOT NULL DEFAULT '',
 		linear_issue_id  TEXT NOT NULL DEFAULT '',

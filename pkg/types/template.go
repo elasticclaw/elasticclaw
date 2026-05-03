@@ -96,6 +96,10 @@ type TemplateConfig struct {
 	// Nix installs the Determinate Systems variant of Nix during bootstrap.
 	// Adds ~2-3 min to bootstrap time. Opt-in only.
 	Nix bool `yaml:"nix,omitempty"`
+	// Docker installs Docker Engine (via the official Docker apt repo) during
+	// bootstrap. Useful for projects that need docker build/run but can't
+	// include Docker in a Nix flake for portability. Opt-in only.
+	Docker bool `yaml:"docker,omitempty"`
 	// Tags are static labels applied to every claw created from this template.
 	// Merged with the auto template=<name> tag and any --tag CLI flags.
 	Tags []string `yaml:"tags,omitempty"`
@@ -417,6 +421,7 @@ type CreateClawRequest struct {
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
 	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
 	Nix          bool                  `json:"nix,omitempty"`
+	Docker       bool                  `json:"docker,omitempty"`
 	Tags         []string              `json:"tags,omitempty"`
 	Color        string                `json:"color,omitempty"`
 	AutoWatchCI     *bool             `json:"auto_watch_ci,omitempty"`

@@ -740,7 +740,11 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	if req.Nix {
 		nixEnabled = 1
 	}
-	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d", req.Name, req.Nix, nixEnabled)
+	dockerEnabled := 0
+	if req.Docker {
+		dockerEnabled = 1
+	}
+	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d docker=%d", req.Name, req.Nix, nixEnabled, dockerEnabled)
 
 	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
@@ -786,9 +790,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, string(tagsJSON), color, req.LLMKey, autoFixCI, autoFixBugbot, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, autoFixCI, autoFixBugbot, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -1975,6 +1979,48 @@ openclaw --version`); err != nil {
 		return err
 	}
 
+	// Step 1b: Install Nix (Determinate Systems) if requested.
+	var nixEnabled int
+	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
+	if nixEnabled == 1 {
+		if err := exec("install nix", 3*time.Minute,
+			`export HOME=/home/daytona; \
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+  sh -s -- install linux --no-confirm --init none >> /tmp/nix-install.log 2>&1; \
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true; \
+nix --version`); err != nil {
+			log.Printf("[daytona] warning: nix install failed: %v", err)
+		}
+	}
+
+	// Step 1c: Install Docker Engine if requested.
+	var dockerEnabled int
+	_ = s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled)
+	if dockerEnabled == 1 {
+		if err := exec("install docker", 3*time.Minute,
+			`export HOME=/home/daytona; \
+. /etc/os-release; \
+if [ "$ID" = "debian" ] && [ -n "$VERSION_CODENAME" ]; then \
+  DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $VERSION_CODENAME stable"; \
+  DOCKER_GPG="https://download.docker.com/linux/debian/gpg"; \
+else \
+  DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable"; \
+  DOCKER_GPG="https://download.docker.com/linux/ubuntu/gpg"; \
+fi; \
+sudo apt-get update -qq && \
+sudo apt-get install -y --fix-broken ca-certificates curl gnupg && \
+sudo install -m 0755 -d /etc/apt/keyrings && \
+curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg && \
+sudo chmod a+r /etc/apt/keyrings/docker.gpg && \
+echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+sudo apt-get update -qq && \
+sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+sudo usermod -aG docker daytona 2>/dev/null || true && \
+docker --version`); err != nil {
+			log.Printf("[daytona] warning: docker install failed: %v", err)
+		}
+	}
+
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
 	var llmKeyNameDaytona string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
@@ -2785,7 +2831,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
 		log.Printf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
 	}
-	log.Printf("[bootstrap] claw %s nix=%d", clawID[:8], nixEnabled)
+	var dockerEnabled int
+	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
+		log.Printf("[bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
+	}
+	log.Printf("[bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
@@ -2838,6 +2888,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
+		Docker:          dockerEnabled != 0,
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,

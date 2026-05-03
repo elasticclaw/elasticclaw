@@ -473,6 +473,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		defaultModel    string
 		llmKey          string
 		nixEnabled      int
+		dockerEnabled   int
 		githubRepos     []types.GitHubRepoAccess
 		linearWorkspace string
 	)
@@ -482,6 +483,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		llmKey = tmplCfg.LLMKey
 		if tmplCfg.Nix {
 			nixEnabled = 1
+		}
+		if tmplCfg.Docker {
+			dockerEnabled = 1
 		}
 		if tmplCfg.GitHub != nil {
 			githubRepos = tmplCfg.GitHub.Repos
@@ -533,10 +537,10 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	now := now()
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, tags, color, llm_key, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, string(tagsJSON), clawColor, llmKey, storyID, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)

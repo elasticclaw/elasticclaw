@@ -12,6 +12,7 @@
 //
 //	ELASTICCLAW_BOOTSTRAP         - set to "1" to run bootstrap before normal bridge loop
 //	ELASTICCLAW_NIX               - set to "true" to install Nix in background
+//	ELASTICCLAW_DOCKER            - set to "true" to install Docker Engine
 //	ELASTICCLAW_GATEWAY_PASSWORD  - OpenClaw gateway password
 //	ELASTICCLAW_ONBOARD_FLAGS     - extra flags for openclaw onboard
 //	OPENCLAW_DEFAULT_MODEL        - default agent model
@@ -856,6 +857,63 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 	return ch
 }
 
+// dockerInstallBg starts the Docker Engine installer in background and returns
+// a done channel. The channel receives an error (or nil) when the install finishes.
+func dockerInstallBg() <-chan error {
+	ch := make(chan error, 1)
+	go func() {
+		log.Printf("[bootstrap] starting Docker install in background...")
+		script := `
+set -euo pipefail
+# Detect OS family (debian vs ubuntu) for the correct Docker repo
+. /etc/os-release
+if [ "$ID" = "debian" ] && [ -n "$VERSION_CODENAME" ]; then
+  DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $VERSION_CODENAME stable"
+  DOCKER_GPG="https://download.docker.com/linux/debian/gpg"
+else
+  DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable"
+  DOCKER_GPG="https://download.docker.com/linux/ubuntu/gpg"
+fi
+# Add Docker's official GPG key
+sudo apt-get update -qq
+sudo apt-get install -y --fix-broken ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+# Add the repository to Apt sources
+echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update -qq
+sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+echo "Docker: $(docker --version)"
+`
+		err := runShell(script)
+		if err != nil {
+			log.Printf("[bootstrap] Docker install failed: %v", err)
+		} else {
+			log.Printf("[bootstrap] Docker install complete")
+		}
+		ch <- err
+	}()
+	return ch
+}
+
+// finishDocker waits for the background Docker install to complete and adds
+// the current user to the docker group so docker commands work without sudo.
+func finishDocker(dockerDone <-chan error) {
+	if dockerDone == nil {
+		return
+	}
+	log.Printf("[bootstrap] waiting for Docker install...")
+	if err := <-dockerDone; err != nil {
+		log.Printf("[bootstrap] Docker install error: %v", err)
+		return
+	}
+	// Add daytona user to docker group (common username on Replicated VMs)
+	_ = runShell("sudo usermod -aG docker daytona 2>/dev/null || true")
+	_ = runShell("sudo usermod -aG docker root 2>/dev/null || true")
+	log.Printf("[bootstrap] Docker ready")
+}
+
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
@@ -1082,6 +1140,12 @@ func runBootstrap() error {
 		nixDone = nixInstallBg()
 	}
 
+	// Step 2b: Start Docker install in background (if requested)
+	var dockerDone <-chan error
+	if os.Getenv("ELASTICCLAW_DOCKER") == "true" {
+		dockerDone = dockerInstallBg()
+	}
+
 	// Step 3: Install OpenClaw (needs Node)
 	if err := installOpenClaw(); err != nil {
 		return fmt.Errorf("installOpenClaw: %w", err)
@@ -1128,8 +1192,9 @@ func runBootstrap() error {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 9: After bridge connects, finish Nix in background
+	// Step 9: After bridge connects, finish Nix and Docker in background
 	go finishNix(nixDone)
+	go finishDocker(dockerDone)
 
 	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
 		if err := os.WriteFile(notifyFile, []byte("ok\n"), 0600); err != nil {
