@@ -454,12 +454,14 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       if (!formName.trim() || !formKey.trim()) return
       onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: formDefaultModel || undefined }] })
     } else if (editIdx !== null) {
-      const patch: Record<string, unknown> = { name: formName.trim() }
-      if (formKey.trim()) patch.apiKey = formKey.trim()
-      if (formDefault) patch.default = true
-      if (formDefaultModel) patch.defaultModel = formDefaultModel
-      // If provider changed
       const existing = llmKeys[editIdx]
+      const patch: Record<string, unknown> = {
+        name: existing.name,          // lookup key — original name
+        newName: formName.trim(),      // new name if changed
+      }
+      if (formKey.trim()) patch.apiKey = formKey.trim()
+      patch.default = formDefault       // always send so user can unset
+      if (formDefaultModel) patch.defaultModel = formDefaultModel
       if (actualProvider !== existing.provider) patch.provider = actualProvider
       onSave({ llmKeys: [patch] })
     }
