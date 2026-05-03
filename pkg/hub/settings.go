@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -112,10 +114,21 @@ type ProviderView struct {
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
 }
 
+// GitHubAppPermission is a single permission check result for a GitHub App.
+type GitHubAppPermission struct {
+	Name    string `json:"name"`
+	Granted string `json:"granted"` // "read", "write", or ""
+	Needed  string `json:"needed"`  // "read" or "write"
+	OK      bool   `json:"ok"`
+}
+
 type GitHubAppView struct {
-	AppID  int64  `json:"appId"`
-	URL    string `json:"url,omitempty"`
-	KeySet bool   `json:"keySet"`
+	AppID       int64                 `json:"appId"`
+	URL         string                `json:"url,omitempty"`
+	KeySet      bool                  `json:"keySet"`
+	Permissions []GitHubAppPermission `json:"permissions,omitempty"`
+	PermCheckOK *bool                 `json:"permCheckOk,omitempty"` // nil = not checked yet
+	PermCheckError string           `json:"permCheckError,omitempty"`
 }
 
 // SettingsPatch is the request body for PATCH /api/settings.
@@ -293,11 +306,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 	// GitHub Apps
 	for _, app := range s.hubCfg.GitHubApps {
-		view.GitHub = append(view.GitHub, GitHubAppView{
-			AppID:  app.AppID,
-			URL:    app.URL,
-			KeySet: app.PrivateKeyPEM != "",
-		})
+		view.GitHub = append(view.GitHub, s.buildGitHubAppView(app))
 	}
 
 	// Integrations
@@ -394,6 +403,60 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, view)
+}
+
+// buildGitHubAppView builds a GitHubAppView for the settings page, including
+// a live permission check if the private key is set.
+func (s *Server) buildGitHubAppView(app *types.GitHubAppConfig) GitHubAppView {
+	view := GitHubAppView{
+		AppID:  app.AppID,
+		URL:    app.URL,
+		KeySet: app.PrivateKeyPEM != "",
+	}
+	if !view.KeySet {
+		return view
+	}
+
+	provider, err := NewGitHubTokenProvider(app)
+	if err != nil {
+		view.PermCheckError = fmt.Sprintf("invalid key: %v", err)
+		return view
+	}
+
+	perms, err := provider.CheckAppPermissions(context.Background())
+	if err != nil {
+		view.PermCheckError = err.Error()
+		return view
+	}
+
+	// Permissions ElasticClaw needs from the GitHub App
+	required := []struct {
+		name   string
+		needed string
+	}{
+		{"contents", "write"},
+		{"pull_requests", "write"},
+		{"metadata", "read"},
+		{"checks", "read"},
+		{"statuses", "read"},
+	}
+
+	allOK := true
+	for _, req := range required {
+		granted := perms[req.name]
+		ok := granted == req.needed || (req.needed == "read" && (granted == "read" || granted == "write"))
+		if !ok {
+			allOK = false
+		}
+		view.Permissions = append(view.Permissions, GitHubAppPermission{
+			Name:    req.name,
+			Granted: granted,
+			Needed:  req.needed,
+			OK:      ok,
+		})
+	}
+	view.PermCheckOK = &allOK
+	return view
 }
 
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,22 @@ interface LLMKeyView {
   defaultModel?: string
 }
 
+interface GitHubAppPermission {
+  name: string
+  granted: string
+  needed: string
+  ok: boolean
+}
+
+interface GitHubAppView {
+  appId: number
+  url?: string
+  keySet: boolean
+  permissions?: GitHubAppPermission[]
+  permCheckOk?: boolean
+  permCheckError?: string
+}
+
 interface SettingsData {
   llmKeys: LLMKeyView[]
   providers: Record<string, {
@@ -37,7 +53,7 @@ interface SettingsData {
     defaultTtl?: string
     defaultInstanceType?: string
   }>
-  github: Array<{ appId: number; url?: string; keySet: boolean }>
+  github: GitHubAppView[]
   sshPublicKeys: string[]
   integrations?: {
     linear?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
@@ -548,6 +564,34 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                   </Button>
                 </div>
               </div>
+
+              {/* Permission check results */}
+              {app.permCheckError && (
+                <div className="mt-2 text-xs text-red-500 bg-red-500/10 rounded px-2 py-1.5">
+                  ⚠ {app.permCheckError}
+                </div>
+              )}
+              {app.permissions && app.permissions.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-muted-foreground mb-1.5">Required permissions</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {app.permissions.map(p => (
+                      <div key={p.name} className={cn(
+                        "flex items-center justify-between text-xs rounded px-2 py-1",
+                        p.ok ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
+                      )}>
+                        <span className="font-mono">{p.name}</span>
+                        <span>{p.granted || "—"} <span className="text-muted-foreground/60">/ need {p.needed}</span></span>
+                      </div>
+                    ))}
+                  </div>
+                  {app.permCheckOk === false && (
+                    <p className="text-xs text-red-500 mt-1.5">
+                      Missing permissions. Update the GitHub App settings and re-install on your org.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>

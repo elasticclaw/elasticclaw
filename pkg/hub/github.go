@@ -23,6 +23,17 @@ type githubInstallation struct {
 	} `json:"account"`
 }
 
+// githubAppPermission is a permission entry in the GitHub App manifest.
+type githubAppPermission struct {
+	Name    string `json:"name"`
+	Granted string `json:"granted"` // "read", "write", or ""
+}
+
+// githubAppMeta is the response from GET /app (authenticated as the App).
+type githubAppMeta struct {
+	Permissions map[string]string `json:"permissions"`
+}
+
 // githubTokenResponse is the GitHub API response for an installation access token.
 type githubTokenResponse struct {
 	Token     string    `json:"token"`
@@ -222,4 +233,37 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		return "", time.Time{}, fmt.Errorf("decode github response: %w", err)
 	}
 	return result.Token, result.ExpiresAt, nil
+}
+
+// CheckAppPermissions queries the GitHub App's configured permissions via
+// GET /app (authenticated as the App). It returns a map of permission name ->
+// granted level ("read", "write", or "").
+func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[string]string, error) {
+	appJWT, err := p.appJWT()
+	if err != nil {
+		return nil, fmt.Errorf("sign app jwt: %w", err)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app", nil)
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github get app: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		return nil, fmt.Errorf("github get app %d: %v", resp.StatusCode, errBody["message"])
+	}
+
+	var meta githubAppMeta
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		return nil, fmt.Errorf("decode app meta: %w", err)
+	}
+	return meta.Permissions, nil
 }
