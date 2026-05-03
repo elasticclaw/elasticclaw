@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -112,10 +114,21 @@ type ProviderView struct {
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
 }
 
+// GitHubAppPermission is a single permission check result for a GitHub App.
+type GitHubAppPermission struct {
+	Name    string `json:"name"`
+	Granted string `json:"granted"` // "read", "write", or ""
+	Needed  string `json:"needed"`  // "read" or "write"
+	OK      bool   `json:"ok"`
+}
+
 type GitHubAppView struct {
-	AppID  int64  `json:"appId"`
-	URL    string `json:"url,omitempty"`
-	KeySet bool   `json:"keySet"`
+	AppID       int64                 `json:"appId"`
+	URL         string                `json:"url,omitempty"`
+	KeySet      bool                  `json:"keySet"`
+	Permissions []GitHubAppPermission `json:"permissions,omitempty"`
+	PermCheckOK *bool                 `json:"permCheckOk,omitempty"` // nil = not checked yet
+	PermCheckError string           `json:"permCheckError,omitempty"`
 }
 
 // SettingsPatch is the request body for PATCH /api/settings.
@@ -291,13 +304,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		view.SSHPublicKeys = []string{}
 	}
 
-	// GitHub Apps
-	for _, app := range s.hubCfg.GitHubApps {
-		view.GitHub = append(view.GitHub, GitHubAppView{
-			AppID:  app.AppID,
-			URL:    app.URL,
-			KeySet: app.PrivateKeyPEM != "",
-		})
+	// GitHub Apps — copy configs under lock, check permissions after releasing lock
+	ghAppCfgs := make([]*types.GitHubAppConfig, len(s.hubCfg.GitHubApps))
+	for i, app := range s.hubCfg.GitHubApps {
+		copy := *app
+		ghAppCfgs[i] = &copy
 	}
 
 	// Integrations
@@ -385,6 +396,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
+	// Check GitHub App permissions outside the lock (network call)
+	for _, app := range ghAppCfgs {
+		view.GitHub = append(view.GitHub, s.buildGitHubAppView(r.Context(), app))
+	}
+
 	// Secrets — names only, read from disk so manually-edited hub.yaml entries are visible
 	view.Secrets = []string{}
 	if diskCfg, err := config.LoadHubConfig(); err == nil && diskCfg != nil {
@@ -393,6 +409,90 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	jsonOK(w, view)
+}
+
+// buildGitHubAppView builds a GitHubAppView for the settings page, including
+// a live permission check if the private key is set.
+func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
+	view := GitHubAppView{
+		AppID:  app.AppID,
+		URL:    app.URL,
+		KeySet: app.PrivateKeyPEM != "",
+	}
+	if !view.KeySet {
+		view.PermCheckError = "Private key is required to test permissions"
+		return view
+	}
+
+	provider, err := NewGitHubTokenProvider(app)
+	if err != nil {
+		view.PermCheckError = fmt.Sprintf("invalid key: %v", err)
+		return view
+	}
+
+	perms, err := provider.CheckAppPermissions(ctx)
+	if err != nil {
+		view.PermCheckError = err.Error()
+		return view
+	}
+
+	// Permissions ElasticClaw needs from the GitHub App
+	required := []struct {
+		name   string
+		needed string
+	}{
+		{"contents", "write"},
+		{"pull_requests", "write"},
+		{"metadata", "read"},
+		{"checks", "read"},
+		{"statuses", "read"},
+	}
+
+	allOK := true
+	for _, req := range required {
+		granted := perms[req.name]
+		ok := granted == req.needed || (req.needed == "read" && (granted == "read" || granted == "write"))
+		if !ok {
+			allOK = false
+		}
+		view.Permissions = append(view.Permissions, GitHubAppPermission{
+			Name:    req.name,
+			Granted: granted,
+			Needed:  req.needed,
+			OK:      ok,
+		})
+	}
+	view.PermCheckOK = &allOK
+	return view
+}
+
+// handleGitHubAppTest tests a GitHub App's permissions without saving it.
+func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AppID         int64  `json:"appId"`
+		URL           string `json:"url,omitempty"`
+		PrivateKeyPEM string `json:"privateKeyPem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.AppID == 0 || req.PrivateKeyPEM == "" {
+		http.Error(w, "appId and privateKeyPem required", http.StatusBadRequest)
+		return
+	}
+
+	app := &types.GitHubAppConfig{
+		AppID:         req.AppID,
+		URL:           req.URL,
+		PrivateKeyPEM: req.PrivateKeyPEM,
+	}
+	view := s.buildGitHubAppView(r.Context(), app)
 	jsonOK(w, view)
 }
 
