@@ -459,6 +459,35 @@ func (s *Server) buildGitHubAppView(app *types.GitHubAppConfig) GitHubAppView {
 	return view
 }
 
+// handleGitHubAppTest tests a GitHub App's permissions without saving it.
+func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AppID         int64  `json:"appId"`
+		URL           string `json:"url,omitempty"`
+		PrivateKeyPEM string `json:"privateKeyPem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.AppID == 0 || req.PrivateKeyPEM == "" {
+		http.Error(w, "appId and privateKeyPem required", http.StatusBadRequest)
+		return
+	}
+
+	app := &types.GitHubAppConfig{
+		AppID:         req.AppID,
+		URL:           req.URL,
+		PrivateKeyPEM: req.PrivateKeyPEM,
+	}
+	view := s.buildGitHubAppView(app)
+	jsonOK(w, view)
+}
+
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	var patch SettingsPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {

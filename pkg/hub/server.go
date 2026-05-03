@@ -171,6 +171,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
+	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))

@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -527,9 +527,55 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
 }
 
 function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+  const [showModal, setShowModal] = useState(false)
   const [appId, setAppId] = useState("")
   const [url, setUrl] = useState("")
   const [pem, setPem] = useState("")
+  const [testResult, setTestResult] = useState<GitHubAppView | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testError, setTestError] = useState("")
+
+  const resetModal = () => {
+    setAppId(""); setUrl(""); setPem("")
+    setTestResult(null); setTestError(""); setTesting(false)
+  }
+
+  const openModal = () => { resetModal(); setShowModal(true) }
+  const closeModal = () => { setShowModal(false); resetModal() }
+
+  async function runTest() {
+    setTesting(true); setTestError(""); setTestResult(null)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/settings/github/test`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ appId: parseInt(appId, 10), url, privateKeyPem: pem }),
+      })
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(txt || `HTTP ${res.status}`)
+      }
+      setTestResult(await res.json())
+    } catch (e) {
+      setTestError(e instanceof Error ? e.message : "Test failed")
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  function doSave() {
+    const parsedAppId = parseInt(appId, 10)
+    const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
+    if (url) newApp.url = url
+    onSave({ github: [...(settings.github || []), newApp] })
+    closeModal()
+  }
+
+  const needsAttention = testResult?.permissions?.filter(p => !p.ok).length ?? 0
+  const configuredCount = testResult?.permissions?.filter(p => p.ok).length ?? 0
+  const totalCount = testResult?.permissions?.length ?? 0
 
   return (
     <div>
@@ -545,7 +591,11 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
               <div className="flex items-center justify-between mb-2">
                 <div>
                   <p className="text-sm font-medium">App ID: {app.appId}</p>
-                  {app.url && <p className="text-xs text-muted-foreground">{app.url}</p>}
+                  {app.url && (
+                    <a href={app.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1">
+                      {app.url} <ExternalLink className="size-3" />
+                    </a>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={cn("text-xs px-2 py-1 rounded", app.keySet ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
@@ -560,36 +610,87 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                       })
                       onSave({ github: filtered })
                     }}>
-                    Remove
+                    <Trash2 className="size-3.5" />
                   </Button>
                 </div>
               </div>
 
               {/* Permission check results */}
               {app.permCheckError && (
-                <div className="mt-2 text-xs text-red-500 bg-red-500/10 rounded px-2 py-1.5">
-                  ⚠ {app.permCheckError}
+                <div className="mt-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-start gap-2">
+                  <AlertTriangle className="size-4 text-yellow-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-medium text-yellow-400">Permission check failed</p>
+                    <p className="text-xs text-yellow-400/80">{app.permCheckError}</p>
+                  </div>
                 </div>
               )}
               {app.permissions && app.permissions.length > 0 && (
-                <div className="mt-2">
-                  <p className="text-xs font-medium text-muted-foreground mb-1.5">Required permissions</p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {app.permissions.map(p => (
-                      <div key={p.name} className={cn(
-                        "flex items-center justify-between text-xs rounded px-2 py-1",
-                        p.ok ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
-                      )}>
-                        <span className="font-mono">{p.name}</span>
-                        <span>{p.granted || "—"} <span className="text-muted-foreground/60">/ need {p.needed}</span></span>
-                      </div>
-                    ))}
-                  </div>
+                <div className="mt-3">
                   {app.permCheckOk === false && (
-                    <p className="text-xs text-red-500 mt-1.5">
-                      Missing permissions. Update the GitHub App settings and re-install on your org.
-                    </p>
+                    <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 mb-2 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Shield className="size-4 text-yellow-400" />
+                        <div>
+                          <p className="text-xs font-medium text-yellow-400">
+                            {app.permissions.filter(p => !p.ok).length} permission{app.permissions.filter(p => !p.ok).length !== 1 ? "s" : ""} need attention
+                          </p>
+                          <p className="text-xs text-yellow-400/70">
+                            {app.permissions.filter(p => p.ok).length} of {app.permissions.length} required permissions granted
+                          </p>
+                        </div>
+                      </div>
+                      {app.url && (
+                        <a href={app.url} target="_blank" rel="noopener noreferrer">
+                          <Button size="sm" variant="outline" className="h-7 text-xs gap-1">
+                            <ExternalLink className="size-3" /> Fix in GitHub
+                          </Button>
+                        </a>
+                      )}
+                    </div>
                   )}
+
+                  <details className="group" open={app.permCheckOk === false}>
+                    <summary className="flex items-center gap-2 text-xs font-medium text-muted-foreground cursor-pointer list-none">
+                      <Shield className="size-3.5" />
+                      Required Permissions
+                      <ChevronLeft className="size-3 transition-transform group-open:-rotate-90" />
+                    </summary>
+
+                    {app.permissions.filter(p => !p.ok).length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
+                        {app.permissions.filter(p => !p.ok).map(p => (
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="size-3.5 text-yellow-400" />
+                              <span className="text-sm font-mono text-yellow-400">{p.name}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
+                              <span className="text-muted-foreground">→</span>
+                              <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {app.permissions.filter(p => p.ok).length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Configured</p>
+                        {app.permissions.filter(p => p.ok).map(p => (
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="size-3.5 text-green-400" />
+                              <span className="text-sm font-mono text-green-400">{p.name}</span>
+                            </div>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </details>
                 </div>
               )}
             </div>
@@ -597,39 +698,135 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
         </div>
       )}
 
-      <div className="border border-border rounded-lg p-5">
-        <h3 className="font-medium text-sm mb-4">Add GitHub App</h3>
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
-              <Input type="number" value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
+      <Button onClick={openModal} className="gap-2">
+        <Github className="size-4" /> Add GitHub App
+      </Button>
+
+      {/* Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h3 className="font-medium">Add GitHub App</h3>
+              <Button size="sm" variant="ghost" onClick={closeModal} className="h-8 w-8 p-0">
+                <X className="size-4" />
+              </Button>
             </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">App URL (optional)</label>
-              <Input value={url} onChange={e => setUrl(e.target.value)} className="h-8 text-sm" placeholder="https://github.com/apps/..." />
+
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
+                  <Input type="number" value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">App URL (optional)</label>
+                  <Input value={url} onChange={e => setUrl(e.target.value)} className="h-8 text-sm" placeholder="https://github.com/apps/..." />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Private Key (PEM)</label>
+                <textarea
+                  value={pem}
+                  onChange={e => setPem(e.target.value)}
+                  placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
+                  className="w-full h-32 rounded-md border border-border bg-background px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" disabled={testing || !appId || !pem || isNaN(Number(appId))} onClick={runTest} className="gap-1">
+                  {testing ? <RotateCcw className="size-3 animate-spin" /> : <Check className="size-3" />}
+                  Test Permissions
+                </Button>
+              </div>
+
+              {testError && (
+                <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2.5 flex items-start gap-2">
+                  <AlertTriangle className="size-4 text-red-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-red-400">{testError}</p>
+                </div>
+              )}
+
+              {testResult && testResult.permissions && testResult.permissions.length > 0 && (
+                <div className="space-y-3">
+                  {testResult.permCheckOk === false && (
+                    <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Shield className="size-4 text-yellow-400" />
+                        <div>
+                          <p className="text-xs font-medium text-yellow-400">
+                            {needsAttention} permission{needsAttention !== 1 ? "s" : ""} need attention
+                          </p>
+                          <p className="text-xs text-yellow-400/70">
+                            {configuredCount} of {totalCount} required permissions granted
+                          </p>
+                        </div>
+                      </div>
+                      {url && (
+                        <a href={url} target="_blank" rel="noopener noreferrer">
+                          <Button size="sm" variant="outline" className="h-7 text-xs gap-1">
+                            <ExternalLink className="size-3" /> Fix in GitHub
+                          </Button>
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {testResult.permCheckOk === true && (
+                    <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
+                      <CheckCircle2 className="size-4 text-green-400" />
+                      <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    {testResult.permissions.filter(p => !p.ok).length > 0 && (
+                      <>
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
+                        {testResult.permissions.filter(p => !p.ok).map(p => (
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <AlertTriangle className="size-3.5 text-yellow-400" />
+                              <span className="text-sm font-mono text-yellow-400">{p.name}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
+                              <span className="text-muted-foreground">→</span>
+                              <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {testResult.permissions.filter(p => p.ok).length > 0 && (
+                      <>
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium mt-2">Configured</p>
+                        {testResult.permissions.filter(p => p.ok).map(p => (
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="size-3.5 text-green-400" />
+                              <span className="text-sm font-mono text-green-400">{p.name}</span>
+                            </div>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-border">
+              <Button size="sm" variant="outline" onClick={closeModal}>Cancel</Button>
+              <Button size="sm" disabled={saving || !appId || !pem || isNaN(Number(appId))} onClick={doSave}>
+                Save Anyway
+              </Button>
             </div>
           </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Private Key (PEM)</label>
-            <textarea
-              value={pem}
-              onChange={e => setPem(e.target.value)}
-              placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
-              className="w-full h-32 rounded-md border border-border bg-background px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
-          <Button size="sm" disabled={saving || !appId || !pem || isNaN(Number(appId))} onClick={() => {
-            const parsedAppId = parseInt(appId, 10)
-            const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
-            if (url) newApp.url = url
-            onSave({ github: [...(settings.github || []), newApp] })
-            setAppId(""); setUrl(""); setPem("")
-          }}>
-            Add App
-          </Button>
         </div>
-      </div>
+      )}
     </div>
   )
 }
