@@ -26,7 +26,8 @@ type BootstrapParams struct {
 	BridgeURL string
 
 	// Features
-	Nix bool
+	Nix    bool
+	Docker bool
 
 	// GitHub credential helper
 	HubCfg      *types.HubConfig
@@ -195,6 +196,10 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 	if p.Nix {
 		nixFlag = "true"
 	}
+	dockerFlag := "false"
+	if p.Docker {
+		dockerFlag = "true"
+	}
 	// Encode the provider config python snippet as a single env var value so
 	// claw-bridge can receive it without heredoc escaping issues.
 	// We use a simple approach: if it's non-empty, pass it as ELASTICCLAW_PROVIDER_CONFIG.
@@ -224,6 +229,7 @@ export ELASTICCLAW_CLAW_NAME="%s"
 export ELASTICCLAW_GATEWAY_PASSWORD="%s"
 export OPENCLAW_DEFAULT_MODEL="%s"
 export ELASTICCLAW_NIX="%s"
+export ELASTICCLAW_DOCKER="%s"
 %s
 %s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
@@ -292,7 +298,7 @@ echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.DefaultModel, nixFlag,
+		p.DefaultModel, nixFlag, dockerFlag,
 		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		p.BridgeURL,
 	)
