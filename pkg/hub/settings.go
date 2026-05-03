@@ -136,6 +136,7 @@ type GitHubAppView struct {
 // LLMKeyPatch adds/updates a named LLM key. Set APIKey to "" to remove.
 type LLMKeyPatch struct {
 	Name         string  `json:"name"`
+	NewName      string  `json:"newName,omitempty"` // for rename: lookup by Name, set to NewName
 	Provider     string  `json:"provider,omitempty"`
 	APIKey       string  `json:"apiKey,omitempty"`
 	Default      *bool   `json:"default,omitempty"`
@@ -529,10 +530,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				existing = filtered
 				continue
 			}
-			// Find existing by name
+			// Find existing by name (or newName if renaming)
+			lookupName := kp.Name
 			var found *types.LLMKeyConfig
 			for _, k := range existing {
-				if k.Name == kp.Name {
+				if k.Name == lookupName {
 					found = k
 					break
 				}
@@ -540,6 +542,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if found == nil {
 				found = &types.LLMKeyConfig{Name: kp.Name}
 				existing = append(existing, found)
+			}
+			if kp.NewName != "" && kp.NewName != found.Name {
+				found.Name = kp.NewName
 			}
 			if kp.Provider != "" {
 				found.Provider = kp.Provider
