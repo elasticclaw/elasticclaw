@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "llm" | "github" | "authentication" | "integrations" | "factories" | "secrets" | "templates" | "ai-config"
+type Section = "runtimes" | "llm" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "integrations", "factories", "secrets", "templates", "ai-config"]
+const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -175,7 +175,7 @@ export default function SettingsSectionPage() {
     { id: "llm", label: "LLM Keys", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
     { id: "authentication", label: "Authentication", icon: Shield },
-    { id: "integrations", label: "Integrations", icon: Zap },
+    { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
     { id: "secrets", label: "Secrets", icon: Lock },
     { id: "templates", label: "Templates", icon: LayoutTemplate },
@@ -237,7 +237,7 @@ export default function SettingsSectionPage() {
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "integrations" && (
+          {settings && section === "issue-trackers" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "factories" && (
@@ -1191,8 +1191,8 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Integrations</h2>
-        <p className="text-sm text-muted-foreground mb-6">Connect external services to enable Factories.</p>
+        <h2 className="text-base font-semibold mb-1">Issue Trackers</h2>
+        <p className="text-sm text-muted-foreground mb-6">Connect Linear and Shortcut so Factories can listen for issue status changes and spawn claws automatically.</p>
       </div>
 
       {/* Linear */}
