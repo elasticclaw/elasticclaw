@@ -304,9 +304,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		view.SSHPublicKeys = []string{}
 	}
 
-	// GitHub Apps
-	for _, app := range s.hubCfg.GitHubApps {
-		view.GitHub = append(view.GitHub, s.buildGitHubAppView(app))
+	// GitHub Apps — copy configs under lock, check permissions after releasing lock
+	ghAppCfgs := make([]*types.GitHubAppConfig, len(s.hubCfg.GitHubApps))
+	for i, app := range s.hubCfg.GitHubApps {
+		copy := *app
+		ghAppCfgs[i] = &copy
 	}
 
 	// Integrations
@@ -394,6 +396,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
+	// Check GitHub App permissions outside the lock (network call)
+	for _, app := range ghAppCfgs {
+		view.GitHub = append(view.GitHub, s.buildGitHubAppView(r.Context(), app))
+	}
+
 	// Secrets — names only, read from disk so manually-edited hub.yaml entries are visible
 	view.Secrets = []string{}
 	if diskCfg, err := config.LoadHubConfig(); err == nil && diskCfg != nil {
@@ -407,7 +414,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
 // a live permission check if the private key is set.
-func (s *Server) buildGitHubAppView(app *types.GitHubAppConfig) GitHubAppView {
+func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
 	view := GitHubAppView{
 		AppID:  app.AppID,
 		URL:    app.URL,
@@ -424,7 +431,7 @@ func (s *Server) buildGitHubAppView(app *types.GitHubAppConfig) GitHubAppView {
 		return view
 	}
 
-	perms, err := provider.CheckAppPermissions(context.Background())
+	perms, err := provider.CheckAppPermissions(ctx)
 	if err != nil {
 		view.PermCheckError = err.Error()
 		return view
@@ -485,7 +492,7 @@ func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 		URL:           req.URL,
 		PrivateKeyPEM: req.PrivateKeyPEM,
 	}
-	view := s.buildGitHubAppView(app)
+	view := s.buildGitHubAppView(r.Context(), app)
 	jsonOK(w, view)
 }
 

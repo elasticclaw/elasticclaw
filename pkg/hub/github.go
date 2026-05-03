@@ -23,12 +23,6 @@ type githubInstallation struct {
 	} `json:"account"`
 }
 
-// githubAppPermission is a permission entry in the GitHub App manifest.
-type githubAppPermission struct {
-	Name    string `json:"name"`
-	Granted string `json:"granted"` // "read", "write", or ""
-}
-
 // githubAppMeta is the response from GET /app (authenticated as the App).
 type githubAppMeta struct {
 	Permissions map[string]string `json:"permissions"`
@@ -244,7 +238,10 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+appJWT)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
