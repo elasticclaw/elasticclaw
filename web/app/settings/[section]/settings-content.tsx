@@ -748,6 +748,18 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                 </div>
               )}
 
+              {/* Test result — success banner when all OK */}
+              {testResult && testResult.permCheckOk === true && (
+                <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
+                  <CheckCircle2 className="size-4 text-green-400" />
+                  <div>
+                    <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
+                    <p className="text-xs text-green-400/70">This GitHub App is ready to use.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Test result — permission details (shown for both OK and not-OK) */}
               {testResult && testResult.permissions && testResult.permissions.length > 0 && (
                 <div className="space-y-3">
                   {testResult.permCheckOk === false && (
@@ -770,13 +782,6 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                           </Button>
                         </a>
                       )}
-                    </div>
-                  )}
-
-                  {testResult.permCheckOk === true && (
-                    <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
-                      <CheckCircle2 className="size-4 text-green-400" />
-                      <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
                     </div>
                   )}
 

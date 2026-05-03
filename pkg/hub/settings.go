@@ -414,6 +414,7 @@ func (s *Server) buildGitHubAppView(app *types.GitHubAppConfig) GitHubAppView {
 		KeySet: app.PrivateKeyPEM != "",
 	}
 	if !view.KeySet {
+		view.PermCheckError = "Private key is required to test permissions"
 		return view
 	}
 
