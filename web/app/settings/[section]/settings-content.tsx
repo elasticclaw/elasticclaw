@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "llm" | "github" | "authentication" | "integrations" | "factories" | "secrets" | "templates" | "ai-config"
+type Section = "runtimes" | "llm" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "integrations", "factories", "secrets", "templates", "ai-config"]
+const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -175,7 +175,7 @@ export default function SettingsSectionPage() {
     { id: "llm", label: "LLM Keys", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
     { id: "authentication", label: "Authentication", icon: Shield },
-    { id: "integrations", label: "Integrations", icon: Zap },
+    { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
     { id: "secrets", label: "Secrets", icon: Lock },
     { id: "templates", label: "Templates", icon: LayoutTemplate },
@@ -237,7 +237,7 @@ export default function SettingsSectionPage() {
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "integrations" && (
+          {settings && section === "issue-trackers" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "factories" && (
@@ -1164,104 +1164,304 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
 }
 function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const linear = settings.integrations?.linear || []
-  const [editingIdx, setEditingIdx] = useState<number | null>(null)
-  const [editWorkspace, setEditWorkspace] = useState("")
-  const [editToken, setEditToken] = useState("")
-  const [originalWorkspace, setOriginalWorkspace] = useState("")
-  const [newWorkspace, setNewWorkspace] = useState("")
-  const [newToken, setNewToken] = useState("")
+  const shortcut = settings.integrations?.shortcut || []
 
-  const startEdit = (i: number) => {
-    setEditingIdx(i)
-    setEditWorkspace(linear[i].workspace)
-    setEditToken("")
-    setOriginalWorkspace(linear[i].workspace)
+  // Linear modal state
+  const [showLinearModal, setShowLinearModal] = useState(false)
+  const [linearModalMode, setLinearModalMode] = useState<"add" | "edit">("add")
+  const [linearEditIdx, setLinearEditIdx] = useState<number | null>(null)
+  const [linearWorkspace, setLinearWorkspace] = useState("")
+  const [linearToken, setLinearToken] = useState("")
+
+  // Shortcut modal state
+  const [showShortcutModal, setShowShortcutModal] = useState(false)
+  const [shortcutModalMode, setShortcutModalMode] = useState<"add" | "edit">("add")
+  const [shortcutEditIdx, setShortcutEditIdx] = useState<number | null>(null)
+  const [shortcutWorkspace, setShortcutWorkspace] = useState("")
+  const [shortcutToken, setShortcutToken] = useState("")
+
+  const linearConnected = linear.length
+  const shortcutConnected = shortcut.length
+  const totalConnected = linearConnected + shortcutConnected
+
+  const resetLinearModal = () => {
+    setLinearWorkspace(""); setLinearToken(""); setLinearEditIdx(null)
+  }
+  const openLinearAdd = () => { resetLinearModal(); setLinearModalMode("add"); setShowLinearModal(true) }
+  const openLinearEdit = (i: number) => {
+    setLinearWorkspace(linear[i].workspace)
+    setLinearToken("")
+    setLinearEditIdx(i)
+    setLinearModalMode("edit")
+    setShowLinearModal(true)
   }
 
-  const saveEdit = () => {
-    if (editingIdx === null) return
-    const updated = linear.map((li, i) => i === editingIdx
-      ? { workspace: editWorkspace, originalWorkspace, ...(editToken ? { token: editToken } : {}) }
-      : { workspace: li.workspace }
-    )
-    onSave({ integrations: { linear: updated } })
-    setEditingIdx(null)
+  const resetShortcutModal = () => {
+    setShortcutWorkspace(""); setShortcutToken(""); setShortcutEditIdx(null)
+  }
+  const openShortcutAdd = () => { resetShortcutModal(); setShortcutModalMode("add"); setShowShortcutModal(true) }
+  const openShortcutEdit = (i: number) => {
+    setShortcutWorkspace(shortcut[i].workspace)
+    setShortcutToken("")
+    setShortcutEditIdx(i)
+    setShortcutModalMode("edit")
+    setShowShortcutModal(true)
+  }
+
+  function saveLinear() {
+    if (!linearWorkspace.trim()) return
+    if (linearModalMode === "add") {
+      if (!linearToken.trim()) return
+      onSave({ integrations: { linear: [...linear, { workspace: linearWorkspace.trim(), token: linearToken.trim() }] } })
+    } else if (linearEditIdx !== null) {
+      const updated = linear.map((li, i) => i === linearEditIdx
+        ? { workspace: linearWorkspace.trim(), originalWorkspace: li.workspace, ...(linearToken.trim() ? { token: linearToken.trim() } : {}) }
+        : { workspace: li.workspace }
+      )
+      onSave({ integrations: { linear: updated } })
+    }
+    setShowLinearModal(false)
+    resetLinearModal()
+  }
+
+  function removeLinear(i: number) {
+    onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } })
+    setShowLinearModal(false)
+    resetLinearModal()
+  }
+
+  function saveShortcut() {
+    if (!shortcutWorkspace.trim()) return
+    if (shortcutModalMode === "add") {
+      if (!shortcutToken.trim()) return
+      onSave({ integrations: { shortcut: [...shortcut.map(x => ({ workspace: x.workspace })), { workspace: shortcutWorkspace.trim(), token: shortcutToken.trim() }] } })
+    } else if (shortcutEditIdx !== null) {
+      const updated = shortcut.map((sc, i) => i === shortcutEditIdx
+        ? { workspace: shortcutWorkspace.trim(), originalWorkspace: sc.workspace, ...(shortcutToken.trim() ? { token: shortcutToken.trim() } : {}) }
+        : { workspace: sc.workspace }
+      )
+      onSave({ integrations: { shortcut: updated } })
+    }
+    setShowShortcutModal(false)
+    resetShortcutModal()
+  }
+
+  function removeShortcut(i: number) {
+    onSave({ integrations: { shortcut: shortcut.filter((_, j) => j !== i).map(x => ({ workspace: x.workspace })) } })
+    setShowShortcutModal(false)
+    resetShortcutModal()
   }
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Integrations</h2>
-        <p className="text-sm text-muted-foreground mb-6">Connect external services to enable Factories.</p>
+        <h2 className="text-base font-semibold mb-1">Issue Trackers</h2>
+        <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from Factories.</p>
+
+        {/* Summary badges */}
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {totalConnected} workspace{totalConnected !== 1 ? "s" : ""} connected
+          </span>
+        </div>
       </div>
 
-      {/* Linear */}
+      {/* Linear section */}
       <div>
-        <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-          <Zap className="size-4" /> Linear
-        </h3>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Zap className="size-4" />
+            <span className="text-sm font-medium">Linear</span>
+            {linearConnected > 0 && (
+              <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">{linearConnected}</span>
+            )}
+          </div>
+          <Button size="sm" variant="outline" onClick={openLinearAdd} className="gap-1">
+            <span className="text-sm">+</span> Add
+          </Button>
+        </div>
+
         {linear.length > 0 && (
-          <div className="mb-4 space-y-2">
+          <div className="space-y-2 mb-4">
             {linear.map((li, i) => (
-              <div key={i}>
-                {editingIdx === i ? (
-                  <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
-                    <h4 className="text-sm font-semibold">Edit: {li.workspace}</h4>
-                    <p className="text-xs text-muted-foreground">Leave token/secret blank to keep existing values.</p>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                      <Input value={editWorkspace} onChange={e => setEditWorkspace(e.target.value)} className="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                      <Input type="password" value={editToken} onChange={e => setEditToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_... (leave blank to keep)" />
-                    </div>
-                    <div className="flex gap-2">
-                      <Button size="sm" disabled={saving || !editWorkspace} onClick={saveEdit}>Save</Button>
-                      <Button size="sm" variant="outline" onClick={() => setEditingIdx(null)}>Cancel</Button>
-                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive ml-auto" disabled={saving}
-                        onClick={() => { onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } }); setEditingIdx(null) }}>
-                        Remove
-                      </Button>
-                    </div>
+              <div
+                key={i}
+                onClick={() => openLinearEdit(i)}
+                className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+              >
+                <div>
+                  <p className="text-sm font-medium">{li.workspace}</p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    {li.tokenSet ? (
+                      <span className="text-xs text-green-400 flex items-center gap-1">
+                        <CheckCircle2 className="size-3" /> Connected
+                      </span>
+                    ) : (
+                      <span className="text-xs text-red-400 flex items-center gap-1">
+                        <AlertTriangle className="size-3" /> Token revoked
+                      </span>
+                    )}
                   </div>
-                ) : (
-                  <div className="border border-border rounded-lg p-3 flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">{li.workspace}</p>
-                      <p className="text-xs text-muted-foreground">
-                        Token: {li.tokenSet ? <span className="text-green-500">✓ set</span> : <span className="text-amber-500">✗ not set</span>}
-                      </p>
-                    </div>
-                    <Button size="sm" variant="outline" onClick={() => startEdit(i)}>Edit</Button>
-                  </div>
-                )}
+                </div>
+                <span className="text-muted-foreground text-lg">⋯</span>
               </div>
             ))}
           </div>
         )}
-        <div className="border border-border rounded-lg p-4 space-y-3">
-          <p className="text-xs text-muted-foreground font-medium">Add a Linear workspace</p>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-            <Input value={newWorkspace} onChange={e => setNewWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
+
+        {linear.length === 0 && (
+          <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3">
+            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
+              <Zap className="size-5 text-muted-foreground" />
+            </div>
+            <p className="text-sm text-muted-foreground">No Linear workspaces connected</p>
+            <Button size="sm" variant="outline" onClick={openLinearAdd} className="gap-1">
+              <span className="text-sm">+</span> Add Linear workspace
+            </Button>
           </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-            <Input type="password" value={newToken} onChange={e => setNewToken(e.target.value)} className="h-8 text-sm" placeholder="lin_api_..." />
-          </div>
-          <Button size="sm" disabled={saving || !newWorkspace || !newToken}
-            onClick={() => {
-              onSave({ integrations: { linear: [...linear, { workspace: newWorkspace, token: newToken }] } })
-              setNewWorkspace(""); setNewToken("")
-            }}>
-            Add Linear Workspace
-          </Button>
-        </div>
+        )}
       </div>
 
-      {/* Shortcut */}
-      <ShortcutIntegrationsBlock settings={settings} onSave={onSave} saving={saving} />
+      {/* Shortcut section */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="size-4 text-[#F4603C]">⚡</span>
+            <span className="text-sm font-medium">Shortcut</span>
+            {shortcutConnected > 0 && (
+              <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">{shortcutConnected}</span>
+            )}
+          </div>
+          <Button size="sm" variant="outline" onClick={openShortcutAdd} className="gap-1">
+            <span className="text-sm">+</span> Add
+          </Button>
+        </div>
+
+        {shortcut.length > 0 && (
+          <div className="space-y-2 mb-4">
+            {shortcut.map((sc, i) => (
+              <div
+                key={i}
+                onClick={() => openShortcutEdit(i)}
+                className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+              >
+                <div>
+                  <p className="text-sm font-medium">{sc.workspace}</p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    {sc.tokenSet ? (
+                      <span className="text-xs text-green-400 flex items-center gap-1">
+                        <CheckCircle2 className="size-3" /> Connected
+                      </span>
+                    ) : (
+                      <span className="text-xs text-red-400 flex items-center gap-1">
+                        <AlertTriangle className="size-3" /> Token revoked
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <span className="text-muted-foreground text-lg">⋯</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {shortcut.length === 0 && (
+          <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3">
+            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
+              <span className="text-xl text-muted-foreground">⚡</span>
+            </div>
+            <p className="text-sm text-muted-foreground">No Shortcut workspaces connected</p>
+            <Button size="sm" variant="outline" onClick={openShortcutAdd} className="gap-1">
+              <span className="text-sm">+</span> Add Shortcut workspace
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Linear Modal */}
+      {showLinearModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <div className="flex items-center gap-2">
+                <Zap className="size-4" />
+                <h3 className="font-medium">{linearModalMode === "add" ? "Add Linear workspace" : `Edit ${linear[linearEditIdx!]?.workspace}`}</h3>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => { setShowLinearModal(false); resetLinearModal() }} className="h-8 w-8 p-0">
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-sm text-muted-foreground">Connect a Linear workspace to sync issues.</p>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+                <Input value={linearWorkspace} onChange={e => setLinearWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
+                <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                <Input type="password" value={linearToken} onChange={e => setLinearToken(e.target.value)} className="h-9 text-sm" placeholder="Linear API token" />
+                <p className="text-xs text-muted-foreground mt-1">Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between px-5 py-4 border-t border-border">
+              {linearModalMode === "edit" && linearEditIdx !== null && (
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => removeLinear(linearEditIdx)}>
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" onClick={() => { setShowLinearModal(false); resetLinearModal() }}>Cancel</Button>
+                <Button size="sm" disabled={saving || !linearWorkspace.trim() || (linearModalMode === "add" && !linearToken.trim())} onClick={saveLinear}>
+                  {linearModalMode === "add" ? "Add workspace" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Shortcut Modal */}
+      {showShortcutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <div className="flex items-center gap-2">
+                <span className="text-[#F4603C]">⚡</span>
+                <h3 className="font-medium">{shortcutModalMode === "add" ? "Add Shortcut workspace" : `Edit ${shortcut[shortcutEditIdx!]?.workspace}`}</h3>
+              </div>
+              <Button size="sm" variant="ghost" onClick={() => { setShowShortcutModal(false); resetShortcutModal() }} className="h-8 w-8 p-0">
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-sm text-muted-foreground">Connect a Shortcut workspace to sync issues.</p>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
+                <Input value={shortcutWorkspace} onChange={e => setShortcutWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
+                <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                <Input type="password" value={shortcutToken} onChange={e => setShortcutToken(e.target.value)} className="h-9 text-sm" placeholder="Shortcut API token" />
+              </div>
+            </div>
+            <div className="flex items-center justify-between px-5 py-4 border-t border-border">
+              {shortcutModalMode === "edit" && shortcutEditIdx !== null && (
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => removeShortcut(shortcutEditIdx)}>
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" onClick={() => { setShowShortcutModal(false); resetShortcutModal() }}>Cancel</Button>
+                <Button size="sm" disabled={saving || !shortcutWorkspace.trim() || (shortcutModalMode === "add" && !shortcutToken.trim())} onClick={saveShortcut}>
+                  {shortcutModalMode === "add" ? "Add workspace" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
