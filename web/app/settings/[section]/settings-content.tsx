@@ -565,7 +565,19 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
     }
   }
 
-  function doSave() {
+  const [showConfirmModal, setShowConfirmModal] = useState(false)
+
+  function doSave(force = false) {
+    // Not tested yet — recommend testing
+    if (!force && testResult === null) {
+      setShowConfirmModal(true)
+      return
+    }
+    // Tested and failed — warn but allow
+    if (!force && testResult && testResult.permCheckOk !== true) {
+      setShowConfirmModal(true)
+      return
+    }
     const parsedAppId = parseInt(appId, 10)
     const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
     if (url) newApp.url = url
@@ -838,7 +850,45 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 
             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-border">
               <Button size="sm" variant="outline" onClick={closeModal}>Cancel</Button>
-              <Button size="sm" disabled={saving || !appId || !pem || isNaN(Number(appId))} onClick={doSave}>
+              <Button size="sm" disabled={saving || !appId || !pem || isNaN(Number(appId))} onClick={() => doSave(false)}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm save modal — not tested or test failed */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-md p-5 space-y-4">
+            {testResult === null ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="size-5 text-yellow-400" />
+                  <h3 className="font-medium">Test Recommended</h3>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  You haven't tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="size-5 text-yellow-400" />
+                  <h3 className="font-medium">Permissions Missing</h3>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  This GitHub App is missing required permissions. It <strong>will not work</strong> for claws until fixed.
+                </p>
+                {testResult.permCheckError && (
+                  <p className="text-xs text-yellow-400 bg-yellow-500/10 rounded px-2 py-1.5">{testResult.permCheckError}</p>
+                )}
+              </>
+            )}
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button size="sm" variant="outline" onClick={() => setShowConfirmModal(false)}>Go Back</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setShowConfirmModal(false); doSave(true) }}>
                 Save Anyway
               </Button>
             </div>
