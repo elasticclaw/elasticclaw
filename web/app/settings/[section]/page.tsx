@@ -1,6 +1,6 @@
 import SettingsSectionPage from "./settings-content"
 
-const VALID_SECTIONS = ["runtimes", "llm", "github", "authentication", "integrations", "factories", "secrets", "templates"]
+const VALID_SECTIONS = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
 
 export function generateStaticParams() {
   return VALID_SECTIONS.map((section) => ({ section }))
