@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "llm" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "llm", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -172,7 +172,7 @@ export default function SettingsSectionPage() {
 
   const navItems: { id: Section; label: string; icon: React.ElementType }[] = [
     { id: "runtimes", label: "Sandbox Runtimes", icon: Cpu },
-    { id: "llm", label: "LLM Keys", icon: Key },
+    { id: "models", label: "Models", icon: Key },
     { id: "github", label: "GitHub Apps", icon: Github },
     { id: "authentication", label: "Authentication", icon: Shield },
     { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
@@ -228,7 +228,7 @@ export default function SettingsSectionPage() {
           {settings && section === "runtimes" && (
             <RuntimesSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "llm" && (
+          {settings && section === "models" && (
             <LLMSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "github" && (
@@ -411,117 +411,281 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
 
 function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const llmKeys = settings.llmKeys || []
-  const [newName, setNewName] = useState("")
-  const [newProvider, setNewProvider] = useState("anthropic")
-  const [newCustomProvider, setNewCustomProvider] = useState("")
-  const [newKey, setNewKey] = useState("")
-  const [newDefault, setNewDefault] = useState(false)
-  const [newDefaultModel, setNewDefaultModel] = useState("")
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [editIdx, setEditIdx] = useState<number | null>(null)
+
+  // Form state
+  const [formName, setFormName] = useState("")
+  const [formProvider, setFormProvider] = useState("anthropic")
+  const [formCustomProvider, setFormCustomProvider] = useState("")
+  const [formKey, setFormKey] = useState("")
+  const [formDefault, setFormDefault] = useState(false)
+  const [formDefaultModel, setFormDefaultModel] = useState("")
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
 
-  return (
-    <div>
-      <h2 className="text-base font-semibold mb-1">LLM Keys</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Named API keys injected into claws at bootstrap. The default key's model is used unless overridden by the template.
-      </p>
+  const resetForm = () => {
+    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setEditIdx(null)
+  }
 
-      {/* Existing keys */}
-      {llmKeys.length > 0 && (
-        <div className="space-y-2 mb-6">
-          {llmKeys.map((k) => (
-            <div key={k.name} className="border border-border rounded-lg p-3 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{k.name}</span>
-                  <span className="text-xs text-muted-foreground">{providerLabel(k.provider)}</span>
-                  {k.default && <span className="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded">default</span>}
-                  {k.keySet
-                    ? <span className="text-xs text-green-500">✓ set</span>
-                    : <span className="text-xs text-amber-500">✗ not set</span>}
+  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  const openEdit = (i: number) => {
+    const k = llmKeys[i]
+    setFormName(k.name)
+    const isCustom = !PROVIDER_OPTIONS.some(o => o.value === k.provider)
+    setFormProvider(isCustom ? "other" : k.provider)
+    setFormCustomProvider(isCustom ? k.provider : "")
+    setFormKey("")
+    setFormDefault(k.default)
+    setFormDefaultModel(k.defaultModel || "")
+    setEditIdx(i)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  const needsAttention = llmKeys.filter(k => !k.keySet).length
+  const configuredCount = llmKeys.filter(k => k.keySet).length
+
+  function doSave() {
+    const actualProvider = formProvider === "other" ? formCustomProvider : formProvider
+    if (modalMode === "add") {
+      if (!formName.trim() || !formKey.trim()) return
+      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: formDefaultModel || undefined }] })
+    } else if (editIdx !== null) {
+      const patch: Record<string, unknown> = { name: formName.trim() }
+      if (formKey.trim()) patch.apiKey = formKey.trim()
+      if (formDefault) patch.default = true
+      if (formDefaultModel) patch.defaultModel = formDefaultModel
+      // If provider changed
+      const existing = llmKeys[editIdx]
+      if (actualProvider !== existing.provider) patch.provider = actualProvider
+      onSave({ llmKeys: [patch] })
+    }
+    setShowModal(false)
+    resetForm()
+  }
+
+  function doRemove(i: number) {
+    onSave({ llmKeys: [{ name: llmKeys[i].name, delete: true }] })
+    setShowModal(false)
+    resetForm()
+  }
+
+  function setDefault(i: number) {
+    onSave({ llmKeys: [{ name: llmKeys[i].name, default: true }] })
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Models</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          API keys for LLM providers. The default key is used unless overridden by a template.
+        </p>
+
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {llmKeys.length} key{llmKeys.length !== 1 ? "s" : ""} configured
+          </span>
+          {needsAttention > 0 && (
+            <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-1 rounded font-medium flex items-center gap-1">
+              <AlertTriangle className="size-3" /> {needsAttention} need{needsAttention !== 1 ? "" : "s"} attention
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Needs Attention */}
+      {needsAttention > 0 && (
+        <div>
+          <p className="text-sm font-medium text-yellow-400 mb-2 flex items-center gap-1.5">
+            <AlertTriangle className="size-4" /> Needs Attention
+          </p>
+          <div className="space-y-2">
+            {llmKeys.filter(k => !k.keySet).map((k) => (
+              <div
+                key={k.name}
+                onClick={() => openEdit(llmKeys.indexOf(k))}
+                className="border border-red-500/20 rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-red-500/5 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                    <Zap className="size-4 text-muted-foreground" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{k.name}</span>
+                      <span className="text-xs text-muted-foreground">{providerLabel(k.provider)}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {k.defaultModel ? (
+                        <span className="text-xs text-muted-foreground">model: {k.defaultModel}</span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">using provider default</span>
+                      )}
+                      <span className="text-xs text-red-400 flex items-center gap-1">✕ Invalid</span>
+                    </div>
+                  </div>
                 </div>
-                {k.defaultModel && (
-                  <p className="text-xs text-muted-foreground mt-0.5 truncate">model: {k.defaultModel}</p>
-                )}
+                <span className="text-muted-foreground text-lg">⋯</span>
               </div>
-              <div className="flex gap-2 shrink-0">
-                {!k.default && (
-                  <Button size="sm" variant="outline" disabled={saving}
-                    onClick={() => onSave({ llmKeys: [{ name: k.name, default: true }] })}>
-                    Set default
-                  </Button>
-                )}
-                <Button size="sm" variant="ghost" className="text-destructive" disabled={saving}
-                  onClick={() => onSave({ llmKeys: [{ name: k.name, delete: true }] })}>
-                  Remove
-                </Button>
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Add new key */}
-      <div className="border border-border rounded-lg p-4 space-y-3">
-        <p className="text-xs font-medium text-muted-foreground">Add key</p>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Name</label>
-            <Input value={newName} onChange={e => setNewName(e.target.value)} className="h-8 text-sm" placeholder="anthropic-prod" />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
-            <select value={newProvider} onChange={e => { setNewProvider(e.target.value); setNewDefaultModel("") }}
-              className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm">
-              {PROVIDER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-        </div>
-        {newProvider === "other" && (
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Custom Provider Name</label>
-            <Input value={newCustomProvider} onChange={e => setNewCustomProvider(e.target.value)}
-              className="h-8 text-sm" placeholder="mistral" />
-          </div>
-        )}
+      {/* Configured */}
+      {configuredCount > 0 && (
         <div>
-          <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
-          <Input type="password" value={newKey} onChange={e => setNewKey(e.target.value)}
-            className="h-8 text-sm" placeholder={providerPlaceholder(newProvider)} />
+          <p className="text-sm font-medium text-muted-foreground mb-2">Configured</p>
+          <div className="space-y-2">
+            {llmKeys.filter(k => k.keySet).map((k) => (
+              <div
+                key={k.name}
+                onClick={() => openEdit(llmKeys.indexOf(k))}
+                className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                    {k.provider === "anthropic" ? (
+                      <Sparkles className="size-4 text-muted-foreground" />
+                    ) : (
+                      <Zap className="size-4 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{k.name}</span>
+                      <span className="text-xs text-muted-foreground">{providerLabel(k.provider)}</span>
+                      {k.default && (
+                        <span className="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <Sparkles className="size-3" /> Default
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {k.defaultModel ? (
+                        <span className="text-xs text-muted-foreground">model: {k.defaultModel}</span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">using provider default</span>
+                      )}
+                      <span className="text-xs text-green-400 flex items-center gap-1">✓ Valid</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!k.default && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={(e) => { e.stopPropagation(); setDefault(llmKeys.indexOf(k)) }}
+                      disabled={saving}
+                    >
+                      Set default
+                    </Button>
+                  )}
+                  <span className="text-muted-foreground text-lg">⋯</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
-          {PROVIDER_MODELS[newProvider] ? (
-            <select
-              value={newDefaultModel}
-              onChange={e => setNewDefaultModel(e.target.value)}
-              className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
-            >
-              <option value="">— use provider default —</option>
-              {PROVIDER_MODELS[newProvider].map(m => (
-                <option key={m.id} value={m.id}>{m.name}</option>
-              ))}
-            </select>
-          ) : (
-            <Input value={newDefaultModel} onChange={e => setNewDefaultModel(e.target.value)}
-              className="h-8 text-sm" placeholder="e.g. myprovider/model-name" />
-          )}
+      )}
+
+      <Button onClick={openAdd} className="gap-2">
+        <span className="text-sm">+</span> Add Model Key
+      </Button>
+
+      {/* Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
+              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetForm() }} className="h-8 w-8 p-0">
+                <X className="size-4" />
+              </Button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                  <Input value={formName} onChange={e => setFormName(e.target.value)} className="h-8 text-sm" placeholder="anthropic-prod" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
+                  <select
+                    value={formProvider}
+                    onChange={e => { setFormProvider(e.target.value); setFormDefaultModel("") }}
+                    className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
+                  >
+                    {PROVIDER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+              </div>
+              {formProvider === "other" && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Custom Provider Name</label>
+                  <Input value={formCustomProvider} onChange={e => setFormCustomProvider(e.target.value)} className="h-8 text-sm" placeholder="mistral" />
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
+                <Input
+                  type="password"
+                  value={formKey}
+                  onChange={e => setFormKey(e.target.value)}
+                  className="h-8 text-sm"
+                  placeholder={modalMode === "edit" ? "Leave blank to keep existing" : providerPlaceholder(formProvider)}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
+                {PROVIDER_MODELS[formProvider] ? (
+                  <select
+                    value={formDefaultModel}
+                    onChange={e => setFormDefaultModel(e.target.value)}
+                    className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
+                  >
+                    <option value="">— use provider default —</option>
+                    {PROVIDER_MODELS[formProvider].map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <Input value={formDefaultModel} onChange={e => setFormDefaultModel(e.target.value)} className="h-8 text-sm" placeholder="e.g. myprovider/model-name" />
+                )}
+              </div>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={formDefault} onChange={e => setFormDefault(e.target.checked)} />
+                Set as default key
+              </label>
+            </div>
+
+            <div className="flex items-center justify-between px-5 py-4 border-t border-border">
+              {modalMode === "edit" && editIdx !== null && (
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => doRemove(editIdx)}>
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={saving || !formName.trim() || (modalMode === "add" && !formKey.trim()) || (formProvider === "other" && !formCustomProvider.trim())}
+                  onClick={doSave}
+                >
+                  {modalMode === "add" ? "Add Model Key" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />
-          Set as default key
-        </label>
-        <Button size="sm" disabled={saving || !newName || !newKey || (newProvider === "other" && !newCustomProvider)}
-          onClick={() => {
-            const actualProvider = newProvider === "other" ? newCustomProvider : newProvider
-            onSave({ llmKeys: [{ name: newName, provider: actualProvider, apiKey: newKey, default: newDefault, defaultModel: newDefaultModel || undefined }] })
-            setNewName(""); setNewKey(""); setNewDefault(false); setNewCustomProvider(""); setNewDefaultModel("")
-          }}>
-          Add Key
-        </Button>
-      </div>
+      )}
     </div>
   )
 }
