@@ -748,77 +748,90 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                 </div>
               )}
 
-              {/* Test result — success banner when all OK */}
-              {testResult && testResult.permCheckOk === true && (
-                <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
-                  <CheckCircle2 className="size-4 text-green-400" />
-                  <div>
-                    <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
-                    <p className="text-xs text-green-400/70">This GitHub App is ready to use.</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Test result — permission details (shown for both OK and not-OK) */}
-              {testResult && testResult.permissions && testResult.permissions.length > 0 && (
+              {/* Test result — show SOMETHING for every result state */}
+              {testResult && (
                 <div className="space-y-3">
-                  {testResult.permCheckOk === false && (
-                    <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Shield className="size-4 text-yellow-400" />
-                        <div>
-                          <p className="text-xs font-medium text-yellow-400">
-                            {needsAttention} permission{needsAttention !== 1 ? "s" : ""} need attention
-                          </p>
-                          <p className="text-xs text-yellow-400/70">
-                            {configuredCount} of {totalCount} required permissions granted
-                          </p>
-                        </div>
+                  {/* permCheckOk is true — all good */}
+                  {testResult.permCheckOk === true && (
+                    <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
+                      <CheckCircle2 className="size-4 text-green-400" />
+                      <div>
+                        <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
+                        <p className="text-xs text-green-400/70">This GitHub App is ready to use.</p>
                       </div>
-                      {url && (
-                        <a href={url} target="_blank" rel="noopener noreferrer">
-                          <Button size="sm" variant="outline" className="h-7 text-xs gap-1">
-                            <ExternalLink className="size-3" /> Fix in GitHub
-                          </Button>
-                        </a>
-                      )}
                     </div>
                   )}
 
-                  <div className="space-y-1">
-                    {testResult.permissions.filter(p => !p.ok).length > 0 && (
-                      <>
-                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
-                        {testResult.permissions.filter(p => !p.ok).map(p => (
-                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              <AlertTriangle className="size-3.5 text-yellow-400" />
-                              <span className="text-sm font-mono text-yellow-400">{p.name}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5 text-xs">
-                              <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
-                              <span className="text-muted-foreground">→</span>
-                              <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                  {/* permCheckOk is false or missing — show the problem */}
+                  {(testResult.permCheckOk === false || testResult.permCheckOk == null) && (
+                    <>
+                      {testResult.permCheckError ? (
+                        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-start gap-2">
+                          <AlertTriangle className="size-4 text-yellow-400 shrink-0 mt-0.5" />
+                          <p className="text-xs text-yellow-400">{testResult.permCheckError}</p>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Shield className="size-4 text-yellow-400" />
+                            <div>
+                              <p className="text-xs font-medium text-yellow-400">
+                                {needsAttention} permission{needsAttention !== 1 ? "s" : ""} need attention
+                              </p>
+                              <p className="text-xs text-yellow-400/70">
+                                {configuredCount} of {totalCount} required permissions granted
+                              </p>
                             </div>
                           </div>
-                        ))}
-                      </>
-                    )}
-                    {testResult.permissions.filter(p => p.ok).length > 0 && (
-                      <>
-                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium mt-2">Configured</p>
-                        {testResult.permissions.filter(p => p.ok).map(p => (
-                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              <CheckCircle2 className="size-3.5 text-green-400" />
-                              <span className="text-sm font-mono text-green-400">{p.name}</span>
+                          {url && (
+                            <a href={url} target="_blank" rel="noopener noreferrer">
+                              <Button size="sm" variant="outline" className="h-7 text-xs gap-1">
+                                <ExternalLink className="size-3" /> Fix in GitHub
+                              </Button>
+                            </a>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* Permission list — shown whenever we have permissions */}
+                  {testResult.permissions && testResult.permissions.length > 0 && (
+                    <div className="space-y-1">
+                      {testResult.permissions.filter(p => !p.ok).length > 0 && (
+                        <>
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
+                          {testResult.permissions.filter(p => !p.ok).map(p => (
+                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <AlertTriangle className="size-3.5 text-yellow-400" />
+                                <span className="text-sm font-mono text-yellow-400">{p.name}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-xs">
+                                <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
+                                <span className="text-muted-foreground">→</span>
+                                <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                              </div>
                             </div>
-                            <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                  </div>
+                          ))}
+                        </>
+                      )}
+                      {testResult.permissions.filter(p => p.ok).length > 0 && (
+                        <>
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium mt-2">Configured</p>
+                          {testResult.permissions.filter(p => p.ok).map(p => (
+                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <CheckCircle2 className="size-3.5 text-green-400" />
+                                <span className="text-sm font-mono text-green-400">{p.name}</span>
+                              </div>
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
