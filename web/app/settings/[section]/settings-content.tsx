@@ -592,9 +592,18 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
   return (
     <div>
       <h2 className="text-base font-semibold mb-1">GitHub Apps</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        GitHub App credentials for claws to access repositories. <span className="text-muted-foreground/60">(Optional)</span>
-      </p>
+      <div className="text-sm text-muted-foreground mb-6 space-y-1.5">
+        <p>
+          Register a GitHub App so your ElasticClaw templates can access repositories.
+          When a claw is created, it gets a scoped token that can read and write code,
+          open pull requests, and check CI status — but only on repos the App is installed on.
+        </p>
+        <p>
+          The App needs <strong>contents:write</strong>, <strong>pull_requests:write</strong>,
+          and read access to <strong>metadata</strong>, <strong>checks</strong>, and <strong>statuses</strong>.
+          Install it on your org or specific repos, then add the App ID and private key here.
+        </p>
+      </div>
 
       {settings.github?.length > 0 && (
         <div className="mb-6 space-y-2">
