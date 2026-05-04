@@ -915,6 +915,15 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if mp.Delete {
 				continue
 			}
+			if mp.Source != "" {
+				switch types.MCPSource(mp.Source) {
+				case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery, types.MCPSourceDocker, types.MCPSourceSSE:
+					// ok
+				default:
+					http.Error(w, "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+					return
+				}
+			}
 			mcp := &types.MCPServerHubConfig{
 				Name:    mp.Name,
 				Source:  types.MCPSource(mp.Source),
