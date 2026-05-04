@@ -50,11 +50,6 @@ type Server struct {
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
 	linearBaseURL string
-
-	// webhookDedup prevents duplicate Linear webhook deliveries from creating
-	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
-	webhookDedup   map[string]time.Time
-	webhookDedupMu sync.Mutex
 }
 
 type clawConn struct {
@@ -116,7 +111,6 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		users:           make(map[string]*userConn),
 		fileAckWaiters:  make(map[string]chan types.FileAck),
 		fileReadWaiters: make(map[string]chan types.FileReadResp),
-		webhookDedup:    make(map[string]time.Time),
 	}
 
 	// Start background poller to keep provider VM status fresh
