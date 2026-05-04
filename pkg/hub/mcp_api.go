@@ -111,6 +111,17 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	cfgCopy := *s.hubCfg
+
+	// Preserve existing secrets if the request omits them (partial update)
+	if req.Secrets == nil {
+		for _, existing := range cfgCopy.MCPServers {
+			if existing.Name == req.Name && existing.Secrets != nil {
+				req.Secrets = existing.Secrets
+				break
+			}
+		}
+	}
+
 	var mcps []*types.MCPServerHubConfig
 	found := false
 	for _, existing := range cfgCopy.MCPServers {
