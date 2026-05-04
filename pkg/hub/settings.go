@@ -908,37 +908,106 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// MCP Servers
+	// MCP Servers — merge patch entries into existing list
 	if patch.MCPServers != nil {
+		// Build a map of patch entries by name for quick lookup
+		patchByName := make(map[string]MCPPatch, len(patch.MCPServers))
+		for _, mp := range patch.MCPServers {
+			patchByName[mp.Name] = mp
+		}
+
 		var mcps []*types.MCPServerHubConfig
+		// Keep existing entries not mentioned in patch; update or delete those that are
+		for _, existing := range s.hubCfg.MCPServers {
+			mp, inPatch := patchByName[existing.Name]
+			if !inPatch {
+				// Not in patch — preserve unchanged
+				mcps = append(mcps, existing)
+				continue
+			}
+			if mp.Delete {
+				// Delete — drop this entry
+				continue
+			}
+			// Update existing entry with patched fields
+			updated := &types.MCPServerHubConfig{
+				Name:    existing.Name,
+				Source:  existing.Source,
+				Package: existing.Package,
+				Image:   existing.Image,
+				URL:     existing.URL,
+				Enabled: existing.Enabled,
+				Config:  existing.Config,
+				Secrets: existing.Secrets,
+				Command: existing.Command,
+			}
+			if mp.Source != "" {
+				updated.Source = types.MCPSource(mp.Source)
+			}
+			if mp.Package != "" {
+				updated.Package = mp.Package
+			}
+			if mp.Image != "" {
+				updated.Image = mp.Image
+			}
+			if mp.URL != "" {
+				updated.URL = mp.URL
+			}
+			if mp.Enabled != nil {
+				updated.Enabled = *mp.Enabled
+			}
+			if mp.Config != nil {
+				updated.Config = mp.Config
+			}
+			if mp.Command != nil {
+				updated.Command = mp.Command
+			}
+			if mp.Secrets != nil {
+				updated.Secrets = mp.Secrets
+			}
+			mcps = append(mcps, updated)
+		}
+		// Add new entries (names not found in existing)
 		for _, mp := range patch.MCPServers {
 			if mp.Delete {
 				continue
 			}
+			// Check if this name already exists (already handled above)
+			found := false
+			for _, existing := range s.hubCfg.MCPServers {
+				if existing.Name == mp.Name {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+			// Validate new entry
 			if mp.Source == "" {
 				http.Error(w, "source required for mcp "+mp.Name, http.StatusBadRequest)
 				return
 			}
 			switch types.MCPSource(mp.Source) {
-				case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
-					if mp.Package == "" {
-						http.Error(w, "package required for mcp "+mp.Name+" source "+mp.Source, http.StatusBadRequest)
-						return
-					}
-				case types.MCPSourceDocker:
-					if mp.Image == "" {
-						http.Error(w, "image required for mcp "+mp.Name+" source docker", http.StatusBadRequest)
-						return
-					}
-				case types.MCPSourceSSE:
-					if mp.URL == "" {
-						http.Error(w, "url required for mcp "+mp.Name+" source sse", http.StatusBadRequest)
-						return
-					}
-				default:
-					http.Error(w, "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+			case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
+				if mp.Package == "" {
+					http.Error(w, "package required for mcp "+mp.Name+" source "+mp.Source, http.StatusBadRequest)
 					return
 				}
+			case types.MCPSourceDocker:
+				if mp.Image == "" {
+					http.Error(w, "image required for mcp "+mp.Name+" source docker", http.StatusBadRequest)
+					return
+				}
+			case types.MCPSourceSSE:
+				if mp.URL == "" {
+					http.Error(w, "url required for mcp "+mp.Name+" source sse", http.StatusBadRequest)
+					return
+				}
+			default:
+				http.Error(w, "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+				return
+			}
 			mcp := &types.MCPServerHubConfig{
 				Name:    mp.Name,
 				Source:  types.MCPSource(mp.Source),
@@ -953,19 +1022,8 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			} else {
 				mcp.Enabled = true
 			}
-			// Preserve existing secrets if not being replaced
 			if mp.Secrets != nil {
 				mcp.Secrets = mp.Secrets
-			} else {
-				for _, existing := range s.hubCfg.MCPServers {
-					if existing.Name == mp.Name && existing.Secrets != nil {
-						mcp.Secrets = make(map[string]string, len(existing.Secrets))
-						for k, v := range existing.Secrets {
-							mcp.Secrets[k] = v
-						}
-						break
-					}
-				}
 			}
 			mcps = append(mcps, mcp)
 		}
