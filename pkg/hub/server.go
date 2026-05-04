@@ -184,6 +184,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))     // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))       // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -818,6 +819,72 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	for k, v := range req.Files {
 		templateFiles[k] = []byte(v)
 	}
+
+	// Resolve MCP server configs from template + hub config
+	var mcpConfigs []*types.MCPConfig
+	if len(req.MCPs) > 0 {
+		s.mu.RLock()
+		hubMCPServers := s.hubCfg.MCPServers
+		hubSecrets := s.hubCfg.Secrets
+		s.mu.RUnlock()
+		for _, mcpRef := range req.MCPs {
+			var hubMCP *types.MCPServerHubConfig
+			for _, hm := range hubMCPServers {
+				if hm.Name == mcpRef.Name {
+					hubMCP = hm
+					break
+				}
+			}
+			if hubMCP == nil {
+				log.Printf("[create] MCP server %q not found in hub config, skipping", mcpRef.Name)
+				continue
+			}
+			if !hubMCP.Enabled {
+				log.Printf("[create] MCP server %q is disabled, skipping", mcpRef.Name)
+				continue
+			}
+			// Build command
+			cmd := hubMCP.Command
+			if len(cmd) == 0 {
+				switch hubMCP.Source {
+				case types.MCPSourceNpx:
+					cmd = []string{"npx", "-y", hubMCP.Package}
+				case types.MCPSourceUvx:
+					cmd = []string{"uvx", hubMCP.Package}
+				case types.MCPSourceSmithery:
+					cmd = []string{"npx", "-y", "@smithery/cli@latest", "run", hubMCP.Package}
+				case types.MCPSourceDocker:
+					cmd = []string{"docker", "run", "-i", "--rm", hubMCP.Image}
+				case types.MCPSourceSSE:
+					// SSE is remote — no local command, skip for now
+					log.Printf("[create] SSE MCP server %q not yet supported for local stdio", mcpRef.Name)
+					continue
+				}
+			}
+			if len(cmd) == 0 {
+				log.Printf("[create] MCP server %q has no command, skipping", mcpRef.Name)
+				continue
+			}
+			// Build env: merge hub config + template overrides + resolved secrets
+			mcpEnv := make(map[string]string)
+			for k, v := range hubMCP.Config {
+				mcpEnv[k] = v
+			}
+			// mcpRef is now a resolved MCPConfig (not an MCPRef), so no template-level Config override here
+			// Template-level overrides were already merged into hubMCP.Config during resolution
+			for envVar, secretRef := range hubMCP.Secrets {
+				if val, ok := hubSecrets[secretRef]; ok {
+					mcpEnv[envVar] = val
+				}
+			}
+			mcpConfigs = append(mcpConfigs, &types.MCPConfig{
+				Name:    mcpRef.Name,
+				Command: cmd,
+				Env:     mcpEnv,
+			})
+		}
+	}
+	req.MCPs = mcpConfigs
 
 	// Provision asynchronously so the HTTP request returns quickly
 	// Use a stable short ID as the provider-side name so renaming the claw

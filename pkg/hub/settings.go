@@ -27,6 +27,19 @@ type LLMKeyView struct {
 	DefaultModel string `json:"defaultModel,omitempty"`
 }
 
+// MCPView is the redacted view of an MCP server config for the settings page.
+type MCPView struct {
+	Name      string            `json:"name"`
+	Source    string            `json:"source"`
+	Package   string            `json:"package,omitempty"`
+	Image     string            `json:"image,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Enabled   bool              `json:"enabled"`
+	Config    map[string]string `json:"config,omitempty"`
+	Secrets   []string          `json:"secrets,omitempty"` // env var names only, not values
+	Command   []string          `json:"command,omitempty"`
+}
+
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
@@ -37,6 +50,7 @@ type SettingsView struct {
 	Integrations  *IntegrationsView       `json:"integrations"`
 	Factories     []FactoryView           `json:"factories"`
 	Secrets       []string                `json:"secrets"`
+	MCPServers    []MCPView               `json:"mcpServers,omitempty"`
 	Auth          *AuthView               `json:"auth,omitempty"`
 }
 
@@ -152,7 +166,22 @@ type SettingsPatch struct {
 	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"`
 	Integrations  *IntegrationsPatch       `json:"integrations,omitempty"`
 	Factories     []FactoryPatch           `json:"factories,omitempty"`
+	MCPServers    []MCPPatch               `json:"mcpServers,omitempty"`
 	Auth          *AuthPatch               `json:"auth,omitempty"`
+}
+
+// MCPPatch is a request to add/update an MCP server config.
+type MCPPatch struct {
+	Name    string            `json:"name"`
+	Source  string            `json:"source"`
+	Package string            `json:"package,omitempty"`
+	Image   string            `json:"image,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Enabled *bool             `json:"enabled,omitempty"`
+	Config  map[string]string `json:"config,omitempty"`
+	Secrets map[string]string `json:"secrets,omitempty"` // envVar -> secretRefName
+	Command []string          `json:"command,omitempty"`
+	Delete  bool              `json:"delete,omitempty"`
 }
 
 type AuthPatch struct {
@@ -407,6 +436,32 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	if diskCfg, err := config.LoadHubConfig(); err == nil && diskCfg != nil {
 		for k := range diskCfg.Secrets {
 			view.Secrets = append(view.Secrets, k)
+		}
+	}
+
+	// MCP Servers — redacted view, read from disk
+	view.MCPServers = []MCPView{}
+	if diskCfg, err := config.LoadHubConfig(); err == nil && diskCfg != nil {
+		for _, mcp := range diskCfg.MCPServers {
+			if mcp == nil {
+				continue
+			}
+			mcpView := MCPView{
+				Name:    mcp.Name,
+				Source:  string(mcp.Source),
+				Package: mcp.Package,
+				Image:   mcp.Image,
+				URL:     mcp.URL,
+				Enabled: mcp.Enabled,
+				Config:  mcp.Config,
+				Command: mcp.Command,
+			}
+			if mcp.Secrets != nil {
+				for envVar := range mcp.Secrets {
+					mcpView.Secrets = append(mcpView.Secrets, envVar)
+				}
+			}
+			view.MCPServers = append(view.MCPServers, mcpView)
 		}
 	}
 
@@ -851,6 +906,46 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// MCP Servers
+	if patch.MCPServers != nil {
+		var mcps []*types.MCPServerHubConfig
+		for _, mp := range patch.MCPServers {
+			if mp.Delete {
+				continue
+			}
+			mcp := &types.MCPServerHubConfig{
+				Name:    mp.Name,
+				Source:  types.MCPSource(mp.Source),
+				Package: mp.Package,
+				Image:   mp.Image,
+				URL:     mp.URL,
+				Config:  mp.Config,
+				Command: mp.Command,
+			}
+			if mp.Enabled != nil {
+				mcp.Enabled = *mp.Enabled
+			} else {
+				mcp.Enabled = true
+			}
+			// Preserve existing secrets if not being replaced
+			if mp.Secrets != nil {
+				mcp.Secrets = mp.Secrets
+			} else {
+				for _, existing := range s.hubCfg.MCPServers {
+					if existing.Name == mp.Name && existing.Secrets != nil {
+						mcp.Secrets = make(map[string]string, len(existing.Secrets))
+						for k, v := range existing.Secrets {
+							mcp.Secrets[k] = v
+						}
+						break
+					}
+				}
+			}
+			mcps = append(mcps, mcp)
+		}
+		updatedCfg.MCPServers = mcps
 	}
 
 	// Save to disk before applying to in-memory config

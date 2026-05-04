@@ -113,6 +113,10 @@ type TemplateConfig struct {
 	// hub.yaml secrets, injected with that name) or a typed SecretRef that
 	// resolves the right secret and maps it to the correct env var name.
 	Secrets SecretRefList `yaml:"secrets,omitempty"`
+	// MCPs is a list of MCP server names from hub.yaml mcp_servers to enable
+	// in this template's claws. Each claw will start these MCP servers as
+	// subprocesses and register their tools with the gateway.
+	MCPs []MCPRef `yaml:"mcps,omitempty"`
 }
 
 type TemplateResources struct {
@@ -198,6 +202,42 @@ func (l *SecretRefList) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*l = refs
 	return nil
+}
+
+// MCPSource is the installation source for an MCP server.
+type MCPSource string
+
+const (
+	MCPSourceNpx      MCPSource = "npx"
+	MCPSourceUvx      MCPSource = "uvx"
+	MCPSourceSmithery MCPSource = "smithery"
+	MCPSourceDocker   MCPSource = "docker"
+	MCPSourceSSE      MCPSource = "sse"
+)
+
+// MCPServerHubConfig defines an MCP server available to claws.
+// Configured in hub.yaml under 'mcp_servers:' as a list.
+type MCPServerHubConfig struct {
+	Name    string            `yaml:"name"`              // unique identifier, e.g. "github"
+	Source  MCPSource         `yaml:"source"`            // npx, uvx, smithery, docker, sse
+	Package string            `yaml:"package,omitempty"` // for npx/uvx/smithery: e.g. "@modelcontextprotocol/server-github"
+	Image   string            `yaml:"image,omitempty"`   // for docker: e.g. "mcp/postgres"
+	URL     string            `yaml:"url,omitempty"`     // for sse: the SSE endpoint URL
+	Enabled bool              `yaml:"enabled"`           // default true
+	Config  map[string]string `yaml:"config,omitempty"`  // non-secret env vars (e.g. {"repository": "owner/repo"})
+	// Secrets maps env var name → secret ref name in HubConfig.Secrets.
+	// Example: {"GITHUB_TOKEN": "github_token"} resolves HubConfig.Secrets["github_token"]
+	// and injects it as GITHUB_TOKEN in the MCP server's environment.
+	Secrets map[string]string `yaml:"secrets,omitempty"`
+	// Command overrides the default command for stdio-based sources.
+	// If empty, the hub generates: ["npx", "-y", Package] or ["uvx", Package] etc.
+	Command []string `yaml:"command,omitempty"`
+}
+
+// MCPRef references an MCP server in a template config.
+type MCPRef struct {
+	Name   string            `yaml:"name"`              // matches MCPServerHubConfig.Name
+	Config map[string]string `yaml:"config,omitempty"`  // template-level overrides
 }
 
 // GitHubAppConfig holds GitHub App credentials for one GitHub App.
@@ -305,6 +345,9 @@ type HubConfig struct {
 	// Secrets is a named map of secret values referenced by factories via webhook_secret_ref.
 	Secrets map[string]string `yaml:"secrets,omitempty"`
 
+	// MCPServers is a list of MCP server configurations available to claws.
+	MCPServers []*MCPServerHubConfig `yaml:"mcp_servers,omitempty"`
+
 	// Auth holds GitHub OAuth and access control config for the hub web UI.
 	Auth *AuthConfig `yaml:"auth,omitempty"`
 }
@@ -401,6 +444,14 @@ type ProviderConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
 
+// MCPConfig is the resolved MCP server configuration passed to a claw at creation time.
+// Secrets are resolved from hub.yaml Secrets map before sending.
+type MCPConfig struct {
+	Name    string            `json:"name"`
+	Command []string          `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
 // CreateClawRequest is POSTed by the CLI to the hub to provision a new claw.
 type CreateClawRequest struct {
 	Name         string            `json:"name"`
@@ -426,6 +477,8 @@ type CreateClawRequest struct {
 	Color        string                `json:"color,omitempty"`
 	AutoWatchCI     *bool             `json:"auto_watch_ci,omitempty"`
 	AutoWatchBugbot *bool             `json:"auto_watch_bugbot,omitempty"`
+	// MCPs is the list of resolved MCP server configs to start in the claw.
+	MCPs []*MCPConfig `json:"mcps,omitempty"`
 	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).
 	// Never set by the CLI; Name is the display name.
 	ProviderName string                `json:"provider_name,omitempty"`
