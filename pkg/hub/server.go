@@ -587,7 +587,8 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 		// may have failed. Try index.html at this path before falling back.
 		if !strings.HasSuffix(p, "/index.html") {
 			idxPath := strings.TrimRight(p, "/") + "/index.html"
-			if _, err := staticFS.Open(idxPath); err == nil {
+			if f, err := staticFS.Open(idxPath); err == nil {
+				f.Close()
 				serveFile(w, r, idxPath)
 				return
 			}
