@@ -1846,22 +1846,34 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
 }
 
 function SecretsSection({ settings }: { settings: SettingsData | null }) {
-  const [secrets, setSecrets] = useState<string[]>(settings?.secrets || [])
+  const [secrets, setSecrets] = useState<string[]>([])
   const [newName, setNewName] = useState("")
   const [newValue, setNewValue] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
 
-  const refresh = async () => {
-    const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
-    if (res.ok) {
-      const data = await res.json()
-      setSecrets(data.secrets || [])
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
+      if (res.ok) {
+        const data = await res.json()
+        setSecrets(data.secrets || [])
+      }
+    } finally {
+      setLoading(false)
     }
-  }
+  }, [hubUrl])
+
+  // Load secrets from API on mount — the authoritative source of truth.
+  // The /api/secrets endpoint reads from disk, so manually-edited hub.yaml
+  // entries are visible immediately without waiting for a server restart.
+  useEffect(() => {
+    refresh()
+  }, [refresh])
 
   const handleAdd = async () => {
     if (!newName.trim() || !newValue.trim()) return
@@ -1902,7 +1914,9 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
       </div>
 
       <div className="border border-border rounded-lg divide-y divide-border">
-        {secrets.length === 0 ? (
+        {loading ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading secrets…</p>
+        ) : secrets.length === 0 ? (
           <p className="text-sm text-muted-foreground px-4 py-6 text-center">No secrets configured.</p>
         ) : (
           secrets.map(name => (
