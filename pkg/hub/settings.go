@@ -917,8 +917,21 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if mp.Source != "" {
 				switch types.MCPSource(mp.Source) {
-				case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery, types.MCPSourceDocker, types.MCPSourceSSE:
-					// ok
+				case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
+					if mp.Package == "" {
+						http.Error(w, "package required for mcp "+mp.Name+" source "+mp.Source, http.StatusBadRequest)
+						return
+					}
+				case types.MCPSourceDocker:
+					if mp.Image == "" {
+						http.Error(w, "image required for mcp "+mp.Name+" source docker", http.StatusBadRequest)
+						return
+					}
+				case types.MCPSourceSSE:
+					if mp.URL == "" {
+						http.Error(w, "url required for mcp "+mp.Name+" source sse", http.StatusBadRequest)
+						return
+					}
 				default:
 					http.Error(w, "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
 					return

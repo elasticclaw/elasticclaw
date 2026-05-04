@@ -89,8 +89,21 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch types.MCPSource(req.Source) {
-	case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery, types.MCPSourceDocker, types.MCPSourceSSE:
-		// ok
+	case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
+		if req.Package == "" {
+			http.Error(w, "package required for source "+req.Source, http.StatusBadRequest)
+			return
+		}
+	case types.MCPSourceDocker:
+		if req.Image == "" {
+			http.Error(w, "image required for source docker", http.StatusBadRequest)
+			return
+		}
+	case types.MCPSourceSSE:
+		if req.URL == "" {
+			http.Error(w, "url required for source sse", http.StatusBadRequest)
+			return
+		}
 	default:
 		http.Error(w, "invalid source: must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
 		return
