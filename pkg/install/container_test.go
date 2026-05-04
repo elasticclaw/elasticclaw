@@ -33,18 +33,13 @@ func TestInstall_Container(t *testing.T) {
 
 	// Start Ubuntu 24.04 with sshd
 	req := tc.ContainerRequest{
-		Image: "ubuntu:24.04",
+		Image: "rastasheep/ubuntu-sshd:18.04",
 		Cmd: []string{
 			"bash", "-c",
-			fmt.Sprintf(`apt-get update -qq && apt-get install -y openssh-server curl sudo 2>/dev/null &&
-mkdir -p /run/sshd /root/.ssh /root/.elasticclaw /etc/caddy &&
-echo 'root:%s' | chpasswd &&
-sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config &&
-sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
-/usr/sbin/sshd -D`, sshPassword),
+			fmt.Sprintf(`echo 'root:%s' | chpasswd && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D`, sshPassword),
 		},
 		ExposedPorts: []string{"22/tcp"},
-		WaitingFor:   wait.ForListeningPort("22/tcp").WithStartupTimeout(120 * time.Second),
+		WaitingFor:   wait.ForListeningPort("22/tcp").WithStartupTimeout(30 * time.Second),
 	}
 
 	container, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
@@ -128,8 +123,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 	t.Log("✓ hub config written correctly")
 
 	// ── Write Caddyfile ───────────────────────────────────────────────────────
-	// Create /etc/caddy dir (already done in container setup)
-	run("write caddyfile", fmt.Sprintf(`cat > /etc/caddy/Caddyfile << 'CADDYEOF'
+	run("write caddyfile", fmt.Sprintf(`mkdir -p /etc/caddy && cat > /etc/caddy/Caddyfile << 'CADDYEOF'
 %sCADDYEOF`, install.Caddyfile(params.Domain)))
 	assertFile("/etc/caddy/Caddyfile", "hub.test.example.com")
 	assertFile("/etc/caddy/Caddyfile", "reverse_proxy localhost:8080")
