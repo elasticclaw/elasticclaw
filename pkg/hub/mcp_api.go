@@ -126,13 +126,13 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	cfgCopy.MCPServers = mcps
-	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
-
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
+		s.mu.Unlock()
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.hubCfg = &cfgCopy
+	s.mu.Unlock()
 
 	jsonOK(w, map[string]string{"upserted": req.Name})
 }
@@ -155,13 +155,13 @@ func (s *Server) handleMCPDelete(w http.ResponseWriter, _ *http.Request, name st
 		return
 	}
 	cfgCopy.MCPServers = mcps
-	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
-
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
+		s.mu.Unlock()
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.hubCfg = &cfgCopy
+	s.mu.Unlock()
 
 	jsonOK(w, map[string]string{"deleted": name})
 }
