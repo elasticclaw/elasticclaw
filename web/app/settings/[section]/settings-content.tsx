@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -65,6 +65,17 @@ interface SettingsData {
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
   }>
   secrets?: string[]
+  mcpServers?: Array<{
+    name: string
+    source: string
+    package?: string
+    image?: string
+    url?: string
+    enabled: boolean
+    config?: Record<string, string>
+    secrets?: string[]
+    command?: string[]
+  }>
   auth?: {
     githubOAuth?: {
       clientId: string
@@ -178,6 +189,7 @@ export default function SettingsSectionPage() {
     { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
     { id: "factories", label: "Factories", icon: Factory },
     { id: "secrets", label: "Secrets", icon: Lock },
+    { id: "mcp-servers", label: "MCP Servers", icon: Zap },
     { id: "templates", label: "Templates", icon: LayoutTemplate },
     { id: "ai-config", label: "Configure with AI", icon: Sparkles },
   ]
@@ -245,6 +257,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} />
+          )}
+          {settings && section === "mcp-servers" && (
+            <MCPServersSection settings={settings} onSave={save} saving={saving} />
           )}
           {section === "templates" && (
             <TemplatesSection />
@@ -2633,6 +2648,222 @@ function AIConfigSection() {
   )
 }
 
+
+function MCPServersSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<boolean>; saving: boolean }) {
+  const mcps = settings.mcpServers || []
+  const [newMCP, setNewMCP] = useState({
+    name: "",
+    source: "npx" as "npx" | "uvx" | "smithery" | "docker" | "sse",
+    package: "",
+    image: "",
+    url: "",
+    enabled: true,
+    config: {} as Record<string, string>,
+    secrets: {} as Record<string, string>,
+    command: "" as string,
+  })
+  const [configKey, setConfigKey] = useState("")
+  const [configValue, setConfigValue] = useState("")
+  const [secretEnvVar, setSecretEnvVar] = useState("")
+  const [secretRef, setSecretRef] = useState("")
+  const [localSaving, setLocalSaving] = useState(false)
+
+  const handleAdd = async () => {
+    if (!newMCP.name.trim() || !newMCP.source) return
+    const mcp = {
+      name: newMCP.name.trim(),
+      source: newMCP.source,
+      package: newMCP.package || undefined,
+      image: newMCP.image || undefined,
+      url: newMCP.url || undefined,
+      enabled: newMCP.enabled,
+      config: Object.keys(newMCP.config).length > 0 ? newMCP.config : undefined,
+      secrets: Object.keys(newMCP.secrets).length > 0 ? newMCP.secrets : undefined,
+      command: newMCP.command ? newMCP.command.split(" ").filter(Boolean) : undefined,
+    }
+    const updated = [...mcps.filter(m => m.name !== mcp.name), mcp]
+    setLocalSaving(true)
+    const ok = await onSave({ mcpServers: updated })
+    setLocalSaving(false)
+    if (ok) {
+      setNewMCP({ name: "", source: "npx", package: "", image: "", url: "", enabled: true, config: {}, secrets: {}, command: "" })
+    }
+  }
+
+  const handleDelete = async (name: string) => {
+    const updated = mcps.map(m => m.name === name ? { ...m, delete: true } : m)
+    await onSave({ mcpServers: updated })
+  }
+
+  const handleToggle = async (name: string) => {
+    const updated = mcps.map(m => m.name === name ? { ...m, enabled: !m.enabled } : m)
+    await onSave({ mcpServers: updated })
+  }
+
+  const needsPackage = newMCP.source === "npx" || newMCP.source === "uvx" || newMCP.source === "smithery"
+  const needsImage = newMCP.source === "docker"
+  const needsURL = newMCP.source === "sse"
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">MCP Servers</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Model Context Protocol servers add tools to your claws. Configure them here and reference them in templates.
+        </p>
+      </div>
+
+      <div className="border border-border rounded-lg divide-y divide-border">
+        {mcps.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center">No MCP servers configured.</p>
+        ) : (
+          mcps.map(mcp => (
+            <div key={mcp.name} className="flex items-center justify-between px-4 py-3">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleToggle(mcp.name)}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
+                    mcp.enabled
+                      ? "bg-green-600 border-2 border-transparent"
+                      : "bg-transparent border-2 border-muted-foreground/40"
+                  )}
+                >
+                  <span className={cn(
+                    "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
+                    mcp.enabled ? "bg-white translate-x-4" : "bg-muted-foreground/50 translate-x-0"
+                  )} />
+                </button>
+                <div>
+                  <code className="text-sm font-mono font-medium">{mcp.name}</code>
+                  <p className="text-xs text-muted-foreground">
+                    {mcp.source}
+                    {mcp.package && ` · ${mcp.package}`}
+                    {mcp.image && ` · ${mcp.image}`}
+                    {mcp.url && ` · ${mcp.url}`}
+                    {mcp.secrets && mcp.secrets.length > 0 && ` · ${mcp.secrets.length} secret(s)`}
+                  </p>
+                </div>
+              </div>
+              <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive" onClick={() => handleDelete(mcp.name)}>
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="border border-border rounded-lg p-5 space-y-4">
+        <h3 className="text-sm font-medium">Add MCP Server</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+            <Input placeholder="e.g. github" value={newMCP.name} onChange={e => setNewMCP({ ...newMCP, name: e.target.value })} className="font-mono text-sm h-8" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Source</label>
+            <select
+              value={newMCP.source}
+              onChange={e => setNewMCP({ ...newMCP, source: e.target.value as typeof newMCP.source })}
+              className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+            >
+              <option value="npx">npx</option>
+              <option value="uvx">uvx</option>
+              <option value="smithery">smithery</option>
+              <option value="docker">docker</option>
+              <option value="sse">sse</option>
+            </select>
+          </div>
+        </div>
+        {needsPackage && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Package</label>
+            <Input placeholder="e.g. @modelcontextprotocol/server-github" value={newMCP.package} onChange={e => setNewMCP({ ...newMCP, package: e.target.value })} className="font-mono text-sm h-8" />
+          </div>
+        )}
+        {needsImage && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Image</label>
+            <Input placeholder="e.g. mcp/postgres" value={newMCP.image} onChange={e => setNewMCP({ ...newMCP, image: e.target.value })} className="font-mono text-sm h-8" />
+          </div>
+        )}
+        {needsURL && (
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">URL</label>
+            <Input placeholder="e.g. https://mcp.example.com/sse" value={newMCP.url} onChange={e => setNewMCP({ ...newMCP, url: e.target.value })} className="font-mono text-sm h-8" />
+          </div>
+        )}
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Command override (optional)</label>
+          <Input placeholder="e.g. npx -y @scope/package --flag" value={newMCP.command} onChange={e => setNewMCP({ ...newMCP, command: e.target.value })} className="font-mono text-sm h-8" />
+        </div>
+
+        {/* Config vars */}
+        <div className="space-y-2">
+          <label className="text-xs text-muted-foreground block">Config variables</label>
+          {Object.entries(newMCP.config).map(([k, v]) => (
+            <div key={k} className="flex items-center gap-2">
+              <code className="text-xs font-mono">{k}</code>
+              <span className="text-xs text-muted-foreground">= {v}</span>
+              <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => {
+                const { [k]: _, ...rest } = newMCP.config
+                setNewMCP({ ...newMCP, config: rest })
+              }}>Remove</Button>
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <Input placeholder="Key" value={configKey} onChange={e => setConfigKey(e.target.value)} className="font-mono text-xs h-7 flex-1" />
+            <Input placeholder="Value" value={configValue} onChange={e => setConfigValue(e.target.value)} className="font-mono text-xs h-7 flex-1" />
+            <Button size="sm" variant="outline" className="h-7" onClick={() => {
+              if (!configKey.trim()) return
+              setNewMCP({ ...newMCP, config: { ...newMCP.config, [configKey.trim()]: configValue } })
+              setConfigKey("")
+              setConfigValue("")
+            }}>Add</Button>
+          </div>
+        </div>
+
+        {/* Secret refs */}
+        <div className="space-y-2">
+          <label className="text-xs text-muted-foreground block">Secret references</label>
+          {Object.entries(newMCP.secrets).map(([envVar, ref]) => (
+            <div key={envVar} className="flex items-center gap-2">
+              <code className="text-xs font-mono">{envVar}</code>
+              <span className="text-xs text-muted-foreground">→ secret: {ref}</span>
+              <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => {
+                const { [envVar]: _, ...rest } = newMCP.secrets
+                setNewMCP({ ...newMCP, secrets: rest })
+              }}>Remove</Button>
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <Input placeholder="Env var (e.g. GITHUB_TOKEN)" value={secretEnvVar} onChange={e => setSecretEnvVar(e.target.value)} className="font-mono text-xs h-7 flex-1" />
+            <select
+              value={secretRef}
+              onChange={e => setSecretRef(e.target.value)}
+              className="h-7 text-xs rounded-md border border-input bg-background px-2 flex-1"
+            >
+              <option value="">Select secret…</option>
+              {(settings.secrets || []).map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            <Button size="sm" variant="outline" className="h-7" onClick={() => {
+              if (!secretEnvVar.trim() || !secretRef) return
+              setNewMCP({ ...newMCP, secrets: { ...newMCP.secrets, [secretEnvVar.trim()]: secretRef } })
+              setSecretEnvVar("")
+              setSecretRef("")
+            }}>Add</Button>
+          </div>
+        </div>
+
+        <Button onClick={handleAdd} disabled={saving || localSaving || !newMCP.name.trim() || !newMCP.source}>
+          {saving || localSaving ? "Saving…" : "Add MCP Server"}
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 function TemplatesSection() {
   const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])
