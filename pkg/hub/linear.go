@@ -81,8 +81,46 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dedup: ignore duplicate webhook deliveries for the same issue transition
+	// within a 30-second window. Linear may retry if the first response is slow.
+	key := fmt.Sprintf("%s|%s|%s", payload.Data.Identifier, payload.Data.State.Name, previousStatusForDedup(payload))
+	if s.isDuplicateWebhook(key) {
+		log.Printf("[linear-webhook] dedup: skipping duplicate delivery for %s", key)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	go s.processLinearEvent(payload)
 	w.WriteHeader(http.StatusOK)
+}
+
+// previousStatusForDedup extracts the previous status for dedup key construction.
+func previousStatusForDedup(payload linearWebhookPayload) string {
+	if payload.UpdatedFrom != nil && payload.UpdatedFrom.State != nil {
+		return payload.UpdatedFrom.State.Name
+	}
+	return ""
+}
+
+// isDuplicateWebhook checks if we've recently seen this webhook fingerprint.
+// It also cleans expired entries while holding the lock.
+func (s *Server) isDuplicateWebhook(key string) bool {
+	s.webhookDedupMu.Lock()
+	defer s.webhookDedupMu.Unlock()
+
+	now := time.Now()
+	// Clean expired entries (older than 30s)
+	for k, t := range s.webhookDedup {
+		if now.Sub(t) > 30*time.Second {
+			delete(s.webhookDedup, k)
+		}
+	}
+
+	if lastSeen, ok := s.webhookDedup[key]; ok && now.Sub(lastSeen) < 30*time.Second {
+		return true
+	}
+	s.webhookDedup[key] = now
+	return false
 }
 
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
@@ -274,14 +312,18 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
 	}
 
-	// Enforce 1:1 — check if a claw already exists for this issue
+	// Enforce 1:1 — check if a claw already exists for this issue.
+	// If another concurrent request (or Linear redelivery) already created one,
+	// return the existing claw ID instead of failing. This makes the operation
+	// idempotent — duplicate webhooks are harmless.
 	var existingID string
 	_ = s.db.QueryRow(
 		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 		issueID,
 	).Scan(&existingID)
 	if existingID != "" {
-		return fmt.Errorf("claw %s already exists for issue %s", existingID[:8], issueID)
+		log.Printf("[factory:%s] claw %s already exists for issue %s — treating as idempotent success", factory.Name, existingID[:8], issueID)
+		return nil
 	}
 
 	// Resolve template files
