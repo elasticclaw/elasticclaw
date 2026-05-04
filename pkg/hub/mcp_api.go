@@ -88,6 +88,13 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source required", http.StatusBadRequest)
 		return
 	}
+	switch types.MCPSource(req.Source) {
+	case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery, types.MCPSourceDocker, types.MCPSourceSSE:
+		// ok
+	default:
+		http.Error(w, "invalid source: must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+		return
+	}
 
 	s.mu.Lock()
 	cfgCopy := *s.hubCfg
