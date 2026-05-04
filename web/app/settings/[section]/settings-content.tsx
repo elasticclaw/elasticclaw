@@ -181,32 +181,17 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const navGroups: { id: Section; label: string; icon: React.ElementType }[][] = [
-    // Infrastructure
-    [
-      { id: "runtimes", label: "Sandboxes", icon: Cpu },
-      { id: "models", label: "Models", icon: Key },
-    ],
-    // Integrations
-    [
-      { id: "github", label: "GitHub Apps", icon: Github },
-      { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-      { id: "mcp-servers", label: "MCP Servers", icon: Zap },
-    ],
-    // Configuration
-    [
-      { id: "secrets", label: "Secrets", icon: Lock },
-      { id: "templates", label: "Templates", icon: LayoutTemplate },
-      { id: "factories", label: "Factories", icon: Factory },
-    ],
-    // Access
-    [
-      { id: "authentication", label: "Authentication", icon: Shield },
-    ],
-    // AI Assistant
-    [
-      { id: "ai-config", label: "Configure with AI", icon: Sparkles },
-    ],
+  const navItems: { id: Section; label: string; icon: React.ElementType }[] = [
+    { id: "runtimes", label: "Sandbox Runtimes", icon: Cpu },
+    { id: "models", label: "Models", icon: Key },
+    { id: "github", label: "GitHub Apps", icon: Github },
+    { id: "authentication", label: "Authentication", icon: Shield },
+    { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
+    { id: "factories", label: "Factories", icon: Factory },
+    { id: "secrets", label: "Secrets", icon: Lock },
+    { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+    { id: "templates", label: "Templates", icon: LayoutTemplate },
+    { id: "ai-config", label: "Configure with AI", icon: Sparkles },
   ]
 
   return (
@@ -224,26 +209,21 @@ export default function SettingsSectionPage() {
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
           <div className="space-y-1 flex-1">
-            {navGroups.map((group, groupIdx) => (
-              <div key={groupIdx}>
-                {groupIdx > 0 && <div className="my-2 border-t border-border/50" />}
-                {group.map(({ id, label, icon: Icon }) => (
-                  <Link
-                    key={id}
-                    href={`/settings/${id}`}
-                    className={cn(
-                      "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                      section === id
-                        ? "bg-primary/10 text-primary font-medium"
-                        : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                    )}
-                  >
-                    <Icon className="size-4 flex-shrink-0" />
-                    {label}
-                  </Link>
-                ))}
-              </div>
-            ))}
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <Link
+              key={id}
+              href={`/settings/${id}`}
+              className={cn(
+                "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
+                section === id
+                  ? "bg-primary/10 text-primary font-medium"
+                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+              )}
+            >
+              <Icon className="size-4 flex-shrink-0" />
+              {label}
+            </Link>
+          ))}
           </div>
           {version && (
             <p className="text-xs text-muted-foreground/50 px-3 pt-4 font-mono">
@@ -2720,7 +2700,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
   const needsImage = formSource === "docker"
   const needsURL = formSource === "sse"
 
-  function doSave() {
+  async function doSave() {
     const mcp = {
       name: formName.trim(),
       source: formSource,
@@ -2733,9 +2713,10 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       secrets: Object.keys(formSecrets).length > 0 ? formSecrets : undefined,
     }
 
+    let ok = false
     if (modalMode === "add") {
       const updated = [...mcps.filter(m => m.name !== mcp.name), mcp]
-      onSave({ mcpServers: updated })
+      ok = await onSave({ mcpServers: updated })
     } else if (editIdx !== null) {
       const existing = mcps[editIdx]
       const patch: Record<string, unknown> = { name: existing.name }
@@ -2748,20 +2729,24 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       if (formCommand.trim() !== (existing.command?.join(" ") || "")) patch.command = formCommand.trim().split(/\s+/).filter(Boolean)
       if (Object.keys(formConfig).length > 0) patch.config = formConfig
       if (Object.keys(formSecrets).length > 0) patch.secrets = formSecrets
-      onSave({ mcpServers: [patch] })
+      ok = await onSave({ mcpServers: [patch] })
     }
-    setShowModal(false)
-    resetForm()
+    if (ok) {
+      setShowModal(false)
+      resetForm()
+    }
   }
 
-  function doRemove(i: number) {
-    onSave({ mcpServers: [{ name: mcps[i].name, delete: true }] })
-    setShowModal(false)
-    resetForm()
+  async function doRemove(i: number) {
+    const ok = await onSave({ mcpServers: [{ name: mcps[i].name, delete: true }] })
+    if (ok) {
+      setShowModal(false)
+      resetForm()
+    }
   }
 
-  function doToggle(name: string) {
-    onSave({ mcpServers: [{ name, enabled: !mcps.find(m => m.name === name)?.enabled }] })
+  async function doToggle(name: string) {
+    await onSave({ mcpServers: [{ name, enabled: !mcps.find(m => m.name === name)?.enabled }] })
   }
 
   const enabledCount = mcps.filter(m => m.enabled).length
@@ -2818,10 +2803,12 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
                     <span className="text-xs text-muted-foreground capitalize">{mcp.source}</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    {mcp.package && `package: ${mcp.package}`}
-                    {mcp.image && `image: ${mcp.image}`}
-                    {mcp.url && `url: ${mcp.url}`}
-                    {mcp.secrets && mcp.secrets.length > 0 && ` · ${mcp.secrets.length} secret(s)`}
+                    {[
+                      mcp.package && `package: ${mcp.package}`,
+                      mcp.image && `image: ${mcp.image}`,
+                      mcp.url && `url: ${mcp.url}`,
+                      mcp.secrets && mcp.secrets.length > 0 && `${mcp.secrets.length} secret(s)`,
+                    ].filter(Boolean).join(" · ")}
                   </p>
                 </div>
               </div>
