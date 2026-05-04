@@ -571,7 +571,7 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 		if p == "" {
 			p = "index.html"
 		}
-		// Try exact path first
+		// Try exact path first (file or directory)
 		if f, err := staticFS.Open(p); err == nil {
 			stat, _ := f.Stat()
 			f.Close()
@@ -582,6 +582,15 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 			// It's a dir — try index.html inside
 			serveFile(w, r, strings.TrimRight(p, "/")+"/index.html")
 			return
+		}
+		// embed.FS doesn't support Open() on directories — the dir check above
+		// may have failed. Try index.html at this path before falling back.
+		if !strings.HasSuffix(p, "/index.html") {
+			idxPath := strings.TrimRight(p, "/") + "/index.html"
+			if _, err := staticFS.Open(idxPath); err == nil {
+				serveFile(w, r, idxPath)
+				return
+			}
 		}
 		// Unknown path — serve root index.html (SPA fallback)
 		serveFile(w, r, "index.html")
