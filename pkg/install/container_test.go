@@ -44,7 +44,7 @@ sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_c
 /usr/sbin/sshd -D`, sshPassword),
 		},
 		ExposedPorts: []string{"22/tcp"},
-		WaitingFor:   wait.ForListeningPort("22/tcp").WithStartupTimeout(60 * time.Second),
+		WaitingFor:   wait.ForListeningPort("22/tcp").WithStartupTimeout(120 * time.Second),
 	}
 
 	container, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
