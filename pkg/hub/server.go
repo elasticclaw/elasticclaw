@@ -870,8 +870,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			for k, v := range hubMCP.Config {
 				mcpEnv[k] = v
 			}
-			// mcpRef is now a resolved MCPConfig (not an MCPRef), so no template-level Config override here
-			// Template-level overrides were already merged into hubMCP.Config during resolution
+			// Template-level overrides (from MCPRef.Config) take precedence over hub-level config
+			for k, v := range mcpRef.Env {
+				mcpEnv[k] = v
+			}
 			for envVar, secretRef := range hubMCP.Secrets {
 				if val, ok := hubSecrets[secretRef]; ok {
 					mcpEnv[envVar] = val
