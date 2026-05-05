@@ -683,6 +683,20 @@ func (s *Server) resolveSecretRef(ref types.SecretRef, factory *types.FactoryCon
 			}
 		}
 		return "", envName, false
+	case "github-issues":
+		if s.hubCfg.Integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, gi := range s.hubCfg.Integrations.GitHubIssues {
+			if ws == "" || strings.EqualFold(gi.Workspace, ws) {
+				return gi.Token, envName, true
+			}
+		}
+		return "", envName, false
 	case "github":
 		// GitHub tokens are minted per-installation; not stored in integrations.
 		// For now, fall through to custom lookup in hub secrets.
@@ -739,9 +753,9 @@ func buildLinearContext(payload linearWebhookPayload) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
-	// Get the linear_issue_id and tenant for this claw
+	// Get the issue ID and tenant for this claw (linear or github-issues)
 	var issueID, tenantID string
-	if err := s.db.QueryRow(`SELECT linear_issue_id, tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')), tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
 		return // not a factory claw
 	}
 
@@ -795,6 +809,26 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, factory.DoneStatus, err)
 				} else {
 					log.Printf("[factory] moved story %s to '%s'", issueID, factory.DoneStatus)
+				}
+			}
+		} else if strings.HasPrefix(issueID, "gh-") {
+			// GitHub issue
+			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			if ghToken != "" {
+				// Parse gh-owner/repo/number from issueID
+				rest := strings.TrimPrefix(issueID, "gh-")
+				lastSlash := strings.LastIndex(rest, "/")
+				if lastSlash > 0 {
+					repo := rest[:lastSlash]
+					issueNumStr := rest[lastSlash+1:]
+					var issueNum int
+					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+						if err := moveGitHubIssue(ghToken, repo, issueNum, factory.DoneStatus); err != nil {
+							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, factory.DoneStatus, err)
+						} else {
+							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, factory.DoneStatus)
+						}
+					}
 				}
 			}
 		} else {
@@ -911,6 +945,22 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 			}
 		}
 	}
+	// Also check github_issue_id column
+	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
+		var tags []string
+		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+			for _, tag := range tags {
+				if strings.HasPrefix(tag, "factory:") {
+					factoryName := strings.TrimPrefix(tag, "factory:")
+					for _, factory := range s.hubCfg.Factories {
+						if factory.Name == factoryName {
+							return factory
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Fallback: Extract team key from issue ID (e.g. "ELA" from "ELA-123", "sc" from "sc-123")
 	parts := strings.SplitN(issueID, "-", 2)
@@ -923,6 +973,9 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	expectedIntegration := "linear"
 	if teamKey == "sc" {
 		expectedIntegration = "shortcut"
+	}
+	if strings.HasPrefix(issueID, "gh-") {
+		expectedIntegration = "github-issues"
 	}
 
 	for _, factory := range s.hubCfg.Factories {

@@ -75,8 +75,9 @@ type AccessView struct {
 }
 
 type IntegrationsView struct {
-	Linear   []LinearIntegrationView   `json:"linear"`
-	Shortcut []ShortcutIntegrationView `json:"shortcut"`
+	Linear       []LinearIntegrationView       `json:"linear"`
+	Shortcut     []ShortcutIntegrationView     `json:"shortcut"`
+	GitHubIssues []GitHubIssuesIntegrationView `json:"githubIssues"`
 }
 
 type ShortcutIntegrationView struct {
@@ -85,6 +86,12 @@ type ShortcutIntegrationView struct {
 }
 
 type LinearIntegrationView struct {
+	Workspace        string `json:"workspace"`
+	TokenSet         bool   `json:"tokenSet"`
+	WebhookSecretSet bool   `json:"webhookSecretSet"`
+}
+
+type GitHubIssuesIntegrationView struct {
 	Workspace        string `json:"workspace"`
 	TokenSet         bool   `json:"tokenSet"`
 	WebhookSecretSet bool   `json:"webhookSecretSet"`
@@ -206,8 +213,9 @@ type AccessPatch struct {
 }
 
 type IntegrationsPatch struct {
-	Linear   []LinearIntegrationPatch   `json:"linear,omitempty"`
-	Shortcut []ShortcutIntegrationPatch `json:"shortcut,omitempty"`
+	Linear       []LinearIntegrationPatch       `json:"linear,omitempty"`
+	Shortcut     []ShortcutIntegrationPatch     `json:"shortcut,omitempty"`
+	GitHubIssues []GitHubIssuesIntegrationPatch `json:"githubIssues,omitempty"`
 }
 
 type ShortcutIntegrationPatch struct {
@@ -222,6 +230,14 @@ type LinearIntegrationPatch struct {
 	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
 	Token             string `json:"token,omitempty"`
 	WebhookSecret     string `json:"webhookSecret,omitempty"`
+}
+
+type GitHubIssuesIntegrationPatch struct {
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	WebhookSecret     string `json:"webhookSecret,omitempty"`
+	Delete            bool   `json:"delete,omitempty"`
 }
 
 type FactoryPatch struct {
@@ -342,7 +358,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Integrations
-	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}, Shortcut: []ShortcutIntegrationView{}}
+	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}, Shortcut: []ShortcutIntegrationView{}, GitHubIssues: []GitHubIssuesIntegrationView{}}
 	if s.hubCfg.Integrations != nil {
 		for _, sc := range s.hubCfg.Integrations.Shortcut {
 			view.Integrations.Shortcut = append(view.Integrations.Shortcut, ShortcutIntegrationView{
@@ -355,6 +371,13 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 				Workspace:        li.Workspace,
 				TokenSet:         li.Token != "",
 				WebhookSecretSet: li.WebhookSecret != "",
+			})
+		}
+		for _, gi := range s.hubCfg.Integrations.GitHubIssues {
+			view.Integrations.GitHubIssues = append(view.Integrations.GitHubIssues, GitHubIssuesIntegrationView{
+				Workspace:        gi.Workspace,
+				TokenSet:         gi.Token != "",
+				WebhookSecretSet: gi.WebhookSecret != "",
 			})
 		}
 	}
@@ -734,9 +757,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		updatedCfg.Integrations.Linear = linears
 
-		// Preserve existing Shortcut integrations not in patch
+		// Preserve existing Shortcut and GitHub Issues integrations not in patch
 		if existingIntegrations != nil {
 			updatedCfg.Integrations.Shortcut = existingIntegrations.Shortcut
+			updatedCfg.Integrations.GitHubIssues = existingIntegrations.GitHubIssues
 		}
 	}
 
@@ -750,8 +774,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			updatedCfg.Integrations = &types.IntegrationsConfig{}
 		} else {
 			updatedCfg.Integrations = &types.IntegrationsConfig{
-				Linear:   existingIntegrations.Linear,
-				Shortcut: existingIntegrations.Shortcut,
+				Linear:       existingIntegrations.Linear,
+				Shortcut:     existingIntegrations.Shortcut,
+				GitHubIssues: existingIntegrations.GitHubIssues,
 			}
 		}
 		existing := updatedCfg.Integrations.Shortcut
@@ -777,6 +802,49 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			shortcuts = append(shortcuts, sc)
 		}
 		updatedCfg.Integrations.Shortcut = shortcuts
+	}
+
+	if patch.Integrations != nil && patch.Integrations.GitHubIssues != nil {
+		var existingIntegrations *types.IntegrationsConfig
+		if updatedCfg.Integrations != nil {
+			existingIntegrations = updatedCfg.Integrations
+		}
+		if updatedCfg.Integrations == nil {
+			updatedCfg.Integrations = &types.IntegrationsConfig{}
+		} else {
+			updatedCfg.Integrations = &types.IntegrationsConfig{
+				Linear:       existingIntegrations.Linear,
+				Shortcut:     existingIntegrations.Shortcut,
+				GitHubIssues: existingIntegrations.GitHubIssues,
+			}
+		}
+		existing := updatedCfg.Integrations.GitHubIssues
+		var githubIssues []*types.GitHubIssuesIntegrationConfig
+		for _, gp := range patch.Integrations.GitHubIssues {
+			if gp.Delete {
+				continue
+			}
+			gi := &types.GitHubIssuesIntegrationConfig{Workspace: gp.Workspace}
+			matchWorkspace := gp.Workspace
+			if gp.OriginalWorkspace != "" {
+				matchWorkspace = gp.OriginalWorkspace
+			}
+			for _, ex := range existing {
+				if ex.Workspace == matchWorkspace {
+					gi.Token = ex.Token
+					gi.WebhookSecret = ex.WebhookSecret
+					break
+				}
+			}
+			if gp.Token != "" {
+				gi.Token = gp.Token
+			}
+			if gp.WebhookSecret != "" {
+				gi.WebhookSecret = gp.WebhookSecret
+			}
+			githubIssues = append(githubIssues, gi)
+		}
+		updatedCfg.Integrations.GitHubIssues = githubIssues
 	}
 
 	// Factories (full replace)
