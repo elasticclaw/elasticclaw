@@ -867,7 +867,16 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	})
 	// Notify the claw it's in watch mode — skip if the pipeline already injected a message
 	if !pipelineHandledDone {
-		s.injectUserMessage(clawID, "PR created and Linear issue updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.")
+		var issueTracker string
+		switch {
+		case strings.HasPrefix(issueID, "sc-"):
+			issueTracker = "Shortcut story"
+		case strings.HasPrefix(issueID, "gh-"):
+			issueTracker = "GitHub issue"
+		default:
+			issueTracker = "Linear issue"
+		}
+		s.injectUserMessage(clawID, fmt.Sprintf("PR created and %s updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.", issueTracker))
 	}
 }
 
