@@ -194,7 +194,15 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	}
 
 	// Handle label/unlabel actions: the label that was added/removed is in payload.Label
+	// For "labeled", build the pre-event label set so previousMatched works correctly
+	// when the trigger is a label name (e.g., "bug") and the issue already had it.
+	previousLabels := make(map[string]bool, len(issueLabels))
+	for k, v := range issueLabels {
+		previousLabels[k] = v
+	}
 	if payload.Action == "labeled" && payload.Label != nil {
+		// Remove the newly-added label from the previous set
+		delete(previousLabels, strings.ToLower(payload.Label.Name))
 		issueLabels[strings.ToLower(payload.Label.Name)] = true
 		// Treat labeling as a status change for factory matching
 		if previousStatus == "" {
@@ -280,6 +288,13 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		previousMatched := false
 		if previousStatus != "" {
 			if strings.EqualFold(previousStatus, factory.TriggerStatus) {
+				previousMatched = true
+			}
+		}
+		// For label-based triggers, also check if the trigger label was already
+		// present before this event (using the pre-event label set).
+		if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+			if previousLabels[strings.ToLower(factory.TriggerStatus)] {
 				previousMatched = true
 			}
 		}
