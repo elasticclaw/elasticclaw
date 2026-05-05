@@ -168,6 +168,8 @@ func (r SecretRef) EnvVarName() string {
 		return "LINEAR_API_KEY"
 	case "shortcut":
 		return "SHORTCUT_API_KEY"
+	case "github-issues":
+		return "GITHUB_ISSUES_API_KEY"
 	case "github":
 		return "GITHUB_TOKEN"
 	case "custom":
@@ -354,8 +356,9 @@ type HubConfig struct {
 
 // IntegrationsConfig holds configs for external integrations.
 type IntegrationsConfig struct {
-	Linear    []*LinearIntegrationConfig    `yaml:"linear,omitempty"`
-	Shortcut  []*ShortcutIntegrationConfig  `yaml:"shortcut,omitempty"`
+	Linear      []*LinearIntegrationConfig      `yaml:"linear,omitempty"`
+	Shortcut    []*ShortcutIntegrationConfig    `yaml:"shortcut,omitempty"`
+	GitHubIssues []*GitHubIssuesIntegrationConfig `yaml:"github_issues,omitempty"`
 }
 
 // ShortcutIntegrationConfig holds credentials for one Shortcut workspace.
@@ -371,11 +374,18 @@ type LinearIntegrationConfig struct {
 	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
 }
 
+// GitHubIssuesIntegrationConfig holds credentials for one GitHub Issues integration.
+type GitHubIssuesIntegrationConfig struct {
+	Workspace     string `yaml:"workspace"`       // human label (e.g. "my-org")
+	Token         string `yaml:"token"`            // GitHub personal access token
+	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
+}
+
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
 	Enabled           *bool  `yaml:"enabled,omitempty"`  // nil = true (default on); set false to pause
-	Integration       string `yaml:"integration"`        // "linear", "shortcut", or "github"
+	Integration       string `yaml:"integration"`        // "linear", "shortcut", "github-issues", or "github"
 	Workspace         string `yaml:"workspace,omitempty"` // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
 	TriggerStatus     string `yaml:"trigger_status,omitempty"` // entering this status → create claw

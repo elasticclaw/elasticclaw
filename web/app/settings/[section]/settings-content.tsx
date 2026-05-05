@@ -58,6 +58,7 @@ interface SettingsData {
   integrations?: {
     linear?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
     shortcut?: Array<{ workspace: string; tokenSet: boolean }>
+    githubIssues?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
   }
   factories?: Array<{
     name: string; integration: string; workspace: string; team: string
@@ -1363,7 +1364,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
     </div>
   )
 }
-type TrackerType = "linear" | "shortcut"
+type TrackerType = "linear" | "shortcut" | "github-issues"
 
 interface TrackerItem {
   type: TrackerType
@@ -1374,10 +1375,12 @@ interface TrackerItem {
 function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const linear = settings.integrations?.linear || []
   const shortcut = settings.integrations?.shortcut || []
+  const githubIssues = settings.integrations?.githubIssues || []
 
   const allTrackers: TrackerItem[] = [
     ...linear.map((li: { workspace: string; tokenSet?: boolean }) => ({ type: "linear" as TrackerType, workspace: li.workspace, tokenSet: li.tokenSet ?? false })),
     ...shortcut.map((sc: { workspace: string; tokenSet?: boolean }) => ({ type: "shortcut" as TrackerType, workspace: sc.workspace, tokenSet: sc.tokenSet ?? false })),
+    ...githubIssues.map((gi: { workspace: string; tokenSet?: boolean }) => ({ type: "github-issues" as TrackerType, workspace: gi.workspace, tokenSet: gi.tokenSet ?? false })),
   ]
 
   // Unified modal state
@@ -1388,6 +1391,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   const [editType, setEditType] = useState<TrackerType>("linear")
   const [workspace, setWorkspace] = useState("")
   const [token, setToken] = useState("")
+  const [webhookSecret, setWebhookSecret] = useState("")
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -1405,7 +1409,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }, [showAddMenu])
 
   const resetModal = () => {
-    setWorkspace(""); setToken(""); setEditIdx(null); setEditType("linear")
+    setWorkspace(""); setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -1417,9 +1421,17 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
-    const typeIdx = tracker.type === "linear" ? idx : idx - linear.length
+    let typeIdx: number
+    if (tracker.type === "linear") {
+      typeIdx = idx
+    } else if (tracker.type === "shortcut") {
+      typeIdx = idx - linear.length
+    } else {
+      typeIdx = idx - linear.length - shortcut.length
+    }
     setWorkspace(tracker.workspace)
     setToken("")
+    setWebhookSecret("")
     setEditIdx(typeIdx)
     setEditType(tracker.type)
     setModalMode("edit")
@@ -1434,25 +1446,37 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
     if (type === "linear") {
       if (modalMode === "add") {
-        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim() }] } })
+        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
       } else if (editIdx !== null) {
         const li = linear[editIdx]
         const updated = linear.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
           : { workspace: item.workspace }
         )
         onSave({ integrations: { linear: updated } })
       }
-    } else {
+    } else if (type === "shortcut") {
       if (modalMode === "add") {
-        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim() }] } })
+        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
       } else if (editIdx !== null) {
         const sc = shortcut[editIdx]
         const updated = shortcut.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
           : { workspace: item.workspace }
         )
         onSave({ integrations: { shortcut: updated } })
+      }
+    } else {
+      // github-issues
+      if (modalMode === "add") {
+        onSave({ integrations: { githubIssues: [...githubIssues.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
+      } else if (editIdx !== null) {
+        const gi = githubIssues[editIdx]
+        const updated = githubIssues.map((item: { workspace: string }, i: number) => i === editIdx
+          ? { workspace: workspace.trim(), originalWorkspace: gi.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
+          : { workspace: item.workspace }
+        )
+        onSave({ integrations: { githubIssues: updated } })
       }
     }
     setShowModal(false)
@@ -1464,21 +1488,35 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       onSave({ integrations: { linear: linear.filter((_: unknown, j: number) => j !== editIdx) } })
     } else if (editType === "shortcut" && editIdx !== null) {
       onSave({ integrations: { shortcut: shortcut.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
+    } else if (editType === "github-issues" && editIdx !== null) {
+      onSave({ integrations: { githubIssues: githubIssues.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
     }
     setShowModal(false)
     resetModal()
   }
 
+  const trackerTypeLabel = (t: TrackerType) => {
+    switch (t) {
+      case "linear": return "Linear"
+      case "shortcut": return "Shortcut"
+      case "github-issues": return "GitHub Issues"
+    }
+  }
+
   const modalTitle = modalMode === "add"
-    ? `Add ${modalType === "linear" ? "Linear" : "Shortcut"} workspace`
-    : `Edit ${editType === "linear" ? "Linear" : "Shortcut"} — ${workspace}`
+    ? `Add ${trackerTypeLabel(modalType)} workspace`
+    : `Edit ${trackerTypeLabel(editType)} — ${workspace}`
 
-  const modalIcon = modalType === "linear" || (modalMode === "edit" && editType === "linear")
+  const modalIcon = (modalMode === "add" ? modalType : editType) === "linear"
     ? <Zap className="size-4" />
-    : <span className="text-[#F4603C]">⚡</span>
+    : (modalMode === "add" ? modalType : editType) === "shortcut"
+    ? <span className="text-[#F4603C]">⚡</span>
+    : <Github className="size-4" />
 
-  const tokenHint = modalType === "linear" || (modalMode === "edit" && editType === "linear")
+  const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
     ? <>Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></>
+    : (modalMode === "add" ? modalType : editType) === "github-issues"
+    ? <>Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline">github.com/settings/tokens</a> with <code>repo</code> and <code>issues</code> scopes</>
     : null
 
   return (
@@ -1498,6 +1536,9 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
           {shortcut.length > 0 && (
             <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Shortcut: {shortcut.length}</span>
           )}
+          {githubIssues.length > 0 && (
+            <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">GitHub Issues: {githubIssues.length}</span>
+          )}
         </div>
       </div>
 
@@ -1513,13 +1554,15 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
               <div className="flex items-center gap-3">
                 {tracker.type === "linear" ? (
                   <Zap className="size-4 text-muted-foreground" />
-                ) : (
+                ) : tracker.type === "shortcut" ? (
                   <span className="text-[#F4603C]">⚡</span>
+                ) : (
+                  <Github className="size-4 text-muted-foreground" />
                 )}
                 <div>
                   <p className="text-sm font-medium">{tracker.workspace}</p>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="text-xs text-muted-foreground capitalize">{tracker.type}</span>
+                    <span className="text-xs text-muted-foreground capitalize">{tracker.type === "github-issues" ? "github issues" : tracker.type}</span>
                     <span className="text-xs text-muted-foreground">·</span>
                     {tracker.tokenSet ? (
                       <span className="text-xs text-green-400 flex items-center gap-1">
@@ -1569,6 +1612,13 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
               <span className="text-[#F4603C]">⚡</span>
               <span>Shortcut</span>
             </button>
+            <button
+              onClick={() => openAdd("github-issues")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+            >
+              <Github className="size-4" />
+              <span>GitHub Issues</span>
+            </button>
           </div>
         )}
       </div>
@@ -1588,7 +1638,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
             </div>
             <div className="p-5 space-y-4">
               <p className="text-sm text-muted-foreground">
-                Connect a {modalType === "linear" || (modalMode === "edit" && editType === "linear") ? "Linear" : "Shortcut"} workspace to sync issues.
+                Connect a {trackerTypeLabel(modalMode === "add" ? modalType : editType)} workspace to sync issues.
               </p>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
@@ -1597,8 +1647,13 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${modalType === "linear" || (modalMode === "edit" && editType === "linear") ? "Linear" : "Shortcut"} API token`} />
+                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(modalMode === "add" ? modalType : editType)} API token`} />
                 {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
+                <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
+                <p className="text-xs text-muted-foreground mt-1">Used to verify incoming webhook signatures. Leave blank to keep existing.</p>
               </div>
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">
@@ -1639,7 +1694,12 @@ function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
       hint: "Use Shortcut's API to register this webhook: POST /api/v3/webhooks with this URL.",
     },
     {
-      name: "GitHub",
+      name: "GitHub Issues",
+      url: hubUrl ? `${hubUrl}/api/integrations/github-issues/webhook` : "",
+      hint: "Use in GitHub repo or org settings. Subscribe to: Issues events.",
+    },
+    {
+      name: "GitHub (PRs)",
       url: hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Pull requests and Issue comments.",
     },
