@@ -1417,9 +1417,10 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
+    const typeIdx = tracker.type === "linear" ? idx : idx - linear.length
     setWorkspace(tracker.workspace)
     setToken("")
-    setEditIdx(idx)
+    setEditIdx(typeIdx)
     setEditType(tracker.type)
     setModalMode("edit")
     setShowModal(true)
