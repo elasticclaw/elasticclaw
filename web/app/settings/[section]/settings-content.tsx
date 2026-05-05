@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -1363,95 +1363,120 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
     </div>
   )
 }
+type TrackerType = "linear" | "shortcut"
+
+interface TrackerItem {
+  type: TrackerType
+  workspace: string
+  tokenSet: boolean
+}
+
 function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const linear = settings.integrations?.linear || []
   const shortcut = settings.integrations?.shortcut || []
 
-  // Linear modal state
-  const [showLinearModal, setShowLinearModal] = useState(false)
-  const [linearModalMode, setLinearModalMode] = useState<"add" | "edit">("add")
-  const [linearEditIdx, setLinearEditIdx] = useState<number | null>(null)
-  const [linearWorkspace, setLinearWorkspace] = useState("")
-  const [linearToken, setLinearToken] = useState("")
+  const allTrackers: TrackerItem[] = [
+    ...linear.map((li: { workspace: string; tokenSet?: boolean }) => ({ type: "linear" as TrackerType, workspace: li.workspace, tokenSet: li.tokenSet ?? false })),
+    ...shortcut.map((sc: { workspace: string; tokenSet?: boolean }) => ({ type: "shortcut" as TrackerType, workspace: sc.workspace, tokenSet: sc.tokenSet ?? false })),
+  ]
 
-  // Shortcut modal state
-  const [showShortcutModal, setShowShortcutModal] = useState(false)
-  const [shortcutModalMode, setShortcutModalMode] = useState<"add" | "edit">("add")
-  const [shortcutEditIdx, setShortcutEditIdx] = useState<number | null>(null)
-  const [shortcutWorkspace, setShortcutWorkspace] = useState("")
-  const [shortcutToken, setShortcutToken] = useState("")
+  // Unified modal state
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [modalType, setModalType] = useState<TrackerType>("linear")
+  const [editIdx, setEditIdx] = useState<number | null>(null)
+  const [editType, setEditType] = useState<TrackerType>("linear")
+  const [workspace, setWorkspace] = useState("")
+  const [token, setToken] = useState("")
+  const [showAddMenu, setShowAddMenu] = useState(false)
+  const addMenuRef = useRef<HTMLDivElement>(null)
 
-  const linearConnected = linear.length
-  const shortcutConnected = shortcut.length
-  const totalConnected = linearConnected + shortcutConnected
-
-  const resetLinearModal = () => {
-    setLinearWorkspace(""); setLinearToken(""); setLinearEditIdx(null)
-  }
-  const openLinearAdd = () => { resetLinearModal(); setLinearModalMode("add"); setShowLinearModal(true) }
-  const openLinearEdit = (i: number) => {
-    setLinearWorkspace(linear[i].workspace)
-    setLinearToken("")
-    setLinearEditIdx(i)
-    setLinearModalMode("edit")
-    setShowLinearModal(true)
-  }
-
-  const resetShortcutModal = () => {
-    setShortcutWorkspace(""); setShortcutToken(""); setShortcutEditIdx(null)
-  }
-  const openShortcutAdd = () => { resetShortcutModal(); setShortcutModalMode("add"); setShowShortcutModal(true) }
-  const openShortcutEdit = (i: number) => {
-    setShortcutWorkspace(shortcut[i].workspace)
-    setShortcutToken("")
-    setShortcutEditIdx(i)
-    setShortcutModalMode("edit")
-    setShowShortcutModal(true)
-  }
-
-  function saveLinear() {
-    if (!linearWorkspace.trim()) return
-    if (linearModalMode === "add") {
-      if (!linearToken.trim()) return
-      onSave({ integrations: { linear: [...linear, { workspace: linearWorkspace.trim(), token: linearToken.trim() }] } })
-    } else if (linearEditIdx !== null) {
-      const updated = linear.map((li, i) => i === linearEditIdx
-        ? { workspace: linearWorkspace.trim(), originalWorkspace: li.workspace, ...(linearToken.trim() ? { token: linearToken.trim() } : {}) }
-        : { workspace: li.workspace }
-      )
-      onSave({ integrations: { linear: updated } })
+  // Close add menu on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+        setShowAddMenu(false)
+      }
     }
-    setShowLinearModal(false)
-    resetLinearModal()
-  }
-
-  function removeLinear(i: number) {
-    onSave({ integrations: { linear: linear.filter((_, j) => j !== i) } })
-    setShowLinearModal(false)
-    resetLinearModal()
-  }
-
-  function saveShortcut() {
-    if (!shortcutWorkspace.trim()) return
-    if (shortcutModalMode === "add") {
-      if (!shortcutToken.trim()) return
-      onSave({ integrations: { shortcut: [...shortcut.map(x => ({ workspace: x.workspace })), { workspace: shortcutWorkspace.trim(), token: shortcutToken.trim() }] } })
-    } else if (shortcutEditIdx !== null) {
-      const updated = shortcut.map((sc, i) => i === shortcutEditIdx
-        ? { workspace: shortcutWorkspace.trim(), originalWorkspace: sc.workspace, ...(shortcutToken.trim() ? { token: shortcutToken.trim() } : {}) }
-        : { workspace: sc.workspace }
-      )
-      onSave({ integrations: { shortcut: updated } })
+    if (showAddMenu) {
+      document.addEventListener("mousedown", handleClick)
+      return () => document.removeEventListener("mousedown", handleClick)
     }
-    setShowShortcutModal(false)
-    resetShortcutModal()
+  }, [showAddMenu])
+
+  const resetModal = () => {
+    setWorkspace(""); setToken(""); setEditIdx(null); setEditType("linear")
   }
 
-  function removeShortcut(i: number) {
-    onSave({ integrations: { shortcut: shortcut.filter((_, j) => j !== i).map(x => ({ workspace: x.workspace })) } })
-    setShowShortcutModal(false)
-    resetShortcutModal()
+  const openAdd = (type: TrackerType) => {
+    resetModal()
+    setModalType(type)
+    setModalMode("add")
+    setShowModal(true)
+    setShowAddMenu(false)
   }
+
+  const openEdit = (tracker: TrackerItem, idx: number) => {
+    setWorkspace(tracker.workspace)
+    setToken("")
+    setEditIdx(idx)
+    setEditType(tracker.type)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  function saveTracker() {
+    if (!workspace.trim()) return
+    if (modalMode === "add" && !token.trim()) return
+
+    if (modalType === "linear") {
+      if (modalMode === "add") {
+        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim() }] } })
+      } else if (editIdx !== null) {
+        const li = linear[editIdx]
+        const updated = linear.map((item: { workspace: string }, i: number) => i === editIdx
+          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          : { workspace: item.workspace }
+        )
+        onSave({ integrations: { linear: updated } })
+      }
+    } else {
+      if (modalMode === "add") {
+        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim() }] } })
+      } else if (editIdx !== null) {
+        const sc = shortcut[editIdx]
+        const updated = shortcut.map((item: { workspace: string }, i: number) => i === editIdx
+          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          : { workspace: item.workspace }
+        )
+        onSave({ integrations: { shortcut: updated } })
+      }
+    }
+    setShowModal(false)
+    resetModal()
+  }
+
+  function removeTracker() {
+    if (editType === "linear" && editIdx !== null) {
+      onSave({ integrations: { linear: linear.filter((_: unknown, j: number) => j !== editIdx) } })
+    } else if (editType === "shortcut" && editIdx !== null) {
+      onSave({ integrations: { shortcut: shortcut.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
+    }
+    setShowModal(false)
+    resetModal()
+  }
+
+  const modalTitle = modalMode === "add"
+    ? `Add ${modalType === "linear" ? "Linear" : "Shortcut"} workspace`
+    : `Edit ${editType === "linear" ? "Linear" : "Shortcut"} — ${workspace}`
+
+  const modalIcon = modalType === "linear" || (modalMode === "edit" && editType === "linear")
+    ? <Zap className="size-4" />
+    : <span className="text-[#F4603C]">⚡</span>
+
+  const tokenHint = modalType === "linear" || (modalMode === "edit" && editType === "linear")
+    ? <>Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></>
+    : null
 
   return (
     <div className="space-y-6">
@@ -1462,38 +1487,38 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         {/* Summary badges */}
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-            {totalConnected} workspace{totalConnected !== 1 ? "s" : ""} connected
+            {allTrackers.length} workspace{allTrackers.length !== 1 ? "s" : ""} connected
           </span>
+          {linear.length > 0 && (
+            <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Linear: {linear.length}</span>
+          )}
+          {shortcut.length > 0 && (
+            <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Shortcut: {shortcut.length}</span>
+          )}
         </div>
       </div>
 
-      {/* Linear section */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Zap className="size-4" />
-            <span className="text-sm font-medium">Linear</span>
-            {linearConnected > 0 && (
-              <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">{linearConnected}</span>
-            )}
-          </div>
-          <Button size="sm" variant="outline" onClick={openLinearAdd} className="gap-1">
-            <span className="text-sm">+</span> Add
-          </Button>
-        </div>
-
-        {linear.length > 0 && (
-          <div className="space-y-2 mb-4">
-            {linear.map((li, i) => (
-              <div
-                key={i}
-                onClick={() => openLinearEdit(i)}
-                className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
-              >
+      {/* Configured trackers list */}
+      {allTrackers.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {allTrackers.map((tracker, i) => (
+            <div
+              key={`${tracker.type}-${tracker.workspace}`}
+              onClick={() => openEdit(tracker, i)}
+              className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                {tracker.type === "linear" ? (
+                  <Zap className="size-4 text-muted-foreground" />
+                ) : (
+                  <span className="text-[#F4603C]">⚡</span>
+                )}
                 <div>
-                  <p className="text-sm font-medium">{li.workspace}</p>
+                  <p className="text-sm font-medium">{tracker.workspace}</p>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    {li.tokenSet ? (
+                    <span className="text-xs text-muted-foreground capitalize">{tracker.type}</span>
+                    <span className="text-xs text-muted-foreground">·</span>
+                    {tracker.tokenSet ? (
                       <span className="text-xs text-green-400 flex items-center gap-1">
                         <CheckCircle2 className="size-3" /> Connected
                       </span>
@@ -1504,159 +1529,85 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                     )}
                   </div>
                 </div>
-                <span className="text-muted-foreground text-lg">⋯</span>
               </div>
-            ))}
-          </div>
-        )}
-
-        {linear.length === 0 && (
-          <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3">
-            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
-              <Zap className="size-5 text-muted-foreground" />
+              <span className="text-muted-foreground text-lg">⋯</span>
             </div>
-            <p className="text-sm text-muted-foreground">No Linear workspaces connected</p>
-            <Button size="sm" variant="outline" onClick={openLinearAdd} className="gap-1">
-              <span className="text-sm">+</span> Add Linear workspace
-            </Button>
-          </div>
-        )}
-      </div>
-
-      {/* Shortcut section */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className="size-4 text-[#F4603C]">⚡</span>
-            <span className="text-sm font-medium">Shortcut</span>
-            {shortcutConnected > 0 && (
-              <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">{shortcutConnected}</span>
-            )}
-          </div>
-          <Button size="sm" variant="outline" onClick={openShortcutAdd} className="gap-1">
-            <span className="text-sm">+</span> Add
-          </Button>
-        </div>
-
-        {shortcut.length > 0 && (
-          <div className="space-y-2 mb-4">
-            {shortcut.map((sc, i) => (
-              <div
-                key={i}
-                onClick={() => openShortcutEdit(i)}
-                className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
-              >
-                <div>
-                  <p className="text-sm font-medium">{sc.workspace}</p>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    {sc.tokenSet ? (
-                      <span className="text-xs text-green-400 flex items-center gap-1">
-                        <CheckCircle2 className="size-3" /> Connected
-                      </span>
-                    ) : (
-                      <span className="text-xs text-red-400 flex items-center gap-1">
-                        <AlertTriangle className="size-3" /> Token revoked
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <span className="text-muted-foreground text-lg">⋯</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {shortcut.length === 0 && (
-          <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3">
-            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
-              <span className="text-xl text-muted-foreground">⚡</span>
-            </div>
-            <p className="text-sm text-muted-foreground">No Shortcut workspaces connected</p>
-            <Button size="sm" variant="outline" onClick={openShortcutAdd} className="gap-1">
-              <span className="text-sm">+</span> Add Shortcut workspace
-            </Button>
-          </div>
-        )}
-      </div>
-
-      {/* Linear Modal */}
-      {showLinearModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <div className="flex items-center gap-2">
-                <Zap className="size-4" />
-                <h3 className="font-medium">{linearModalMode === "add" ? "Add Linear workspace" : `Edit ${linear[linearEditIdx!]?.workspace}`}</h3>
-              </div>
-              <Button size="sm" variant="ghost" onClick={() => { setShowLinearModal(false); resetLinearModal() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
-            <div className="p-5 space-y-4">
-              <p className="text-sm text-muted-foreground">Connect a Linear workspace to sync issues.</p>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                <Input value={linearWorkspace} onChange={e => setLinearWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
-                <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                <Input type="password" value={linearToken} onChange={e => setLinearToken(e.target.value)} className="h-9 text-sm" placeholder="Linear API token" />
-                <p className="text-xs text-muted-foreground mt-1">Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></p>
-              </div>
-            </div>
-            <div className="flex items-center justify-between px-5 py-4 border-t border-border">
-              {linearModalMode === "edit" && linearEditIdx !== null && (
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => removeLinear(linearEditIdx)}>
-                  <Trash2 className="size-3.5 mr-1" /> Remove
-                </Button>
-              )}
-              <div className="flex items-center gap-2 ml-auto">
-                <Button size="sm" variant="outline" onClick={() => { setShowLinearModal(false); resetLinearModal() }}>Cancel</Button>
-                <Button size="sm" disabled={saving || !linearWorkspace.trim() || (linearModalMode === "add" && !linearToken.trim())} onClick={saveLinear}>
-                  {linearModalMode === "add" ? "Add workspace" : "Save changes"}
-                </Button>
-              </div>
-            </div>
-          </div>
+          ))}
         </div>
       )}
 
-      {/* Shortcut Modal */}
-      {showShortcutModal && (
+      {allTrackers.length === 0 && (
+        <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
+            <Zap className="size-5 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">No issue trackers connected</p>
+        </div>
+      )}
+
+      {/* Add dropdown */}
+      <div className="relative" ref={addMenuRef}>
+        <Button size="sm" variant="outline" onClick={() => setShowAddMenu(!showAddMenu)} className="gap-1">
+          <span className="text-sm">+</span> Add issue tracker
+        </Button>
+        {showAddMenu && (
+          <div className="absolute top-full left-0 mt-1 bg-background border border-border rounded-lg shadow-lg py-1 z-50 min-w-[180px]">
+            <button
+              onClick={() => openAdd("linear")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+            >
+              <Zap className="size-4" />
+              <span>Linear</span>
+            </button>
+            <button
+              onClick={() => openAdd("shortcut")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+            >
+              <span className="text-[#F4603C]">⚡</span>
+              <span>Shortcut</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Unified Modal */}
+      {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <div className="flex items-center gap-2">
-                <span className="text-[#F4603C]">⚡</span>
-                <h3 className="font-medium">{shortcutModalMode === "add" ? "Add Shortcut workspace" : `Edit ${shortcut[shortcutEditIdx!]?.workspace}`}</h3>
+                {modalIcon}
+                <h3 className="font-medium">{modalTitle}</h3>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => { setShowShortcutModal(false); resetShortcutModal() }} className="h-8 w-8 p-0">
+              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetModal() }} className="h-8 w-8 p-0">
                 <X className="size-4" />
               </Button>
             </div>
             <div className="p-5 space-y-4">
-              <p className="text-sm text-muted-foreground">Connect a Shortcut workspace to sync issues.</p>
+              <p className="text-sm text-muted-foreground">
+                Connect a {modalType === "linear" || (modalMode === "edit" && editType === "linear") ? "Linear" : "Shortcut"} workspace to sync issues.
+              </p>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                <Input value={shortcutWorkspace} onChange={e => setShortcutWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
+                <Input value={workspace} onChange={e => setWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
                 <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                <Input type="password" value={shortcutToken} onChange={e => setShortcutToken(e.target.value)} className="h-9 text-sm" placeholder="Shortcut API token" />
+                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${modalType === "linear" || (modalMode === "edit" && editType === "linear") ? "Linear" : "Shortcut"} API token`} />
+                {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
               </div>
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">
-              {shortcutModalMode === "edit" && shortcutEditIdx !== null && (
-                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => removeShortcut(shortcutEditIdx)}>
+              {modalMode === "edit" && editIdx !== null && (
+                <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={removeTracker}>
                   <Trash2 className="size-3.5 mr-1" /> Remove
                 </Button>
               )}
               <div className="flex items-center gap-2 ml-auto">
-                <Button size="sm" variant="outline" onClick={() => { setShowShortcutModal(false); resetShortcutModal() }}>Cancel</Button>
-                <Button size="sm" disabled={saving || !shortcutWorkspace.trim() || (shortcutModalMode === "add" && !shortcutToken.trim())} onClick={saveShortcut}>
-                  {shortcutModalMode === "add" ? "Add workspace" : "Save changes"}
+                <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetModal() }}>Cancel</Button>
+                <Button size="sm" disabled={saving || !workspace.trim() || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
+                  {modalMode === "add" ? "Add workspace" : "Save changes"}
                 </Button>
               </div>
             </div>
@@ -1667,97 +1618,81 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   )
 }
 
-function ShortcutIntegrationsBlock({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
-  const shortcut = settings.integrations?.shortcut || []
-  const [editingIdx, setEditingIdx] = useState<number | null>(null)
-  const [editWorkspace, setEditWorkspace] = useState("")
-  const [editToken, setEditToken] = useState("")
-  const [newWorkspace, setNewWorkspace] = useState("")
-  const [newToken, setNewToken] = useState("")
+
+
+function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
+  const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState<string | null>(null)
+
+  const urls = [
+    {
+      name: "Linear",
+      url: hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : "",
+      hint: "Paste into Linear → Settings → API → Webhooks, subscribe to Issue events.",
+    },
+    {
+      name: "Shortcut",
+      url: hubUrl ? `${hubUrl}/api/integrations/shortcut/webhook` : "",
+      hint: "Use Shortcut's API to register this webhook: POST /api/v3/webhooks with this URL.",
+    },
+    {
+      name: "GitHub",
+      url: hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "",
+      hint: "Use in GitHub repo or org settings. Subscribe to: Pull requests and Issue comments.",
+    },
+  ]
+
+  const doCopy = (text: string, label: string) => {
+    if (!text) return
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(label)
+      setTimeout(() => setCopied(null), 2000)
+    })
+  }
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 mt-6">
-        <span className="size-4 text-[#F4603C]">⚡</span> Shortcut
-      </h3>
-      {shortcut.length > 0 && (
-        <div className="mb-4 space-y-2">
-          {shortcut.map((sc, i) => (
-            <div key={i}>
-              {editingIdx === i ? (
-                <div className="border border-primary/40 rounded-lg p-4 space-y-3 bg-primary/5">
-                  <h4 className="text-sm font-semibold">Edit: {sc.workspace}</h4>
-                  <p className="text-xs text-muted-foreground">Leave token blank to keep existing.</p>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                    <Input value={editWorkspace} onChange={e => setEditWorkspace(e.target.value)} className="h-8 text-sm" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                    <Input type="password" value={editToken} onChange={e => setEditToken(e.target.value)} className="h-8 text-sm" placeholder="(leave blank to keep)" />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button size="sm" disabled={saving || !editWorkspace} onClick={() => {
-                      const patch = shortcut.map((x, j) => j === i
-                        ? { workspace: editWorkspace, originalWorkspace: sc.workspace, ...(editToken ? { token: editToken } : {}) }
-                        : { workspace: x.workspace }
-                      )
-                      onSave({ integrations: { shortcut: patch } })
-                      setEditingIdx(null)
-                    }}>Save</Button>
-                    <Button size="sm" variant="outline" onClick={() => setEditingIdx(null)}>Cancel</Button>
-                    <Button size="sm" variant="ghost" className="text-destructive ml-auto" disabled={saving}
-                      onClick={() => { onSave({ integrations: { shortcut: shortcut.filter((_, j) => j !== i).map(x => ({ workspace: x.workspace })) } }); setEditingIdx(null) }}>
-                      Remove
+    <>
+      <Button variant="outline" size="sm" className="gap-2" onClick={() => setOpen(true)}>
+        <Webhook className="size-4" />
+        Webhook URLs
+      </Button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h3 className="font-medium">Webhook URLs</h3>
+              <Button size="sm" variant="ghost" onClick={() => setOpen(false)} className="h-8 w-8 p-0">
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="p-5 space-y-5">
+              {urls.map(({ name, url, hint }) => (
+                <div key={name} className="space-y-2">
+                  <h4 className="text-sm font-medium">{name}</h4>
+                  <p className="text-xs text-muted-foreground">{hint}</p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
+                      {url || "Loading…"}
+                    </code>
+                    <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
+                      {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                      <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
                     </Button>
                   </div>
                 </div>
-              ) : (
-                <div className="border border-border rounded-lg p-3 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">{sc.workspace}</p>
-                    <p className="text-xs text-muted-foreground">
-                      Token: {sc.tokenSet ? <span className="text-green-500">✓ set</span> : <span className="text-amber-500">✗ not set</span>}
-                    </p>
-                  </div>
-                  <Button size="sm" variant="outline" onClick={() => { setEditingIdx(i); setEditWorkspace(sc.workspace); setEditToken("") }}>Edit</Button>
-                </div>
-              )}
+              ))}
             </div>
-          ))}
+          </div>
         </div>
       )}
-      <div className="border border-border rounded-lg p-4 space-y-3">
-        <p className="text-xs text-muted-foreground font-medium">Add a Shortcut workspace</p>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-          <Input value={newWorkspace} onChange={e => setNewWorkspace(e.target.value)} className="h-8 text-sm" placeholder="my-company" />
-        </div>
-        <div>
-          <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-          <Input type="password" value={newToken} onChange={e => setNewToken(e.target.value)} className="h-8 text-sm" placeholder="Shortcut API token" />
-        </div>
-        <Button size="sm" disabled={saving || !newWorkspace || !newToken}
-          onClick={() => {
-            onSave({ integrations: { shortcut: [...shortcut.map(x => ({ workspace: x.workspace })), { workspace: newWorkspace, token: newToken }] } })
-            setNewWorkspace(""); setNewToken("")
-          }}>
-          Add Shortcut Workspace
-        </Button>
-      </div>
-    </div>
+    </>
   )
 }
 
 function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
-  const [copied, setCopied] = useState(false)
-  const webhookUrl = hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : ""
-  const handleCopy = () => {
-    if (!webhookUrl) return
-    navigator.clipboard.writeText(webhookUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
-  }
 
   return (
     <div className="space-y-6">
@@ -1768,54 +1703,8 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </p>
       </div>
 
-      {/* Webhook URLs */}
-      <div className="border border-border rounded-lg p-5 space-y-4">
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">Linear Webhook URL</h3>
-          <p className="text-xs text-muted-foreground">Paste into <strong>Linear → Settings → API → Webhooks</strong>, subscribe to <strong>Issue</strong> events.</p>
-        <div className="flex items-center gap-2">
-          <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
-            {webhookUrl || "Loading…"}
-          </code>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={handleCopy} disabled={!webhookUrl}>
-            {copied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
-            <span className="ml-1.5">{copied ? "Copied" : "Copy"}</span>
-          </Button>
-        </div>
-        </div>
-        {/* Shortcut webhook */}
-        <div className="space-y-2 pt-3 border-t border-border">
-          <h3 className="text-sm font-medium">Shortcut Webhook URL</h3>
-          <p className="text-xs text-muted-foreground">Use Shortcut's API to register this webhook: <code className="bg-muted px-1 rounded text-xs">POST /api/v3/webhooks</code> with this URL.</p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
-              {hubUrl ? `${hubUrl}/api/integrations/shortcut/webhook` : "Loading…"}
-            </code>
-            <Button variant="outline" size="sm" className="shrink-0" onClick={() => {
-              if (hubUrl) navigator.clipboard.writeText(`${hubUrl}/api/integrations/shortcut/webhook`)
-            }} disabled={!hubUrl}>
-              <Copy className="size-3.5" />
-              <span className="ml-1.5">Copy</span>
-            </Button>
-          </div>
-        </div>
-        {/* GitHub webhook */}
-        <div className="space-y-2 pt-3 border-t border-border">
-          <h3 className="text-sm font-medium">GitHub Webhook URL</h3>
-          <p className="text-xs text-muted-foreground">Use this URL when configuring webhooks in your GitHub repo or org settings. Subscribe to: <strong>Pull requests</strong> and <strong>Issue comments</strong> events.</p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
-              {hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "Loading…"}
-            </code>
-            <Button variant="outline" size="sm" className="shrink-0" onClick={() => {
-              if (hubUrl) navigator.clipboard.writeText(`${hubUrl}/api/integrations/github/webhook`)
-            }} disabled={!hubUrl}>
-              <Copy className="size-3.5" />
-              <span className="ml-1.5">Copy</span>
-            </Button>
-          </div>
-        </div>
-      </div>
+      {/* Webhook URLs — hidden behind modal */}
+      <WebhookUrlsModal hubUrl={hubUrl} />
 
       {/* Factories-as-code callout */}
       <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
