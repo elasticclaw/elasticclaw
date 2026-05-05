@@ -7,5 +7,4 @@ github:
     - repo: elasticclaw/elasticclaw
       permissions: write
 nix: true
-auto_watch_ci: true
-auto_watch_bugbot: false
+docker: true

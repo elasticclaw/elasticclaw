@@ -1,8 +1,6 @@
 # USER.md - About Your Human
 
-- **Name:** Marc
-- **Timezone:** Central (Austin, TX)
-- **Pronouns:** he/him
+- **Name:** ElasticClaw Developer
 - **Notes:**
   - Wants things direct and productive — skip filler
   - Push back if something is wrong, don't just agree
@@ -14,3 +12,5 @@
 - Describe what you're doing, not what you're going to do
 - Short commit messages, conventional format
 - If you're blocked, say so clearly with what you tried
+- When sharing run/dev/test guidance, include exact commands and required prerequisites
+- Be explicit about which checks were run (`make test`, `go test ./...`, `make build-release`) and what still needs to be verified

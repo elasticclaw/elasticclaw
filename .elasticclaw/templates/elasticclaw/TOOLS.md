@@ -5,8 +5,9 @@
 The `elasticclaw/elasticclaw` repo is cloned into your workspace.
 
 ```bash
-alias ws="~/.openclaw/workspace/elasticclaw"
+alias ws="cd ~/.openclaw/workspace/elasticclaw"
 cd ~/.openclaw/workspace/elasticclaw
+nix develop   # required for Go / Node / npm / ORAS; see below
 ```
 
 ## Git & GitHub
@@ -22,28 +23,22 @@ gh issue list --repo elasticclaw/elasticclaw           # works
 
 Token is scoped: **write** on `elasticclaw/elasticclaw`.
 
-## Go
+## Toolchain: Nix flake only
 
-Go is NOT pre-installed by default. Install if needed:
-```bash
-curl -fsSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
-export PATH=$PATH:/usr/local/go/bin
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-```
+**Nix** and **Docker** are pre-installed on this VM. The repo has a **`flake.nix`** at the root; Go, Node, npm, ORAS, shellcheck, and the rest of the dev toolchain are pinned there.
 
-Or if nix is enabled in the template: it's already there via the flake.
-
-Check: `go version`
-
-## Node.js
-
-Node 24 is pre-installed: `node --version`, `npm --version`
+**Do not** install Go, Node, npm, ORAS, or other dev tools with curl, apt, brew, nvm, or manual tarballs. Use the flake.
 
 ```bash
-cd ~/.openclaw/workspace/elasticclaw/web
-npm install
-npm run dev   # dev server on :3000
+cd ~/.openclaw/workspace/elasticclaw
+nix develop
 ```
+
+Stay in that shell for `make`, `go`, `npm`, `oras`, and tests. That gives you the **exact** versions CI and the project expect.
+
+**Docker** (pre-installed): required for `make test-container` and `make test-install`. Use `docker version` from the VM when you need to confirm the daemon.
+
+**ORAS** (from the flake): required when publishing a dev `claw-bridge` OCI artifact — run `oras version` inside `nix develop`.
 
 ## OpenClaw
 
@@ -61,14 +56,67 @@ Don't kill it — you'll lose your connection to the hub.
 
 ## Build Commands
 
+Run these **inside** `nix develop` (repo root):
+
 ```bash
 make build          # Go only, fast (no web UI — dev iteration)
 make build-release  # Full: web UI + Go binary (requires npm)
 make build-web      # npm build → copy to internal/webui/out/
 make test           # Go unit tests
 make test-bootstrap # Bootstrap script tests
+make test-factory   # Factory integration tests (hub package, integration tag)
+make test-container # Bootstrap container run test (requires Docker)
 make test-install   # Container integration test for install scripts
 ```
+
+## Local Development (run hub + web together)
+
+Use two terminals. In **each**, enter the dev shell first:
+
+```bash
+cd ~/.openclaw/workspace/elasticclaw
+nix develop
+```
+
+Terminal 1 (hub API on `:8080`):
+```bash
+make build
+./bin/elasticclaw hub --no-web-ui
+```
+
+Terminal 2 (Next.js UI on `:3000`) — still inside `nix develop` (cwd is repo root):
+```bash
+cd web
+cp .env.example .env.local
+# set NEXT_PUBLIC_HUB_URL=http://localhost:8080
+npm install
+npm run dev
+```
+
+Then open `http://localhost:3000`.
+
+## Release Build Verification
+
+From repo root inside `nix develop`:
+
+```bash
+make build-release
+rm -rf ~/.elasticclaw/hub.db
+./bin/elasticclaw hub
+# open http://localhost:8080 and verify embedded UI loads
+```
+
+## Working on claw-bridge
+
+After changing `cmd/claw-bridge/` (inside `nix develop`):
+
+```bash
+make build-bridge-linux
+oras push ttl.sh/<your-handle>/claw-bridge:1w \
+  bin/claw-bridge-linux-amd64:application/octet-stream
+```
+
+Set `bridge_image:` in `~/.elasticclaw/hub.yaml` to your pushed image for hub testing.
 
 ## Hub Architecture
 
@@ -103,7 +151,7 @@ The factory system is in `pkg/hub/linear.go`:
    - Inserted claw record with `linear_issue_id`, tags, color
    - Provisioned Replicated CMX VM
 3. VM booted → bootstrap script ran:
-   - Installed Node 24, OpenClaw, claw-bridge
+   - Nix + Docker available; OpenClaw, claw-bridge
    - Configured OpenClaw (model, gateway password)
    - Started gateway (port 18789) + bridge (WS to hub)
    - Installed git credential helper

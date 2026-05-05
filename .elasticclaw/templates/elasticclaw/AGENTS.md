@@ -2,11 +2,15 @@
 
 ## First Run
 
-The repo is already cloned at `~/.openclaw/workspace/elasticclaw/`. Check with `ls ~/.openclaw/workspace/`.
+The repo is already cloned at `~/.openclaw/workspace/elasticclaw/`. Check with:
 
-Read SOUL.md, USER.md, MEMORY.md, and TOOLS.md before doing anything.
+```bash
+ls ~/.openclaw/workspace/
+```
 
-**Context file:** If a `CONTEXT.md` exists in your workspace, read it — it was injected by a factory with the Linear issue you're working on.
+Read `SOUL.md`, `USER.md`, `MEMORY.md`, and `TOOLS.md` before doing anything.
+
+**Context file:** If a `CONTEXT.md` exists in your workspace, read it. It is injected by the factory and contains the Linear issue context.
 
 ## Every Session
 
@@ -17,6 +21,19 @@ Read SOUL.md, USER.md, MEMORY.md, and TOOLS.md before doing anything.
 5. Read CONTEXT.md if it exists (Linear issue context)
 6. `git -C ~/.openclaw/workspace/elasticclaw status` to see where things stand
 7. `git -C ~/.openclaw/workspace/elasticclaw pull` to get latest
+8. `cd ~/.openclaw/workspace/elasticclaw && nix develop` — **all** dev tools (Go, Node, npm, ORAS, etc.) come from the repo `flake.nix`. Nix and Docker are pre-installed; do **not** install language runtimes or ORAS by hand.
+
+## Toolchain
+
+Work only inside `nix develop` at the repo root. Do not install Go, Node, npm, or ORAS outside the flake.
+
+```bash
+cd ~/.openclaw/workspace/elasticclaw
+nix develop
+# optional sanity checks:
+go version && node --version && npm --version && oras version
+docker version   # Docker is on the VM; use for container tests
+```
 
 ## Memory
 
@@ -33,28 +50,74 @@ Write to memory files. Don't rely on "mental notes" — this VM can be killed an
 1. Check current branch: `git -C ~/.openclaw/workspace/elasticclaw branch`
 2. Pull latest: `git -C ~/.openclaw/workspace/elasticclaw pull origin main`
 3. Create a feature branch for non-trivial changes: `git checkout -b feat/my-thing`
-4. Alias: `alias ws="cd ~/.openclaw/workspace/elasticclaw"`
+4. `cd ~/.openclaw/workspace/elasticclaw && nix develop` before any `make`, `go`, or `npm` work
+5. Optional alias: `alias ws="cd ~/.openclaw/workspace/elasticclaw"` (you still must run `nix develop` from that directory)
 
 ### Go code
 
+From repo root, inside `nix develop`:
+
 ```bash
-ws   # cd to repo
 make build           # fast build, Go only (no web embed)
 go build ./...       # verify compiles
-go vet ./...         # check for issues
+go vet ./...         # static analysis
 go test ./...        # run tests
-gofmt -w <file>      # format
+gofmt -w <file>      # format edited files
 ```
 
 ### Web UI (Next.js in `web/`)
 
+Inside `nix develop` (repo root):
+
 ```bash
-cd ~/.openclaw/workspace/elasticclaw/web
+cd web
 npm install
 NEXT_PUBLIC_HUB_URL=http://localhost:8080 npm run dev  # dev server :3000
 
 # Full static build (embeds in binary):
-cd ~/.openclaw/workspace/elasticclaw && make build-release
+cd .. && make build-release
+```
+
+### Full local development workflow (2 terminals)
+
+In each terminal: `cd ~/.openclaw/workspace/elasticclaw && nix develop`.
+
+Terminal 1 (hub):
+```bash
+make build
+./bin/elasticclaw hub --no-web-ui
+```
+
+Terminal 2 (web):
+```bash
+cd web
+cp .env.example .env.local
+# Ensure .env.local contains:
+# NEXT_PUBLIC_HUB_URL=http://localhost:8080
+npm install
+npm run dev
+```
+
+Then open `http://localhost:3000`.
+
+### Tests (what to run and when)
+
+Inside `nix develop` at repo root:
+
+```bash
+make test           # baseline for all changes
+make test-bootstrap # required for bootstrap/install script changes
+make test-install   # requires Docker and integration tag path
+```
+
+Container-heavy tests (repo root, inside `nix develop`):
+```bash
+make test-container
+```
+
+Factory integration tests:
+```bash
+make test-factory
 ```
 
 ### Committing
@@ -105,8 +168,9 @@ internal/webui/         Embed package for web UI binary
 
 - `go build ./...` must pass before any Go commit
 - `go test ./...` must pass
+- `make build-release` must pass for web/UI-affecting changes
 - Never put API keys, tokens, or secrets in the repo (public, Apache 2.0)
-- PR for non-trivial changes, direct push for obvious fixes
+- Open a PR for every change (no direct pushes to main)
 
 ## When You're Done with a Linear Issue
 
