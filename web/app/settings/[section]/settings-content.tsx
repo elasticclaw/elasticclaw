@@ -1417,9 +1417,10 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
+    const typeIdx = tracker.type === "linear" ? idx : idx - linear.length
     setWorkspace(tracker.workspace)
     setToken("")
-    setEditIdx(idx)
+    setEditIdx(typeIdx)
     setEditType(tracker.type)
     setModalMode("edit")
     setShowModal(true)
@@ -1429,7 +1430,9 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     if (!workspace.trim()) return
     if (modalMode === "add" && !token.trim()) return
 
-    if (modalType === "linear") {
+    const type = modalMode === "add" ? modalType : editType
+
+    if (type === "linear") {
       if (modalMode === "add") {
         onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim() }] } })
       } else if (editIdx !== null) {
