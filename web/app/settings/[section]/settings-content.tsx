@@ -1391,6 +1391,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   const [editType, setEditType] = useState<TrackerType>("linear")
   const [workspace, setWorkspace] = useState("")
   const [token, setToken] = useState("")
+  const [webhookSecret, setWebhookSecret] = useState("")
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -1408,7 +1409,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }, [showAddMenu])
 
   const resetModal = () => {
-    setWorkspace(""); setToken(""); setEditIdx(null); setEditType("linear")
+    setWorkspace(""); setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -1430,6 +1431,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     }
     setWorkspace(tracker.workspace)
     setToken("")
+    setWebhookSecret("")
     setEditIdx(typeIdx)
     setEditType(tracker.type)
     setModalMode("edit")
@@ -1444,22 +1446,22 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
     if (type === "linear") {
       if (modalMode === "add") {
-        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim() }] } })
+        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
       } else if (editIdx !== null) {
         const li = linear[editIdx]
         const updated = linear.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
           : { workspace: item.workspace }
         )
         onSave({ integrations: { linear: updated } })
       }
     } else if (type === "shortcut") {
       if (modalMode === "add") {
-        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim() }] } })
+        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
       } else if (editIdx !== null) {
         const sc = shortcut[editIdx]
         const updated = shortcut.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
           : { workspace: item.workspace }
         )
         onSave({ integrations: { shortcut: updated } })
@@ -1467,11 +1469,11 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     } else {
       // github-issues
       if (modalMode === "add") {
-        onSave({ integrations: { githubIssues: [...githubIssues.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim() }] } })
+        onSave({ integrations: { githubIssues: [...githubIssues.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
       } else if (editIdx !== null) {
         const gi = githubIssues[editIdx]
         const updated = githubIssues.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: gi.workspace, ...(token.trim() ? { token: token.trim() } : {}) }
+          ? { workspace: workspace.trim(), originalWorkspace: gi.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
           : { workspace: item.workspace }
         )
         onSave({ integrations: { githubIssues: updated } })
@@ -1647,6 +1649,11 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
                 <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(modalMode === "add" ? modalType : editType)} API token`} />
                 {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
+                <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
+                <p className="text-xs text-muted-foreground mt-1">Used to verify incoming webhook signatures. Leave blank to keep existing.</p>
               </div>
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">

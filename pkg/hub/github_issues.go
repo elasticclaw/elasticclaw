@@ -146,11 +146,17 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 		}
 	}
 
-	// If any secrets are configured but none matched, reject
+	// If any secrets are configured but none matched, reject.
+	// Also reject if there are GitHub Issues integrations configured but
+	// none have secrets set — unauthenticated webhooks are a security risk.
 	if hasAnySecret {
 		return false
 	}
-	return true // no secrets configured
+	if integrations != nil && len(integrations.GitHubIssues) > 0 {
+		return false
+	}
+	// No integrations and no factory secrets — allow (dev/testing)
+	return true
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {
