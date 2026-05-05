@@ -186,6 +186,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Integration webhooks (signature-validated, no session auth)
 	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
+	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))     // factory CRUD (GET list, POST push)
