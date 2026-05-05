@@ -340,6 +340,17 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		}
 	}
 
+	// Enforce 1:1 — check if a claw already exists for this issue.
+	var existingID string
+	_ = s.db.QueryRow(
+		`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueID,
+	).Scan(&existingID)
+	if existingID != "" {
+		log.Printf("[factory:%s] claw %s already exists for issue %s — treating as idempotent success", factory.Name, existingID[:8], issueID)
+		return nil
+	}
+
 	// Load template
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
 	if err != nil {
@@ -673,8 +684,10 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 }
 
 // moveGitHubIssue updates a GitHub issue's state or labels.
-func moveGitHubIssue(token, repo string, issueNumber int, targetState string) error {
-	base := "https://api.github.com"
+func moveGitHubIssue(token, repo string, issueNumber int, targetState string, baseURL string) error {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
 	// targetState can be "open", "closed", or a label name
 	if strings.EqualFold(targetState, "open") || strings.EqualFold(targetState, "closed") {
 		state := strings.ToLower(targetState)
@@ -682,10 +695,10 @@ func moveGitHubIssue(token, repo string, issueNumber int, targetState string) er
 		if state == "closed" {
 			body["state_reason"] = "completed"
 		}
-		_, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token, "PATCH", body)
+		_, err := githubAPIPostWithBase(baseURL, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token, "PATCH", body)
 		return err
 	}
 	// Otherwise treat as label addition
-	_, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNumber), token, "POST", map[string][]string{"labels": {targetState}})
+	_, err := githubAPIPostWithBase(baseURL, fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNumber), token, "POST", map[string][]string{"labels": {targetState}})
 	return err
 }

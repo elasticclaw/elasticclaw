@@ -823,7 +823,11 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 					issueNumStr := rest[lastSlash+1:]
 					var issueNum int
 					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
-						if err := moveGitHubIssue(ghToken, repo, issueNum, factory.DoneStatus); err != nil {
+							base := s.githubBaseURL
+							if base == "" {
+								base = "https://api.github.com"
+							}
+							if err := moveGitHubIssue(ghToken, repo, issueNum, factory.DoneStatus, base); err != nil {
 							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, factory.DoneStatus, err)
 						} else {
 							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, factory.DoneStatus)
