@@ -401,6 +401,10 @@ type FactoryConfig struct {
 	Labels []string `yaml:"labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
 	AssignedTo string `yaml:"assigned_to,omitempty"`
+	// AllowedLabelers restricts who can trigger claw creation by labeling an issue.
+	// Only users in this list (GitHub logins, case-insensitive) can trigger.
+	// If empty, any user with label permissions can trigger.
+	AllowedLabelers []string `yaml:"allowed_labelers,omitempty"`
 	// WebhookSecretRef is a named key in HubConfig.Secrets (use instead of inline WebhookSecret for repo-defined factories)
 	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty"`
 	// PipelineYAML is the raw pipeline.yaml content stored alongside this factory

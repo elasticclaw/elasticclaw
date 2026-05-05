@@ -172,11 +172,16 @@ func verifyGitHubHMAC(body []byte, sig, secret string) bool {
 }
 
 func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
+	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
+	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
+		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
+
 	if s.hubCfg.Factories == nil {
+		log.Printf("[github-issues-webhook] no factories configured — nothing to do")
 		return
 	}
+	log.Printf("[github-issues-webhook] checking %d factories", len(s.hubCfg.Factories))
 
-	issueID := fmt.Sprintf("gh-%s/%d", payload.Repository.FullName, payload.Issue.Number)
 	currentStatus := payload.Issue.State
 	previousStatus := ""
 
@@ -198,6 +203,14 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	for _, l := range payload.Issue.Labels {
 		issueLabels[strings.ToLower(l.Name)] = true
 	}
+	log.Printf("[github-issues-webhook] issue %s labels=%v assignee=%q currentStatus=%q previousStatus=%q",
+		issueID, func() []string {
+			out := make([]string, 0, len(issueLabels))
+			for k := range issueLabels {
+				out = append(out, k)
+			}
+			return out
+		}(), assignee, currentStatus, previousStatus)
 
 	// Handle label/unlabel actions: the label that was added/removed is in payload.Label
 	// For "labeled", build the pre-event label set so previousMatched works correctly
@@ -214,6 +227,14 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		if previousStatus == "" {
 			previousStatus = currentStatus
 		}
+		log.Printf("[github-issues-webhook] label '%s' added by %q — previousLabels=%v",
+			payload.Label.Name, payload.Sender.Login, func() []string {
+				out := make([]string, 0, len(previousLabels))
+				for k := range previousLabels {
+					out = append(out, k)
+				}
+				return out
+			}())
 	}
 	if payload.Action == "unlabeled" && payload.Label != nil {
 		delete(issueLabels, strings.ToLower(payload.Label.Name))
@@ -224,61 +245,114 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 
 	matched := false
 	for _, factory := range s.hubCfg.Factories {
+		log.Printf("[github-issues-webhook] checking factory %q: integration=%q enabled=%v trigger_status=%q labels=%v assigned_to=%q allowed_labelers=%v",
+			factory.Name, factory.Integration,
+			func() bool {
+				if factory.Enabled == nil {
+					return true
+				}
+				return *factory.Enabled
+			}(),
+			factory.TriggerStatus, factory.Labels, factory.AssignedTo, factory.AllowedLabelers)
+
 		if factory.Integration != "github-issues" {
+			log.Printf("[github-issues-webhook] factory %q: SKIP — integration=%q, want github-issues", factory.Name, factory.Integration)
 			continue
 		}
 		if factory.Enabled != nil && !*factory.Enabled {
+			log.Printf("[github-issues-webhook] factory %q: SKIP — disabled", factory.Name)
 			continue
 		}
 
-		// Workspace filter: if factory specifies a workspace, match against integration workspace
-		// (for GitHub Issues, workspace is a human label on the integration config, not the repo)
-		if factory.Workspace != "" {
+		// Workspace filter: for Linear/Shortcut, workspace selects the integration token.
+		// For GitHub Issues, workspace is just a human label — no token resolution needed.
+		if factory.Workspace != "" && factory.Integration != "github-issues" {
 			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 			if ghToken == "" {
+				log.Printf("[github-issues-webhook] factory %q: SKIP — workspace=%q but no token resolved", factory.Name, factory.Workspace)
 				continue
 			}
-			// Workspace is just a label — we don't filter by repo here.
-			// If we wanted repo-level filtering, we'd add a Repos field to FactoryConfig.
+			log.Printf("[github-issues-webhook] factory %q: workspace=%q, token resolved", factory.Name, factory.Workspace)
 		}
 
 		// Labels filter: all configured labels must be present on the issue (AND)
 		if len(factory.Labels) > 0 {
 			allMatch := true
+			missing := []string{}
 			for _, required := range factory.Labels {
 				if !issueLabels[strings.ToLower(required)] {
 					allMatch = false
-					break
+					missing = append(missing, required)
 				}
 			}
 			if !allMatch {
+				log.Printf("[github-issues-webhook] factory %q: SKIP — missing required labels: %v (have: %v)", factory.Name, missing, func() []string {
+					out := make([]string, 0, len(issueLabels))
+					for k := range issueLabels {
+						out = append(out, k)
+					}
+					return out
+				}())
 				continue
 			}
+			log.Printf("[github-issues-webhook] factory %q: labels match (all %v present)", factory.Name, factory.Labels)
+		}
+
+		// AllowedLabelers filter: restrict who can trigger by labeling
+		if len(factory.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+			labelerAllowed := false
+			for _, allowed := range factory.AllowedLabelers {
+				if strings.EqualFold(allowed, payload.Sender.Login) {
+					labelerAllowed = true
+					break
+				}
+			}
+			if !labelerAllowed {
+				log.Printf("[github-issues-webhook] factory %q: SKIP — labeler %q not in allowed_labelers %v",
+					factory.Name, payload.Sender.Login, factory.AllowedLabelers)
+				continue
+			}
+			log.Printf("[github-issues-webhook] factory %q: labeler %q allowed", factory.Name, payload.Sender.Login)
 		}
 
 		// AssignedTo filter
 		if factory.AssignedTo != "" {
 			wanted := strings.ToLower(strings.TrimSpace(factory.AssignedTo))
+			assigneeMatch := false
+			skipReason := ""
 			switch {
 			case wanted == "any":
-				if assignee == "" {
-					continue
+				if assignee != "" {
+					assigneeMatch = true
+				} else {
+					skipReason = "assignee=any but issue unassigned"
 				}
 			case wanted == "none":
-				if assignee != "" {
-					continue
+				if assignee == "" {
+					assigneeMatch = true
+				} else {
+					skipReason = fmt.Sprintf("assignee=none but issue assigned to %q", assignee)
 				}
 			case strings.HasPrefix(wanted, "!"):
 				excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
-				if strings.EqualFold(assignee, excluded) {
-					continue
+				if !strings.EqualFold(assignee, excluded) {
+					assigneeMatch = true
+				} else {
+					skipReason = fmt.Sprintf("assignee %q is excluded (%q)", assignee, wanted)
 				}
 			default:
 				target := strings.TrimPrefix(wanted, "@")
-				if !strings.EqualFold(assignee, target) {
-					continue
+				if strings.EqualFold(assignee, target) {
+					assigneeMatch = true
+				} else {
+					skipReason = fmt.Sprintf("assignee=%q, want %q", assignee, target)
 				}
 			}
+			if !assigneeMatch {
+				log.Printf("[github-issues-webhook] factory %q: SKIP — %s", factory.Name, skipReason)
+				continue
+			}
+			log.Printf("[github-issues-webhook] factory %q: assignee match (%q)", factory.Name, factory.AssignedTo)
 		}
 
 		// Issue entering trigger status → create claw.
@@ -286,8 +360,21 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		triggerMatched := false
 		if strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			triggerMatched = true
+			log.Printf("[github-issues-webhook] factory %q: trigger matched by current status %q == trigger_status %q",
+				factory.Name, currentStatus, factory.TriggerStatus)
 		} else if issueLabels[strings.ToLower(factory.TriggerStatus)] {
 			triggerMatched = true
+			log.Printf("[github-issues-webhook] factory %q: trigger matched by label %q present",
+				factory.Name, factory.TriggerStatus)
+		} else {
+			log.Printf("[github-issues-webhook] factory %q: trigger NOT matched — currentStatus=%q, labels=%v, trigger_status=%q",
+				factory.Name, currentStatus, func() []string {
+					out := make([]string, 0, len(issueLabels))
+					for k := range issueLabels {
+						out = append(out, k)
+					}
+					return out
+				}(), factory.TriggerStatus)
 		}
 
 		// Only create when transitioning into the trigger condition
@@ -295,6 +382,8 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		if previousStatus != "" {
 			if strings.EqualFold(previousStatus, factory.TriggerStatus) {
 				previousMatched = true
+				log.Printf("[github-issues-webhook] factory %q: previous status %q matched trigger (transition detection)",
+					factory.Name, previousStatus)
 			}
 		}
 		// For label-based triggers, also check if the trigger label was already
@@ -302,20 +391,29 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
 			if previousLabels[strings.ToLower(factory.TriggerStatus)] {
 				previousMatched = true
+				log.Printf("[github-issues-webhook] factory %q: trigger label %q was already present before this event",
+					factory.Name, factory.TriggerStatus)
 			}
 		}
 
 		if triggerMatched && !previousMatched {
 			matched = true
-			log.Printf("[factory:%s] issue %s entered trigger '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
+			log.Printf("[github-issues-webhook] factory %q: ✓ CREATING CLAW — issue %s entered trigger '%s' (was not in trigger before)",
+				factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
 			if err := s.createClawForGitHubIssue(factory, payload); err != nil {
-				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
+				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
 			} else {
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+				log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
 			}
+		} else if triggerMatched && previousMatched {
+			log.Printf("[github-issues-webhook] factory %q: SKIP — issue %s already in trigger '%s', no transition",
+				factory.Name, issueID, factory.TriggerStatus)
+		} else {
+			log.Printf("[github-issues-webhook] factory %q: SKIP — trigger not matched for issue %s", factory.Name, issueID)
 		}
 
 		// Issue leaving trigger status → terminate claw.
@@ -327,7 +425,8 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			).Scan(&activeClaw)
 			if activeClaw != "" {
 				matched = true
-				log.Printf("[factory:%s] issue %s left trigger '%s' — terminating claw", factory.Name, issueID, factory.TriggerStatus)
+				log.Printf("[github-issues-webhook] factory %q: issue %s left trigger '%s' — terminating claw %s",
+					factory.Name, issueID, factory.TriggerStatus, activeClaw[:8])
 				s.terminateClawForGitHubIssue(issueID)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_terminated", activeClaw, "terminated: issue left trigger status")
 			}
@@ -335,8 +434,11 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	}
 
 	if !matched {
+		log.Printf("[github-issues-webhook] no factory matched for issue %s — checking why:", issueID)
 		for _, factory := range s.hubCfg.Factories {
 			if factory.Integration == "github-issues" && (factory.Enabled == nil || *factory.Enabled) {
+				log.Printf("[github-issues-webhook] factory %q: not_actionable — status '%s'→'%s' did not match trigger '%s' (labels=%v)",
+					factory.Name, previousStatus, currentStatus, factory.TriggerStatus, factory.Labels)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "not_actionable",
 					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
 			}
@@ -345,7 +447,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload) error {
-	issueID := fmt.Sprintf("gh-%s/%d", payload.Repository.FullName, payload.Issue.Number)
+	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 
 	// Verify we can read the issue before spending money on a sandbox
 	ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
@@ -702,6 +804,119 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 		return nil, fmt.Errorf("github API parse error: %w", err)
 	}
 	return result, nil
+}
+
+// findClawForGitHubIssue finds an active claw tracking the given GitHub issue URL.
+func (s *Server) findClawForGitHubIssue(issueURL string) string {
+	var clawID string
+	_ = s.db.QueryRow(
+		`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueURL,
+	).Scan(&clawID)
+	return clawID
+}
+
+// closeGitHubIssueForClaw finds the tracked GitHub issue for a claw and closes it.
+func (s *Server) closeGitHubIssueForClaw(clawID string) {
+	var issueURL string
+	err := s.db.QueryRow(
+		`SELECT github_issue_id FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&issueURL)
+	if err != nil || issueURL == "" {
+		log.Printf("[pipeline] close_issue: no tracked GitHub issue for claw %s", clawID[:8])
+		return
+	}
+
+	// Parse owner/repo#number from the issue URL
+	// URL format: https://github.com/owner/repo/issues/123
+	parts := strings.Split(issueURL, "/")
+	if len(parts) < 2 {
+		log.Printf("[pipeline] close_issue: invalid issue URL %q", issueURL)
+		return
+	}
+	// Extract owner/repo from URL
+	var owner, repo string
+	for i, p := range parts {
+		if p == "github.com" && i+2 < len(parts) {
+			owner = parts[i+1]
+			repo = parts[i+2]
+			break
+		}
+	}
+	if owner == "" || repo == "" {
+		log.Printf("[pipeline] close_issue: could not parse owner/repo from %q", issueURL)
+		return
+	}
+	repoFullName := owner + "/" + repo
+
+	// Extract issue number from URL
+	var issueNumber int
+	fmt.Sscanf(parts[len(parts)-1], "%d", &issueNumber)
+	if issueNumber == 0 {
+		log.Printf("[pipeline] close_issue: could not parse issue number from %q", issueURL)
+		return
+	}
+
+	// Find token for this repo
+	token := s.resolveGitHubIssuesTokenForRepo(repoFullName)
+	if token == "" {
+		log.Printf("[pipeline] close_issue: no GitHub token for repo %s", repoFullName)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: no GitHub token available for %s — cannot close issue.", repoFullName))
+		return
+	}
+
+	baseURL := s.ghBaseURL()
+
+	body, _ := json.Marshal(map[string]string{
+		"state":        "closed",
+		"state_reason": "completed",
+	})
+	_, err = githubAPIPostWithBase(baseURL, fmt.Sprintf("repos/%s/issues/%d", repoFullName, issueNumber), token, "PATCH", body)
+	if err != nil {
+		log.Printf("[pipeline] close_issue: failed to close issue %s#%d: %v", repoFullName, issueNumber, err)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: failed to close issue #%d: %v", issueNumber, err))
+		return
+	}
+
+	log.Printf("[pipeline] close_issue: closed issue %s#%d", repoFullName, issueNumber)
+	s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Closed GitHub issue #%d in %s.", issueNumber, repoFullName))
+}
+
+// resolveGitHubIssuesTokenForRepo resolves a GitHub token for a specific repo by checking
+// all GitHub Issues integrations and factories.
+func (s *Server) resolveGitHubIssuesTokenForRepo(repoFullName string) string {
+	s.mu.RLock()
+	integrations := s.hubCfg.Integrations
+	factories := s.hubCfg.Factories
+	secrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+
+	if integrations != nil {
+		for _, gi := range integrations.GitHubIssues {
+			if gi.Token != "" {
+				return gi.Token
+			}
+		}
+	}
+
+	if factories != nil {
+		for _, factory := range factories {
+			if factory.Integration != "github-issues" {
+				continue
+			}
+			if factory.WebhookSecret != "" {
+				return factory.WebhookSecret
+			}
+			if factory.WebhookSecretRef != "" && secrets != nil {
+				if secret := secrets[factory.WebhookSecretRef]; secret != "" {
+					return secret
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // moveGitHubIssue updates a GitHub issue's state or labels.
