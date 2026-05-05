@@ -19,6 +19,37 @@ import (
 	"github.com/google/uuid"
 )
 
+// githubIssuePayload holds the relevant fields from a GitHub issues webhook event.
+type githubIssuePayload struct {
+	Action string `json:"action"` // "opened", "edited", "deleted", "closed", "reopened", "labeled", "unlabeled", "assigned", "unassigned"
+	Number int    `json:"number"`
+	Issue  struct {
+		Title     string `json:"title"`
+		HTMLURL   string `json:"html_url"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		Labels    []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		Assignee *struct {
+			Login string `json:"login"`
+		} `json:"assignee"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	} `json:"issue"`
+	Label *struct {
+		Name string `json:"name"`
+	} `json:"label,omitempty"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"sender"`
+}
+
 // githubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
 type githubPRPayload struct {
 	Action string `json:"action"` // "opened", "synchronize", "reopened", "closed"
@@ -91,13 +122,26 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[github-webhook] failed to parse issue_comment payload: %v", err)
 			break
 		}
-		// Only care about comments on pull requests
-		if payload.Issue.PullRequest.URL == "" {
-			break
+		// Comments on pull requests go to PR handler; comments on plain issues go to issue handler
+		if payload.Issue.PullRequest.URL != "" {
+			log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
+				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
+			go s.processGitHubIssueCommentEvent(payload)
+		} else {
+			log.Printf("[github-webhook] issue_comment action=%q repo=%q issue=#%d author=%q",
+				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
+				go s.processGitHubIssueComment(payload)
 		}
-		log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
-			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
-		go s.processGitHubIssueCommentEvent(payload)
+	case "issues":
+		var payload githubIssuePayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse issues payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] issues action=%q repo=%q issue=#%d title=%q labels=%v",
+			payload.Action, payload.Repository.FullName, payload.Number, payload.Issue.Title, payload.Issue.Labels)
+		go s.processGitHubIssueEvent(payload)
 	case "ping":
 		log.Printf("[github-webhook] ping received — webhook configured correctly")
 	default:
@@ -241,6 +285,7 @@ type githubIssueCommentPayload struct {
 	Action string `json:"action"` // "created", "edited", "deleted"
 	Issue  struct {
 		Number      int `json:"number"`
+		HTMLURL     string `json:"html_url"`
 		PullRequest struct {
 			URL     string `json:"url"`      // non-empty only for PR comments
 			HTMLURL string `json:"html_url"` // web URL for the PR
@@ -261,6 +306,32 @@ type githubIssueCommentPayload struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
+}
+
+// processGitHubIssueComment handles issue_comment events on plain issues (not PRs).
+// If a claw exists for the issue, it injects the comment.
+func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
+	if payload.Action != "created" {
+		return
+	}
+	// Skip bot comments to avoid loops
+	if strings.EqualFold(payload.Comment.User.Type, "bot") {
+		return
+	}
+
+	issueURL := payload.Issue.HTMLURL
+	commentMsg := fmt.Sprintf("**@%s** commented on issue #%d:\n> %s\n[View](%s)",
+		payload.Comment.User.Login, payload.Issue.Number,
+		strings.TrimSpace(payload.Comment.Body), payload.Comment.HTMLURL)
+
+	existingClawID := s.findClawForGitHubIssue(issueURL)
+	if existingClawID != "" {
+		log.Printf("[github-webhook] issue_comment on issue #%d — injecting into existing claw %s", payload.Issue.Number, existingClawID[:8])
+		s.injectHubMessageByID(existingClawID, commentMsg)
+		return
+	}
+
+	log.Printf("[github-webhook] issue_comment on issue #%d — no claw found for %s", payload.Issue.Number, issueURL)
 }
 
 // processGitHubIssueCommentEvent handles issue_comment events on PRs.
@@ -679,6 +750,390 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	return nil
 }
 
+// findClawForGitHubIssue returns the claw ID that is already tracking this issue URL, or "".
+func (s *Server) findClawForGitHubIssue(issueURL string) string {
+	var clawID string
+	_ = s.db.QueryRow(
+		`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('deleted','error','offline') LIMIT 1`,
+		issueURL,
+	).Scan(&clawID)
+	return clawID
+}
+
+// processGitHubIssueEvent finds matching factories and creates claws for a GitHub issue event.
+func (s *Server) processGitHubIssueEvent(payload githubIssuePayload) {
+	// Only handle labeled, opened, and assigned actions for triggering
+	if payload.Action != "labeled" && payload.Action != "opened" && payload.Action != "assigned" {
+		log.Printf("[github-webhook] issue event action=%q ignored (only labeled/opened/assigned trigger)", payload.Action)
+		return
+	}
+
+	s.mu.RLock()
+	factories := s.hubCfg.Factories
+	s.mu.RUnlock()
+
+	repoFullName := payload.Repository.FullName
+	issueURL := payload.Issue.HTMLURL
+	issueNumber := payload.Number
+
+	for _, factory := range factories {
+		if factory.Integration != "github" {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			log.Printf("[github-webhook] factory %q: skipped (disabled)", factory.Name)
+			continue
+		}
+		if factory.Trigger == nil {
+			log.Printf("[github-webhook] factory %q: skipped (no trigger configured)", factory.Name)
+			continue
+		}
+		if factory.Trigger.On != "issue" {
+			log.Printf("[github-webhook] factory %q: skipped (trigger.on=%q, not issue)", factory.Name, factory.Trigger.On)
+			continue
+		}
+		// Check repo match
+		if !githubRepoMatches(repoFullName, factory.Repos) {
+			log.Printf("[github-webhook] factory %q: skipped (repo %q not in %v)", factory.Name, repoFullName, factory.Repos)
+			continue
+		}
+
+		// Check label filter — all specified labels must be present (AND)
+		if len(factory.Labels) > 0 {
+			issueLabels := make(map[string]bool)
+			for _, l := range payload.Issue.Labels {
+				issueLabels[l.Name] = true
+			}
+			for _, required := range factory.Labels {
+				if !issueLabels[required] {
+					log.Printf("[github-webhook] factory %q: skipped (missing label %q)", factory.Name, required)
+					continue
+				}
+			}
+		}
+
+		// Check assigned_to filter
+		if factory.AssignedTo != "" {
+			assignee := ""
+			if payload.Issue.Assignee != nil {
+				assignee = payload.Issue.Assignee.Login
+			}
+			switch factory.AssignedTo {
+			case "none":
+				if assignee != "" {
+					log.Printf("[github-webhook] factory %q: skipped (assigned to %q, want none)", factory.Name, assignee)
+					continue
+				}
+			case "any":
+				if assignee == "" {
+					log.Printf("[github-webhook] factory %q: skipped (not assigned, want any)", factory.Name)
+					continue
+				}
+			default:
+				// "@username" or "!@username"
+				target := strings.TrimPrefix(factory.AssignedTo, "@")
+				if strings.HasPrefix(factory.AssignedTo, "!@") {
+					target = strings.TrimPrefix(factory.AssignedTo, "!@")
+					if strings.EqualFold(assignee, target) {
+						log.Printf("[github-webhook] factory %q: skipped (assigned to %q, excluded)", factory.Name, assignee)
+						continue
+					}
+				} else {
+					if !strings.EqualFold(assignee, target) {
+						log.Printf("[github-webhook] factory %q: skipped (assigned to %q, want %q)", factory.Name, assignee, target)
+						continue
+					}
+				}
+			}
+		}
+
+		// Check if a claw already exists for this issue
+		existingClawID := s.findClawForGitHubIssue(issueURL)
+		if existingClawID != "" {
+			log.Printf("[github-webhook] factory %q: claw %s already exists for issue %s#%d", factory.Name, existingClawID[:8], repoFullName, issueNumber)
+			continue
+		}
+
+		log.Printf("[factory:%s] github issue #%d in %s (action=%s) — creating claw", factory.Name, issueNumber, repoFullName, payload.Action)
+		if err := s.createClawForGitHubIssue(factory, payload); err != nil {
+			log.Printf("[factory:%s] failed to create claw for issue #%d: %v", factory.Name, issueNumber, err)
+			s.logFactoryEvent(factory.Name,
+				fmt.Sprintf("%s#%d", repoFullName, issueNumber),
+				payload.Issue.Title, "", payload.Action, "error", "", err.Error())
+		}
+	}
+}
+
+// createClawForGitHubIssue provisions a new claw for a GitHub issue event.
+func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, issue githubIssuePayload) error {
+	repoFullName := issue.Repository.FullName
+	issueNumber := issue.Number
+	issueURL := issue.Issue.HTMLURL
+
+	// Enforce 1:1 — check if a claw already exists for this issue
+	var existingID string
+	_ = s.db.QueryRow(
+		`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueURL,
+	).Scan(&existingID)
+	if existingID != "" {
+		return fmt.Errorf("claw %s already exists for issue %s", existingID[:8], issueURL)
+	}
+
+	// Resolve template files
+	templateFiles, err := s.resolveTemplateFiles(factory.Template)
+	if err != nil {
+		return fmt.Errorf("template %q not found: %w", factory.Template, err)
+	}
+
+	// Parse elasticclaw-config.yaml from the template if present
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		if parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent)); parseErr == nil {
+			tmplCfg = parsed
+		}
+	}
+
+	// Write issue context to CONTEXT.md
+	issueCtx := buildGitHubIssueContext(issue)
+	templateFiles["CONTEXT.md"] = issueCtx
+
+	// Determine claw name: "repo#123" pattern
+	repoShort := repoFullName
+	if idx := strings.LastIndex(repoFullName, "/"); idx >= 0 {
+		repoShort = repoFullName[idx+1:]
+	}
+	clawName := fmt.Sprintf("%s#%d", repoShort, issueNumber)
+	if factory.NamePattern != "" {
+		clawName = strings.ReplaceAll(factory.NamePattern, "{issue_number}", fmt.Sprintf("%d", issueNumber))
+		clawName = strings.ReplaceAll(clawName, "{repo}", repoShort)
+	}
+
+	// Find tenant
+	var tenantID string
+	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+		return fmt.Errorf("no tenant: %w", err)
+	}
+
+	// Resolve provider
+	provider := factory.Provider
+	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
+		provider = tmplCfg.Provider
+	}
+	if provider == "" {
+		provider = s.defaultProvider()
+	}
+	if provider == "" {
+		return fmt.Errorf("no provider configured")
+	}
+
+	// Build env vars
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
+		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+	}
+
+	// Resolve and inject template-requested secrets
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		for _, ref := range tmplCfg.Secrets {
+			val, envName, ok := s.resolveSecretRef(ref, factory)
+			if ok {
+				env[envName] = val
+				log.Printf("[factory:%s] injected secret %s as %s into claw env", factory.Name, ref.Type, envName)
+			} else {
+				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
+			}
+		}
+	}
+
+	// Resolve template config fields
+	var (
+		instanceType    string
+		defaultModel    string
+		llmKey          string
+		nixEnabled      int
+		dockerEnabled   int
+		githubRepos     []types.GitHubRepoAccess
+		linearWorkspace string
+		autoFixCI       int = 1
+		autoFixBugbot   int = 1
+	)
+	if tmplCfg != nil {
+		instanceType = tmplCfg.InstanceType
+		defaultModel = tmplCfg.DefaultModel
+		llmKey = tmplCfg.LLMKey
+		if tmplCfg.Nix {
+			nixEnabled = 1
+		}
+		if tmplCfg.Docker {
+			dockerEnabled = 1
+		}
+		if tmplCfg.GitHub != nil {
+			githubRepos = tmplCfg.GitHub.Repos
+		}
+		if tmplCfg.Linear != nil {
+			linearWorkspace = tmplCfg.Linear.Workspace
+		}
+		if tmplCfg.AutoWatchCI != nil && !*tmplCfg.AutoWatchCI {
+			autoFixCI = 0
+		}
+		if tmplCfg.AutoWatchBugbot != nil && !*tmplCfg.AutoWatchBugbot {
+			autoFixBugbot = 0
+		}
+	}
+	if defaultModel == "" && llmKey != "" {
+		s.mu.RLock()
+		for _, k := range s.hubCfg.LLMKeys {
+			if k.Name == llmKey {
+				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				break
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if defaultModel == "" {
+		s.mu.RLock()
+		defaultModel = s.hubCfg.DefaultModel
+		s.mu.RUnlock()
+	}
+
+	// Build tags
+	tags := mergeTags(factory.Template, factory.Tags, nil)
+	hasfactory := false
+	for _, t := range tags {
+		if t == "factory:"+factory.Name {
+			hasfactory = true
+			break
+		}
+	}
+	if !hasfactory {
+		tags = append(tags, "factory:"+factory.Name)
+	}
+	tags = append(tags, fmt.Sprintf("github_issue:%s#%d", repoFullName, issueNumber))
+	tagsJSON, _ := json.Marshal(tags)
+
+	clawColor := factory.Color
+	if clawColor == "" && tmplCfg != nil {
+		clawColor = tmplCfg.Color
+	}
+
+	githubReposJSON, _ := json.Marshal(githubRepos)
+
+	clawID := uuid.New().String()
+	filesJSON, _ := json.Marshal(templateFiles)
+	createdAt := now()
+
+	_, err = s.db.Exec(`
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, status, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, "", issueURL, createdAt,
+	)
+	if err != nil {
+		return fmt.Errorf("db insert: %w", err)
+	}
+
+	// Log factory event
+	s.logFactoryEvent(factory.Name,
+		fmt.Sprintf("%s#%d", repoFullName, issueNumber),
+		issue.Issue.Title, "", issue.Action, "claw_created", clawID, "")
+
+	// Provision asynchronously
+	provCfg, _ := s.hubCfg.Providers[provider]
+	go func() {
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus == "deleted" {
+			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			return
+		}
+		ctx := context.Background()
+		req := types.CreateClawRequest{
+			Name:         clawName,
+			TemplateName: factory.Template,
+			Provider:     provider,
+			Files:        templateFiles,
+			Env:          env,
+			InstanceType: instanceType,
+			ProviderName: "ec-" + clawID[:8],
+		}
+		fileBytes := make(map[string][]byte, len(templateFiles))
+		for k, v := range templateFiles {
+			fileBytes[k] = []byte(v)
+		}
+
+		var provErr error
+		switch provider {
+		case "replicated":
+			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		case "daytona":
+			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+		case "vercel":
+			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		case "noop":
+			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
+				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
+			} else {
+				providerID := "noop-vm-" + clawID[:8]
+				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+			}
+		default:
+			provErr = fmt.Errorf("unsupported provider: %s", provider)
+		}
+		if provErr != nil {
+			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+		}
+	}()
+
+	log.Printf("[factory] created claw %s (%s) for GitHub issue %s#%d", clawName, clawID[:8], repoFullName, issueNumber)
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
+	})
+
+	return nil
+}
+
+// buildGitHubIssueContext builds the CONTEXT.md for a GitHub issue assignment.
+func buildGitHubIssueContext(issue githubIssuePayload) string {
+	var b strings.Builder
+	b.WriteString("## GitHub Issue Assignment\n\n")
+	b.WriteString(fmt.Sprintf("Issue: %s\n", issue.Issue.HTMLURL))
+	b.WriteString(fmt.Sprintf("Number: #%d\n", issue.Number))
+	b.WriteString(fmt.Sprintf("Title: %s\n", issue.Issue.Title))
+	b.WriteString(fmt.Sprintf("State: %s\n", issue.Issue.State))
+	b.WriteString(fmt.Sprintf("Author: %s\n", issue.Issue.User.Login))
+	if issue.Issue.Assignee != nil {
+		b.WriteString(fmt.Sprintf("Assignee: %s\n", issue.Issue.Assignee.Login))
+	}
+	if len(issue.Issue.Labels) > 0 {
+		var labels []string
+		for _, l := range issue.Issue.Labels {
+			labels = append(labels, l.Name)
+		}
+		b.WriteString(fmt.Sprintf("Labels: %s\n", strings.Join(labels, ", ")))
+	}
+	b.WriteString(fmt.Sprintf("Repo: %s\n", issue.Repository.FullName))
+	if issue.Issue.Body != "" {
+		b.WriteString(fmt.Sprintf("\n## Description\n\n%s\n", issue.Issue.Body))
+	}
+	b.WriteString(`
+## Git & GitHub Auth
+
+A git credential helper is pre-configured. You do NOT need to run gh auth login or set GH_TOKEN.
+Just use git and gh commands directly — authentication is handled automatically.
+
+## Instructions
+
+1. Read the issue description above carefully
+2. Create a branch and implement the fix/feature
+3. Open a pull request when ready
+4. Send [DONE] when the PR is ready for review
+`)
+	return b.String()
+}
+
 // buildGitHubPRContext builds the BOOTSTRAP.md context for a GitHub PR assignment.
 func buildGitHubPRContext(pr githubPRPayload) string {
 	var b strings.Builder
@@ -698,6 +1153,91 @@ To check out this PR:
 `)
 	b.WriteString(fmt.Sprintf("\tgh pr checkout %s\n", pr.PullRequest.HTMLURL))
 	return b.String()
+}
+
+// closeGitHubIssueForClaw finds the tracked GitHub issue for a claw and closes it.
+func (s *Server) closeGitHubIssueForClaw(clawID string) {
+	var issueURL string
+	err := s.db.QueryRow(
+		`SELECT github_issue_id FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&issueURL)
+	if err != nil || issueURL == "" {
+		log.Printf("[pipeline] close_issue: no tracked GitHub issue for claw %s", clawID[:8])
+		return
+	}
+
+	// Parse owner/repo#number from the issue URL
+	// URL format: https://github.com/owner/repo/issues/123
+	parts := strings.Split(issueURL, "/")
+	if len(parts) < 2 {
+		log.Printf("[pipeline] close_issue: invalid issue URL %q", issueURL)
+		return
+	}
+	// Extract owner/repo from URL
+	var owner, repo string
+	for i, p := range parts {
+		if p == "github.com" && i+2 < len(parts) {
+			owner = parts[i+1]
+			repo = parts[i+2]
+			break
+		}
+	}
+	if owner == "" || repo == "" {
+		log.Printf("[pipeline] close_issue: could not parse owner/repo from %q", issueURL)
+		return
+	}
+	repoFullName := owner + "/" + repo
+
+	token := s.resolveGitHubTokenForRepo(repoFullName)
+	if token == "" {
+		log.Printf("[pipeline] close_issue: no GitHub token for repo %s", repoFullName)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: no GitHub token available for %s — cannot close issue.", repoFullName))
+		return
+	}
+
+	// Extract issue number from URL
+	var issueNumber int
+	fmt.Sscanf(parts[len(parts)-1], "%d", &issueNumber)
+	if issueNumber == 0 {
+		log.Printf("[pipeline] close_issue: could not parse issue number from %q", issueURL)
+		return
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"state": "closed",
+	})
+	req, err := http.NewRequest(
+		http.MethodPatch,
+		fmt.Sprintf("%s/repos/%s/issues/%d", s.ghBaseURL(), repoFullName, issueNumber),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		log.Printf("[pipeline] close_issue: failed to build request for %s#%d: %v", repoFullName, issueNumber, err)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: failed to prepare close request for issue #%d: %v", issueNumber, err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[pipeline] close_issue: request failed for %s#%d: %v", repoFullName, issueNumber, err)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: failed to close issue #%d: %v", issueNumber, err))
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("[pipeline] close_issue: closed %s#%d successfully", repoFullName, issueNumber)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Issue #%d closed successfully.", issueNumber))
+	} else {
+		log.Printf("[pipeline] close_issue: failed to close %s#%d: HTTP %d: %s", repoFullName, issueNumber, resp.StatusCode, string(respBody))
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: failed to close issue #%d (HTTP %d).", issueNumber, resp.StatusCode))
+	}
 }
 
 // mergePRForClaw finds the tracked PR for a claw and merges it via the GitHub API.

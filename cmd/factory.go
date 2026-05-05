@@ -67,7 +67,59 @@ func runFactoryCreate(name, integration, workspace, triggerStatus, doneStatus, t
 		workspace = name
 	}
 
-	factoryYAML := fmt.Sprintf(`name: %s
+	var factoryYAML, pipelineYAML string
+
+	if integration == "github" {
+		// GitHub issue factory — uses repos and trigger instead of workspace/trigger_status
+		factoryYAML = fmt.Sprintf(`name: %s
+integration: github
+# repos: ["my-org/my-repo", "my-org/*"]
+trigger:
+  on: issue           # "issue" or "pull_request"
+  action: labeled     # for issues: "labeled", "opened", "assigned"
+# filter:
+#   author: "dependabot[bot]"
+labels:
+  - bug
+  - claw-ready
+# assigned_to: "@username"  # or !@username, any, none
+webhook_secret_ref: %s_webhook_secret
+
+template: %s
+`, name, name, tmpl)
+
+		pipelineYAML = fmt.Sprintf(`# Pipeline for %s (GitHub Issues)
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read the GitHub issue in CONTEXT.md and start working.
+        Create a branch, implement the fix, and open a PR.
+        Narrate your progress. Send [DONE] when the PR is ready.
+
+  - id: pr_opened
+    label: "PR Opened"
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: |
+        PR created. Watch for CI results and review comments.
+
+  - id: done
+    label: "Done"
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      close_issue: true
+      inject: |
+        Issue resolved. Closing the GitHub issue.
+    terminal: true
+`, name)
+	} else {
+		// Linear/Shortcut factory
+		factoryYAML = fmt.Sprintf(`name: %s
 integration: %s
 workspace: %s
 trigger_status: %q
@@ -78,7 +130,7 @@ webhook_secret_ref: %s_webhook_secret
 template: %s
 `, name, integration, workspace, triggerStatus, name, tmpl)
 
-	pipelineYAML := fmt.Sprintf(`# Pipeline for %s
+		pipelineYAML = fmt.Sprintf(`# Pipeline for %s
 # Stages define the lifecycle of a factory claw.
 # The hub is the state machine — it injects instructions into the claw at each stage.
 
@@ -114,6 +166,7 @@ stages:
       inject: |
         PR was closed without merging. Decide: reopen, new PR, or ask the user.
 `, name, doneStatus)
+	}
 
 	dir := filepath.Join(".elasticclaw", "factories", name)
 	if err := os.MkdirAll(dir, 0755); err != nil {

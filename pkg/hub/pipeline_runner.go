@@ -89,13 +89,20 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		go s.mergePRForClaw(clawID)
 	}
 
+	if stage.OnEnter.CloseIssue {
+		go s.closeGitHubIssueForClaw(clawID)
+	}
+
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
 		return
 	}
 
 	targetStatus := stage.OnEnter.MoveIssue
 
-	if strings.HasPrefix(issueID, "sc-") {
+	if strings.HasPrefix(issueID, "https://github.com/") {
+		// GitHub issue — move_issue means close with a comment
+		go s.closeGitHubIssueForClaw(clawID)
+	} else if strings.HasPrefix(issueID, "sc-") {
 		// Shortcut story
 		scToken := s.resolveShortcutToken(factory.Workspace)
 		if scToken == "" {
@@ -159,9 +166,14 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID, tagsJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &tagsJSON); err != nil {
+	var issueID, githubIssueID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &tagsJSON); err != nil {
 		return nil, ""
+	}
+
+	// Prefer github_issue_id for GitHub issue-based claws
+	if githubIssueID != "" {
+		issueID = githubIssueID
 	}
 
 	if issueID != "" {

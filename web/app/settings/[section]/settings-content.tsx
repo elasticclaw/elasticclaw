@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, ChevronRight, ChevronDown, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -63,6 +63,8 @@ interface SettingsData {
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
+    repos?: string[]
+    trigger?: { on: string; action: string; filter?: { author?: string; base_branch?: string } }
   }>
   secrets?: string[]
   mcpServers?: Array<{
@@ -181,33 +183,87 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const navGroups: { id: Section; label: string; icon: React.ElementType }[][] = [
-    // Infrastructure
-    [
-      { id: "runtimes", label: "Sandboxes", icon: Cpu },
-      { id: "models", label: "Models", icon: Key },
-    ],
-    // Integrations
-    [
-      { id: "github", label: "GitHub Apps", icon: Github },
-      { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-      { id: "mcp-servers", label: "MCP Servers", icon: Zap },
-    ],
-    // Configuration
-    [
-      { id: "secrets", label: "Secrets", icon: Lock },
-      { id: "templates", label: "Templates", icon: LayoutTemplate },
-      { id: "factories", label: "Factories", icon: Factory },
-    ],
-    // Access
-    [
-      { id: "authentication", label: "Authentication", icon: Shield },
-    ],
-    // AI Assistant
-    [
-      { id: "ai-config", label: "Configure with AI", icon: Sparkles },
-    ],
+  type NavItem = { id: Section; label: string; icon: React.ElementType }
+  type NavGroup = { label?: string; items: (NavItem | { id: string; label: string; parent: Section; icon?: React.ElementType })[] }
+
+  const navGroups: NavGroup[] = [
+    {
+      label: "Infrastructure",
+      items: [
+        { id: "runtimes", label: "Sandboxes", icon: Cpu },
+        { id: "models", label: "Models", icon: Key },
+      ],
+    },
+    {
+      label: "Integrations",
+      items: [
+        { id: "github", label: "GitHub Apps", icon: Github },
+        { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
+        { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+      ],
+    },
+    {
+      label: "Configuration",
+      items: [
+        { id: "secrets", label: "Secrets", icon: Lock },
+        { id: "templates", label: "Templates", icon: LayoutTemplate },
+        { id: "factories", label: "Factories", icon: Factory },
+      ],
+    },
+    {
+      label: "Access",
+      items: [
+        { id: "authentication", label: "Authentication", icon: Shield },
+      ],
+    },
+    {
+      label: "AI Assistant",
+      items: [
+        { id: "ai-config", label: "Configure with AI", icon: Sparkles },
+      ],
+    },
   ]
+
+  // Groups that have expandable children (child items scroll to sections within the parent page)
+  const expandableGroups: Record<string, { label: string; children: { id: string; label: string }[] }> = {
+    "issue-trackers": {
+      label: "Issue Trackers",
+      children: [
+        { id: "linear", label: "Linear" },
+        { id: "shortcut", label: "Shortcut" },
+        { id: "github-issues", label: "GitHub Issues" },
+      ],
+    },
+    "authentication": {
+      label: "Authentication",
+      children: [
+        { id: "shared-password", label: "Shared Password" },
+        { id: "github-oauth", label: "GitHub OAuth" },
+      ],
+    },
+  }
+
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() => {
+    // Auto-expand if currently on that section or a child is active
+    const init: Record<string, boolean> = {}
+    for (const [parentId, group] of Object.entries(expandableGroups)) {
+      if (section === parentId) {
+        init[parentId] = true
+      }
+    }
+    return init
+  })
+
+  function toggleGroup(parentId: string) {
+    setExpandedGroups(prev => ({ ...prev, [parentId]: !prev[parentId] }))
+  }
+
+  function scrollToSection(sectionId: string) {
+    const el = document.getElementById(sectionId)
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" })
+    }
+  }
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -227,21 +283,87 @@ export default function SettingsSectionPage() {
             {navGroups.map((group, groupIdx) => (
               <div key={groupIdx}>
                 {groupIdx > 0 && <div className="my-2 border-t border-border/50" />}
-                {group.map(({ id, label, icon: Icon }) => (
-                  <Link
-                    key={id}
-                    href={`/settings/${id}`}
-                    className={cn(
-                      "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                      section === id
-                        ? "bg-primary/10 text-primary font-medium"
-                        : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                    )}
-                  >
-                    <Icon className="size-4 flex-shrink-0" />
-                    {label}
-                  </Link>
-                ))}
+                {group.label && (
+                  <p className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider px-3 py-1.5">
+                    {group.label}
+                  </p>
+                )}
+                {group.items.map((item) => {
+                  if ("parent" in item) return null // not used in this structure
+                  const { id, label, icon: Icon } = item
+                  const isExpandable = id in expandableGroups
+                  const isExpanded = expandedGroups[id]
+                  const isActive = section === id
+
+                  return (
+                    <div key={id}>
+                      {isExpandable ? (
+                        <>
+                          <button
+                            onClick={() => {
+                              if (isActive) {
+                                toggleGroup(id)
+                              } else {
+                                router.push(`/settings/${id}`)
+                              }
+                            }}
+                            className={cn(
+                              "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
+                              isActive
+                                ? "bg-primary/10 text-primary font-medium"
+                                : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                            )}
+                          >
+                            <Icon className="size-4 flex-shrink-0" />
+                            <span className="flex-1">{label}</span>
+                            {isExpanded ? (
+                              <ChevronDown className="size-3.5 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="size-3.5 text-muted-foreground" />
+                            )}
+                          </button>
+                          {isExpanded && (
+                            <div className="ml-4 pl-4 border-l border-border/50 space-y-0.5 mt-0.5">
+                              {expandableGroups[id].children.map((child) => (
+                                <button
+                                  key={child.id}
+                                  onClick={() => {
+                                    if (!isActive) {
+                                      router.push(`/settings/${id}`)
+                                      // Wait for navigation then scroll
+                                      setTimeout(() => scrollToSection(child.id), 150)
+                                    } else {
+                                      scrollToSection(child.id)
+                                    }
+                                  }}
+                                  className={cn(
+                                    "w-full text-left px-3 py-1.5 rounded-md text-xs transition-colors",
+                                    "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                                  )}
+                                >
+                                  {child.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <Link
+                          href={`/settings/${id}`}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
+                            isActive
+                              ? "bg-primary/10 text-primary font-medium"
+                              : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          )}
+                        >
+                          <Icon className="size-4 flex-shrink-0" />
+                          {label}
+                        </Link>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             ))}
           </div>
@@ -1195,7 +1317,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
       </div>
 
       {/* Password card */}
-      <div className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
+      <div id="shared-password" className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium">Password Login</h3>
@@ -1251,7 +1373,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
       </div>
 
       {/* GitHub OAuth card */}
-      <div className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
+      <div id="github-oauth" className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium">GitHub OAuth</h3>
@@ -1468,7 +1590,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       </div>
 
       {/* Linear section */}
-      <div>
+      <div id="linear">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <Zap className="size-4" />
@@ -1524,7 +1646,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       </div>
 
       {/* Shortcut section */}
-      <div>
+      <div id="shortcut">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className="size-4 text-[#F4603C]">⚡</span>
@@ -1577,6 +1699,34 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
             </Button>
           </div>
         )}
+      </div>
+
+      {/* GitHub Issues section */}
+      <div id="github-issues">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Github className="size-4" />
+            <span className="text-sm font-medium">GitHub Issues</span>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => window.location.href = "/settings/github"} className="gap-1">
+            Configure
+          </Button>
+        </div>
+        <div className="border border-border rounded-lg p-4 space-y-2">
+          <p className="text-sm text-muted-foreground">
+            GitHub Issues are handled through your GitHub App configuration. Set up a GitHub App to enable issue-based factory triggers and PR workflows.
+          </p>
+          <div className="flex items-center gap-2">
+            <span className={cn(
+              "text-xs px-2 py-0.5 rounded font-medium",
+              settings.github && settings.github.length > 0
+                ? "bg-green-500/20 text-green-400"
+                : "bg-muted text-muted-foreground"
+            )}>
+              {settings.github && settings.github.length > 0 ? `${settings.github.length} app${settings.github.length !== 1 ? "s" : ""} configured` : "Not configured"}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Linear Modal */}
@@ -1837,7 +1987,15 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                   {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  {f.integration} · {f.workspace} · &ldquo;{f.triggerStatus}&rdquo; → {f.template}
+                  {f.integration === "github" && f.repos && f.repos.length > 0 ? (
+                    <>
+                      {f.integration} · repos: {f.repos.length} · {f.trigger?.on || "pull_request"} → {f.template}
+                    </>
+                  ) : (
+                    <>
+                      {f.integration} · {f.workspace} · &ldquo;{f.triggerStatus}&rdquo; → {f.template}
+                    </>
+                  )}
                   {f.labels && f.labels.length > 0 && ` · labels: ${f.labels.join(", ")}`}
                   {f.assigned_to && ` · assigned: ${f.assigned_to}`}
                   {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
