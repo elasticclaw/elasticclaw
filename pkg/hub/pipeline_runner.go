@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"text/template"
@@ -94,6 +95,40 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		go s.closeGitHubIssueForClaw(clawID)
 	}
 
+	// Handle add_labels / remove_labels for GitHub Issues
+	if len(stage.OnEnter.AddLabels) > 0 || len(stage.OnEnter.RemoveLabels) > 0 {
+		if strings.Contains(issueID, "/") {
+			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			if ghToken != "" {
+				parts := strings.Split(issueID, "/")
+				if len(parts) == 3 {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						for _, label := range stage.OnEnter.AddLabels {
+							if _, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNum), ghToken, "POST", map[string][]string{"labels": {label}}); err != nil {
+								log.Printf("[pipeline] failed to add label %q to issue %s: %v", label, issueID, err)
+							} else {
+								log.Printf("[pipeline] added label %q to issue %s", label, issueID)
+							}
+						}
+						for _, label := range stage.OnEnter.RemoveLabels {
+							if _, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, issueNum, label), ghToken, "DELETE", nil); err != nil {
+								log.Printf("[pipeline] failed to remove label %q from issue %s: %v", label, issueID, err)
+							} else {
+								log.Printf("[pipeline] removed label %q from issue %s", label, issueID)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
 		return
 	}
@@ -111,6 +146,25 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] failed to move story %s to %q: %v", issueID, targetStatus, err)
 		} else {
 			log.Printf("[pipeline] moved story %s to %q", issueID, targetStatus)
+		}
+	} else if strings.Contains(issueID, "/") {
+		// GitHub issue (owner/repo/number format)
+		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+		if ghToken == "" {
+			log.Printf("[pipeline] factory %q: no GitHub token for move_issue, skipping", factory.Name)
+			return
+		}
+		parts := strings.Split(issueID, "/")
+		if len(parts) == 3 {
+			repo := parts[0] + "/" + parts[1]
+			var issueNum int
+			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+				if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
+					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", issueID, targetStatus, err)
+				} else {
+					log.Printf("[pipeline] moved GitHub issue %s to %q", issueID, targetStatus)
+				}
+			}
 		}
 	} else {
 		// Linear issue

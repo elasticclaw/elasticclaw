@@ -89,6 +89,10 @@ type OnEnter struct {
 	MergePR bool `yaml:"merge_pr,omitempty"`
 	// CloseIssue closes the associated GitHub issue when entering this stage.
 	CloseIssue bool `yaml:"close_issue,omitempty"`
+	// AddLabels adds the specified labels to the associated GitHub issue.
+	AddLabels []string `yaml:"add_labels,omitempty"`
+	// RemoveLabels removes the specified labels from the associated GitHub issue.
+	RemoveLabels []string `yaml:"remove_labels,omitempty"`
 }
 
 // Parse decodes YAML bytes into a Pipeline. Returns an error if the YAML is invalid.
