@@ -3,13 +3,129 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"strings"
 	"text/template"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+// githubIssueDetails holds the fields we fetch for pipeline template rendering.
+type githubIssueDetails struct {
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+}
+
+// fetchGitHubIssueDetails looks up an issue by owner/repo/number and returns
+// the fields needed for pipeline template rendering.
+func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, baseURL string) (*githubIssueDetails, error) {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	url := fmt.Sprintf("%s/repos/%s/issues/%d", baseURL, repo, issueNumber)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("github API GET %s: %d %s", url, resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		URL    string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse github issue response: %w", err)
+	}
+
+	return &githubIssueDetails{
+		Identifier:  fmt.Sprintf("#%d", result.Number),
+		Title:       result.Title,
+		URL:         result.URL,
+		Description: result.Body,
+	}, nil
+}
+
+// githubAPIAddLabel adds a label to a GitHub issue. Unlike
+// githubAPIPostWithBase, this does not attempt to unmarshal the response body
+// (POST /labels returns a JSON array of label objects, not a JSON object).
+func githubAPIAddLabel(baseURL, repo string, issueNumber int, label, token string) error {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNumber)
+	body := map[string][]string{"labels": {label}}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", baseURL+"/"+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github API POST %s: %d %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// githubAPIDeleteLabel removes a label from a GitHub issue. Unlike
+// githubAPIPostWithBase, this does not attempt to unmarshal the response body
+// (DELETE returns an array of remaining labels, not a JSON object).
+func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token string) error {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, issueNumber, url.PathEscape(label))
+	req, err := http.NewRequest("DELETE", baseURL+"/"+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github API DELETE %s: %d %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
 
 // parsePipelineForFactory parses the PipelineYAML from a factory config.
 // Returns nil (and logs a warning) if the YAML is empty or invalid.
@@ -37,7 +153,8 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		injectMsg := stage.OnEnter.Inject
 
 		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
-		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
+		if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
 			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken == "" {
@@ -78,6 +195,62 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			injectMsg = buf.String()
 			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
+		} else if strings.Contains(issueID, "/") {
+			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
+			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			if ghToken == "" {
+				log.Printf("[pipeline] no GitHub token for factory %q, putting claw in error state", factory.Name)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			parts := strings.Split(issueID, "/")
+			if len(parts) != 3 {
+				log.Printf("[pipeline] invalid GitHub issue ID format %q, putting claw in error state", issueID)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			repo := parts[0] + "/" + parts[1]
+			var issueNum int
+			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
+				log.Printf("[pipeline] invalid GitHub issue number in %q: %v, putting claw in error state", issueID, err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			base := s.githubBaseURL
+			if base == "" {
+				base = "https://api.github.com"
+			}
+			details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+			if err != nil {
+				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v, putting claw in error state", issueID, err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			if details == nil {
+				log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s, putting claw in error state", issueID)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
+			tmpl, err := template.New("inject").Parse(injectMsg)
+			if err != nil {
+				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			var buf bytes.Buffer
+			data := struct {
+				Issue *githubIssueDetails
+			}{
+				Issue: details,
+			}
+			if err := tmpl.Execute(&buf, data); err != nil {
+				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			injectMsg = buf.String()
+			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
 		} else {
 			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
@@ -91,6 +264,40 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 
 	if stage.OnEnter.CloseIssue {
 		go s.closeGitHubIssueForClaw(clawID)
+	}
+
+	// Handle add_labels / remove_labels for GitHub Issues
+	if len(stage.OnEnter.AddLabels) > 0 || len(stage.OnEnter.RemoveLabels) > 0 {
+		if strings.Contains(issueID, "/") {
+			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			if ghToken != "" {
+				parts := strings.Split(issueID, "/")
+				if len(parts) == 3 {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						for _, label := range stage.OnEnter.AddLabels {
+							if err := githubAPIAddLabel(base, repo, issueNum, label, ghToken); err != nil {
+								log.Printf("[pipeline] failed to add label %q to issue %s: %v", label, issueID, err)
+							} else {
+								log.Printf("[pipeline] added label %q to issue %s", label, issueID)
+							}
+						}
+						for _, label := range stage.OnEnter.RemoveLabels {
+							if err := githubAPIDeleteLabel(base, repo, issueNum, label, ghToken); err != nil {
+								log.Printf("[pipeline] failed to remove label %q from issue %s: %v", label, issueID, err)
+							} else {
+								log.Printf("[pipeline] removed label %q from issue %s", label, issueID)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
@@ -110,6 +317,25 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] failed to move story %s to %q: %v", issueID, targetStatus, err)
 		} else {
 			log.Printf("[pipeline] moved story %s to %q", issueID, targetStatus)
+		}
+	} else if strings.Contains(issueID, "/") {
+		// GitHub issue (owner/repo/number format)
+		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+		if ghToken == "" {
+			log.Printf("[pipeline] factory %q: no GitHub token for move_issue, skipping", factory.Name)
+			return
+		}
+		parts := strings.Split(issueID, "/")
+		if len(parts) == 3 {
+			repo := parts[0] + "/" + parts[1]
+			var issueNum int
+			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+				if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
+					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", issueID, targetStatus, err)
+				} else {
+					log.Printf("[pipeline] moved GitHub issue %s to %q", issueID, targetStatus)
+				}
+			}
 		}
 	} else {
 		// Linear issue

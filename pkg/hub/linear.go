@@ -320,17 +320,21 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 
 	// Enforce 1:1 — check if a claw already exists for this issue.
-	// If another concurrent request (or Linear redelivery) already created one,
-	// return the existing claw ID instead of failing. This makes the operation
-	// idempotent — duplicate webhooks are harmless.
-	var existingID string
+	// If the claw is offline, error, or stopped, delete and recreate it since
+	// the underlying sandbox is gone. Only skip if it's actively starting,
+	// running, or connected.
+	var existingID, existingStatus string
 	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+		`SELECT id, status FROM claws WHERE linear_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		issueID,
-	).Scan(&existingID)
+	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
-		log.Printf("[factory:%s] claw %s already exists for issue %s — treating as idempotent success", factory.Name, existingID[:8], issueID)
-		return nil
+		if existingStatus == "starting" || existingStatus == "connected" || existingStatus == "running" {
+			log.Printf("[factory:%s] claw %s already exists for issue %s (status=%s) — treating as idempotent success", factory.Name, existingID[:8], issueID, existingStatus)
+			return nil
+		}
+		log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 	}
 
 	// Resolve template files
