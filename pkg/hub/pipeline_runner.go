@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"text/template"
 
@@ -64,6 +65,33 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 		URL:         result.URL,
 		Description: result.Body,
 	}, nil
+}
+
+// githubAPIDeleteLabel removes a label from a GitHub issue. Unlike
+// githubAPIPostWithBase, this does not attempt to unmarshal the response body
+// (DELETE returns an array of remaining labels, not a JSON object).
+func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token string) error {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, issueNumber, url.PathEscape(label))
+	req, err := http.NewRequest("DELETE", baseURL+"/"+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github API DELETE %s: %d %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 // parsePipelineForFactory parses the PipelineYAML from a factory config.
@@ -137,44 +165,59 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		} else if strings.Contains(issueID, "/") {
 			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
 			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
-			if ghToken != "" {
-				parts := strings.Split(issueID, "/")
-				if len(parts) == 3 {
-					repo := parts[0] + "/" + parts[1]
-					var issueNum int
-					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
-						base := s.githubBaseURL
-						if base == "" {
-							base = "https://api.github.com"
-						}
-						details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
-						if err != nil {
-							log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v", issueID, err)
-						} else if details == nil {
-							log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s", issueID)
-						} else {
-							log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
-							tmpl, err := template.New("inject").Parse(injectMsg)
-							if err != nil {
-								log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
-							} else {
-								var buf bytes.Buffer
-								data := struct {
-									Issue *githubIssueDetails
-								}{
-									Issue: details,
-								}
-								if err := tmpl.Execute(&buf, data); err != nil {
-									log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
-								} else {
-									injectMsg = buf.String()
-									log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
-								}
-							}
-						}
-					}
-				}
+			if ghToken == "" {
+				log.Printf("[pipeline] no GitHub token for factory %q, putting claw in error state", factory.Name)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
 			}
+			parts := strings.Split(issueID, "/")
+			if len(parts) != 3 {
+				log.Printf("[pipeline] invalid GitHub issue ID format %q, putting claw in error state", issueID)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			repo := parts[0] + "/" + parts[1]
+			var issueNum int
+			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
+				log.Printf("[pipeline] invalid GitHub issue number in %q: %v, putting claw in error state", issueID, err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			base := s.githubBaseURL
+			if base == "" {
+				base = "https://api.github.com"
+			}
+			details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+			if err != nil {
+				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v, putting claw in error state", issueID, err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			if details == nil {
+				log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s, putting claw in error state", issueID)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
+			tmpl, err := template.New("inject").Parse(injectMsg)
+			if err != nil {
+				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			var buf bytes.Buffer
+			data := struct {
+				Issue *githubIssueDetails
+			}{
+				Issue: details,
+			}
+			if err := tmpl.Execute(&buf, data); err != nil {
+				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
+				_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+				return
+			}
+			injectMsg = buf.String()
+			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
 		} else {
 			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
@@ -212,7 +255,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 							}
 						}
 						for _, label := range stage.OnEnter.RemoveLabels {
-							if _, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, issueNum, label), ghToken, "DELETE", nil); err != nil {
+							if err := githubAPIDeleteLabel(base, repo, issueNum, label, ghToken); err != nil {
 								log.Printf("[pipeline] failed to remove label %q from issue %s: %v", label, issueID, err)
 							} else {
 								log.Printf("[pipeline] removed label %q from issue %s", label, issueID)
