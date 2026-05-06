@@ -87,6 +87,8 @@ type OnEnter struct {
 	MoveIssue string `yaml:"move_issue"`
 	// MergePR triggers the GitHub merge API for the tracked PR (stub — not yet implemented).
 	MergePR bool `yaml:"merge_pr,omitempty"`
+	// CloseIssue closes the associated GitHub issue when entering this stage.
+	CloseIssue bool `yaml:"close_issue,omitempty"`
 }
 
 // Parse decodes YAML bytes into a Pipeline. Returns an error if the YAML is invalid.

@@ -91,13 +91,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[github-webhook] failed to parse issue_comment payload: %v", err)
 			break
 		}
-		// Only care about comments on pull requests
-		if payload.Issue.PullRequest.URL == "" {
-			break
+		if payload.Issue.PullRequest.URL != "" {
+			// Comment on a pull request
+			log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
+				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
+			go s.processGitHubIssueCommentEvent(payload)
+		} else {
+			// Comment on a plain issue (not PR)
+			log.Printf("[github-webhook] issue_comment action=%q repo=%q issue=#%d author=%q",
+				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
+			go s.processGitHubIssueComment(payload)
 		}
-		log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
-			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
-		go s.processGitHubIssueCommentEvent(payload)
 	case "ping":
 		log.Printf("[github-webhook] ping received — webhook configured correctly")
 	default:
@@ -240,7 +244,8 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 type githubIssueCommentPayload struct {
 	Action string `json:"action"` // "created", "edited", "deleted"
 	Issue  struct {
-		Number      int `json:"number"`
+		Number      int    `json:"number"`
+		HTMLURL     string `json:"html_url"` // web URL for the issue
 		PullRequest struct {
 			URL     string `json:"url"`      // non-empty only for PR comments
 			HTMLURL string `json:"html_url"` // web URL for the PR
@@ -261,6 +266,32 @@ type githubIssueCommentPayload struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
+}
+
+// processGitHubIssueComment handles issue_comment events on plain issues (not PRs).
+// If a claw exists for the issue, it injects the comment.
+func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
+	if payload.Action != "created" {
+		return
+	}
+	// Skip bot comments to avoid loops
+	if strings.EqualFold(payload.Comment.User.Type, "bot") {
+		return
+	}
+
+	issueURL := payload.Issue.HTMLURL
+	commentMsg := fmt.Sprintf("**@%s** commented on issue #%d:\n> %s\n[View](%s)",
+		payload.Comment.User.Login, payload.Issue.Number,
+		strings.TrimSpace(payload.Comment.Body), payload.Comment.HTMLURL)
+
+	existingClawID := s.findClawForGitHubIssue(issueURL)
+	if existingClawID != "" {
+		log.Printf("[github-webhook] issue_comment on issue #%d — injecting into existing claw %s", payload.Issue.Number, existingClawID[:8])
+		s.injectHubMessageByID(existingClawID, commentMsg)
+		return
+	}
+
+	log.Printf("[github-webhook] issue_comment on issue #%d — no claw found for %s", payload.Issue.Number, issueURL)
 }
 
 // processGitHubIssueCommentEvent handles issue_comment events on PRs.
