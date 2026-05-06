@@ -37,7 +37,8 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		injectMsg := stage.OnEnter.Inject
 
 		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
-		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
+		if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
 			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken == "" {
