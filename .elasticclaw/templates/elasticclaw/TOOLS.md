@@ -15,6 +15,8 @@ nix develop   # required for Go / Node / npm / ORAS; see below
 `git` and `gh` CLI are pre-configured via the elasticclaw credential helper.
 Tokens are fetched automatically from the hub — you don't need to set anything up.
 
+IMPORTANT:  When making changes based on feedback, CI failures, etc, NEVER force push. Always create new commmits in the same branch / PR.
+
 ```bash
 git clone https://github.com/elasticclaw/elasticclaw  # works without auth prompt
 gh pr create --base main                               # works

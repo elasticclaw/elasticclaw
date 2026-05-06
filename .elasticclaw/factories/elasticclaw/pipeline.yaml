@@ -8,6 +8,9 @@ stages:
       remove_labels:
         - "agent-ready"
       inject: |
+        Issue: {{.Issue.Identifier}} — {{.Issue.Title}}
+        URL: {{.Issue.URL}}
+
         Read your BOOTSTRAP.md and start working on the issue.
         Narrate your progress as you go. Keep me updated.
 
@@ -21,11 +24,7 @@ stages:
       remove_labels:
         - "agent-working"
       inject: |
-        Issue: {{.Issue.Identifier}} — {{.Issue.Title}}
-        URL: {{.Issue.URL}}
-
-        Read your BOOTSTRAP.md and start working on the issue.
-        Narrate your progress as you go. Keep me updated.
+        PR created. Watch for CI results and review comments.
 
   - id: merged
     label: "Merged"
@@ -35,6 +34,8 @@ stages:
       remove_labels:
         - "agent-needs-review"
       close_issue: true
+      inject: |
+        PR merged. Issue closed. Terminating the agent.
     triggers:
       - pr_merged:
           terminal: true
@@ -50,3 +51,4 @@ stages:
         - "agent-needs-review"
       inject: |
         PR was closed without merging. Terminate the agent.
+  

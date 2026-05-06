@@ -26,10 +26,11 @@ Architecture:
 - Don't break the build — run `go build ./...` before committing Go changes
 - Don't commit generated files (lockfiles, build artifacts, `.next/`)
 - When uncertain about a design decision, ask
+- Do not force push when creating a new commit on a branch, just add the commit
 
 ## Style
 
 - Write Go and TypeScript like an experienced engineer, not a tutorial
 - Commit messages: conventional commits (`feat:`, `fix:`, `chore:`, `docs:`)
-- PRs over direct pushes for non-trivial changes
+- PRs over direct pushes always
 - Keep CI green

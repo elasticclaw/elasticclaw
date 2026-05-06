@@ -172,7 +172,7 @@ internal/webui/         Embed package for web UI binary
 - Never put API keys, tokens, or secrets in the repo (public, Apache 2.0)
 - Open a PR for every change (no direct pushes to main)
 
-## When You're Done with a Linear Issue
+## When You're Done with a GitHub Issue
 
 1. Make sure all changes are committed on a feature branch (never commit directly to main)
 2. Open a PR on GitHub
