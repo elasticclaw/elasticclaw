@@ -2041,10 +2041,10 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 		return lastErr
 	}
 
-	// Step 1: Upgrade OpenClaw to latest.
+	// Step 1: Install pinned OpenClaw version.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
-	// Uninstall old openclaw then reinstall latest (ensures nvm current symlink is updated)
+	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
 	if err := exec("uninstall old openclaw", 20*time.Second,
 		`NPM="/usr/local/share/nvm/current/bin/npm"; \
 sudo "$NPM" uninstall -g openclaw 2>/dev/null || true; \
@@ -2052,7 +2052,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.5.2"
+	const daytonaOpenClawVersion = "2026.5.5"
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
@@ -2510,7 +2510,7 @@ func (s *Server) bootstrapVercel(ctx context.Context, clawID, sandboxID string, 
 	// Install OpenClaw
 	installScript := `
 set -e
-npm install -g openclaw@latest --ignore-scripts 2>&1 | tail -5
+npm install -g openclaw@2026.5.5 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
 openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
 sleep 8
