@@ -1,0 +1,40 @@
+# Pipeline for elasticclaw
+# Stages define the lifecycle of a factory claw.
+# The hub is the state machine — it injects instructions into the claw at each stage.
+
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      move_issue: "In Progress"
+      inject: |
+        Read your BOOTSTRAP.md and start working on the issue.
+        Narrate your progress as you go. Keep me updated.
+
+  - id: pr_opened
+    label: "PR Opened"
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      move_issue: "In Review"
+      inject: |
+        PR created. Watch for CI results and review comments.
+
+  - id: merged
+    label: "Merged"
+    on_enter:
+      move_issue: "Done"
+    triggers:
+      - pr_merged:
+    terminal: true
+
+  - id: closed_no_merge
+    label: "Closed Without Merge"
+    on_enter:
+      move_issue: "Done"
+    triggers:
+      - pr_closed:
+    on_enter:
+      inject: |
+        PR was closed without merging. Terminate the agent.

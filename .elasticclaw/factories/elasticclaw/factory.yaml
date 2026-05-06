@@ -1,0 +1,10 @@
+name: elasticclaw
+integration: github-issues
+workspace: elasticclaw
+trigger_status: "agent-ready"
+labels:
+  - agent-ready
+allowed_labelers:
+  - marccampbell
+webhook_secret_ref: elasticclaw_webhook_secret
+template: elasticclaw

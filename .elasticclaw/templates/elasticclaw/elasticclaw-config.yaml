@@ -1,7 +1,5 @@
 # ElasticClaw template configuration
-provider: replicated
-instance_type: r1.large
-ttl: 48h
+provider: daytona
 github:
   repos:
     - repo: elasticclaw/elasticclaw
