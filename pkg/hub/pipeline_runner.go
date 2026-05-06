@@ -67,6 +67,39 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 	}, nil
 }
 
+// githubAPIAddLabel adds a label to a GitHub issue. Unlike
+// githubAPIPostWithBase, this does not attempt to unmarshal the response body
+// (POST /labels returns a JSON array of label objects, not a JSON object).
+func githubAPIAddLabel(baseURL, repo string, issueNumber int, label, token string) error {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNumber)
+	body := map[string][]string{"labels": {label}}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", baseURL+"/"+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github API POST %s: %d %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 // githubAPIDeleteLabel removes a label from a GitHub issue. Unlike
 // githubAPIPostWithBase, this does not attempt to unmarshal the response body
 // (DELETE returns an array of remaining labels, not a JSON object).
@@ -248,7 +281,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 							base = "https://api.github.com"
 						}
 						for _, label := range stage.OnEnter.AddLabels {
-							if _, err := githubAPIPostWithBase(base, fmt.Sprintf("repos/%s/issues/%d/labels", repo, issueNum), ghToken, "POST", map[string][]string{"labels": {label}}); err != nil {
+							if err := githubAPIAddLabel(base, repo, issueNum, label, ghToken); err != nil {
 								log.Printf("[pipeline] failed to add label %q to issue %s: %v", label, issueID, err)
 							} else {
 								log.Printf("[pipeline] added label %q to issue %s", label, issueID)
