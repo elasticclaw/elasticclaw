@@ -7,6 +7,8 @@ stages:
         - "agent-working"
       remove_labels:
         - "agent-ready"
+      allowed_labelers:
+        - marccampbell        
       inject: |
         Issue: {{.Issue.Identifier}} — {{.Issue.Title}}
         URL: {{.Issue.URL}}
