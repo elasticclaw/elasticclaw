@@ -4,13 +4,67 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"text/template"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+// githubIssueDetails holds the fields we fetch for pipeline template rendering.
+type githubIssueDetails struct {
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+}
+
+// fetchGitHubIssueDetails looks up an issue by owner/repo/number and returns
+// the fields needed for pipeline template rendering.
+func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, baseURL string) (*githubIssueDetails, error) {
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	url := fmt.Sprintf("%s/repos/%s/issues/%d", baseURL, repo, issueNumber)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("github API GET %s: %d %s", url, resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		URL    string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse github issue response: %w", err)
+	}
+
+	return &githubIssueDetails{
+		Identifier:  fmt.Sprintf("#%d", result.Number),
+		Title:       result.Title,
+		URL:         result.URL,
+		Description: result.Body,
+	}, nil
+}
 
 // parsePipelineForFactory parses the PipelineYAML from a factory config.
 // Returns nil (and logs a warning) if the YAML is empty or invalid.
@@ -80,6 +134,47 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			injectMsg = buf.String()
 			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
+		} else if strings.Contains(issueID, "/") {
+			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
+			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			if ghToken != "" {
+				parts := strings.Split(issueID, "/")
+				if len(parts) == 3 {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+						if err != nil {
+							log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v", issueID, err)
+						} else if details == nil {
+							log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s", issueID)
+						} else {
+							log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
+							tmpl, err := template.New("inject").Parse(injectMsg)
+							if err != nil {
+								log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
+							} else {
+								var buf bytes.Buffer
+								data := struct {
+									Issue *githubIssueDetails
+								}{
+									Issue: details,
+								}
+								if err := tmpl.Execute(&buf, data); err != nil {
+									log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
+								} else {
+									injectMsg = buf.String()
+									log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
+								}
+							}
+						}
+					}
+				}
+			}
 		} else {
 			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
