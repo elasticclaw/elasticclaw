@@ -21,8 +21,9 @@ import (
 
 // linearWebhookPayload is the relevant subset of a Linear webhook event.
 type linearWebhookPayload struct {
-	Action string `json:"action"` // "create", "update", "remove"
-	Type   string `json:"type"`   // "Issue", "IssueLabel", etc.
+	Action    string `json:"action"`    // "create", "update", "remove"
+	Type      string `json:"type"`      // "Issue", "IssueLabel", etc.
+	CreatedAt string `json:"createdAt"` // ISO 8601 timestamp of the webhook event
 	Data   struct {
 		ID          string `json:"id"`
 		Identifier  string `json:"identifier"` // e.g. "ELA-123"
@@ -82,11 +83,20 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dedup: ignore duplicate webhook deliveries using Linear's webhookId.
-	// Linear retries carry the same webhookId; legitimate rapid transitions
-	// (A→B→A→B) have different webhookIds and are not suppressed.
-	if payload.WebhookID != "" && s.isDuplicateWebhook(payload.WebhookID) {
-		log.Printf("[linear-webhook] dedup: skipping duplicate delivery %s for %s", payload.WebhookID, payload.Data.Identifier)
+	// Dedup: ignore duplicate webhook deliveries.
+	// Key includes webhookId + issue identifier + createdAt timestamp.
+	// Linear retries carry the same webhookId and same createdAt; rapid
+	// transitions (A→B→A→B) have different createdAt values and pass through.
+	// If createdAt is missing, fall back to a nanosecond timestamp so we never
+	// silently collapse the key — missing createdAt means we can't dedup
+	// reliably, so we err on the side of processing (claw creation is idempotent).
+	createdAt := payload.CreatedAt
+	if createdAt == "" {
+		createdAt = fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	dedupKey := payload.WebhookID + ":" + payload.Data.Identifier + ":" + createdAt
+	if payload.WebhookID != "" && s.isDuplicateWebhook(dedupKey) {
+		log.Printf("[linear-webhook] dedup: skipping duplicate delivery %s for %s (createdAt=%s)", payload.WebhookID, payload.Data.Identifier, createdAt)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -102,14 +112,18 @@ func (s *Server) isDuplicateWebhook(key string) bool {
 	defer s.webhookDedupMu.Unlock()
 
 	now := time.Now()
-	// Clean expired entries (older than 30s)
+	// Clean expired entries (older than 5s). The short window only catches
+	// near-simultaneous retries. We rely on claw creation idempotency (1:1
+	// issue→claw enforcement in createClawForLinearIssue) for any retry that
+	// arrives after this window expires. The createdAt in the dedup key ensures
+	// rapid A→B→A→B transitions on the same issue are never suppressed.
 	for k, t := range s.webhookDedup {
-		if now.Sub(t) > 30*time.Second {
+		if now.Sub(t) > 5*time.Second {
 			delete(s.webhookDedup, k)
 		}
 	}
 
-	if lastSeen, ok := s.webhookDedup[key]; ok && now.Sub(lastSeen) < 30*time.Second {
+	if lastSeen, ok := s.webhookDedup[key]; ok && now.Sub(lastSeen) < 5*time.Second {
 		return true
 	}
 	s.webhookDedup[key] = now
