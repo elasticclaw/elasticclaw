@@ -63,7 +63,7 @@ ElasticClaw provisions ephemeral VMs that run AI agents. The bootstrap sequence 
 4. claw-bridge --bootstrap runs:
    a. Install Node.js 24 + git via apt
    b. Install Nix in background (if enabled)
-   c. npm install -g openclaw@2026.5.5
+   c. npm install -g openclaw@2026.5.6
    d. openclaw onboard (first-run config)
    e. Start gateway, stop it (first-run writes device.json)
    f. Patch openclaw.json with model config, auth, disable bonjour

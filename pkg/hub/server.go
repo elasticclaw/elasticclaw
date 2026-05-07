@@ -2052,7 +2052,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.5.5"
+	const daytonaOpenClawVersion = "2026.5.6"
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
@@ -2510,7 +2510,7 @@ func (s *Server) bootstrapVercel(ctx context.Context, clawID, sandboxID string, 
 	// Install OpenClaw
 	installScript := `
 set -e
-npm install -g openclaw@2026.5.5 --ignore-scripts 2>&1 | tail -5
+npm install -g openclaw@2026.5.6 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
 openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
 sleep 8
