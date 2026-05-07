@@ -237,9 +237,22 @@ function LoginForm() {
   )
 }
 
+function LoginFallback() {
+  return (
+    <div className="flex h-screen bg-background items-center justify-center">
+      <div className="w-full max-w-sm space-y-6 p-8 border border-border rounded-xl bg-card">
+        <div className="space-y-1 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight">ElasticClaw</h1>
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function LoginPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<LoginFallback />}>
       <LoginForm />
     </Suspense>
   )
