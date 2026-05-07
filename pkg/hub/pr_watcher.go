@@ -765,6 +765,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	// If the pipeline handled termination (terminal stage), we're done.
 	if pipelineHandled {
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 		return true
 	}
 
