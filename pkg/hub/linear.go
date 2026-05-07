@@ -854,8 +854,8 @@ func (s *Server) provisionPendingClaw(clawID string) {
 
 	// Guard: if the claw was deleted before provisioning started
 	var currentStatus string
-	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
-	if currentStatus == "deleted" {
+	err2 := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+	if err2 != nil || currentStatus == "deleted" {
 		log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 		return
 	}
@@ -965,6 +965,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
 		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+		// Slot is now free (error claws don't count toward limit); try to
+		// promote the next pending claw.
+		go s.promotePendingClaws()
 	}
 }
 
