@@ -14,8 +14,11 @@ stages:
         Issue: {{.Issue.Identifier}} — {{.Issue.Title}}
         URL: {{.Issue.URL}}
 
-        Read your BOOTSTRAP.md and start working on the issue.
-        Narrate your progress as you go. Keep me updated.
+        Read your BOOTSTRAP.md and start by describing your understanding of the issue.
+        Then start working on the issue.
+        Narrate your progress as you go. 
+        Keep me updated.
+        It's likely that you will change code. If so, create a new branch and open a PR.
 
   - id: pr_opened
     label: "PR Opened"
