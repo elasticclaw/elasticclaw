@@ -1075,6 +1075,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if providerID != "" {
 			go s.terminateVM(provider, providerID)
 		}
+		// Promote any pending claws now that a slot is free
+		go s.promotePendingClaws()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

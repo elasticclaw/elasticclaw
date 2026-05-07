@@ -809,9 +809,15 @@ func (s *Server) promotePendingClaws() {
 			return
 		}
 
-		// Promote to provisioning
+		// Promote to provisioning — scope UPDATE to pending status so a
+		// concurrent hard-delete doesn't match zero rows silently.
 		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, max=%d)", clawID[:8], active, maxConcurrent)
-		_, _ = s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=?`, clawID)
+		res, _ := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID)
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Claw was deleted between SELECT and UPDATE; skip to next pending
+			continue
+		}
 
 		// Broadcast so UI updates
 		s.broadcastToUsers(tenantID, types.WSMessage{
