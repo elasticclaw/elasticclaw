@@ -649,6 +649,12 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("db insert: %w", err)
 	}
 
+	// Notify connected dashboards immediately so the card appears with a spinner
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
+	})
+
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
 	go func() {
