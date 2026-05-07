@@ -55,6 +55,10 @@ type Server struct {
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
 	webhookDedup   map[string]time.Time
 	webhookDedupMu sync.Mutex
+
+	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
+	// multiple terminating claws each read active < max and promote, exceeding limit.
+	promoteMu sync.Mutex
 }
 
 type clawConn struct {

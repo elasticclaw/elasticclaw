@@ -857,8 +857,6 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	// MaxConcurrentClaws
 	if patch.MaxConcurrentClaws != nil {
 		updatedCfg.MaxConcurrentClaws = *patch.MaxConcurrentClaws
-		// If the limit was raised or removed, try to promote pending claws
-		go s.promotePendingClaws()
 	}
 
 	// Factories (full replace)
@@ -1120,6 +1118,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Only update in-memory config after successful disk write
 	s.hubCfg = &updatedCfg
+
+	// If the concurrency limit was raised or removed, try to promote pending claws.
+	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.
+	if patch.MaxConcurrentClaws != nil {
+		go s.promotePendingClaws()
+	}
 
 	jsonOK(w, map[string]bool{"ok": true})
 }

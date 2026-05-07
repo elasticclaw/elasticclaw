@@ -772,20 +772,21 @@ func (s *Server) countActiveClaws() int {
 // promotePendingClaws checks if any pending claws can be promoted to provisioning
 // when a running claw terminates. Called after any claw deletion.
 func (s *Server) promotePendingClaws() {
+	// Serialize promotion to prevent TOCTOU race: multiple goroutines
+	// terminating simultaneously could each read active < max and promote,
+	// exceeding the limit.
+	s.promoteMu.Lock()
+	defer s.promoteMu.Unlock()
+
 	s.mu.RLock()
 	maxConcurrent := s.hubCfg.MaxConcurrentClaws
 	s.mu.RUnlock()
 
-	// 0 means unlimited
-	if maxConcurrent <= 0 {
-		// Still promote all pending claws (they were queued for some reason)
-		// but actually with unlimited we shouldn't have pending claws at all
-		return
-	}
-
 	for {
 		active := s.countActiveClaws()
-		if active >= maxConcurrent {
+
+		// 0 means unlimited — promote all pending claws
+		if maxConcurrent > 0 && active >= maxConcurrent {
 			return
 		}
 
@@ -827,7 +828,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		tenantID string
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &autoFixCI, &autoFixBugbot, &issueID)
 	if err != nil {
@@ -847,12 +848,13 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 
-	// Resolve Linear token for env
-	var linearToken string
+	// Resolve tokens for env (Linear or GitHub Issues)
+	var linearToken, githubToken string
 	if issueID != "" {
 		factory := s.findFactoryForIssue(issueID)
 		if factory != nil {
 			linearToken = s.resolveLinearTokenForFactory(factory)
+			githubToken = s.resolveGitHubIssuesTokenForFactory(factory)
 		}
 	}
 
@@ -865,6 +867,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	}
 	if linearToken != "" {
 		env["LINEAR_API_KEY"] = linearToken
+	}
+	if githubToken != "" {
+		env["GITHUB_TOKEN"] = githubToken
 	}
 
 	ctx := context.Background()
