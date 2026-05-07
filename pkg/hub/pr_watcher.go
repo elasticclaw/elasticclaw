@@ -736,7 +736,10 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			if pl := parsePipelineForFactory(factory); pl != nil {
 				if stage := pl.StageForPRClosed(); stage != nil {
 					s.transitionPipelineStage(clawID, *stage, factory, issueID)
-					pipelineHandled = true
+					if stage.Terminal {
+						_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+						pipelineHandled = true
+					}
 				}
 			}
 		}
@@ -751,12 +754,22 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
+	pipelineHandled := false
 	if mergeFactory != nil {
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
 			if stage := pl.StageForPRMerged(); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
+				if stage.Terminal {
+					pipelineHandled = true
+				}
 			}
 		}
+	}
+
+	// If the pipeline handled termination (terminal stage), we're done.
+	if pipelineHandled {
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+		return true
 	}
 
 	var providerID, provider string

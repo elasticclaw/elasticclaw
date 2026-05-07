@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -353,10 +354,51 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 }
 
 // transitionPipelineStage sets the claw's current pipeline stage and runs on_enter.
+// If the stage is terminal, it terminates the claw after running on_enter and
+// ensuring any injected message is delivered (waits if agent is streaming).
 func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	s.setPipelineStage(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, factory, issueID)
+
+	// If this is a terminal stage, terminate the claw
+	if stage.Terminal {
+		log.Printf("[pipeline] claw %s reached terminal stage %q — terminating", clawID[:8], stage.ID)
+
+		// Wait for any streaming response to finish so injected terminal message
+		// is delivered before we close the connection.
+		for i := 0; i < 60; i++ {
+			s.mu.RLock()
+			cc, connected := s.claws[clawID]
+			streaming := connected && cc.streamingBuf.Len() > 0
+			s.mu.RUnlock()
+			if !streaming {
+				break
+			}
+			log.Printf("[pipeline] claw %s is streaming, waiting before terminal termination...", clawID[:8])
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		var tenantID, providerID, provider string
+		_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
+
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		s.mu.Lock()
+		if cc, ok := s.claws[clawID]; ok {
+			cc.conn.Close(1000, "factory: pipeline terminal stage")
+			delete(s.claws, clawID)
+		}
+		s.mu.Unlock()
+
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type:    "claw_status",
+			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+		})
+
+		if providerID != "" {
+			go s.terminateVM(provider, providerID)
+		}
+	}
 }
 
 // initializePipelineEntryIfNeeded transitions a factory claw into its entry stage
