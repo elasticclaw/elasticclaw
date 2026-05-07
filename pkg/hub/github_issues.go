@@ -667,6 +667,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s)", clawName, clawID[:8], issueID, initialStatus)
+	// Notify connected dashboards immediately so the card appears
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
