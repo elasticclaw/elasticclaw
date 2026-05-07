@@ -92,6 +92,7 @@ interface SettingsData {
     }
     disablePasswordAuth?: boolean
   }
+  maxConcurrentClaws?: number
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -1756,6 +1757,12 @@ function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
 function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
+  const [maxConcurrent, setMaxConcurrent] = useState<number>(settings.maxConcurrentClaws || 0)
+
+  // Keep local state in sync when settings load
+  useEffect(() => {
+    setMaxConcurrent(settings.maxConcurrentClaws || 0)
+  }, [settings.maxConcurrentClaws])
 
   return (
     <div className="space-y-6">
@@ -1763,6 +1770,39 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         <h2 className="text-base font-semibold mb-1">Factories</h2>
         <p className="text-sm text-muted-foreground mb-6">
           Automatically spawn and terminate claws based on issue tracker events.
+        </p>
+      </div>
+
+      {/* Concurrency Limit */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium text-sm">Concurrency Limit</p>
+            <p className="text-muted-foreground text-xs">
+              Maximum number of claws that can run simultaneously. New claws will queue as &ldquo;pending&rdquo; when the limit is reached.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              min={0}
+              value={maxConcurrent}
+              onChange={(e) => setMaxConcurrent(parseInt(e.target.value) || 0)}
+              className="w-24 text-sm"
+              placeholder="0 = unlimited"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={saving || maxConcurrent === (settings.maxConcurrentClaws || 0)}
+              onClick={() => onSave({ maxConcurrentClaws: maxConcurrent })}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          0 = unlimited (default). If lowered below current running count, existing claws keep running.
         </p>
       </div>
 

@@ -52,6 +52,8 @@ type SettingsView struct {
 	Secrets       []string                `json:"secrets"`
 	MCPServers    []MCPView               `json:"mcpServers,omitempty"`
 	Auth          *AuthView               `json:"auth,omitempty"`
+	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
+	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
 }
 
 type AuthView struct {
@@ -175,6 +177,8 @@ type SettingsPatch struct {
 	Factories     []FactoryPatch           `json:"factories,omitempty"`
 	MCPServers    []MCPPatch               `json:"mcpServers,omitempty"`
 	Auth          *AuthPatch               `json:"auth,omitempty"`
+	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
+	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
 }
 
 // MCPPatch is a request to add/update an MCP server config.
@@ -381,6 +385,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	// Concurrency limit
+	view.MaxConcurrentClaws = s.hubCfg.MaxConcurrentClaws
 
 	// Factories
 	view.Factories = []FactoryView{}
@@ -845,6 +852,13 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			githubIssues = append(githubIssues, gi)
 		}
 		updatedCfg.Integrations.GitHubIssues = githubIssues
+	}
+
+	// MaxConcurrentClaws
+	if patch.MaxConcurrentClaws != nil {
+		updatedCfg.MaxConcurrentClaws = *patch.MaxConcurrentClaws
+		// If the limit was raised or removed, try to promote pending claws
+		go s.promotePendingClaws()
 	}
 
 	// Factories (full replace)

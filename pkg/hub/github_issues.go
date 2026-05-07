@@ -634,19 +634,46 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
+	// Check concurrency limit
+	s.mu.RLock()
+	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	s.mu.RUnlock()
+
+	activeCount := s.countActiveClaws()
+	isPending := false
+	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+		isPending = true
+		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for GitHub issue %s as pending", activeCount, maxConcurrent, issueID)
+	}
+
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
+	initialStatus := "provisioning"
+	if isPending {
+		initialStatus = "pending"
+	}
+
 	_, err = s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, github_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, initialStatus, now,
 	)
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
+	}
+
+	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s)", clawName, clawID[:8], issueID, initialStatus)
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
+	})
+
+	if isPending {
+		return nil
 	}
 
 	// Provision asynchronously
@@ -725,6 +752,8 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
 	})
+	// Promote any pending claws now that a slot is free
+	go s.promotePendingClaws()
 }
 
 func (s *Server) resolveGitHubIssuesTokenForFactory(factory *types.FactoryConfig) string {
