@@ -55,6 +55,10 @@ type Server struct {
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
 	webhookDedup   map[string]time.Time
 	webhookDedupMu sync.Mutex
+
+	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
+	// multiple terminating claws each read active < max and promote, exceeding limit.
+	promoteMu sync.Mutex
 }
 
 type clawConn struct {
@@ -701,7 +705,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				c.Status = "starting"
 			}
 			c.ContextUsage = cc.contextUsage
-		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" {
+		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
@@ -1071,6 +1075,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if providerID != "" {
 			go s.terminateVM(provider, providerID)
 		}
+		// Promote any pending claws now that a slot is free
+		go s.promotePendingClaws()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

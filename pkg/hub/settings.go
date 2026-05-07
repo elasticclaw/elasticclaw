@@ -52,6 +52,8 @@ type SettingsView struct {
 	Secrets       []string                `json:"secrets"`
 	MCPServers    []MCPView               `json:"mcpServers,omitempty"`
 	Auth          *AuthView               `json:"auth,omitempty"`
+	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
+	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
 }
 
 type AuthView struct {
@@ -175,6 +177,8 @@ type SettingsPatch struct {
 	Factories     []FactoryPatch           `json:"factories,omitempty"`
 	MCPServers    []MCPPatch               `json:"mcpServers,omitempty"`
 	Auth          *AuthPatch               `json:"auth,omitempty"`
+	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
+	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
 }
 
 // MCPPatch is a request to add/update an MCP server config.
@@ -381,6 +385,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	// Concurrency limit
+	view.MaxConcurrentClaws = s.hubCfg.MaxConcurrentClaws
 
 	// Factories
 	view.Factories = []FactoryView{}
@@ -847,6 +854,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		updatedCfg.Integrations.GitHubIssues = githubIssues
 	}
 
+	// MaxConcurrentClaws
+	if patch.MaxConcurrentClaws != nil {
+		updatedCfg.MaxConcurrentClaws = *patch.MaxConcurrentClaws
+	}
+
 	// Factories (full replace)
 	if patch.Factories != nil {
 		var factories []*types.FactoryConfig
@@ -1106,6 +1118,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Only update in-memory config after successful disk write
 	s.hubCfg = &updatedCfg
+
+	// If the concurrency limit was raised or removed, try to promote pending claws.
+	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.
+	if patch.MaxConcurrentClaws != nil {
+		go s.promotePendingClaws()
+	}
 
 	jsonOK(w, map[string]bool{"ok": true})
 }

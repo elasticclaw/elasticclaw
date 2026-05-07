@@ -794,6 +794,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		go s.terminateVM(provider, providerID)
 	}
 
+	// Promote any pending claws now that a slot is free
+	go s.promotePendingClaws()
+
 	return true
 }
 

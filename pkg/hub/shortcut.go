@@ -539,18 +539,54 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
+	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
+	// race where concurrent factory webhooks both read active < max and both
+	// insert as provisioning, exceeding the limit.
+	s.promoteMu.Lock()
+
+	s.mu.RLock()
+	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	s.mu.RUnlock()
+
+	activeCount := s.countActiveClaws()
+	isPending := false
+	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+		isPending = true
+		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for Shortcut story %s as pending", activeCount, maxConcurrent, storyID)
+	}
+
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
+	initialStatus := "provisioning"
+	if isPending {
+		initialStatus = "pending"
+	}
+
 	_, err = s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now,
 	)
+
+	// Release promoteMu immediately after INSERT so we don't hold it across
+	// the potentially slow async provisioning below.
+	s.promoteMu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
+	}
+
+	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s)", clawName, clawID[:8], storyID, initialStatus)
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
+	})
+
+	if isPending {
+		return nil
 	}
 
 	req := types.CreateClawRequest{
@@ -586,12 +622,6 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
 		}
 	}()
-
-	s.broadcastToUsers(tenantID, types.WSMessage{
-		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
-	})
-	log.Printf("[factory] created claw %s (%s) for Shortcut story %s", clawName, clawID[:8], storyID)
 
 	return nil
 }

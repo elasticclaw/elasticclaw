@@ -352,6 +352,12 @@ type HubConfig struct {
 
 	// Auth holds GitHub OAuth and access control config for the hub web UI.
 	Auth *AuthConfig `yaml:"auth,omitempty"`
+
+	// MaxConcurrentClaws limits the number of simultaneously running claws.
+	// When the limit is reached, new factory-created claws enter 'pending' status
+	// and are promoted to 'provisioning' when a running claw terminates.
+	// 0 means unlimited (default).
+	MaxConcurrentClaws int `yaml:"max_concurrent_claws,omitempty" json:"maxConcurrentClaws"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

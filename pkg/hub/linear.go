@@ -542,19 +542,57 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
+	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
+	// race where concurrent factory webhooks both read active < max and both
+	// insert as provisioning, exceeding the limit.
+	s.promoteMu.Lock()
+
+	s.mu.RLock()
+	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	s.mu.RUnlock()
+
+	activeCount := s.countActiveClaws()
+	isPending := false
+	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+		isPending = true
+		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for issue %s as pending", activeCount, maxConcurrent, issueID)
+	}
+
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := now()
 
+	initialStatus := "provisioning"
+	if isPending {
+		initialStatus = "pending"
+	}
+
 	_, err = s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, initialStatus, now,
 	)
+
+	// Release promoteMu immediately after INSERT so we don't hold it across
+	// the potentially slow async provisioning below.
+	s.promoteMu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
+	}
+
+	log.Printf("[factory] created claw %s (%s) for Linear issue %s (status=%s)", clawName, clawID[:8], issueID, initialStatus)
+	// Notify connected dashboards immediately so the card appears without waiting for next poll
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
+	})
+
+	if isPending {
+		// Don't provision yet — will be promoted when a slot opens
+		return nil
 	}
 
 	// Provision asynchronously
@@ -609,13 +647,6 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	}()
 
-	log.Printf("[factory] created claw %s (%s) for Linear issue %s", clawName, clawID[:8], issueID)
-	// Notify connected dashboards immediately so the card appears without waiting for next poll
-	s.broadcastToUsers(tenantID, types.WSMessage{
-		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
-	})
-
 	return nil
 }
 
@@ -640,6 +671,8 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
 	})
+	// Promote any pending claws now that a slot is free
+	go s.promotePendingClaws()
 }
 
 func (s *Server) defaultProvider() string {
@@ -734,6 +767,208 @@ func escapeLikeWildcards(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+// countActiveClaws returns the number of claws that count toward the concurrency limit.
+// Active claws are: provisioning, starting, connected, running, or idle.
+// Pending, deleted, and error claws do NOT count.
+func (s *Server) countActiveClaws() int {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM claws WHERE status IN ('provisioning','starting','connected','running','idle')`).Scan(&count)
+	return count
+}
+
+// promotePendingClaws checks if any pending claws can be promoted to provisioning
+// when a running claw terminates. Called after any claw deletion.
+func (s *Server) promotePendingClaws() {
+	// Serialize promotion to prevent TOCTOU race: multiple goroutines
+	// terminating simultaneously could each read active < max and promote,
+	// exceeding the limit.
+	s.promoteMu.Lock()
+	defer s.promoteMu.Unlock()
+
+	s.mu.RLock()
+	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	s.mu.RUnlock()
+
+	for {
+		active := s.countActiveClaws()
+
+		// 0 means unlimited — promote all pending claws
+		if maxConcurrent > 0 && active >= maxConcurrent {
+			return
+		}
+
+		// Find the oldest pending claw
+		var clawID, tenantID string
+		err := s.db.QueryRow(
+			`SELECT id, tenant_id FROM claws WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+		).Scan(&clawID, &tenantID)
+		if err != nil {
+			// No pending claws
+			return
+		}
+
+		// Promote to provisioning — scope UPDATE to pending status so a
+		// concurrent hard-delete doesn't match zero rows silently.
+		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, max=%d)", clawID[:8], active, maxConcurrent)
+		res, _ := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID)
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Claw was deleted between SELECT and UPDATE; skip to next pending
+			continue
+		}
+
+		// Broadcast so UI updates
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type:    "claw_status",
+			Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
+		})
+
+		// Start provisioning asynchronously
+		go s.provisionPendingClaw(clawID)
+	}
+}
+
+// provisionPendingClaw provisions a claw that was previously pending.
+// This is similar to the async provisioning in createClawForIssue but fetches
+// the claw record from the DB since it was already inserted.
+func (s *Server) provisionPendingClaw(clawID string) {
+	// Re-fetch the claw record
+	var (
+		name, template, provider, defaultModel, templateFilesJSON string
+		githubReposJSON, linearWorkspace, llmKey string
+		nixEnabled, dockerEnabled, autoFixCI, autoFixBugbot int
+		tagsJSON, color, issueID string
+		tenantID string
+	)
+	err := s.db.QueryRow(
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &autoFixCI, &autoFixBugbot, &issueID)
+	if err != nil {
+		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		return
+	}
+
+	// Guard: if the claw was deleted before provisioning started
+	var currentStatus string
+	err2 := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+	if err2 != nil || currentStatus == "deleted" {
+		log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+		return
+	}
+
+	var templateFiles map[string]string
+	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
+
+	// Resolve factory for this issue so we can look up integration tokens and
+	// template-declared secrets.
+	var factory *types.FactoryConfig
+	if issueID != "" {
+		factory = s.findFactoryForIssue(issueID)
+	}
+
+	// Resolve tokens for env (Linear, GitHub Issues, Shortcut)
+	var linearToken, githubToken, shortcutToken string
+	if factory != nil {
+		linearToken = s.resolveLinearTokenForFactory(factory)
+		githubToken = s.resolveGitHubIssuesTokenForFactory(factory)
+		shortcutToken = s.resolveShortcutToken(factory.Workspace)
+	}
+
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
+		"ELASTICCLAW_CLAW_TOKEN": clawToken,
+	}
+	if linearToken != "" {
+		env["LINEAR_API_KEY"] = linearToken
+	}
+	if githubToken != "" {
+		env["GITHUB_TOKEN"] = githubToken
+	}
+	if shortcutToken != "" {
+		env["SHORTCUT_API_KEY"] = shortcutToken
+	}
+
+	// Parse elasticclaw-config.yaml from recovered template files to honour
+	// template settings like InstanceType that were set at creation time.
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		var parseErr error
+		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[factory] warning: could not parse elasticclaw-config.yaml for pending claw %s: %v", clawID[:8], parseErr)
+			tmplCfg = nil
+		}
+	}
+
+	// Resolve and inject template-requested secrets (same as factory create paths).
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 && factory != nil {
+		for _, ref := range tmplCfg.Secrets {
+			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
+			if ok {
+				env[envName] = secretVal
+				log.Printf("[factory] injected secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
+			} else {
+				log.Printf("[factory] warning: requested secret (type=%s name=%s workspace=%s) not found for pending claw %s", ref.Type, ref.Name, ref.Workspace, clawID[:8])
+			}
+		}
+	}
+
+	ctx := context.Background()
+	req := types.CreateClawRequest{
+		Name:         name,
+		TemplateName: template,
+		Provider:     provider,
+		Files:        templateFiles,
+		Env:          env,
+		ProviderName: "ec-" + clawID[:8],
+	}
+	if tmplCfg != nil && req.InstanceType == "" {
+		req.InstanceType = tmplCfg.InstanceType
+	}
+
+	// Find provider config
+	s.mu.RLock()
+	provCfg, _ := s.hubCfg.Providers[provider]
+	s.mu.RUnlock()
+
+	// Convert string files to []byte for providers that need it
+	fileBytes := make(map[string][]byte, len(templateFiles))
+	for k, v := range templateFiles {
+		fileBytes[k] = []byte(v)
+	}
+
+	var provErr error
+	switch provider {
+	case "replicated":
+		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+	case "daytona":
+		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+	case "vercel":
+		provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+	case "noop":
+		if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
+			provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
+		} else {
+			providerID := "noop-vm-" + clawID[:8]
+			_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+		}
+	default:
+		provErr = fmt.Errorf("unsupported provider: %s", provider)
+	}
+	if provErr != nil {
+		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
+		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+		// Slot is now free (error claws don't count toward limit); try to
+		// promote the next pending claw.
+		go s.promotePendingClaws()
+	}
 }
 
 func buildLinearContext(payload linearWebhookPayload) string {
