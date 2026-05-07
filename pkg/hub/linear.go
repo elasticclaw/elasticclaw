@@ -857,14 +857,19 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 
-	// Resolve tokens for env (Linear or GitHub Issues)
-	var linearToken, githubToken string
+	// Resolve factory for this issue so we can look up integration tokens and
+	// template-declared secrets.
+	var factory *types.FactoryConfig
 	if issueID != "" {
-		factory := s.findFactoryForIssue(issueID)
-		if factory != nil {
-			linearToken = s.resolveLinearTokenForFactory(factory)
-			githubToken = s.resolveGitHubIssuesTokenForFactory(factory)
-		}
+		factory = s.findFactoryForIssue(issueID)
+	}
+
+	// Resolve tokens for env (Linear, GitHub Issues, Shortcut)
+	var linearToken, githubToken, shortcutToken string
+	if factory != nil {
+		linearToken = s.resolveLinearTokenForFactory(factory)
+		githubToken = s.resolveGitHubIssuesTokenForFactory(factory)
+		shortcutToken = s.resolveShortcutToken(factory.Workspace)
 	}
 
 	s.mu.RLock()
@@ -880,15 +885,8 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	if githubToken != "" {
 		env["GITHUB_TOKEN"] = githubToken
 	}
-
-	ctx := context.Background()
-	req := types.CreateClawRequest{
-		Name:         name,
-		TemplateName: template,
-		Provider:     provider,
-		Files:        templateFiles,
-		Env:          env,
-		ProviderName: "ec-" + clawID[:8],
+	if shortcutToken != "" {
+		env["SHORTCUT_API_KEY"] = shortcutToken
 	}
 
 	// Parse elasticclaw-config.yaml from recovered template files to honour
@@ -901,6 +899,29 @@ func (s *Server) provisionPendingClaw(clawID string) {
 			log.Printf("[factory] warning: could not parse elasticclaw-config.yaml for pending claw %s: %v", clawID[:8], parseErr)
 			tmplCfg = nil
 		}
+	}
+
+	// Resolve and inject template-requested secrets (same as factory create paths).
+	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 && factory != nil {
+		for _, ref := range tmplCfg.Secrets {
+			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
+			if ok {
+				env[envName] = secretVal
+				log.Printf("[factory] injected secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
+			} else {
+				log.Printf("[factory] warning: requested secret (type=%s name=%s workspace=%s) not found for pending claw %s", ref.Type, ref.Name, ref.Workspace, clawID[:8])
+			}
+		}
+	}
+
+	ctx := context.Background()
+	req := types.CreateClawRequest{
+		Name:         name,
+		TemplateName: template,
+		Provider:     provider,
+		Files:        templateFiles,
+		Env:          env,
+		ProviderName: "ec-" + clawID[:8],
 	}
 	if tmplCfg != nil && req.InstanceType == "" {
 		req.InstanceType = tmplCfg.InstanceType
