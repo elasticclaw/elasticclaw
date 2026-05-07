@@ -751,12 +751,19 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
+	pipelineHandled := false
 	if mergeFactory != nil {
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
 			if stage := pl.StageForPRMerged(); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
+				pipelineHandled = true
 			}
 		}
+	}
+
+	// If the pipeline handled termination (terminal stage), we're done.
+	if pipelineHandled {
+		return true
 	}
 
 	var providerID, provider string
