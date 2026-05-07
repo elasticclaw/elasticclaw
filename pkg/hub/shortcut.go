@@ -539,7 +539,11 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
-	// Check concurrency limit
+	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
+	// race where concurrent factory webhooks both read active < max and both
+	// insert as provisioning, exceeding the limit.
+	s.promoteMu.Lock()
+
 	s.mu.RLock()
 	maxConcurrent := s.hubCfg.MaxConcurrentClaws
 	s.mu.RUnlock()
@@ -566,6 +570,11 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now,
 	)
+
+	// Release promoteMu immediately after INSERT so we don't hold it across
+	// the potentially slow async provisioning below.
+	s.promoteMu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}

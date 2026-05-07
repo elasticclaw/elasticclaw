@@ -542,7 +542,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
-	// Check concurrency limit
+	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
+	// race where concurrent factory webhooks both read active < max and both
+	// insert as provisioning, exceeding the limit.
+	s.promoteMu.Lock()
+
 	s.mu.RLock()
 	maxConcurrent := s.hubCfg.MaxConcurrentClaws
 	s.mu.RUnlock()
@@ -570,6 +574,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, initialStatus, now,
 	)
+
+	// Release promoteMu immediately after INSERT so we don't hold it across
+	// the potentially slow async provisioning below.
+	s.promoteMu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
@@ -880,6 +889,21 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		Files:        templateFiles,
 		Env:          env,
 		ProviderName: "ec-" + clawID[:8],
+	}
+
+	// Parse elasticclaw-config.yaml from recovered template files to honour
+	// template settings like InstanceType that were set at creation time.
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		var parseErr error
+		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[factory] warning: could not parse elasticclaw-config.yaml for pending claw %s: %v", clawID[:8], parseErr)
+			tmplCfg = nil
+		}
+	}
+	if tmplCfg != nil && req.InstanceType == "" {
+		req.InstanceType = tmplCfg.InstanceType
 	}
 
 	// Find provider config
