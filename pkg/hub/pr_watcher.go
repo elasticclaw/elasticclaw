@@ -736,7 +736,10 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			if pl := parsePipelineForFactory(factory); pl != nil {
 				if stage := pl.StageForPRClosed(); stage != nil {
 					s.transitionPipelineStage(clawID, *stage, factory, issueID)
-					pipelineHandled = true
+					if stage.Terminal {
+						_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+						pipelineHandled = true
+					}
 				}
 			}
 		}
