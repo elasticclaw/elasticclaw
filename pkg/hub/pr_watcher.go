@@ -756,7 +756,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
 			if stage := pl.StageForPRMerged(); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
-				pipelineHandled = true
+				if stage.Terminal {
+					pipelineHandled = true
+				}
 			}
 		}
 	}
