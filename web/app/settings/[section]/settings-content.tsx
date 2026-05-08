@@ -3,15 +3,15 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "doctor"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "doctor"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -209,6 +209,10 @@ export default function SettingsSectionPage() {
     [
       { id: "ai-config", label: "Configure with AI", icon: Sparkles },
     ],
+    // Diagnostics
+    [
+      { id: "doctor", label: "Doctor", icon: Stethoscope },
+    ],
   ]
 
   return (
@@ -288,6 +292,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "ai-config" && (
             <AIConfigSection />
+          )}
+          {section === "doctor" && (
+            <DoctorSection />
           )}
         </main>
       </div>

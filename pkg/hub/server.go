@@ -215,6 +215,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAdminAuth(s.handleAIConfigCurrentConfig))
 	mux.HandleFunc("/api/settings/ai-config", s.withWebAdminAuth(s.handleAIConfig))
 
+	// Doctor
+	mux.HandleFunc("/api/doctor", s.withWebAdminAuth(s.handleDoctor))
+
 	// Health
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
