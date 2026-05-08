@@ -3110,13 +3110,13 @@ function DoctorSection() {
   }
 
   const severityBadge = (s: string) => {
-    const classes = {
+    const classes: Record<string, string> = {
       critical: "bg-red-500/10 text-red-500 border-red-500/20",
       warning: "bg-amber-500/10 text-amber-500 border-amber-500/20",
       info: "bg-blue-400/10 text-blue-400 border-blue-400/20",
     }
     return (
-      <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", classes[s as keyof typeof classes] || classes.info)}>
+      <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", classes[s] || classes.info)}>
         {s}
       </span>
     )
