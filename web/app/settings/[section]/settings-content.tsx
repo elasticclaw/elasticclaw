@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -3215,13 +3215,12 @@ function DoctorSection() {
                             size="sm"
                             variant="outline"
                             className="text-xs"
-                            onClick={() => {
-                              if (check.fixAction.type === "navigate") {
-                                window.location.href = check.fixAction.target
-                              }
-                            }}
+                            asChild
                           >
-                            {check.fixAction.label}
+                            <Link href={check.fixAction.target}>
+                              {check.fixAction.label}
+                              <ArrowRight className="size-3 ml-1" />
+                            </Link>
                           </Button>
                         </div>
                       )}
