@@ -1,0 +1,32 @@
+name: Validate Factory
+
+on:
+  pull_request:
+    paths:
+      - '.elasticclaw/**'
+
+jobs:
+  validate:
+    name: Validate ElasticClaw Config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate factory
+        uses: elasticclaw/actions/publish-factory@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/factories/elasticclaw
+          dry-run: true
+
+      - name: Validate template
+        uses: elasticclaw/actions/publish-template@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/templates/elasticclaw
+          dry-run: true
