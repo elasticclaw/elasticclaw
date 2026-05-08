@@ -3076,3 +3076,163 @@ function TemplatesSection() {
     </div>
   )
 }
+
+function DoctorSection() {
+  const [report, setReport] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async (refresh = false) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/doctor${refresh ? "?refresh=true" : ""}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setReport(await res.json())
+    } catch (e: any) {
+      setError(e.message || "Failed to load diagnostics")
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const severityIcon = (s: string) => {
+    switch (s) {
+      case "critical": return <AlertTriangle className="size-4 text-red-500" />
+      case "warning": return <AlertTriangle className="size-4 text-amber-500" />
+      default: return <CheckCircle2 className="size-4 text-blue-400" />
+    }
+  }
+
+  const severityBadge = (s: string) => {
+    const classes = {
+      critical: "bg-red-500/10 text-red-500 border-red-500/20",
+      warning: "bg-amber-500/10 text-amber-500 border-amber-500/20",
+      info: "bg-blue-400/10 text-blue-400 border-blue-400/20",
+    }
+    return (
+      <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", classes[s as keyof typeof classes] || classes.info)}>
+        {s}
+      </span>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Doctor</h2>
+          <p className="text-sm text-muted-foreground">
+            Diagnose hub configuration issues and get actionable fixes.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {report?.cachedAt && (
+            <span className="text-xs text-muted-foreground">
+              Cached {new Date(report.cachedAt).toLocaleTimeString()}
+            </span>
+          )}
+          <Button size="sm" variant="outline" onClick={() => load(true)} disabled={loading}>
+            <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
+            {loading ? "Checking…" : "Refresh"}
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-500">
+          {error}
+        </div>
+      )}
+
+      {report && (
+        <>
+          <div className="grid grid-cols-4 gap-3">
+            <div className="rounded-lg border border-border p-3 text-center">
+              <p className="text-2xl font-bold">{report.summary.total}</p>
+              <p className="text-xs text-muted-foreground mt-1">Checks</p>
+            </div>
+            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-red-500">{report.summary.critical}</p>
+              <p className="text-xs text-muted-foreground mt-1">Critical</p>
+            </div>
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-500">{report.summary.warning}</p>
+              <p className="text-xs text-muted-foreground mt-1">Warnings</p>
+            </div>
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-emerald-500">{report.summary.passed}</p>
+              <p className="text-xs text-muted-foreground mt-1">Passed</p>
+            </div>
+          </div>
+
+          {report.checks.length === 0 ? (
+            <p className="text-sm text-muted-foreground">All checks passed — no issues found.</p>
+          ) : (
+            <div className="space-y-3">
+              {report.checks.map((check: any, i: number) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "rounded-lg border p-4",
+                    check.ok
+                      ? "border-emerald-500/20 bg-emerald-500/5"
+                      : check.severity === "critical"
+                        ? "border-red-500/20 bg-red-500/5"
+                        : check.severity === "warning"
+                          ? "border-amber-500/20 bg-amber-500/5"
+                          : "border-border"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 shrink-0">
+                      {check.ok ? (
+                        <CheckCircle2 className="size-4 text-emerald-500" />
+                      ) : (
+                        severityIcon(check.severity)
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                          {check.category}
+                        </span>
+                        {!check.ok && severityBadge(check.severity)}
+                      </div>
+                      <p className="text-sm font-medium mt-1">{check.title}</p>
+                      <p className="text-sm text-muted-foreground mt-0.5">{check.description}</p>
+                      {check.error && (
+                        <p className="text-xs text-red-400 mt-1 font-mono">{check.error}</p>
+                      )}
+                      {check.fixAction && !check.ok && (
+                        <div className="mt-3">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-xs"
+                            onClick={() => {
+                              if (check.fixAction.type === "navigate") {
+                                window.location.href = check.fixAction.target
+                              }
+                            }}
+                          >
+                            {check.fixAction.label}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
