@@ -3211,17 +3211,29 @@ function DoctorSection() {
                       )}
                       {check.fixAction && !check.ok && (
                         <div className="mt-3">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="text-xs"
-                            asChild
-                          >
-                            <Link href={check.fixAction.target}>
+                          {check.fixAction.type === "navigate" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-xs"
+                              asChild
+                            >
+                              <Link href={check.fixAction.target}>
+                                {check.fixAction.label}
+                                <ArrowRight className="size-3 ml-1" />
+                              </Link>
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-xs"
+                              disabled
+                              title={`Action type "${check.fixAction.type}" not yet supported in UI`}
+                            >
                               {check.fixAction.label}
-                              <ArrowRight className="size-3 ml-1" />
-                            </Link>
-                          </Button>
+                            </Button>
+                          )}
                         </div>
                       )}
                     </div>
