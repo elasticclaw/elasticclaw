@@ -2,7 +2,12 @@
 
 ## First Run
 
-The repo is already cloned at `~/.openclaw/workspace/elasticclaw/`. Check with:
+There are multiple repos cloned:
+
+- `~/.openclaw/workspace/elasticclaw/`: this is the main elasticlaw repo where it='s likely you will be working
+- `~/.openclaw/workspace/elasticclaw.ai/`: this is the public https://elasticclaw.ai site that includes our docs
+
+Check that these repos exist with:
 
 ```bash
 ls ~/.openclaw/workspace/
@@ -129,6 +134,13 @@ git commit -m "feat: <description>"
 git push origin <branch>
 gh pr create --base main
 ```
+
+## Documentation Updates (Required)
+
+- Docs repo: `elasticclaw/elasticclaw.ai`
+- It is already cloned at `~/.openclaw/workspace/elasticclaw.ai`
+- If your change affects user-facing behavior, CLI commands/flags/output, API/schema/contracts, configuration, install/upgrade flows, or workflows, you must update docs in `elasticclaw/elasticclaw.ai` as part of the same task.
+- Open a corresponding docs PR whenever docs changes are needed. Product/code PRs that require docs must not be considered done without the docs PR URL.
 
 ## CI
 

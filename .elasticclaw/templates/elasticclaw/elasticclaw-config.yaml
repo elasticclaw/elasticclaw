@@ -4,5 +4,7 @@ github:
   repos:
     - repo: elasticclaw/elasticclaw
       permissions: write
+    - repo: elasticclaw/elasticclaw.ai
+      permissions: write
 nix: true
 docker: true

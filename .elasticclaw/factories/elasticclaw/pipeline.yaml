@@ -15,6 +15,7 @@ stages:
         URL: {{.Issue.URL}}
 
         Read your BOOTSTRAP.md and start by describing your understanding of the issue.
+        Describe the issue BEFORE starting any work, but do not wait for a response.
         Then start working on the issue.
         Narrate your progress as you go. 
         Keep me updated.
