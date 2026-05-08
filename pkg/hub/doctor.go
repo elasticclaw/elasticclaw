@@ -710,7 +710,7 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 		}
 	}
 
-	if len(checks) == 0 {
+	if len(cfg.Integrations.Linear) == 0 && len(cfg.Integrations.Shortcut) == 0 && len(cfg.Integrations.GitHubIssues) == 0 {
 		checks = append(checks, DoctorCheck{
 			Category:    "integrations",
 			Severity:    "info",
