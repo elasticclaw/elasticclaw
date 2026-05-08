@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -49,7 +50,10 @@ type doctorCache struct {
 	at     time.Time
 }
 
-var lastDoctorReport *doctorCache
+var (
+	lastDoctorReport *doctorCache
+	doctorMu         sync.RWMutex
+)
 
 // handleDoctor handles GET /api/doctor.
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
@@ -60,15 +64,20 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 
 	// Check cache unless ?refresh=true
 	refresh := r.URL.Query().Get("refresh") == "true"
-	if !refresh && lastDoctorReport != nil && time.Since(lastDoctorReport.at) < 5*time.Minute {
-		resp := lastDoctorReport.report
-		resp.CachedAt = &lastDoctorReport.at
+	doctorMu.RLock()
+	cached := lastDoctorReport
+	doctorMu.RUnlock()
+	if !refresh && cached != nil && time.Since(cached.at) < 5*time.Minute {
+		resp := cached.report
+		resp.CachedAt = &cached.at
 		jsonOK(w, resp)
 		return
 	}
 
 	report := s.runDoctorChecks(r.Context())
+	doctorMu.Lock()
 	lastDoctorReport = &doctorCache{report: report, at: time.Now()}
+	doctorMu.Unlock()
 	jsonOK(w, report)
 }
 
@@ -114,22 +123,22 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
 
-	// Compute summary
+	// Compute summary: total = all checks, passed = OK checks
 	var report DoctorResponse
 	report.Checks = checks
 	for _, c := range checks {
 		report.Summary.Total++
 		if c.OK {
 			report.Summary.Passed++
-			continue
-		}
-		switch c.Severity {
-		case "critical":
-			report.Summary.Critical++
-		case "warning":
-			report.Summary.Warning++
-		case "info":
-			report.Summary.Info++
+		} else {
+			switch c.Severity {
+			case "critical":
+				report.Summary.Critical++
+			case "warning":
+				report.Summary.Warning++
+			case "info":
+				report.Summary.Info++
+			}
 		}
 	}
 	return report
@@ -162,8 +171,10 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 		"moonshot": true, "google": true, "mistral": true,
 	}
 
+	allKeysValid := true
 	for _, key := range cfg.LLMKeys {
 		if !validProviders[key.Provider] {
+			allKeysValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "models",
 				Severity:    "warning",
@@ -178,6 +189,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 			})
 		}
 		if key.APIKey == "" {
+			allKeysValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "models",
 				Severity:    "critical",
@@ -214,6 +226,14 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 				Label:  "Set Default",
 			},
 		})
+	} else if allKeysValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "models",
+			Severity:    "info",
+			Title:       "LLM keys configured",
+			Description: fmt.Sprintf("%d LLM key(s) configured and valid.", len(cfg.LLMKeys)),
+			OK:          true,
+		})
 	}
 
 	return checks
@@ -235,6 +255,14 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 				Params: map[string]string{"hint": "provider/model"},
 				Label:  "Fix Format",
 			},
+		})
+	} else if cfg.DefaultModel != "" {
+		checks = append(checks, DoctorCheck{
+			Category:    "models",
+			Severity:    "info",
+			Title:       "Default model configured",
+			Description: fmt.Sprintf("Default model is set to %q.", cfg.DefaultModel),
+			OK:          true,
 		})
 	}
 
@@ -262,10 +290,12 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 		return checks
 	}
 
+	allProvidersValid := true
 	for name, p := range cfg.Providers {
 		switch name {
 		case "daytona":
 			if p.APIKey == "" {
+				allProvidersValid = false
 				checks = append(checks, DoctorCheck{
 					Category:    "sandboxes",
 					Severity:    "critical",
@@ -281,6 +311,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			}
 		case "replicated":
 			if p.Token == "" {
+				allProvidersValid = false
 				checks = append(checks, DoctorCheck{
 					Category:    "sandboxes",
 					Severity:    "critical",
@@ -296,6 +327,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			}
 		case "vercel":
 			if p.AccessToken == "" {
+				allProvidersValid = false
 				checks = append(checks, DoctorCheck{
 					Category:    "sandboxes",
 					Severity:    "critical",
@@ -311,8 +343,16 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			}
 		case "local":
 			// Local provider doesn't need credentials
-			continue
 		}
+	}
+	if allProvidersValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "sandboxes",
+			Severity:    "info",
+			Title:       "Sandbox providers configured",
+			Description: fmt.Sprintf("%d sandbox provider(s) configured with credentials.", len(cfg.Providers)),
+			OK:          true,
+		})
 	}
 
 	return checks
@@ -324,7 +364,14 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	var checks []DoctorCheck
 
 	if len(cfg.Factories) == 0 {
-		return checks // No factories is fine
+		checks = append(checks, DoctorCheck{
+			Category:    "factories",
+			Severity:    "info",
+			Title:       "No factories configured",
+			Description: "No factories are configured. Factory-based claw creation is disabled.",
+			OK:          true,
+		})
+		return checks
 	}
 
 	// Build set of template names from hub DB
@@ -468,6 +515,16 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		}
 	}
 
+	if len(checks) == 0 {
+		checks = append(checks, DoctorCheck{
+			Category:    "factories",
+			Severity:    "info",
+			Title:       "Factories configured",
+			Description: fmt.Sprintf("%d factory(ies) configured with no issues detected.", len(cfg.Factories)),
+			OK:          true,
+		})
+	}
+
 	return checks
 }
 
@@ -485,6 +542,14 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	// Template secrets are checked at the factory level (factory references template)
 	// Individual template configs are loaded at runtime, not stored in hub.yaml
 	// TODO: Load template configs from hub_templates DB or filesystem and check their secrets
+
+	checks = append(checks, DoctorCheck{
+		Category:    "templates",
+		Severity:    "info",
+		Title:       "Template checks pending",
+		Description: "Template configuration validation is not yet implemented.",
+		OK:          true,
+	})
 
 	return checks
 }
@@ -524,6 +589,14 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 					Target: "/settings/issue-trackers",
 					Label:  "Add Token",
 				},
+			})
+		} else {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "info",
+				Title:       fmt.Sprintf("Linear workspace %q token configured", li.Workspace),
+				Description: fmt.Sprintf("Linear workspace %q has an API token configured.", li.Workspace),
+				OK:          true,
 			})
 		}
 		if li.WebhookSecret == "" {
@@ -567,6 +640,14 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 					Label:  "Add Token",
 				},
 			})
+		} else {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "info",
+				Title:       fmt.Sprintf("Shortcut workspace %q token configured", si.Workspace),
+				Description: fmt.Sprintf("Shortcut workspace %q has an API token configured.", si.Workspace),
+				OK:          true,
+			})
 		}
 		if !factoryWorkspaces["shortcut"][si.Workspace] {
 			checks = append(checks, DoctorCheck{
@@ -594,6 +675,14 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 					Label:  "Add Token",
 				},
 			})
+		} else {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "info",
+				Title:       fmt.Sprintf("GitHub Issues workspace %q token configured", gi.Workspace),
+				Description: fmt.Sprintf("GitHub Issues workspace %q has a personal access token configured.", gi.Workspace),
+				OK:          true,
+			})
 		}
 		if gi.WebhookSecret == "" {
 			checks = append(checks, DoctorCheck{
@@ -620,6 +709,16 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 		}
 	}
 
+	if len(checks) == 0 {
+		checks = append(checks, DoctorCheck{
+			Category:    "integrations",
+			Severity:    "info",
+			Title:       "No integrations configured",
+			Description: "No issue tracker integrations are configured.",
+			OK:          true,
+		})
+	}
+
 	return checks
 }
 
@@ -628,8 +727,21 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
+	if len(cfg.GitHubApps) == 0 {
+		checks = append(checks, DoctorCheck{
+			Category:    "github",
+			Severity:    "info",
+			Title:       "No GitHub Apps configured",
+			Description: "No GitHub Apps are configured. GitHub App-based authentication is disabled.",
+			OK:          true,
+		})
+		return checks
+	}
+
+	allAppsValid := true
 	for _, app := range cfg.GitHubApps {
 		if app.PrivateKeyPEM == "" {
+			allAppsValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "github",
 				Severity:    "critical",
@@ -644,6 +756,7 @@ func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 			})
 		}
 		if app.AppID == 0 {
+			allAppsValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "github",
 				Severity:    "critical",
@@ -658,6 +771,15 @@ func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 			})
 		}
 	}
+	if allAppsValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "github",
+			Severity:    "info",
+			Title:       "GitHub Apps configured",
+			Description: fmt.Sprintf("%d GitHub App(s) configured with valid credentials.", len(cfg.GitHubApps)),
+			OK:          true,
+		})
+	}
 
 	return checks
 }
@@ -667,12 +789,24 @@ func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 func (s *Server) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
+	if len(cfg.MCPServers) == 0 {
+		checks = append(checks, DoctorCheck{
+			Category:    "mcp",
+			Severity:    "info",
+			Title:       "No MCP servers configured",
+			Description: "No MCP servers are configured.",
+			OK:          true,
+		})
+		return checks
+	}
+
 	// Build set of secret names
 	secretNames := make(map[string]bool)
 	for name := range diskCfg.Secrets {
 		secretNames[name] = true
 	}
 
+	allMCPValid := true
 	for _, mcp := range cfg.MCPServers {
 		if mcp == nil {
 			continue
@@ -681,6 +815,7 @@ func (s *Server) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig)
 		// Check secrets referenced
 		for envVar, secretRef := range mcp.Secrets {
 			if !secretNames[secretRef] {
+				allMCPValid = false
 				checks = append(checks, DoctorCheck{
 					Category:    "mcp",
 					Severity:    "warning",
@@ -695,6 +830,15 @@ func (s *Server) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig)
 				})
 			}
 		}
+	}
+	if allMCPValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "mcp",
+			Severity:    "info",
+			Title:       "MCP servers configured",
+			Description: fmt.Sprintf("%d MCP server(s) configured with valid secrets.", len(cfg.MCPServers)),
+			OK:          true,
+		})
 	}
 
 	return checks
@@ -722,10 +866,13 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 				Label:  "Configure Auth",
 			},
 		})
+		return checks
 	}
 
+	authIssues := 0
 	if cfg.Auth != nil && cfg.Auth.GitHubOAuth != nil {
 		if cfg.Auth.GitHubOAuth.ClientID != "" && cfg.Auth.GitHubOAuth.ClientSecret == "" {
+			authIssues++
 			checks = append(checks, DoctorCheck{
 				Category:    "auth",
 				Severity:    "warning",
@@ -743,6 +890,7 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 			len(cfg.Auth.GitHubOAuth.AllowedUsers) == 0 &&
 			len(cfg.Auth.GitHubOAuth.AllowedOrgs) == 0 &&
 			len(cfg.Auth.GitHubOAuth.AllowedTeams) == 0 {
+			authIssues++
 			checks = append(checks, DoctorCheck{
 				Category:    "auth",
 				Severity:    "warning",
@@ -756,6 +904,16 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 				},
 			})
 		}
+	}
+
+	if authIssues == 0 {
+		checks = append(checks, DoctorCheck{
+			Category:    "auth",
+			Severity:    "info",
+			Title:       "Authentication configured",
+			Description: "At least one authentication method is configured.",
+			OK:          true,
+		})
 	}
 
 	return checks
@@ -778,6 +936,14 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 				Target: "/settings/runtimes",
 				Label:  "Increase Limit",
 			},
+		})
+	} else {
+		checks = append(checks, DoctorCheck{
+			Category:    "hub",
+			Severity:    "info",
+			Title:       "Hub settings look good",
+			Description: fmt.Sprintf("Max concurrent claws is %d with %d factories configured.", cfg.MaxConcurrentClaws, len(cfg.Factories)),
+			OK:          true,
 		})
 	}
 
