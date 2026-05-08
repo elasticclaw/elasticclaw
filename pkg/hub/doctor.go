@@ -649,6 +649,7 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 				OK:          true,
 			})
 		}
+
 		if !factoryWorkspaces["shortcut"][si.Workspace] {
 			checks = append(checks, DoctorCheck{
 				Category:    "integrations",
