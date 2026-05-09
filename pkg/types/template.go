@@ -387,6 +387,17 @@ type GitHubIssuesIntegrationConfig struct {
 	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
 }
 
+// FactoryInput defines a user-provided input for manual factory triggers.
+type FactoryInput struct {
+	Name        string   `yaml:"name" json:"name"`
+	Type        string   `yaml:"type" json:"type"`                   // "string", "number", "bool", "enum"
+	Required    bool     `yaml:"required,omitempty" json:"required"`
+	Default     string   `yaml:"default,omitempty" json:"default,omitempty"`
+	Description string   `yaml:"description,omitempty" json:"description,omitempty"`
+	Options     []string `yaml:"options,omitempty" json:"options,omitempty"`       // for enum type
+	Validation  string   `yaml:"validation,omitempty" json:"validation,omitempty"` // regex pattern
+}
+
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
@@ -415,6 +426,9 @@ type FactoryConfig struct {
 	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty"`
 	// PipelineYAML is the raw pipeline.yaml content stored alongside this factory
 	PipelineYAML string `yaml:"pipeline_yaml,omitempty"`
+	// Inputs are user-defined parameters for manual factory triggers (CLI/UI).
+	// Not used by webhook-triggered factories.
+	Inputs []FactoryInput `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 	// GitHub factory fields (integration: github)
 	Repos   []string       `yaml:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
 	Trigger *GitHubTrigger `yaml:"trigger,omitempty"`
