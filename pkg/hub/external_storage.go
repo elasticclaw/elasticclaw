@@ -66,6 +66,9 @@ func EnsureExternalDirs() error {
 
 // loadExternalTemplate reads a template from the external templates directory.
 func loadExternalTemplate(name string) (map[string]string, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(templatesDir(), name)
 	return config.ReadTemplateFiles(dir)
 }
@@ -164,6 +167,9 @@ func loadExternalFactories() ([]*types.FactoryConfig, error) {
 
 // loadExternalFactory reads a single factory from disk.
 func loadExternalFactory(name string) (*types.FactoryConfig, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(factoriesDir(), name)
 
 	factoryPath := filepath.Join(dir, "factory.yaml")
