@@ -3,15 +3,15 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "doctor"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "doctor"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -209,6 +209,10 @@ export default function SettingsSectionPage() {
     [
       { id: "ai-config", label: "Configure with AI", icon: Sparkles },
     ],
+    // Diagnostics
+    [
+      { id: "doctor", label: "Doctor", icon: Stethoscope },
+    ],
   ]
 
   return (
@@ -288,6 +292,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "ai-config" && (
             <AIConfigSection />
+          )}
+          {section === "doctor" && (
+            <DoctorSection />
           )}
         </main>
       </div>
@@ -3065,6 +3072,177 @@ function TemplatesSection() {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+function DoctorSection() {
+  const [report, setReport] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async (refresh = false) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/doctor${refresh ? "?refresh=true" : ""}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setReport(await res.json())
+    } catch (e: any) {
+      setError(e.message || "Failed to load diagnostics")
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const severityIcon = (s: string) => {
+    switch (s) {
+      case "critical": return <AlertTriangle className="size-4 text-red-500" />
+      case "warning": return <AlertTriangle className="size-4 text-amber-500" />
+      default: return <CheckCircle2 className="size-4 text-blue-400" />
+    }
+  }
+
+  const severityBadge = (s: string) => {
+    const classes: Record<string, string> = {
+      critical: "bg-red-500/10 text-red-500 border-red-500/20",
+      warning: "bg-amber-500/10 text-amber-500 border-amber-500/20",
+      info: "bg-blue-400/10 text-blue-400 border-blue-400/20",
+    }
+    return (
+      <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", classes[s] || classes.info)}>
+        {s}
+      </span>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Doctor</h2>
+          <p className="text-sm text-muted-foreground">
+            Diagnose hub configuration issues and get actionable fixes.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {report?.cachedAt && (
+            <span className="text-xs text-muted-foreground">
+              Cached {new Date(report.cachedAt).toLocaleTimeString()}
+            </span>
+          )}
+          <Button size="sm" variant="outline" onClick={() => load(true)} disabled={loading}>
+            <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
+            {loading ? "Checking…" : "Refresh"}
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-500">
+          {error}
+        </div>
+      )}
+
+      {report && (
+        <>
+          <div className="grid grid-cols-4 gap-3">
+            <div className="rounded-lg border border-border p-3 text-center">
+              <p className="text-2xl font-bold">{report.summary.total}</p>
+              <p className="text-xs text-muted-foreground mt-1">Checks</p>
+            </div>
+            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-red-500">{report.summary.critical}</p>
+              <p className="text-xs text-muted-foreground mt-1">Critical</p>
+            </div>
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-500">{report.summary.warning}</p>
+              <p className="text-xs text-muted-foreground mt-1">Warnings</p>
+            </div>
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
+              <p className="text-2xl font-bold text-emerald-500">{report.summary.passed}</p>
+              <p className="text-xs text-muted-foreground mt-1">Passed</p>
+            </div>
+          </div>
+
+          {report.checks.length === 0 ? (
+            <p className="text-sm text-muted-foreground">All checks passed — no issues found.</p>
+          ) : (
+            <div className="space-y-3">
+              {report.checks.map((check: any, i: number) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "rounded-lg border p-4",
+                    check.ok
+                      ? "border-emerald-500/20 bg-emerald-500/5"
+                      : check.severity === "critical"
+                        ? "border-red-500/20 bg-red-500/5"
+                        : check.severity === "warning"
+                          ? "border-amber-500/20 bg-amber-500/5"
+                          : "border-border"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 shrink-0">
+                      {check.ok ? (
+                        <CheckCircle2 className="size-4 text-emerald-500" />
+                      ) : (
+                        severityIcon(check.severity)
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                          {check.category}
+                        </span>
+                        {!check.ok && severityBadge(check.severity)}
+                      </div>
+                      <p className="text-sm font-medium mt-1">{check.title}</p>
+                      <p className="text-sm text-muted-foreground mt-0.5">{check.description}</p>
+                      {check.error && (
+                        <p className="text-xs text-red-400 mt-1 font-mono">{check.error}</p>
+                      )}
+                      {check.fixAction && !check.ok && (
+                        <div className="mt-3">
+                          {check.fixAction.type === "navigate" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-xs"
+                              asChild
+                            >
+                              <Link href={check.fixAction.target}>
+                                {check.fixAction.label}
+                                <ArrowRight className="size-3 ml-1" />
+                              </Link>
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-xs"
+                              disabled
+                              title={`Action type "${check.fixAction.type}" not yet supported in UI`}
+                            >
+                              {check.fixAction.label}
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
