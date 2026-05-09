@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -444,7 +445,14 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			mergedFactories[f.Name] = f
 		}
 	}
-	for _, f := range mergedFactories {
+	// Sort by name for stable ordering
+	factoryNames := make([]string, 0, len(mergedFactories))
+	for name := range mergedFactories {
+		factoryNames = append(factoryNames, name)
+	}
+	sort.Strings(factoryNames)
+	for _, name := range factoryNames {
+		f := mergedFactories[name]
 		view.Factories = append(view.Factories, FactoryView{
 			Name:             f.Name,
 			Integration:      f.Integration,
