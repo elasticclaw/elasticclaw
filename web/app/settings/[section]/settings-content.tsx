@@ -6,6 +6,7 @@ import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
@@ -650,17 +651,13 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetForm() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Name</label>
@@ -733,9 +730,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -938,17 +934,13 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">Add GitHub App</h3>
-              <Button size="sm" variant="ghost" onClick={closeModal} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { if (!open) closeModal(); else setShowModal(true) }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">Add GitHub App</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
@@ -1077,14 +1069,13 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                 Save
               </Button>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
 
       {/* Confirm save modal — not tested or test failed */}
-      {showConfirmModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-md p-5 space-y-4">
+      <Dialog open={showConfirmModal} onOpenChange={open => { if (!open) setShowConfirmModal(false) }}>
+        <DialogContent className="max-w-md p-0 gap-0">
+          <div className="p-5 space-y-4">
             {testResult === null ? (
               <>
                 <div className="flex items-center gap-2">
@@ -1116,8 +1107,8 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
               </Button>
             </div>
           </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -1636,19 +1627,15 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       </div>
 
       {/* Unified Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <div className="flex items-center gap-2">
-                {modalIcon}
-                <h3 className="font-medium">{modalTitle}</h3>
-              </div>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetModal() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
+        <DialogContent className="max-w-lg p-0 gap-0">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div className="flex items-center gap-2">
+              {modalIcon}
+              <h3 className="font-medium">{modalTitle}</h3>
             </div>
-            <div className="p-5 space-y-4">
+          </div>
+          <div className="p-5 space-y-4">
               <p className="text-sm text-muted-foreground">
                 Connect a {trackerTypeLabel(modalMode === "add" ? modalType : editType)} workspace to sync issues.
               </p>
@@ -1681,9 +1668,8 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -2971,17 +2957,13 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetForm() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Name</label>
@@ -3113,9 +3095,8 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
