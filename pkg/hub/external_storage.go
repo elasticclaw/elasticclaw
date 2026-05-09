@@ -253,14 +253,14 @@ func migrationMarkerPath() string {
 	return filepath.Join(hubDataDir(), ".migrated_v2")
 }
 
-// hasMigratedV2 checks if the v2 migration has already run.
-func hasMigratedV2() bool {
+// HasMigratedV2 checks if the v2 migration has already run.
+func HasMigratedV2() bool {
 	_, err := os.Stat(migrationMarkerPath())
 	return err == nil
 }
 
-// markMigratedV2 writes the migration marker.
-func markMigratedV2() error {
+// MarkMigratedV2 writes the migration marker.
+func MarkMigratedV2() error {
 	return os.WriteFile(migrationMarkerPath(), []byte(""), 0644)
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -97,9 +98,35 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 
 	hub.Version = Version // propagate build-time version for bridge download URL
+
+	// Ensure external storage directories exist (factories/, templates/)
+	if err := hub.EnsureExternalDirs(); err != nil {
+		return fmt.Errorf("failed to create external storage dirs: %w", err)
+	}
+
 	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
+	}
+
+	// Migrate legacy templates from SQLite and factories from hub.yaml on first run
+	if !hub.HasMigratedV2() {
+		fmt.Println("[hub] migrating legacy templates and factories to external storage...")
+		if err := s.MigrateLegacyTemplates(); err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] template migration warning: %v\n", err)
+		}
+		migrated, err := hub.MigrateLegacyFactories(hubCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] factory migration warning: %v\n", err)
+		}
+		if len(migrated) > 0 {
+			fmt.Printf("[hub] migrated factories: %s\n", strings.Join(migrated, ", "))
+		}
+		if err := hub.MarkMigratedV2(); err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] failed to write migration marker: %v\n", err)
+		} else {
+			fmt.Println("[hub] migration complete — future runs will skip this step")
+		}
 	}
 
 	// Provision tenant from CLI flags or hub.yaml (whichever is set)
