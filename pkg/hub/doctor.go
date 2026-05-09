@@ -396,6 +396,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 
 	// Build set of template names from hub DB
 	templateNames := make(map[string]bool)
+	templateNamesValid := true
 	rows, err := s.db.Query(`SELECT name FROM hub_templates`)
 	if err == nil && rows != nil {
 		defer rows.Close()
@@ -409,6 +410,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			// DB iteration failed — templateNames may be incomplete.
 			// Emit a warning and skip the template-existence factory check
 			// to avoid false "missing template" critical alerts.
+			templateNamesValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "factories",
 				Severity:    "warning",
@@ -452,7 +454,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		factoryNames[f.Name]++
 
 		// Check 2: template exists
-		if f.Template != "" && !templateNames[f.Template] {
+		if templateNamesValid && f.Template != "" && !templateNames[f.Template] {
 			checks = append(checks, DoctorCheck{
 				Category:    "factories",
 				Severity:    "critical",
