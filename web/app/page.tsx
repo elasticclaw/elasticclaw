@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
 import { SpawnModal } from "@/components/spawn-modal"
 import { SetupScreen } from "@/components/setup-screen"
+import { ManualTriggerPanel } from "@/components/manual-trigger-panel"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
 import { isConfigured } from "@/lib/api"
@@ -285,23 +286,31 @@ export default function Home() {
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
       />
-      <ConversationView
-        claw={selectedClaw}
-        allClaws={claws}
-        messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
-        allMessages={mergedMessages}
-        onSendMessage={handleSendMessage}
-        onSendMessageToClaw={handleSendMessageToClaw}
-        onKill={handleKill}
-        onKillClaw={handleKillClaw}
-        onNewSession={handleNewSession}
-        onNewSessionForClaw={handleNewSessionForClaw}
-        onSelectClaw={handleSelectClaw}
-        onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
-        onReorderClaws={reorderClaws}
-        loading={loading}
-        hubError={hubError}
-      />
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Manual trigger panel — only visible in board view (no claw selected) */}
+        {!selectedClaw && (
+          <div className="shrink-0 px-6 pt-4">
+            <ManualTriggerPanel />
+          </div>
+        )}
+        <ConversationView
+          claw={selectedClaw}
+          allClaws={claws}
+          messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
+          allMessages={mergedMessages}
+          onSendMessage={handleSendMessage}
+          onSendMessageToClaw={handleSendMessageToClaw}
+          onKill={handleKill}
+          onKillClaw={handleKillClaw}
+          onNewSession={handleNewSession}
+          onNewSessionForClaw={handleNewSessionForClaw}
+          onSelectClaw={handleSelectClaw}
+          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+          onReorderClaws={reorderClaws}
+          loading={loading}
+          hubError={hubError}
+        />
+      </div>
       <SpawnModal
         open={spawnModalOpen}
         onOpenChange={setSpawnModalOpen}

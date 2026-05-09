@@ -105,23 +105,24 @@ func isFactoryEnabled(f *types.FactoryConfig) bool {
 }
 
 type FactoryView struct {
-	Name             string   `json:"name"`
-	Integration      string   `json:"integration"`
-	Workspace        string   `json:"workspace"`
-	Team             string   `json:"team"`
-	TriggerStatus    string   `json:"triggerStatus"`
-	DoneStatus       string   `json:"doneStatus"`
-	TerminateOnLeave bool     `json:"terminateOnLeave"`
-	Template         string   `json:"template"`
-	NamePattern      string   `json:"namePattern"`
-	WebhookSecretSet bool     `json:"webhookSecretSet"`
-	WebhookSecretRef string   `json:"webhookSecretRef,omitempty"`
-	PipelineYAML     string   `json:"pipelineYAML,omitempty"`
-	Tags             []string `json:"tags"`
-	Color            string   `json:"color"`
-	Labels           []string `json:"labels,omitempty"`
-	AssignedTo       string   `json:"assigned_to,omitempty"`
-	Enabled          bool     `json:"enabled"`
+	Name                string   `json:"name"`
+	Integration         string   `json:"integration"`
+	Workspace           string   `json:"workspace"`
+	Team                string   `json:"team"`
+	TriggerStatus       string   `json:"triggerStatus"`
+	DoneStatus          string   `json:"doneStatus"`
+	TerminateOnLeave    bool     `json:"terminateOnLeave"`
+	Template            string   `json:"template"`
+	NamePattern         string   `json:"namePattern"`
+	WebhookSecretSet    bool     `json:"webhookSecretSet"`
+	WebhookSecretRef    string   `json:"webhookSecretRef,omitempty"`
+	PipelineYAML        string   `json:"pipelineYAML,omitempty"`
+	Tags                []string `json:"tags"`
+	Color               string   `json:"color"`
+	Labels              []string `json:"labels,omitempty"`
+	AssignedTo          string   `json:"assigned_to,omitempty"`
+	Enabled             bool     `json:"enabled"`
+	EnableManualTrigger bool     `json:"enableManualTrigger,omitempty"`
 }
 
 type ProviderView struct {
@@ -406,23 +407,24 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, f := range mergedFactories {
 		view.Factories = append(view.Factories, FactoryView{
-			Name:             f.Name,
-			Integration:      f.Integration,
-			Workspace:        f.Workspace,
-			Team:             f.Team,
-			TriggerStatus:    f.TriggerStatus,
-			DoneStatus:       f.DoneStatus,
-			TerminateOnLeave: f.TerminateOnLeave,
-			Template:         f.Template,
-			NamePattern:      f.NamePattern,
-			WebhookSecretSet: f.WebhookSecret != "" || f.WebhookSecretRef != "",
-			WebhookSecretRef: f.WebhookSecretRef,
-			PipelineYAML:     f.PipelineYAML,
-			Tags:             f.Tags,
-			Color:            f.Color,
-			Labels:           f.Labels,
-			AssignedTo:       f.AssignedTo,
-			Enabled:          isFactoryEnabled(f),
+			Name:                f.Name,
+			Integration:         f.Integration,
+			Workspace:           f.Workspace,
+			Team:                f.Team,
+			TriggerStatus:       f.TriggerStatus,
+			DoneStatus:          f.DoneStatus,
+			TerminateOnLeave:    f.TerminateOnLeave,
+			Template:            f.Template,
+			NamePattern:         f.NamePattern,
+			WebhookSecretSet:    f.WebhookSecret != "" || f.WebhookSecretRef != "",
+			WebhookSecretRef:    f.WebhookSecretRef,
+			PipelineYAML:        f.PipelineYAML,
+			Tags:                f.Tags,
+			Color:               f.Color,
+			Labels:              f.Labels,
+			AssignedTo:          f.AssignedTo,
+			Enabled:             isFactoryEnabled(f),
+			EnableManualTrigger: f.EnableManualTrigger,
 		})
 	}
 	// Auth config

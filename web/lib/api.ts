@@ -228,3 +228,47 @@ export async function patchClawAutoSettings(clawId: string, patch: { autoFixCI?:
     body: JSON.stringify(patch),
   })
 }
+
+// Factory types for manual trigger
+export interface FactoryInput {
+  name: string
+  type: string
+  required?: boolean
+  default?: string
+  description?: string
+  options?: string[]
+  validation?: string
+}
+
+export interface Factory {
+  name: string
+  integration: string
+  workspace: string
+  team: string
+  triggerStatus: string
+  doneStatus: string
+  terminateOnLeave: boolean
+  template: string
+  namePattern: string
+  webhookSecretSet: boolean
+  webhookSecretRef?: string
+  pipelineYAML?: string
+  tags?: string[]
+  color?: string
+  labels?: string[]
+  assigned_to?: string
+  enabled: boolean
+  enableManualTrigger?: boolean
+  inputs?: FactoryInput[]
+}
+
+export async function fetchFactories(): Promise<Factory[]> {
+  return apiFetch<Factory[]>("/api/factories")
+}
+
+export async function triggerFactory(name: string, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
+  return apiFetch<{ claw_id: string; status: string }>(`/api/factories/${encodeURIComponent(name)}/trigger`, {
+    method: "POST",
+    body: JSON.stringify({ inputs: inputs || {} }),
+  })
+}
