@@ -320,13 +320,17 @@ func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
 		migrated = append(migrated, f.Name)
 	}
 
-	// Strip factories from hub.yaml so they are never loaded from legacy location again
+	// Strip factories from hub.yaml so they are never loaded from legacy location again.
+	// This runs even if len(migrated)==0 (all factories already on disk) to prevent
+	// split-brain where hub.yaml and external storage both claim ownership.
+	cfg.Factories = nil
+	if err := config.SaveHubConfig(cfg); err != nil {
+		return migrated, fmt.Errorf("strip factories from hub.yaml: %w", err)
+	}
 	if len(migrated) > 0 {
-		cfg.Factories = nil
-		if err := config.SaveHubConfig(cfg); err != nil {
-			return migrated, fmt.Errorf("strip factories from hub.yaml: %w", err)
-		}
 		fmt.Println("[hub] stripped migrated factories from hub.yaml")
+	} else {
+		fmt.Println("[hub] no inline factories to migrate — cleared factories from hub.yaml")
 	}
 	return migrated, nil
 }

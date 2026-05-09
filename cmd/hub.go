@@ -109,13 +109,19 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}
 
-	// Migrate legacy templates from SQLite and factories from hub.yaml on first run.
+	// Migrate legacy templates from SQLite and factories from hub.yaml.
 	// Migration is mandatory — if it fails, the hub refuses to start to prevent
 	// split-brain where some data lives in external storage and some in legacy locations.
-	if !hub.HasMigratedV2() {
+	// Also re-runs if hub.yaml still has inline factories (e.g. prior migration didn't
+	// clean up, or user manually edited hub.yaml after migration).
+	needsMigrate := !hub.HasMigratedV2()
+	needsCleanup := len(hubCfg.Factories) > 0
+	if needsMigrate || needsCleanup {
 		fmt.Println("[hub] migrating legacy templates and factories to external storage...")
-		if err := s.MigrateLegacyTemplates(); err != nil {
-			return fmt.Errorf("template migration failed: %w", err)
+		if needsMigrate {
+			if err := s.MigrateLegacyTemplates(); err != nil {
+				return fmt.Errorf("template migration failed: %w", err)
+			}
 		}
 		migrated, err := hub.MigrateLegacyFactories(hubCfg)
 		if err != nil {
@@ -124,10 +130,14 @@ func runHub(cmd *cobra.Command, args []string) error {
 		if len(migrated) > 0 {
 			fmt.Printf("[hub] migrated factories: %s\n", strings.Join(migrated, ", "))
 		}
-		if err := hub.MarkMigratedV2(); err != nil {
-			return fmt.Errorf("migration marker write failed: %w", err)
+		if needsMigrate {
+			if err := hub.MarkMigratedV2(); err != nil {
+				return fmt.Errorf("migration marker write failed: %w", err)
+			}
+			fmt.Println("[hub] migration complete — future runs will skip this step")
+		} else {
+			fmt.Println("[hub] cleaned up lingering factories from hub.yaml")
 		}
-		fmt.Println("[hub] migration complete — future runs will skip this step")
 	}
 
 	// Provision tenant from CLI flags or hub.yaml (whichever is set)
