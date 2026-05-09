@@ -170,13 +170,13 @@ func coerceInput(typ string, raw interface{}) (string, error) {
 // handleFactoryTrigger handles POST /api/factories/{name}/trigger.
 func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	name := r.PathValue("name")
 	if name == "" {
-		http.Error(w, "missing factory name", http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "missing factory name")
 		return
 	}
 
@@ -194,28 +194,28 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		s.mu.RUnlock()
 	}
 	if factory == nil {
-		http.Error(w, "factory not found", http.StatusNotFound)
+		jsonError(w, http.StatusNotFound, "factory not found")
 		return
 	}
 
 	// Parse request body
 	var req FactoryTriggerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
 	// Validate inputs against factory schema
 	validatedInputs, err := validateFactoryInputs(factory.Inputs, req.Inputs)
 	if err != nil {
-		http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+		jsonError(w, http.StatusBadRequest, "validation error: "+err.Error())
 		return
 	}
 
 	// Create claw from factory with manual trigger inputs
 	clawID, err := s.createClawFromFactory(factory, "", validatedInputs, nil)
 	if err != nil {
-		http.Error(w, "failed to create claw: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
 	}
 

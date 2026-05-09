@@ -1917,14 +1917,23 @@ function FactoryTriggerButton({ factory, hubUrl, token }: { factory: NonNullable
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       })
-      const data = await res.json().catch(() => ({}))
+      // Hub sends errors as either JSON {error: string} or text/plain via http.Error()
+      const contentType = res.headers.get("content-type") || ""
+      let errorMsg: string
+      let resData: Record<string, unknown> = {}
+      if (contentType.includes("application/json")) {
+        resData = await res.json().catch(() => ({}))
+        errorMsg = (resData.error as string) || `HTTP ${res.status}`
+      } else {
+        errorMsg = (await res.text().catch(() => "")).trim() || `HTTP ${res.status}`
+      }
       if (!res.ok) {
-        setError(data.error || `HTTP ${res.status}`)
+        setError(errorMsg)
         setLoading(false)
         return
       }
       setOpen(false)
-      window.location.href = `/claws/${data.claw_id}`
+      window.location.href = `/claws/${resData.claw_id}`
     } catch (e) {
       setError(String(e))
     }

@@ -1935,6 +1935,12 @@ func jsonOK(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func jsonError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 // Provision creates or updates the default tenant (for alpha single-user setup).
 // If a tenant named "default" already exists, its token and claw_token are updated
 // so that hub.yaml token changes take effect on restart without manual DB surgery.
