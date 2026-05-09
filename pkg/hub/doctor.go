@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -407,21 +409,33 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		return checks
 	}
 
-	// Build set of template names from hub DB
+	// Build set of template names from external storage + legacy DB
 	templateNames := make(map[string]bool)
 	templateNamesValid := true
+
+	// External templates first
+	externalNames, err := listExternalTemplates()
+	if err == nil {
+		for _, name := range externalNames {
+			templateNames[name] = true
+		}
+	}
+
+	// Legacy DB templates (for migration period)
 	rows, err := s.db.Query(`SELECT name FROM hub_templates`)
 	if err != nil {
-		// Query itself failed — templateNames is empty, so we must skip
-		// template-existence checks to avoid false critical alerts.
-		templateNamesValid = false
-		checks = append(checks, DoctorCheck{
-			Category:    "factories",
-			Severity:    "warning",
-			Title:       "Could not verify templates from database",
-			Description: fmt.Sprintf("Template list query failed: %v. Factory template references cannot be validated.", err),
-			OK:          false,
-		})
+		// Query itself failed — templateNames may be empty from external too,
+		// so we must skip template-existence checks to avoid false critical alerts.
+		if len(templateNames) == 0 {
+			templateNamesValid = false
+			checks = append(checks, DoctorCheck{
+				Category:    "factories",
+				Severity:    "warning",
+				Title:       "Could not verify templates",
+				Description: fmt.Sprintf("Template list query failed: %v. Factory template references cannot be validated.", err),
+				OK:          false,
+			})
+		}
 	} else if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -434,14 +448,16 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			// DB iteration failed — templateNames may be incomplete.
 			// Emit a warning and skip the template-existence factory check
 			// to avoid false "missing template" critical alerts.
-			templateNamesValid = false
-			checks = append(checks, DoctorCheck{
-				Category:    "factories",
-				Severity:    "warning",
-				Title:       "Could not verify templates from database",
-				Description: fmt.Sprintf("Template list query failed during iteration: %v. Factory template references cannot be validated.", err),
-				OK:          false,
-			})
+			if len(templateNames) == 0 {
+				templateNamesValid = false
+				checks = append(checks, DoctorCheck{
+					Category:    "factories",
+					Severity:    "warning",
+					Title:       "Could not verify templates",
+					Description: fmt.Sprintf("Template list query failed during iteration: %v. Factory template references cannot be validated.", err),
+					OK:          false,
+				})
+			}
 		}
 	}
 	// Also check local templates via config resolution
@@ -597,17 +613,64 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		secretNames[name] = true
 	}
 
-	// Template secrets are checked at the factory level (factory references template)
-	// Individual template configs are loaded at runtime, not stored in hub.yaml
-	// TODO: Load template configs from hub_templates DB or filesystem and check their secrets
-
-	checks = append(checks, DoctorCheck{
-		Category:    "templates",
-		Severity:    "info",
-		Title:       "Template checks pending",
-		Description: "Template configuration validation is not yet implemented.",
-		OK:          true,
-	})
+	// Check external templates for common issues
+	externalNames, err := listExternalTemplates()
+	if err != nil && !os.IsNotExist(err) {
+		checks = append(checks, DoctorCheck{
+			Category:    "templates",
+			Severity:    "warning",
+			Title:       "Could not list external templates",
+			Description: fmt.Sprintf("Error reading templates directory: %v", err),
+			OK:          false,
+		})
+	} else {
+		for _, name := range externalNames {
+			_, err := loadExternalTemplate(name)
+			if err != nil {
+				checks = append(checks, DoctorCheck{
+					Category:    "templates",
+					Severity:    "warning",
+					Title:       fmt.Sprintf("Template %q unreadable", name),
+					Description: fmt.Sprintf("Could not read template %q: %v", name, err),
+					OK:          false,
+				})
+				continue
+			}
+			// Check for elasticclaw-config.yaml directly (not via ReadTemplateFiles allow-list)
+			configPath := filepath.Join(templatesDir(), name, "elasticclaw-config.yaml")
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
+				checks = append(checks, DoctorCheck{
+					Category:    "templates",
+					Severity:    "warning",
+					Title:       fmt.Sprintf("Template %q missing elasticclaw-config.yaml", name),
+					Description: fmt.Sprintf("Template %q does not contain an elasticclaw-config.yaml file. This may cause issues when creating claws.", name),
+					OK:          false,
+					FixAction: &FixAction{
+						Type:   "navigate",
+						Target: "/settings/templates",
+						Label:  "Manage Templates",
+					},
+				})
+			}
+		}
+		if len(externalNames) == 0 {
+			checks = append(checks, DoctorCheck{
+				Category:    "templates",
+				Severity:    "info",
+				Title:       "No external templates",
+				Description: "No templates found in external storage. Use 'elasticclaw template push' to add templates.",
+				OK:          true,
+			})
+		} else {
+			checks = append(checks, DoctorCheck{
+				Category:    "templates",
+				Severity:    "info",
+				Title:       fmt.Sprintf("%d template(s) in external storage", len(externalNames)),
+				Description: "Templates are stored as external files alongside hub.yaml.",
+				OK:          true,
+			})
+		}
+	}
 
 	return checks
 }

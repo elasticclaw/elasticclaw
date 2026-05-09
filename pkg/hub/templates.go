@@ -40,10 +40,12 @@ func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 			"files": files,
 		})
 	case http.MethodDelete:
-		if _, err := s.db.Exec(`DELETE FROM hub_templates WHERE name = ?`, name); err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+		if err := deleteExternalTemplate(name); err != nil {
+			http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Also clean up legacy DB row if present
+		_, _ = s.db.Exec(`DELETE FROM hub_templates WHERE name = ?`, name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -51,24 +53,50 @@ func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
+	// List from external storage first
+	names, err := listExternalTemplates()
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		http.Error(w, "fs error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+
+	// Collect legacy DB templates and their updated_at timestamps in one pass
+	dbUpdatedAt := make(map[string]string)
+	rows, err := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name, updatedAt string
+			if err := rows.Scan(&name, &updatedAt); err != nil {
+				continue
+			}
+			dbUpdatedAt[name] = updatedAt
+			// Deduplicate: external takes precedence
+			found := false
+			for _, n := range names {
+				if n == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				names = append(names, name)
+			}
+		}
+	}
 
 	type entry struct {
 		Name      string `json:"name"`
 		UpdatedAt string `json:"updatedAt"`
 	}
-	var out []entry
-	for rows.Next() {
-		var e entry
-		if err := rows.Scan(&e.Name, &e.UpdatedAt); err != nil {
-			continue
+	now := time.Now().UTC().Format(time.RFC3339)
+	out := make([]entry, len(names))
+	for i, name := range names {
+		ts := now
+		if v, ok := dbUpdatedAt[name]; ok && v != "" {
+			ts = v
 		}
-		out = append(out, e)
+		out[i] = entry{Name: name, UpdatedAt: ts}
 	}
 	if out == nil {
 		out = []entry{}
@@ -91,41 +119,54 @@ func (s *Server) pushTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write to external storage
+	if err := saveExternalTemplate(body.Name, body.Files); err != nil {
+		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Also write to legacy DB for backward compat during migration
 	filesJSON, _ := json.Marshal(body.Files)
 	now := time.Now().UTC()
-
-	_, err := s.db.Exec(`
+	_, _ = s.db.Exec(`
 		INSERT INTO hub_templates(name, files, created_at, updated_at)
 		VALUES(?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET files=excluded.files, updated_at=excluded.updated_at`,
 		body.Name, string(filesJSON), now, now,
 	)
-	if err != nil {
-		http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+
 	jsonOK(w, map[string]string{"name": body.Name})
 }
 
-// loadHubTemplate fetches a template's files from the hub DB.
-// Used by the factory engine when creating claws.
+// loadHubTemplate fetches a template's files.
+// Tries external storage first, then legacy DB.
 func (s *Server) loadHubTemplate(name string) (map[string]string, error) {
+	// External storage first
+	files, err := loadExternalTemplate(name)
+	if err == nil {
+		return files, nil
+	}
+	// Legacy DB fallback
 	var filesJSON string
-	err := s.db.QueryRow(`SELECT files FROM hub_templates WHERE name = ?`, name).Scan(&filesJSON)
+	err = s.db.QueryRow(`SELECT files FROM hub_templates WHERE name = ?`, name).Scan(&filesJSON)
 	if err != nil {
 		return nil, err
 	}
-	var files map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 		return nil, err
 	}
 	return files, nil
 }
 
-// resolveTemplateFiles tries hub DB first, then local filesystem via config.ResolveTemplate.
+// resolveTemplateFiles tries external storage first, then legacy DB, then local filesystem.
 func (s *Server) resolveTemplateFiles(name string) (map[string]string, error) {
-	// Hub DB first (pushed via `elasticclaw template push`)
-	files, err := s.loadHubTemplate(name)
+	// External storage first
+	files, err := loadExternalTemplate(name)
+	if err == nil {
+		return files, nil
+	}
+	// Legacy DB second
+	files, err = s.loadHubTemplate(name)
 	if err == nil {
 		return files, nil
 	}
