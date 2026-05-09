@@ -1933,9 +1933,12 @@ function FactoryTriggerButton({ factory, hubUrl, token }: { factory: NonNullable
 
   if (!hasInputs) {
     return (
-      <Button size="sm" variant="outline" onClick={handleTrigger} disabled={loading}>
-        {loading ? "..." : "Trigger"}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="outline" onClick={handleTrigger} disabled={loading}>
+          {loading ? "..." : "Trigger"}
+        </Button>
+        {error && <span className="text-xs text-red-500">{error}</span>}
+      </div>
     )
   }
 
