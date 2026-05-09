@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -28,6 +29,7 @@ func FactoryCmd() *cobra.Command {
 	cmd.AddCommand(factoryListCmd())
 	cmd.AddCommand(factoryShowCmd())
 	cmd.AddCommand(factoryRmCmd())
+	cmd.AddCommand(factoryTriggerCmd())
 	return cmd
 }
 
@@ -414,6 +416,85 @@ func runFactoryRm(name string) error {
 	}
 
 	fmt.Printf("Removed factory %q from hub.\n", name)
+	return nil
+}
+
+// ── factory trigger ───────────────────────────────────────────────────────────
+
+func factoryTriggerCmd() *cobra.Command {
+	var inputs []string
+	cmd := &cobra.Command{
+		Use:   "trigger <name>",
+		Short: "Manually trigger a factory with inputs",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFactoryTrigger(args[0], inputs)
+		},
+	}
+	cmd.Flags().StringArrayVar(&inputs, "input", nil, "input values as key=value (can be repeated)")
+	return cmd
+}
+
+func runFactoryTrigger(name string, inputs []string) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+
+	// Parse inputs
+	inputMap := make(map[string]interface{})
+	for _, in := range inputs {
+		parts := strings.SplitN(in, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid input format %q (expected key=value)", in)
+		}
+		key := parts[0]
+		val := parts[1]
+
+		// Try bool
+		if strings.EqualFold(val, "true") {
+			inputMap[key] = true
+			continue
+		}
+		if strings.EqualFold(val, "false") {
+			inputMap[key] = false
+			continue
+		}
+
+		// Try number
+		if num, err := strconv.ParseFloat(val, 64); err == nil {
+			inputMap[key] = num
+			continue
+		}
+
+		// String
+		inputMap[key] = val
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"inputs": inputMap})
+	req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/factories/"+url.PathEscape(name)+"/trigger", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trigger failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result struct {
+		ClawID string `json:"claw_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	fmt.Printf("Triggered factory %q → claw %s (%s)\n", name, result.ClawID[:8], result.Status)
 	return nil
 }
 

@@ -64,6 +64,10 @@ interface SettingsData {
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
+    inputs?: Array<{
+      name: string; type: string; required?: boolean; default?: string
+      description?: string; options?: string[]; validation?: string
+    }>
   }>
   secrets?: string[]
   mcpServers?: Array<{
@@ -1765,6 +1769,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
   const [maxConcurrent, setMaxConcurrent] = useState<number>(settings.maxConcurrentClaws || 0)
+  const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
 
   // Keep local state in sync when settings load
   useEffect(() => {
@@ -1870,12 +1875,124 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                   )} />
                 </button>
                 <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
+                <FactoryTriggerButton factory={f} hubUrl={hubUrl} token={token} />
               </div>
             </div>
           ))}
         </div>
       )}
     </div>
+  )
+}
+
+function FactoryTriggerButton({ factory, hubUrl, token }: { factory: NonNullable<SettingsData["factories"]>[number]; hubUrl: string; token: string }) {
+  const [open, setOpen] = useState(false)
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const hasInputs = factory.inputs && factory.inputs.length > 0
+
+  const handleTrigger = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const body: Record<string, unknown> = {}
+      if (factory.inputs) {
+        const inputs: Record<string, unknown> = {}
+        for (const input of factory.inputs) {
+          const val = values[input.name]
+          if (input.type === "bool") {
+            inputs[input.name] = val === "true"
+          } else if (input.type === "number") {
+            inputs[input.name] = parseFloat(val)
+          } else {
+            inputs[input.name] = val
+          }
+        }
+        body.inputs = inputs
+      }
+      const res = await fetch(`${hubUrl}/api/factories/${encodeURIComponent(factory.name)}/trigger`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error || `HTTP ${res.status}`)
+        setLoading(false)
+        return
+      }
+      setOpen(false)
+      window.location.href = `/claws/${data.claw_id}`
+    } catch (e) {
+      setError(String(e))
+    }
+    setLoading(false)
+  }
+
+  if (!hasInputs) {
+    return (
+      <Button size="sm" variant="outline" onClick={handleTrigger} disabled={loading}>
+        {loading ? "..." : "Trigger"}
+      </Button>
+    )
+  }
+
+  return (
+    <>
+      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>Trigger</Button>
+      {open && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4">
+            <h3 className="text-sm font-medium">Trigger {factory.name}</h3>
+            {factory.inputs!.map((input) => (
+              <div key={input.name} className="space-y-1">
+                <label className="text-xs font-medium">
+                  {input.name}
+                  {input.required && <span className="text-red-500">*</span>}
+                </label>
+                {input.description && <p className="text-xs text-muted-foreground">{input.description}</p>}
+                {input.type === "enum" && input.options ? (
+                  <select
+                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
+                    value={values[input.name] || input.default || ""}
+                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
+                  >
+                    {input.options.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                ) : input.type === "bool" ? (
+                  <select
+                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
+                    value={values[input.name] || input.default || "false"}
+                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
+                  >
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                ) : (
+                  <Input
+                    type={input.type === "number" ? "number" : "text"}
+                    value={values[input.name] || input.default || ""}
+                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
+                    placeholder={input.default}
+                  />
+                )}
+              </div>
+            ))}
+            {error && <p className="text-xs text-red-500">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button size="sm" onClick={handleTrigger} disabled={loading}>
+                {loading ? "Triggering..." : "Trigger"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

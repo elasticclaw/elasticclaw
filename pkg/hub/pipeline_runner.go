@@ -256,6 +256,28 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
 
+		// For manual triggers, also try rendering with {{ .Inputs.* }} variables
+		// if no issue context was available
+		if issueID == "" {
+			tmpl, err := template.New("inject").Parse(injectMsg)
+			if err == nil {
+				var buf bytes.Buffer
+				// Load inputs from CONTEXT.md (stored during manual trigger)
+				inputs := s.loadManualTriggerInputs(clawID)
+				if inputs != nil {
+					data := struct {
+						Inputs map[string]string
+					}{
+						Inputs: inputs,
+					}
+					if err := tmpl.Execute(&buf, data); err == nil {
+						injectMsg = buf.String()
+						log.Printf("[pipeline] template RENDERED with inputs for claw %s", clawID[:8])
+					}
+				}
+			}
+		}
+
 		s.injectHubMessageByID(clawID, injectMsg)
 	}
 
