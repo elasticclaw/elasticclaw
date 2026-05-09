@@ -411,7 +411,18 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	templateNames := make(map[string]bool)
 	templateNamesValid := true
 	rows, err := s.db.Query(`SELECT name FROM hub_templates`)
-	if err == nil && rows != nil {
+	if err != nil {
+		// Query itself failed — templateNames is empty, so we must skip
+		// template-existence checks to avoid false critical alerts.
+		templateNamesValid = false
+		checks = append(checks, DoctorCheck{
+			Category:    "factories",
+			Severity:    "warning",
+			Title:       "Could not verify templates from database",
+			Description: fmt.Sprintf("Template list query failed: %v. Factory template references cannot be validated.", err),
+			OK:          false,
+		})
+	} else if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
 			var name string
