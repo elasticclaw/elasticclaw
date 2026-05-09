@@ -891,8 +891,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 				}
+				// Also check external storage for secrets
+				if webhookSecret == "" {
+					if disk, err := loadExternalFactory(matchName); err == nil && disk.WebhookSecret != "" {
+						webhookSecret = disk.WebhookSecret
+					}
+				}
 			}
-			factories = append(factories, &types.FactoryConfig{
+			factory := &types.FactoryConfig{
 				Name: fp.Name, Integration: fp.Integration,
 				Workspace: fp.Workspace, Team: fp.Team,
 				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
@@ -901,7 +907,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				WebhookSecretRef: fp.WebhookSecretRef, PipelineYAML: fp.PipelineYAML,
 				Tags: fp.Tags, Color: fp.Color, Labels: fp.Labels,
 				AssignedTo: fp.AssignedTo, Enabled: fp.Enabled,
-			})
+			}
+			factories = append(factories, factory)
+
+			// If this factory exists in external storage, update it there too
+			// so that toggles like Enabled are persisted to disk.
+			if _, err := loadExternalFactory(fp.Name); err == nil {
+				_ = saveExternalFactory(factory)
+			}
 		}
 		updatedCfg.Factories = factories
 	}
