@@ -60,7 +60,8 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also include legacy DB templates (for migration period)
+	// Collect legacy DB templates and their updated_at timestamps in one pass
+	dbUpdatedAt := make(map[string]string)
 	rows, err := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
 	if err == nil {
 		defer rows.Close()
@@ -69,6 +70,7 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&name, &updatedAt); err != nil {
 				continue
 			}
+			dbUpdatedAt[name] = updatedAt
 			// Deduplicate: external takes precedence
 			found := false
 			for _, n := range names {
@@ -79,19 +81,6 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 			}
 			if !found {
 				names = append(names, name)
-			}
-		}
-	}
-
-	// Collect real updated_at timestamps from legacy DB rows
-	dbUpdatedAt := make(map[string]string)
-	rows2, err2 := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
-	if err2 == nil {
-		defer rows2.Close()
-		for rows2.Next() {
-			var n, ts string
-			if err := rows2.Scan(&n, &ts); err == nil {
-				dbUpdatedAt[n] = ts
 			}
 		}
 	}
