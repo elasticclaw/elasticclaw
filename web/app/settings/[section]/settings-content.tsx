@@ -6,7 +6,7 @@ import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
@@ -525,6 +525,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       {/* Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h3 className="font-medium">{modalTitle}</h3>
           </div>
@@ -829,6 +830,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       {/* Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
           </div>
@@ -1112,6 +1114,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       {/* Modal */}
       <Dialog open={showModal} onOpenChange={open => { if (!open) closeModal(); else setShowModal(true) }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">Add GitHub App</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h3 className="font-medium">Add GitHub App</h3>
           </div>
@@ -1251,6 +1254,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       {/* Confirm save modal — not tested or test failed */}
       <Dialog open={showConfirmModal} onOpenChange={open => { if (!open) setShowConfirmModal(false) }}>
         <DialogContent className="max-w-md p-0 gap-0">
+          <DialogTitle className="sr-only">Confirm GitHub App Save</DialogTitle>
           <div className="p-5 space-y-4">
             {testResult === null ? (
               <>
@@ -1805,6 +1809,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       {/* Unified Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
         <DialogContent className="max-w-lg p-0 gap-0">
+          <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
               {modalIcon}
@@ -3057,6 +3062,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       {/* Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
           </div>
