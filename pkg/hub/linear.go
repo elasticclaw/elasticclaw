@@ -492,30 +492,69 @@ func (s *Server) promotePendingClaws() {
 	defer s.promoteMu.Unlock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	// Build a map of group name → limit for quick lookup
+	groupLimits := make(map[string]int)
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		groupLimits[g.Name] = g.Limit
+	}
+	// Fallback: global maxConcurrent maps to "global" group
+	if s.hubCfg.MaxConcurrentClaws > 0 {
+		if _, ok := groupLimits["global"]; !ok {
+			groupLimits["global"] = s.hubCfg.MaxConcurrentClaws
+		}
+	}
 	s.mu.RUnlock()
 
 	for {
-		active := s.countActiveClaws()
-
-		// 0 means unlimited — promote all pending claws
-		if maxConcurrent > 0 && active >= maxConcurrent {
-			return
-		}
-
 		// Find the oldest pending claw
-		var clawID, tenantID string
+		var clawID, tenantID, factoryName string
 		err := s.db.QueryRow(
-			`SELECT id, tenant_id FROM claws WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
-		).Scan(&clawID, &tenantID)
+			`SELECT id, tenant_id, name FROM claws WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+		).Scan(&clawID, &tenantID, &factoryName)
 		if err != nil {
 			// No pending claws
 			return
 		}
 
+		// Determine which group this claw belongs to by looking up its factory
+		groupName := "global"
+		var groupLimit int
+		s.mu.RLock()
+		for _, f := range s.hubCfg.Factories {
+			if f != nil && f.Name == factoryName {
+				if f.ConcurrencyGroup != "" {
+					groupName = f.ConcurrencyGroup
+				}
+				break
+			}
+		}
+		// Also check external factories
+		if groupName == "global" {
+			if externalFactories, err := loadExternalFactories(); err == nil {
+				for _, f := range externalFactories {
+					if f != nil && f.Name == factoryName && f.ConcurrencyGroup != "" {
+						groupName = f.ConcurrencyGroup
+						break
+					}
+				}
+			}
+		}
+		groupLimit = groupLimits[groupName]
+		if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+			groupLimit = s.hubCfg.MaxConcurrentClaws
+		}
+		s.mu.RUnlock()
+
+		active := s.countActiveClaws()
+
+		// 0 means unlimited — promote all pending claws
+		if groupLimit > 0 && active >= groupLimit {
+			return
+		}
+
 		// Promote to provisioning — scope UPDATE to pending status so a
 		// concurrent hard-delete doesn't match zero rows silently.
-		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, max=%d)", clawID[:8], active, maxConcurrent)
+		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, group=%s, limit=%d)", clawID[:8], active, groupName, groupLimit)
 		res, _ := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID)
 		n, _ := res.RowsAffected()
 		if n == 0 {

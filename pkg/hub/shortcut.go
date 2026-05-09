@@ -542,17 +542,31 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
 	// race where concurrent factory webhooks both read active < max and both
 	// insert as provisioning, exceeding the limit.
+	// Check concurrency limit (group-aware)
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	groupName := factory.ConcurrencyGroup
+	if groupName == "" {
+		groupName = "global"
+	}
+	var groupLimit int
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		if g.Name == groupName {
+			groupLimit = g.Limit
+			break
+		}
+	}
+	if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+		groupLimit = s.hubCfg.MaxConcurrentClaws
+	}
 	s.mu.RUnlock()
 
 	activeCount := s.countActiveClaws()
 	isPending := false
-	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for Shortcut story %s as pending", activeCount, maxConcurrent, storyID)
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for Shortcut story %s as pending", groupName, activeCount, groupLimit, storyID)
 	}
 
 	clawID := uuid.New().String()

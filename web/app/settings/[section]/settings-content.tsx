@@ -65,6 +65,7 @@ interface SettingsData {
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
+    concurrencyGroup?: string
     inputs?: Array<{
       name: string; type: string; required?: boolean; default?: string
       description?: string; options?: string[]; validation?: string
@@ -97,7 +98,13 @@ interface SettingsData {
     }
     disablePasswordAuth?: boolean
   }
+  concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
+}
+
+interface ConcurrencyGroup {
+  name: string
+  limit: number
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -1749,13 +1756,42 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
 function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
-  const [maxConcurrent, setMaxConcurrent] = useState<number>(settings.maxConcurrentClaws || 0)
   const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
 
-  // Keep local state in sync when settings load
-  useEffect(() => {
-    setMaxConcurrent(settings.maxConcurrentClaws || 0)
-  }, [settings.maxConcurrentClaws])
+  // Concurrency groups state
+  const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
+  const [newGroupName, setNewGroupName] = useState("")
+  const [newGroupLimit, setNewGroupLimit] = useState(0)
+
+  const allGroupNames = groups.map(g => g.name)
+
+  function saveGroups(updatedGroups: typeof groups) {
+    onSave({ concurrencyGroups: updatedGroups.map(g => ({ name: g.name, limit: g.limit })) })
+  }
+
+  function addGroup() {
+    if (!newGroupName.trim() || groups.some(g => g.name === newGroupName.trim())) return
+    const updated = [...groups, { name: newGroupName.trim(), limit: newGroupLimit }]
+    setNewGroupName("")
+    setNewGroupLimit(0)
+    saveGroups(updated)
+  }
+
+  function removeGroup(name: string) {
+    if (name === "global") return
+    saveGroups(groups.filter(g => g.name !== name))
+  }
+
+  function updateGroupLimit(name: string, limit: number) {
+    saveGroups(groups.map(g => g.name === name ? { ...g, limit } : g))
+  }
+
+  function updateFactoryGroup(factoryIdx: number, groupName: string) {
+    const updated = factories.map((x, j) => j === factoryIdx ? { ...x, concurrencyGroup: groupName } : x)
+    setSavedFactory(factories[factoryIdx].name)
+    setTimeout(() => setSavedFactory(null), 1500)
+    onSaveSilent({ factories: updated })
+  }
 
   return (
     <div className="space-y-6">
@@ -1766,37 +1802,64 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </p>
       </div>
 
-      {/* Concurrency Limit */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-medium text-sm">Concurrency Limit</p>
-            <p className="text-muted-foreground text-xs">
-              Maximum number of claws that can run simultaneously. New claws will queue as &ldquo;pending&rdquo; when the limit is reached.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              value={maxConcurrent}
-              onChange={(e) => setMaxConcurrent(parseInt(e.target.value) || 0)}
-              className="w-24 text-sm"
-              placeholder="0 = unlimited"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={saving || maxConcurrent === (settings.maxConcurrentClaws || 0)}
-              onClick={() => onSave({ maxConcurrentClaws: maxConcurrent })}
-            >
-              Save
-            </Button>
-          </div>
+      {/* Concurrency Groups */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-4">
+        <div>
+          <p className="font-medium text-sm">Concurrency Groups</p>
+          <p className="text-muted-foreground text-xs mt-0.5">
+            Limit how many claws can run simultaneously per group. 0 = unlimited.
+          </p>
         </div>
-        <p className="text-xs text-muted-foreground">
-          0 = unlimited (default). If lowered below current running count, existing claws keep running.
-        </p>
+
+        {/* Groups table */}
+        <div className="space-y-2">
+          {groups.map(g => (
+            <div key={g.name} className="flex items-center gap-3">
+              <span className="text-sm font-mono w-24 shrink-0">{g.name}</span>
+              <Input
+                type="number"
+                min={0}
+                value={g.limit}
+                onChange={(e) => updateGroupLimit(g.name, parseInt(e.target.value) || 0)}
+                className="w-24 text-sm h-7"
+                placeholder="0 = unlimited"
+              />
+              <span className="text-xs text-muted-foreground">limit</span>
+              {g.name !== "global" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive h-7 px-2"
+                  onClick={() => removeGroup(g.name)}
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Add group */}
+        <div className="flex items-center gap-2 pt-2 border-t border-border">
+          <Input
+            placeholder="Group name"
+            value={newGroupName}
+            onChange={(e) => setNewGroupName(e.target.value)}
+            className="w-32 text-sm h-7"
+            onKeyDown={(e) => { if (e.key === "Enter") addGroup() }}
+          />
+          <Input
+            type="number"
+            min={0}
+            value={newGroupLimit}
+            onChange={(e) => setNewGroupLimit(parseInt(e.target.value) || 0)}
+            className="w-24 text-sm h-7"
+            placeholder="Limit"
+          />
+          <Button size="sm" variant="outline" className="h-7" onClick={addGroup} disabled={!newGroupName.trim()}>
+            + Add Group
+          </Button>
+        </div>
       </div>
 
       {/* Factories-as-code callout */}
@@ -1829,6 +1892,16 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                 {savedFactory === f.name && (
                   <span className="text-xs text-green-500">✓</span>
                 )}
+                {/* Concurrency group dropdown */}
+                <select
+                  value={f.concurrencyGroup || "global"}
+                  onChange={(e) => updateFactoryGroup(i, e.target.value)}
+                  className="text-xs rounded-md border border-border bg-background px-2 py-1 h-7"
+                >
+                  {allGroupNames.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
                 <button
                   onClick={async () => {
                     const enabled = !(f.enabled ?? true)
@@ -1853,7 +1926,6 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                   )} />
                 </button>
                 <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
-                <FactoryTriggerButton factory={f} hubUrl={hubUrl} token={token} />
               </div>
             </div>
           ))}
@@ -1863,128 +1935,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   )
 }
 
-function FactoryTriggerButton({ factory, hubUrl, token }: { factory: NonNullable<SettingsData["factories"]>[number]; hubUrl: string; token: string }) {
-  const [open, setOpen] = useState(false)
-  const [values, setValues] = useState<Record<string, string>>({})
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
-  const hasInputs = factory.inputs && factory.inputs.length > 0
-
-  const handleTrigger = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const body: Record<string, unknown> = {}
-      if (factory.inputs) {
-        const inputs: Record<string, unknown> = {}
-        for (const input of factory.inputs) {
-          const val = values[input.name]
-          if (input.type === "bool") {
-            inputs[input.name] = val === "true"
-          } else if (input.type === "number") {
-            inputs[input.name] = parseFloat(val)
-          } else {
-            inputs[input.name] = val
-          }
-        }
-        body.inputs = inputs
-      }
-      const res = await fetch(`${hubUrl}/api/factories/${encodeURIComponent(factory.name)}/trigger`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      })
-      // Hub sends errors as either JSON {error: string} or text/plain via http.Error()
-      const contentType = res.headers.get("content-type") || ""
-      let errorMsg: string
-      let resData: Record<string, unknown> = {}
-      if (contentType.includes("application/json")) {
-        resData = await res.json().catch(() => ({}))
-        errorMsg = (resData.error as string) || `HTTP ${res.status}`
-      } else {
-        errorMsg = (await res.text().catch(() => "")).trim() || `HTTP ${res.status}`
-      }
-      if (!res.ok) {
-        setError(errorMsg)
-        setLoading(false)
-        return
-      }
-      setOpen(false)
-      window.location.href = `/claws/${resData.claw_id}`
-    } catch (e) {
-      setError(String(e))
-    }
-    setLoading(false)
-  }
-
-  if (!hasInputs) {
-    return (
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={handleTrigger} disabled={loading}>
-          {loading ? "..." : "Trigger"}
-        </Button>
-        {error && <span className="text-xs text-red-500">{error}</span>}
-      </div>
-    )
-  }
-
-  return (
-    <>
-      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>Trigger</Button>
-      {open && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4">
-            <h3 className="text-sm font-medium">Trigger {factory.name}</h3>
-            {factory.inputs!.map((input) => (
-              <div key={input.name} className="space-y-1">
-                <label className="text-xs font-medium">
-                  {input.name}
-                  {input.required && <span className="text-red-500">*</span>}
-                </label>
-                {input.description && <p className="text-xs text-muted-foreground">{input.description}</p>}
-                {input.type === "enum" && input.options ? (
-                  <select
-                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
-                    value={values[input.name] || input.default || ""}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                  >
-                    {input.options.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </select>
-                ) : input.type === "bool" ? (
-                  <select
-                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
-                    value={values[input.name] || input.default || "false"}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                  >
-                    <option value="true">true</option>
-                    <option value="false">false</option>
-                  </select>
-                ) : (
-                  <Input
-                    type={input.type === "number" ? "number" : "text"}
-                    value={values[input.name] || input.default || ""}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                    placeholder={input.default}
-                  />
-                )}
-              </div>
-            ))}
-            {error && <p className="text-xs text-red-500">{error}</p>}
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button size="sm" onClick={handleTrigger} disabled={loading}>
-                {loading ? "Triggering..." : "Trigger"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
 
 function SecretsSection({ settings }: { settings: SettingsData | null }) {
   const [secrets, setSecrets] = useState<string[]>([])

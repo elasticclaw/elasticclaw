@@ -353,7 +353,13 @@ type HubConfig struct {
 	// Auth holds GitHub OAuth and access control config for the hub web UI.
 	Auth *AuthConfig `yaml:"auth,omitempty"`
 
+	// ConcurrencyGroups limits the number of simultaneously running claws per group.
+	// Each group has a name and a limit. 0 means unlimited.
+	// Factories can be assigned to a group; unassigned factories use the "global" group.
+	ConcurrencyGroups []*ConcurrencyGroup `yaml:"concurrency_groups,omitempty" json:"concurrencyGroups,omitempty"`
+
 	// MaxConcurrentClaws limits the number of simultaneously running claws.
+	// DEPRECATED: Use ConcurrencyGroups instead. Kept for backward compat.
 	// When the limit is reached, new factory-created claws enter 'pending' status
 	// and are promoted to 'provisioning' when a running claw terminates.
 	// 0 means unlimited (default).
@@ -398,6 +404,12 @@ type FactoryInput struct {
 	Validation  string   `yaml:"validation,omitempty" json:"validation,omitempty"` // regex pattern
 }
 
+// ConcurrencyGroup limits the number of simultaneously running claws per group.
+type ConcurrencyGroup struct {
+	Name  string `yaml:"name" json:"name"`
+	Limit int    `yaml:"limit" json:"limit"` // 0 = unlimited
+}
+
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
 	Name              string `yaml:"name"`
@@ -429,6 +441,9 @@ type FactoryConfig struct {
 	// Inputs are user-defined parameters for manual factory triggers (CLI/UI).
 	// Not used by webhook-triggered factories.
 	Inputs []FactoryInput `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	// ConcurrencyGroup assigns this factory to a concurrency group.
+	// If empty, the factory uses the "global" group.
+	ConcurrencyGroup string `yaml:"concurrency_group,omitempty" json:"concurrencyGroup,omitempty"`
 	// GitHub factory fields (integration: github)
 	Repos   []string       `yaml:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
 	Trigger *GitHubTrigger `yaml:"trigger,omitempty"`

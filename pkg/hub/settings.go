@@ -40,6 +40,12 @@ type MCPView struct {
 	Command   []string          `json:"command,omitempty"`
 }
 
+// ConcurrencyGroupView is the JSON-safe view of a concurrency group.
+type ConcurrencyGroupView struct {
+	Name  string `json:"name"`
+	Limit int    `json:"limit"`
+}
+
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
@@ -52,7 +58,10 @@ type SettingsView struct {
 	Secrets       []string                `json:"secrets"`
 	MCPServers    []MCPView               `json:"mcpServers,omitempty"`
 	Auth          *AuthView               `json:"auth,omitempty"`
+	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
+	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
+	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
 }
 
@@ -122,6 +131,7 @@ type FactoryView struct {
 	Labels           []string `json:"labels,omitempty"`
 	AssignedTo       string   `json:"assigned_to,omitempty"`
 	Enabled          bool     `json:"enabled"`
+	ConcurrencyGroup string   `json:"concurrencyGroup,omitempty"`
 }
 
 type ProviderView struct {
@@ -167,6 +177,13 @@ type LLMKeyPatch struct {
 	DefaultModel *string `json:"defaultModel,omitempty"`
 }
 
+// ConcurrencyGroupPatch is a patch for a concurrency group.
+type ConcurrencyGroupPatch struct {
+	Name   string `json:"name"`
+	Limit  int    `json:"limit"`
+	Delete bool   `json:"delete,omitempty"`
+}
+
 type SettingsPatch struct {
 	LLMKeys       []LLMKeyPatch            `json:"llmKeys,omitempty"`
 	Providers     map[string]ProviderPatch `json:"providers,omitempty"`
@@ -177,7 +194,10 @@ type SettingsPatch struct {
 	Factories     []FactoryPatch           `json:"factories,omitempty"`
 	MCPServers    []MCPPatch               `json:"mcpServers,omitempty"`
 	Auth          *AuthPatch               `json:"auth,omitempty"`
+	// ConcurrencyGroups replaces the full list of concurrency groups.
+	ConcurrencyGroups *[]ConcurrencyGroupPatch `json:"concurrencyGroups,omitempty"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
+	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
 }
 
@@ -263,6 +283,7 @@ type FactoryPatch struct {
 	Labels           []string `json:"labels,omitempty"`
 	AssignedTo       string   `json:"assigned_to,omitempty"`
 	Enabled          *bool    `json:"enabled,omitempty"`
+	ConcurrencyGroup string   `json:"concurrencyGroup,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -389,6 +410,25 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	// Concurrency limit
 	view.MaxConcurrentClaws = s.hubCfg.MaxConcurrentClaws
 
+	// Concurrency groups — ensure "global" always exists
+	view.ConcurrencyGroups = []ConcurrencyGroupView{}
+	hasGlobal := false
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		view.ConcurrencyGroups = append(view.ConcurrencyGroups, ConcurrencyGroupView{
+			Name:  g.Name,
+			Limit: g.Limit,
+		})
+		if g.Name == "global" {
+			hasGlobal = true
+		}
+	}
+	if !hasGlobal {
+		view.ConcurrencyGroups = append(view.ConcurrencyGroups, ConcurrencyGroupView{
+			Name:  "global",
+			Limit: s.hubCfg.MaxConcurrentClaws,
+		})
+	}
+
 	// Factories — merge external (disk) with in-memory (hub.yaml), external takes precedence
 	view.Factories = []FactoryView{}
 	mergedFactories := make(map[string]*types.FactoryConfig)
@@ -423,6 +463,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Labels:           f.Labels,
 			AssignedTo:       f.AssignedTo,
 			Enabled:          isFactoryEnabled(f),
+			ConcurrencyGroup: f.ConcurrencyGroup,
 		})
 	}
 	// Auth config
@@ -872,6 +913,21 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		updatedCfg.MaxConcurrentClaws = *patch.MaxConcurrentClaws
 	}
 
+	// ConcurrencyGroups (full replace)
+	if patch.ConcurrencyGroups != nil {
+		var groups []*types.ConcurrencyGroup
+		for _, gp := range *patch.ConcurrencyGroups {
+			if gp.Delete {
+				continue
+			}
+			groups = append(groups, &types.ConcurrencyGroup{
+				Name:  gp.Name,
+				Limit: gp.Limit,
+			})
+		}
+		updatedCfg.ConcurrencyGroups = groups
+	}
+
 	// Factories (full replace)
 	if patch.Factories != nil {
 		var factories []*types.FactoryConfig
@@ -907,6 +963,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				WebhookSecretRef: fp.WebhookSecretRef, PipelineYAML: fp.PipelineYAML,
 				Tags: fp.Tags, Color: fp.Color, Labels: fp.Labels,
 				AssignedTo: fp.AssignedTo, Enabled: fp.Enabled,
+				ConcurrencyGroup: fp.ConcurrencyGroup,
 			}
 			factories = append(factories, factory)
 

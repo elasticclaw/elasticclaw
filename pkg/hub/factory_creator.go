@@ -247,18 +247,34 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
-	// Check concurrency limit
+	// Check concurrency limit (group-aware)
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	// Determine the factory's concurrency group
+	groupName := factory.ConcurrencyGroup
+	if groupName == "" {
+		groupName = "global"
+	}
+	// Find the group's limit
+	var groupLimit int
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		if g.Name == groupName {
+			groupLimit = g.Limit
+			break
+		}
+	}
+	// Fallback to global maxConcurrent if no group-specific limit found
+	if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+		groupLimit = s.hubCfg.MaxConcurrentClaws
+	}
 	s.mu.RUnlock()
 
 	activeCount := s.countActiveClaws()
 	isPending := false
-	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for factory %s as pending", activeCount, maxConcurrent, factory.Name)
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
 	}
 
 	// Insert claw record
