@@ -1862,16 +1862,6 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </div>
       </div>
 
-      {/* Factories-as-code callout */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
-        <p className="font-medium mb-1">Factories are managed as code</p>
-        <p className="text-muted-foreground text-xs">
-          Define factories in <code className="bg-muted px-1 rounded">.elasticclaw/factories/</code> and push to this hub with{" "}
-          <code className="bg-muted px-1 rounded">elasticclaw factory push</code>.
-          Use <code className="bg-muted px-1 rounded">elasticclaw factory create</code> to scaffold a new factory.
-        </p>
-      </div>
-
       {factories.length > 0 && (
         <div className="space-y-2">
           {factories.map((f, i) => (
