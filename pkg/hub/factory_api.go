@@ -146,16 +146,21 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Write each factory to external storage
+	// Write each factory to external storage — attempt all writes before
+	// returning so that a failure mid-batch doesn't leave a partial update.
+	var saveErrs []string
 	for _, f := range req.Factories {
 		if f == nil || f.Name == "" {
-			http.Error(w, "factory name required", http.StatusBadRequest)
-			return
+			saveErrs = append(saveErrs, "factory name required")
+			continue
 		}
 		if err := saveExternalFactory(f); err != nil {
-			http.Error(w, fmt.Sprintf("save factory %q: %v", f.Name, err), http.StatusInternalServerError)
-			return
+			saveErrs = append(saveErrs, fmt.Sprintf("save factory %q: %v", f.Name, err))
 		}
+	}
+	if len(saveErrs) > 0 {
+		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
+		return
 	}
 
 	// Also update in-memory config for backward compat during migration
