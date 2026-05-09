@@ -265,7 +265,7 @@ func MarkMigratedV2() error {
 }
 
 // MigrateLegacyTemplates migrates templates from the SQLite hub_templates table
-// to the external templates/ directory.
+// to the external templates/ directory, then drops the legacy table.
 func (s *Server) MigrateLegacyTemplates() error {
 	rows, err := s.db.Query(`SELECT name, files FROM hub_templates`)
 	if err != nil {
@@ -273,6 +273,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 	}
 	defer rows.Close()
 
+	var migrated int
 	for rows.Next() {
 		var name, filesJSON string
 		if err := rows.Scan(&name, &filesJSON); err != nil {
@@ -286,13 +287,26 @@ func (s *Server) MigrateLegacyTemplates() error {
 			fmt.Fprintf(os.Stderr, "[hub] migrate template %q: %v\n", name, err)
 			continue
 		}
+		migrated++
 		fmt.Printf("[hub] migrated template %q to external storage\n", name)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("migrate templates: %w", err)
+	}
+
+	// Drop legacy table so future runs never see it
+	if migrated > 0 {
+		if _, err := s.db.Exec(`DROP TABLE IF EXISTS hub_templates`); err != nil {
+			return fmt.Errorf("drop hub_templates: %w", err)
+		}
+		fmt.Println("[hub] dropped legacy hub_templates table")
+	}
+	return nil
 }
 
 // MigrateLegacyFactories migrates factories from hub.yaml to the external
-// factories/ directory. Returns the list of migrated factory names.
+// factories/ directory, then strips them from hub.yaml. Returns the list of
+// migrated factory names.
 func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
 	var migrated []string
 	for _, f := range cfg.Factories {
@@ -304,6 +318,15 @@ func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
 			continue
 		}
 		migrated = append(migrated, f.Name)
+	}
+
+	// Strip factories from hub.yaml so they are never loaded from legacy location again
+	if len(migrated) > 0 {
+		cfg.Factories = nil
+		if err := config.SaveHubConfig(cfg); err != nil {
+			return migrated, fmt.Errorf("strip factories from hub.yaml: %w", err)
+		}
+		fmt.Println("[hub] stripped migrated factories from hub.yaml")
 	}
 	return migrated, nil
 }
