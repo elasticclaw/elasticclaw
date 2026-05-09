@@ -190,7 +190,7 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load factory
+	// Load factory from external storage + in-memory
 	factory, err := loadExternalFactory(name)
 	if err != nil {
 		// Fall back to in-memory
@@ -205,6 +205,18 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if factory == nil {
 		jsonError(w, http.StatusNotFound, "factory not found")
+		return
+	}
+
+	// Verify factory supports manual triggers
+	if !factory.EnableManualTrigger {
+		jsonError(w, http.StatusForbidden, "factory does not support manual triggers")
+		return
+	}
+
+	// Verify factory is enabled
+	if factory.Enabled != nil && !*factory.Enabled {
+		jsonError(w, http.StatusForbidden, "factory is disabled")
 		return
 	}
 
