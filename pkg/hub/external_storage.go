@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,14 +70,31 @@ func loadExternalTemplate(name string) (map[string]string, error) {
 	return config.ReadTemplateFiles(dir)
 }
 
+// validateName rejects names that could cause path traversal.
+func validateName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name is empty")
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("name contains path traversal")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("name contains path separator")
+	}
+	return nil
+}
+
 // saveExternalTemplate writes a template to the external templates directory.
 func saveExternalTemplate(name string, files map[string]string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
 	dir := filepath.Join(templatesDir(), name)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	for fname, content := range files {
-		if strings.Contains(fname, "..") || strings.Contains(fname, "/") {
+		if strings.Contains(fname, "..") || strings.ContainsAny(fname, `/\`) {
 			continue // skip paths with directory traversal
 		}
 		path := filepath.Join(dir, fname)
@@ -89,6 +107,9 @@ func saveExternalTemplate(name string, files map[string]string) error {
 
 // deleteExternalTemplate removes a template from the external directory.
 func deleteExternalTemplate(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
 	dir := filepath.Join(templatesDir(), name)
 	return os.RemoveAll(dir)
 }
@@ -170,6 +191,9 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 	if f == nil || f.Name == "" {
 		return fmt.Errorf("factory name required")
 	}
+	if err := validateName(f.Name); err != nil {
+		return err
+	}
 
 	dir := filepath.Join(factoriesDir(), f.Name)
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -199,6 +223,9 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 
 // deleteExternalFactory removes a factory directory.
 func deleteExternalFactory(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
 	dir := filepath.Join(factoriesDir(), name)
 	return os.RemoveAll(dir)
 }
@@ -236,7 +263,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 			continue
 		}
 		var files map[string]string
-		if err := yaml.Unmarshal([]byte(filesJSON), &files); err != nil {
+		if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 			continue
 		}
 		if err := saveExternalTemplate(name, files); err != nil {

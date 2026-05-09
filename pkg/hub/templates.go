@@ -83,13 +83,31 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Collect real updated_at timestamps from legacy DB rows
+	dbUpdatedAt := make(map[string]string)
+	rows2, err2 := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
+	if err2 == nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var n, ts string
+			if err := rows2.Scan(&n, &ts); err == nil {
+				dbUpdatedAt[n] = ts
+			}
+		}
+	}
+
 	type entry struct {
 		Name      string `json:"name"`
 		UpdatedAt string `json:"updatedAt"`
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	out := make([]entry, len(names))
 	for i, name := range names {
-		out[i] = entry{Name: name, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		ts := now
+		if v, ok := dbUpdatedAt[name]; ok && v != "" {
+			ts = v
+		}
+		out[i] = entry{Name: name, UpdatedAt: ts}
 	}
 	if out == nil {
 		out = []entry{}
