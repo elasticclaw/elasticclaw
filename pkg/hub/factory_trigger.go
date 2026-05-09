@@ -46,13 +46,23 @@ func validateFactoryInputs(inputs []types.FactoryInput, values map[string]interf
 		defined[in.Name] = in
 	}
 
-	// Check required fields
+	// Check required fields (key must be present AND value must be non-empty)
 	for _, in := range inputs {
 		if !in.Required {
 			continue
 		}
-		if _, ok := values[in.Name]; !ok {
+		raw, ok := values[in.Name]
+		if !ok {
 			return nil, fmt.Errorf("missing required input %q", in.Name)
+		}
+		// Reject explicit empty strings, null, and false (for bools, false is valid)
+		switch v := raw.(type) {
+		case string:
+			if v == "" {
+				return nil, fmt.Errorf("required input %q cannot be empty", in.Name)
+			}
+		case nil:
+			return nil, fmt.Errorf("required input %q cannot be null", in.Name)
 		}
 	}
 
