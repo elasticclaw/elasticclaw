@@ -235,6 +235,9 @@ func (s *Server) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, nam
 	factories := make([]*types.FactoryConfig, 0, len(s.hubCfg.Factories))
 	found := false
 	for _, f := range s.hubCfg.Factories {
+		if f == nil {
+			continue
+		}
 		if strings.EqualFold(f.Name, name) {
 			found = true
 			continue
