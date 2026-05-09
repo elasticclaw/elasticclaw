@@ -15,12 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate factory
+      - name: Validate factory (elasticclaw)
         uses: elasticclaw/actions/publish-factory@main
         with:
           hub-endpoint: https://factory.elasticclaw.ai
           token: ${{ secrets.ELASTICCLAW_TOKEN }}
           path: .elasticclaw/factories/elasticclaw
+          dry-run: true
+
+      - name: Validate factory (existing-pr)
+        uses: elasticclaw/actions/publish-factory@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/factories/existing-pr
           dry-run: true
 
       - name: Validate template

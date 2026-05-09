@@ -18,12 +18,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Publish factory
+      - name: Publish factory (elasticclaw)
         uses: elasticclaw/actions/publish-factory@main
         with:
           hub-endpoint: https://factory.elasticclaw.ai
           token: ${{ secrets.ELASTICCLAW_TOKEN }}
           path: .elasticclaw/factories/elasticclaw
+
+      - name: Publish factory (existing-pr)
+        uses: elasticclaw/actions/publish-factory@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/factories/existing-pr
 
       - name: Publish template
         uses: elasticclaw/actions/publish-template@main

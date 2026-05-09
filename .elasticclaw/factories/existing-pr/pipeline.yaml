@@ -1,0 +1,35 @@
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        You are responsible for getting the pull request described in CONTEXT.md to a mergeable state.
+        That means: resolve and fix any Greptile comments you agree with, watch for human review comments, and make sure CI is green.
+
+        Read BOOTSTRAP.md and AGENTS.md. Narrate your progress as you go.
+
+  - id: pr_opened
+    label: "PR Opened"
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: |
+        Continue watching CI, Greptile, and human review comments until the PR merges or closes.
+
+  - id: merged
+    label: "Merged"
+    on_enter:
+      inject: |
+        Pull request merged. Terminating the agent.
+    triggers:
+      - pr_merged:
+          terminal: true
+
+  - id: closed_no_merge
+    label: "Closed Without Merge"
+    triggers:
+      - pr_closed:
+    on_enter:
+      inject: |
+        Pull request was closed without merging. Terminate the agent.

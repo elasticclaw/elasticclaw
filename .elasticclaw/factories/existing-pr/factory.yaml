@@ -1,0 +1,7 @@
+name: existing-pr
+integration: github
+workspace: elasticclaw
+repos:
+  - elasticclaw/elasticclaw
+template: elasticclaw
+webhook_secret_ref: elasticclaw_webhook_secret
