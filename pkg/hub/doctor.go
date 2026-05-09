@@ -290,8 +290,28 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 		return checks
 	}
 
+	validProviders := map[string]bool{
+		"daytona": true, "vercel": true, "replicated": true, "local": true,
+	}
+
 	allProvidersValid := true
 	for name, p := range cfg.Providers {
+		if !validProviders[name] {
+			allProvidersValid = false
+			checks = append(checks, DoctorCheck{
+				Category:    "sandboxes",
+				Severity:    "warning",
+				Title:       fmt.Sprintf("Unknown sandbox provider: %q", name),
+				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, vercel, replicated, local).", name),
+				OK:          false,
+				FixAction: &FixAction{
+					Type:   "navigate",
+					Target: "/settings/runtimes",
+					Label:  "Fix Provider",
+				},
+			})
+			continue
+		}
 		switch name {
 		case "daytona":
 			if p.APIKey == "" {
@@ -378,13 +398,25 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	templateNames := make(map[string]bool)
 	rows, err := s.db.Query(`SELECT name FROM hub_templates`)
 	if err == nil && rows != nil {
+		defer rows.Close()
 		for rows.Next() {
 			var name string
 			if err := rows.Scan(&name); err == nil {
 				templateNames[name] = true
 			}
 		}
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			// DB iteration failed — templateNames may be incomplete.
+			// Emit a warning and skip the template-existence factory check
+			// to avoid false "missing template" critical alerts.
+			checks = append(checks, DoctorCheck{
+				Category:    "factories",
+				Severity:    "warning",
+				Title:       "Could not verify templates from database",
+				Description: fmt.Sprintf("Template list query failed during iteration: %v. Factory template references cannot be validated.", err),
+				OK:          false,
+			})
+		}
 	}
 	// Also check local templates via config resolution
 	// (templates are directories, not a list in hub.yaml)
