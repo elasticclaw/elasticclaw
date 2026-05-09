@@ -318,134 +318,299 @@ export default function SettingsSectionPage() {
   )
 }
 
+const SANDBOX_PROVIDER_OPTIONS = [
+  { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
+  { value: "daytona", label: "Daytona", description: "Development environment provider" },
+]
+
+interface SandboxProviderView {
+  name: string
+  type: string
+  label: string
+  description: string
+  configured: boolean
+  apiUrl?: string
+  apiKeySet?: boolean
+  defaultSnapshot?: string
+  tokenSet?: boolean
+  defaultTtl?: string
+  defaultInstanceType?: string
+}
+
 function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const [newKey, setNewKey] = useState("")
-  const rep = settings.providers?.replicated
-  const day = settings.providers?.daytona
+  const providers = settings.providers || {}
 
-  const [repToken, setRepToken] = useState("")
-  const [repTTL, setRepTTL] = useState(rep?.defaultTtl || "48h")
-  const [repType, setRepType] = useState(rep?.defaultInstanceType || "r1.large")
+  const configuredProviders: SandboxProviderView[] = Object.entries(providers)
+    .filter(([_, p]) => p != null)
+    .map(([name, p]) => {
+      const opt = SANDBOX_PROVIDER_OPTIONS.find(o => o.value === name)
+      return {
+        name,
+        type: p.type || name,
+        label: opt?.label || name,
+        description: opt?.description || "",
+        configured: !!(p.tokenSet || p.apiKeySet),
+        apiUrl: p.apiUrl,
+        apiKeySet: p.apiKeySet,
+        defaultSnapshot: p.defaultSnapshot,
+        tokenSet: p.tokenSet,
+        defaultTtl: p.defaultTtl,
+        defaultInstanceType: p.defaultInstanceType,
+      }
+    })
 
-  const [dayURL, setDayURL] = useState(day?.apiUrl || "")
-  const [dayKey, setDayKey] = useState("")
-  const [daySnapshot, setDaySnapshot] = useState(day?.defaultSnapshot || "")
+  // Modal state
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [editName, setEditName] = useState<string | null>(null)
+
+  // Form state
+  const [formProvider, setFormProvider] = useState("replicated")
+  const [formToken, setFormToken] = useState("")
+  const [formApiUrl, setFormApiUrl] = useState("")
+  const [formApiKey, setFormApiKey] = useState("")
+  const [formDefaultTtl, setFormDefaultTtl] = useState("")
+  const [formDefaultInstanceType, setFormDefaultInstanceType] = useState("")
+  const [formDefaultSnapshot, setFormDefaultSnapshot] = useState("")
+
+  const resetForm = () => {
+    setFormProvider("replicated")
+    setFormToken("")
+    setFormApiUrl("")
+    setFormApiKey("")
+    setFormDefaultTtl("")
+    setFormDefaultInstanceType("")
+    setFormDefaultSnapshot("")
+    setEditName(null)
+  }
+
+  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  const openEdit = (name: string) => {
+    const p = providers[name]
+    const opt = SANDBOX_PROVIDER_OPTIONS.find(o => o.value === name)
+    setFormProvider(name)
+    setFormToken("")
+    setFormApiUrl(p?.apiUrl || "")
+    setFormApiKey("")
+    setFormDefaultTtl(p?.defaultTtl || "")
+    setFormDefaultInstanceType(p?.defaultInstanceType || "")
+    setFormDefaultSnapshot(p?.defaultSnapshot || "")
+    setEditName(name)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  const availableProviders = SANDBOX_PROVIDER_OPTIONS.filter(o => !providers[o.value])
+
+  function doSave() {
+    const patch: Record<string, unknown> = {}
+    if (formProvider === "replicated") {
+      if (formDefaultTtl) patch.defaultTtl = formDefaultTtl
+      if (formDefaultInstanceType) patch.defaultInstanceType = formDefaultInstanceType
+      if (formToken) patch.token = formToken
+    } else if (formProvider === "daytona") {
+      if (formApiUrl) patch.apiUrl = formApiUrl
+      if (formApiKey) patch.apiKey = formApiKey
+      if (formDefaultSnapshot) patch.defaultSnapshot = formDefaultSnapshot
+    }
+    onSave({ providers: { [formProvider]: patch } })
+    setShowModal(false)
+    resetForm()
+  }
+
+  function doRemove(name: string) {
+    onSave({ providers: { [name]: null } })
+    setShowModal(false)
+    resetForm()
+  }
+
+  const modalTitle = modalMode === "add"
+    ? "Add Sandbox Provider"
+    : `Edit ${SANDBOX_PROVIDER_OPTIONS.find(o => o.value === formProvider)?.label || formProvider}`
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Sandbox Runtimes</h2>
-        <p className="text-sm text-muted-foreground mb-6">Configure VM providers for spawning claws.</p>
+        <p className="text-sm text-muted-foreground mb-4">Configure VM providers for spawning claws.</p>
 
-        {/* Replicated */}
-        <div className="border border-border rounded-lg p-5 mb-4">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-medium">Replicated CMX</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">Kubernetes-based VM provider</p>
-            </div>
-            {rep?.tokenSet && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Configured</span>}
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-              <Input
-                type="password"
-                placeholder={rep?.tokenSet ? "••••••••••• (set)" : "Enter Replicated API token"}
-                value={repToken}
-                onChange={e => setRepToken(e.target.value)}
-                className="h-8 text-sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Default TTL</label>
-                <Input value={repTTL} onChange={e => setRepTTL(e.target.value)} className="h-8 text-sm" placeholder="48h" />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Default Instance</label>
-                <Input value={repType} onChange={e => setRepType(e.target.value)} className="h-8 text-sm" placeholder="r1.large" />
-              </div>
-            </div>
-            <Button size="sm" disabled={saving || (!repToken && !repTTL && !repType)} onClick={() => {
-              const patch: Record<string, string> = {}
-              if (repTTL) patch.defaultTtl = repTTL
-              if (repType) patch.defaultInstanceType = repType
-              if (repToken) patch.token = repToken
-              onSave({ providers: { replicated: patch } })
-            }}>
-              Save Replicated
-            </Button>
-            {/* SSH Keys for Replicated VMs */}
-            <div className="border-t border-border mt-4 pt-4">
-              <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
-              <p className="text-xs text-muted-foreground mb-3">Public keys injected into Replicated VMs at bootstrap for direct SSH access.</p>
-              {(settings.sshPublicKeys || []).map((key, i) => {
-                const parts = key.trim().split(/\s+/)
-                const keyType = parts[0] || ""
-                const comment = parts[2] || ""
-                const keyBody = parts[1] || ""
-                const shortKey = keyBody.length > 12 ? keyBody.slice(0, 8) + "..." + keyBody.slice(-4) : keyBody
-                return (
-                <div key={i} className="flex items-center gap-2 mb-2">
-                  <div className="flex-1 min-w-0">
-                    <code className="text-xs font-mono">{keyType} {shortKey}</code>
-                    {comment && <span className="ml-2 text-xs text-muted-foreground">{comment}</span>}
-                  </div>
-                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
-                    onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
-                    Remove
-                  </Button>
-                </div>
-              )
-              })}
-              <div className="flex gap-2">
-                <Input value={newKey} onChange={e => setNewKey(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
-                  placeholder="ssh-ed25519 AAAA..." className="h-7 text-xs font-mono flex-1" />
-                <Button size="sm" disabled={saving || !newKey.trim()}
-                  onClick={() => { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}>
-                  Add
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Daytona */}
-        <div className="border border-border rounded-lg p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-medium">Daytona</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">Development environment provider</p>
-            </div>
-            {day?.apiKeySet && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Configured</span>}
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API URL</label>
-              <Input value={dayURL} onChange={e => setDayURL(e.target.value)} className="h-8 text-sm" placeholder="https://app.daytona.io" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
-              <Input type="password" placeholder={day?.apiKeySet ? "••••••••••• (set)" : "Enter Daytona API key"} value={dayKey} onChange={e => setDayKey(e.target.value)} className="h-8 text-sm" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Default Snapshot</label>
-              <Input value={daySnapshot} onChange={e => setDaySnapshot(e.target.value)} className="h-8 text-sm" placeholder="daytona-medium" />
-            </div>
-            <Button size="sm" disabled={saving} onClick={() => {
-              const patch: Record<string, string> = {}
-              if (dayURL) patch.apiUrl = dayURL
-              if (dayKey) patch.apiKey = dayKey
-              if (daySnapshot) patch.defaultSnapshot = daySnapshot
-              onSave({ providers: { daytona: patch } })
-            }}>
-              Save Daytona
-            </Button>
-          </div>
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {configuredProviders.length} provider{configuredProviders.length !== 1 ? "s" : ""} configured
+          </span>
         </div>
       </div>
+
+      {/* Configured providers list */}
+      {configuredProviders.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {configuredProviders.map((p) => (
+            <div
+              key={p.name}
+              onClick={() => openEdit(p.name)}
+              className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                  <Cpu className="size-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{p.label}</span>
+                    {p.configured && (
+                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded flex items-center gap-1">
+                        <CheckCircle2 className="size-3" /> Configured
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{p.description}</p>
+                </div>
+              </div>
+              <span className="text-muted-foreground text-lg">⋯</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {configuredProviders.length === 0 && (
+        <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
+            <Cpu className="size-5 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">No sandbox providers configured</p>
+        </div>
+      )}
+
+      {availableProviders.length > 0 && (
+        <Button onClick={openAdd} className="gap-2">
+          <span className="text-sm">+</span> Add Sandbox Provider
+        </Button>
+      )}
+
+      {/* SSH Keys — global, stays at bottom */}
+      <div className="border-t border-border pt-6 mt-6">
+        <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
+        <p className="text-xs text-muted-foreground mb-3">Public keys injected into VMs at bootstrap for direct SSH access.</p>
+        {(settings.sshPublicKeys || []).map((key, i) => {
+          const parts = key.trim().split(/\s+/)
+          const keyType = parts[0] || ""
+          const comment = parts[2] || ""
+          const keyBody = parts[1] || ""
+          const shortKey = keyBody.length > 12 ? keyBody.slice(0, 8) + "..." + keyBody.slice(-4) : keyBody
+          return (
+            <div key={i} className="flex items-center gap-2 mb-2">
+              <div className="flex-1 min-w-0">
+                <code className="text-xs font-mono">{keyType} {shortKey}</code>
+                {comment && <span className="ml-2 text-xs text-muted-foreground">{comment}</span>}
+              </div>
+              <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
+                onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
+                Remove
+              </Button>
+            </div>
+          )
+        })}
+        <div className="flex gap-2">
+          <Input value={newKey} onChange={e => setNewKey(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
+            placeholder="ssh-ed25519 AAAA..." className="h-7 text-xs font-mono flex-1" />
+          <Button size="sm" disabled={saving || !newKey.trim()}
+            onClick={() => { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}>
+            Add
+          </Button>
+        </div>
+      </div>
+
+      {/* Modal */}
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalTitle}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            {modalMode === "add" && (
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
+                <select
+                  value={formProvider}
+                  onChange={e => setFormProvider(e.target.value)}
+                  className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
+                >
+                  {availableProviders.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+            )}
+
+            {formProvider === "replicated" && (
+              <>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                  <Input
+                    type="password"
+                    value={formToken}
+                    onChange={e => setFormToken(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder={modalMode === "edit" && providers.replicated?.tokenSet ? "Leave blank to keep existing" : "Enter Replicated API token"}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Default TTL</label>
+                    <Input value={formDefaultTtl} onChange={e => setFormDefaultTtl(e.target.value)} className="h-8 text-sm" placeholder="48h" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Default Instance</label>
+                    <Input value={formDefaultInstanceType} onChange={e => setFormDefaultInstanceType(e.target.value)} className="h-8 text-sm" placeholder="r1.large" />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {formProvider === "daytona" && (
+              <>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API URL</label>
+                  <Input value={formApiUrl} onChange={e => setFormApiUrl(e.target.value)} className="h-8 text-sm" placeholder="https://app.daytona.io" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
+                  <Input
+                    type="password"
+                    value={formApiKey}
+                    onChange={e => setFormApiKey(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder={modalMode === "edit" && providers.daytona?.apiKeySet ? "Leave blank to keep existing" : "Enter Daytona API key"}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Snapshot</label>
+                  <Input value={formDefaultSnapshot} onChange={e => setFormDefaultSnapshot(e.target.value)} className="h-8 text-sm" placeholder="daytona-medium" />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between px-5 py-4 border-t border-border">
+            {modalMode === "edit" && editName && (
+              <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => doRemove(editName)}>
+                <Trash2 className="size-3.5 mr-1" /> Remove
+              </Button>
+            )}
+            <div className="flex items-center gap-2 ml-auto">
+              <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
+              <Button
+                size="sm"
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey)}
+                onClick={doSave}
+              >
+                {modalMode === "add" ? "Add Provider" : "Save changes"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
