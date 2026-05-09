@@ -121,6 +121,21 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Preserve inline webhook secrets before writing to external storage
+	s.mu.RLock()
+	existing := make(map[string]*types.FactoryConfig)
+	for _, f := range s.hubCfg.Factories {
+		existing[f.Name] = f
+	}
+	s.mu.RUnlock()
+	for _, incoming := range req.Factories {
+		if prev, ok := existing[incoming.Name]; ok {
+			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && prev.WebhookSecret != "" {
+				incoming.WebhookSecret = prev.WebhookSecret
+			}
+		}
+	}
+
 	// Write each factory to external storage
 	for _, f := range req.Factories {
 		if f == nil || f.Name == "" {
@@ -135,7 +150,7 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 
 	// Also update in-memory config for backward compat during migration
 	s.mu.Lock()
-	existing := make(map[string]*types.FactoryConfig)
+	existing = make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
 		existing[f.Name] = f
 	}
@@ -143,12 +158,6 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	incomingOrder := make([]string, 0, len(req.Factories))
 	seenIncoming := make(map[string]bool, len(req.Factories))
 	for _, incoming := range req.Factories {
-		if prev, ok := existing[incoming.Name]; ok {
-			// Preserve inline webhook secret if not provided in push
-			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && prev.WebhookSecret != "" {
-				incoming.WebhookSecret = prev.WebhookSecret
-			}
-		}
 		existing[incoming.Name] = incoming
 		incomingByName[incoming.Name] = incoming
 		if !seenIncoming[incoming.Name] {
