@@ -131,6 +131,9 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	for _, incoming := range req.Factories {
+		if incoming == nil || incoming.Name == "" {
+			continue
+		}
 		prev, ok := existing[incoming.Name]
 		if !ok {
 			// Factory not in memory — try external storage
