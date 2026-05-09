@@ -127,6 +127,9 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	existing := make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
+		if f == nil {
+			continue
+		}
 		existing[f.Name] = f
 	}
 	s.mu.RUnlock()
@@ -170,6 +173,9 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	existing = make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
+		if f == nil {
+			continue
+		}
 		existing[f.Name] = f
 	}
 	incomingByName := make(map[string]*types.FactoryConfig, len(req.Factories))

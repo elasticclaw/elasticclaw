@@ -224,11 +224,14 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 		return fmt.Errorf("write factory.yaml: %w", err)
 	}
 
-	// Write pipeline.yaml if present
+	// Write or remove pipeline.yaml based on whether PipelineYAML is set
+	pipelinePath := filepath.Join(dir, "pipeline.yaml")
 	if f.PipelineYAML != "" {
-		if err := os.WriteFile(filepath.Join(dir, "pipeline.yaml"), []byte(f.PipelineYAML), 0640); err != nil {
+		if err := os.WriteFile(pipelinePath, []byte(f.PipelineYAML), 0640); err != nil {
 			return fmt.Errorf("write pipeline.yaml: %w", err)
 		}
+	} else {
+		_ = os.Remove(pipelinePath)
 	}
 
 	return nil
