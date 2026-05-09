@@ -88,11 +88,18 @@ func validateName(name string) error {
 }
 
 // saveExternalTemplate writes a template to the external templates directory.
+// Any files present on disk but absent from the new files map are removed
+// so that deletions are persisted across pushes.
 func saveExternalTemplate(name string, files map[string]string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
 	dir := filepath.Join(templatesDir(), name)
+	// Remove and recreate the directory so stale files from previous pushes
+	// are not re-read by ReadTemplateFiles (which walks the memory/ subtree).
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove old template dir %s: %w", dir, err)
+	}
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -624,7 +625,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		})
 	} else {
 		for _, name := range externalNames {
-			files, err := loadExternalTemplate(name)
+			_, err := loadExternalTemplate(name)
 			if err != nil {
 				checks = append(checks, DoctorCheck{
 					Category:    "templates",
@@ -635,8 +636,9 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 				})
 				continue
 			}
-			// Check for elasticclaw-config.yaml
-			if _, ok := files["elasticclaw-config.yaml"]; !ok {
+			// Check for elasticclaw-config.yaml directly (not via ReadTemplateFiles allow-list)
+			configPath := filepath.Join(templatesDir(), name, "elasticclaw-config.yaml")
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
 				checks = append(checks, DoctorCheck{
 					Category:    "templates",
 					Severity:    "warning",
