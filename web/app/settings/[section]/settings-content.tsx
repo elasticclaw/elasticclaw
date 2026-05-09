@@ -10,9 +10,9 @@ import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "doctor"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "webhooks" | "doctor"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "doctor"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "webhooks", "doctor"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -199,6 +199,7 @@ export default function SettingsSectionPage() {
       { id: "github", label: "GitHub Apps", icon: Github },
       { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
       { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+      { id: "webhooks", label: "Webhooks", icon: Webhook },
     ],
     // Configuration
     [
@@ -297,6 +298,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "ai-config" && (
             <AIConfigSection />
+          )}
+          {section === "webhooks" && (
+            <WebhooksSection hubUrl={hubPublicUrl} />
           )}
           {section === "doctor" && (
             <DoctorSection />
@@ -1676,8 +1680,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
 
 
-function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
-  const [open, setOpen] = useState(false)
+function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   const [copied, setCopied] = useState<string | null>(null)
 
   const urls = [
@@ -1712,42 +1715,34 @@ function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
   }
 
   return (
-    <>
-      <Button variant="outline" size="sm" className="gap-2" onClick={() => setOpen(true)}>
-        <Webhook className="size-4" />
-        Webhook URLs
-      </Button>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Webhook URLs</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Use these URLs to configure webhooks in your integrations.
+        </p>
+      </div>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">Webhook URLs</h3>
-              <Button size="sm" variant="ghost" onClick={() => setOpen(false)} className="h-8 w-8 p-0">
-                <X className="size-4" />
+      <div className="space-y-5">
+        {urls.map(({ name, url, hint }) => (
+          <div key={name} className="border border-border rounded-lg p-4 space-y-3">
+            <div>
+              <h4 className="text-sm font-medium">{name}</h4>
+              <p className="text-xs text-muted-foreground mt-1">{hint}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
+                {url || "Loading…"}
+              </code>
+              <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
+                {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
               </Button>
             </div>
-            <div className="p-5 space-y-5">
-              {urls.map(({ name, url, hint }) => (
-                <div key={name} className="space-y-2">
-                  <h4 className="text-sm font-medium">{name}</h4>
-                  <p className="text-xs text-muted-foreground">{hint}</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
-                      {url || "Loading…"}
-                    </code>
-                    <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
-                      {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
-                      <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
-        </div>
-      )}
-    </>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -1803,9 +1798,6 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
           0 = unlimited (default). If lowered below current running count, existing claws keep running.
         </p>
       </div>
-
-      {/* Webhook URLs — hidden behind modal */}
-      <WebhookUrlsModal hubUrl={hubUrl} />
 
       {/* Factories-as-code callout */}
       <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
