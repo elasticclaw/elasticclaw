@@ -389,9 +389,22 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	// Concurrency limit
 	view.MaxConcurrentClaws = s.hubCfg.MaxConcurrentClaws
 
-	// Factories
+	// Factories — merge external (disk) with in-memory (hub.yaml), external takes precedence
 	view.Factories = []FactoryView{}
+	mergedFactories := make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
+		if f != nil {
+			mergedFactories[f.Name] = f
+		}
+	}
+	// Load from external storage and merge (external takes precedence)
+	externalFactories, _ := loadExternalFactories()
+	for _, f := range externalFactories {
+		if f != nil {
+			mergedFactories[f.Name] = f
+		}
+	}
+	for _, f := range mergedFactories {
 		view.Factories = append(view.Factories, FactoryView{
 			Name:             f.Name,
 			Integration:      f.Integration,
