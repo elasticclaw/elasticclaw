@@ -242,7 +242,20 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
-	if cfg.DefaultModel != "" && !strings.Contains(cfg.DefaultModel, "/") {
+	if cfg.DefaultModel == "" {
+		checks = append(checks, DoctorCheck{
+			Category:    "models",
+			Severity:    "info",
+			Title:       "No default model configured",
+			Description: "No default model is set. The first available LLM key will be used, but an explicit default is recommended.",
+			OK:          false,
+			FixAction: &FixAction{
+				Type:   "navigate",
+				Target: "/settings/models",
+				Label:  "Set Default Model",
+			},
+		})
+	} else if !strings.Contains(cfg.DefaultModel, "/") {
 		checks = append(checks, DoctorCheck{
 			Category:    "models",
 			Severity:    "warning",
@@ -256,7 +269,7 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 				Label:  "Fix Format",
 			},
 		})
-	} else if cfg.DefaultModel != "" {
+	} else {
 		checks = append(checks, DoctorCheck{
 			Category:    "models",
 			Severity:    "info",
