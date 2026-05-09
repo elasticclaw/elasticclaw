@@ -121,7 +121,9 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Preserve inline webhook secrets before writing to external storage
+	// Preserve inline webhook secrets before writing to external storage.
+	// Check in-memory config first, then fall back to external storage
+	// so that factories with secrets only on disk are also protected.
 	s.mu.RLock()
 	existing := make(map[string]*types.FactoryConfig)
 	for _, f := range s.hubCfg.Factories {
@@ -129,7 +131,15 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	for _, incoming := range req.Factories {
-		if prev, ok := existing[incoming.Name]; ok {
+		prev, ok := existing[incoming.Name]
+		if !ok {
+			// Factory not in memory — try external storage
+			if disk, err := loadExternalFactory(incoming.Name); err == nil {
+				prev = disk
+				ok = true
+			}
+		}
+		if ok {
 			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && prev.WebhookSecret != "" {
 				incoming.WebhookSecret = prev.WebhookSecret
 			}
