@@ -86,7 +86,9 @@ func migrate(db *sql.DB) error {
 		auto_fix_bugbot  INTEGER NOT NULL DEFAULT 1,
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
-		bootstrap_ok     INTEGER NOT NULL DEFAULT 0
+		bootstrap_ok     INTEGER NOT NULL DEFAULT 0,
+		factory_name     TEXT NOT NULL DEFAULT '',
+		concurrency_group TEXT NOT NULL DEFAULT ''
 	);
 
 
