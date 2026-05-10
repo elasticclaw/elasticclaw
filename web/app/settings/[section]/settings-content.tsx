@@ -1969,16 +1969,19 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   }
 
   // Debounce group limit updates to avoid firing a PATCH on every keystroke.
-  // Use groupsRef inside the timeout so the callback always sees the latest
-  // groups array (e.g. if a group was removed while the timeout is pending).
-  const groupLimitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Each group gets its own timer so edits to different groups don't cancel
+  // each other — without this, editing group A then group B within 500ms would
+  // silently drop group A's change.
+  const groupLimitTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   function updateGroupLimit(name: string, limit: number) {
     setGroupLimits(prev => ({ ...prev, [name]: limit }))
-    if (groupLimitTimeoutRef.current) {
-      clearTimeout(groupLimitTimeoutRef.current)
+    const timers = groupLimitTimersRef.current
+    if (timers[name]) {
+      clearTimeout(timers[name])
     }
-    groupLimitTimeoutRef.current = setTimeout(() => {
+    timers[name] = setTimeout(() => {
+      delete timers[name]
       const latest = groupsRef.current
       const updated = latest.map(g => g.name === name ? { ...g, limit } : g)
       saveGroups(updated)

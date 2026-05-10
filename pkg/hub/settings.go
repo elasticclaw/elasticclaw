@@ -977,8 +977,55 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 			// If this factory exists in external storage, update it there too
 			// so that toggles like Enabled are persisted to disk.
-			if _, err := loadExternalFactory(fp.Name); err == nil {
-				_ = saveExternalFactory(factory)
+			// Load the existing disk factory and overlay only the patch fields
+			// to avoid wiping integration-specific fields (Repos, Trigger, etc.).
+			if disk, err := loadExternalFactory(fp.Name); err == nil {
+				if fp.Workspace != "" {
+					disk.Workspace = fp.Workspace
+				}
+				if fp.Team != "" {
+					disk.Team = fp.Team
+				}
+				if fp.TriggerStatus != "" {
+					disk.TriggerStatus = fp.TriggerStatus
+				}
+				if fp.DoneStatus != "" {
+					disk.DoneStatus = fp.DoneStatus
+				}
+				if fp.Template != "" {
+					disk.Template = fp.Template
+				}
+				if fp.NamePattern != "" {
+					disk.NamePattern = fp.NamePattern
+				}
+				if webhookSecret != "" {
+					disk.WebhookSecret = webhookSecret
+				}
+				if fp.WebhookSecretRef != "" {
+					disk.WebhookSecretRef = fp.WebhookSecretRef
+				}
+				if fp.PipelineYAML != "" {
+					disk.PipelineYAML = fp.PipelineYAML
+				}
+				if fp.Tags != nil {
+					disk.Tags = fp.Tags
+				}
+				if fp.Color != "" {
+					disk.Color = fp.Color
+				}
+				if fp.Labels != nil {
+					disk.Labels = fp.Labels
+				}
+				if fp.AssignedTo != "" {
+					disk.AssignedTo = fp.AssignedTo
+				}
+				if fp.Enabled != nil {
+					disk.Enabled = fp.Enabled
+				}
+				if fp.ConcurrencyGroup != "" {
+					disk.ConcurrencyGroup = fp.ConcurrencyGroup
+				}
+				_ = saveExternalFactory(disk)
 			}
 		}
 		updatedCfg.Factories = factories
