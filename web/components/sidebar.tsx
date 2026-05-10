@@ -193,8 +193,10 @@ export function Sidebar({
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
 
+  let sidebar: React.ReactElement
+
   if (isCollapsed) {
-    return (
+    sidebar = (
       <aside className="w-12 h-screen flex flex-col border-r border-border bg-card">
         <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
@@ -265,10 +267,9 @@ export function Sidebar({
         </div>
       </aside>
     )
-  }
-  
-  return (
-    <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
+  } else {
+    sidebar = (
+      <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between p-4 border-b border-border">
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
@@ -456,18 +457,6 @@ export function Sidebar({
         </DragOverlay>
       </DndContext>
 
-      {/* Factory picker modal for >1 manual factories */}
-      {showFactoryPicker && (
-        <FactoryPickerOverlay
-          factories={manualFactories}
-          onSelect={(f) => {
-            onSelectFactory?.(f)
-            setShowFactoryPicker(false)
-          }}
-          onClose={() => setShowFactoryPicker(false)}
-        />
-      )}
-
       {/* Logout + Settings */}
       <div className="p-2 border-t border-border">
         <div className="flex items-center gap-1">
@@ -504,6 +493,23 @@ export function Sidebar({
         </div>
       </div>
     </aside>
+    )
+  }
+
+  return (
+    <>
+      {sidebar}
+      {showFactoryPicker && (
+        <FactoryPickerOverlay
+          factories={manualFactories}
+          onSelect={(f) => {
+            onSelectFactory?.(f)
+            setShowFactoryPicker(false)
+          }}
+          onClose={() => setShowFactoryPicker(false)}
+        />
+      )}
+    </>
   )
 }
 
