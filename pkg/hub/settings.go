@@ -297,6 +297,8 @@ type ProviderPatch struct {
 	Token               string `json:"token,omitempty"`
 	DefaultTTL          string `json:"defaultTtl,omitempty"`
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
+	// Delete removes this provider when true.
+	Delete bool `json:"delete,omitempty"`
 }
 
 type GitHubAppPatch struct {
@@ -730,6 +732,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			updatedCfg.Providers = newProviders
 		}
 		for name, pp := range patch.Providers {
+			if pp.Delete {
+				delete(updatedCfg.Providers, name)
+				continue
+			}
 			existing := updatedCfg.Providers[name]
 			switch name {
 			case "daytona":
