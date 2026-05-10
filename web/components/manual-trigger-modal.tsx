@@ -85,8 +85,9 @@ export function ManualTriggerModal({ open, onOpenChange, factory, onClawCreated 
       onOpenChange(false)
       onClawCreated?.(res.claw_id)
     } catch (e) {
-      setTriggerError(String(e))
       setTriggering(false)
+      // Keep modal open so user sees the backend validation error
+      setTriggerError(e instanceof Error ? e.message : String(e))
     }
   }, [factory, inputValues, onOpenChange, onClawCreated])
 
@@ -196,6 +197,8 @@ function FactoryInputField({
           value={value || ""}
           onChange={(e) => onChange(e.target.value)}
           placeholder={input.default}
+          min={input.type === "number" ? input.min : undefined}
+          max={input.type === "number" ? input.max : undefined}
         />
       )}
     </div>

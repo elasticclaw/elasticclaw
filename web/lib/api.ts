@@ -87,7 +87,15 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error("session expired")
   }
   if (!res.ok) {
-    throw new Error(`API error ${res.status}: ${await res.text()}`)
+    const body = await res.text()
+    let message = body
+    try {
+      const parsed = JSON.parse(body)
+      if (typeof parsed.message === "string") message = parsed.message
+      if (typeof parsed.error === "string") message = parsed.error
+    } catch { /* not JSON */ }
+    if (!message) message = `API error ${res.status}`
+    throw new Error(message)
   }
   if (res.status === 204) return undefined as T
   return res.json()
