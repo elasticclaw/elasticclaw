@@ -240,24 +240,21 @@ export interface FactoryInput {
   validation?: string
 }
 
+// Factory matches FactoryPushView from GET /api/factories.
+// Field names match the JSON tags from the backend (snake_case / lowercase).
 export interface Factory {
   name: string
   integration: string
   workspace: string
-  team: string
-  triggerStatus: string
-  doneStatus: string
-  terminateOnLeave: boolean
+  trigger_status: string
+  done_status?: string
   template: string
-  namePattern: string
-  webhookSecretSet: boolean
-  webhookSecretRef?: string
-  pipelineYAML?: string
-  tags?: string[]
-  color?: string
   labels?: string[]
   assigned_to?: string
-  enabled: boolean
+  enabled?: boolean
+  has_webhook_secret: boolean
+  webhook_secret_ref?: string
+  pipeline_yaml?: string
   enableManualTrigger?: boolean
   inputs?: FactoryInput[]
 }

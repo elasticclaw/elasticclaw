@@ -77,13 +77,30 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
           if (input.type === "bool") {
             inputs[input.name] = val === "true"
           } else if (input.type === "number") {
-            inputs[input.name] = parseFloat(val || "0")
+            const num = val !== undefined && val !== "" ? parseFloat(val) : undefined
+            if (num === undefined || isNaN(num)) {
+              throw new Error(`Invalid number for input "${input.name}"`)
+            }
+            inputs[input.name] = num
           } else {
             inputs[input.name] = val || ""
           }
         }
         body.inputs = inputs
       }
+      // Validate: reject empty values for required inputs before submitting.
+      // Required number inputs must not silently default to 0.
+      if (selectedFactory.inputs) {
+        for (const input of selectedFactory.inputs) {
+          if (input.required) {
+            const val = inputValues[input.name]
+            if (val === undefined || val === null || val === "") {
+              throw new Error(`Required input "${input.name}" is empty`)
+            }
+          }
+        }
+      }
+
       const res = await triggerFactory(selectedFactory.name, body.inputs as Record<string, unknown>)
       // Navigate to the new claw using Next.js router (preserves SPA state)
       router.push(`/claws/${res.claw_id}`)
