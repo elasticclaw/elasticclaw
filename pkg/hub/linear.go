@@ -485,12 +485,21 @@ func (s *Server) countActiveClaws() int {
 // countActiveClawsInGroup returns the number of active claws belonging to the
 // given concurrency group. This is the scoped count used for per-group limit
 // enforcement. The concurrency_group column is populated at insert time.
+// Legacy rows (created before the migration) have concurrency_group = '' and
+// are treated as belonging to the "global" group.
 func (s *Server) countActiveClawsInGroup(groupName string) int {
 	var count int
-	_ = s.db.QueryRow(`
-		SELECT COUNT(*) FROM claws
-		WHERE status IN ('provisioning','starting','connected','running','idle')
-		  AND concurrency_group = ?`, groupName).Scan(&count)
+	if groupName == "global" {
+		_ = s.db.QueryRow(`
+			SELECT COUNT(*) FROM claws
+			WHERE status IN ('provisioning','starting','connected','running','idle')
+			  AND (concurrency_group = 'global' OR concurrency_group = '')`).Scan(&count)
+	} else {
+		_ = s.db.QueryRow(`
+			SELECT COUNT(*) FROM claws
+			WHERE status IN ('provisioning','starting','connected','running','idle')
+			  AND concurrency_group = ?`, groupName).Scan(&count)
+	}
 	return count
 }
 
