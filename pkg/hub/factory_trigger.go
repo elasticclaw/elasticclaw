@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -214,7 +215,11 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 
 	factory, err := loadExternalFactory(name)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, "factory not found")
+		if os.IsNotExist(err) {
+			jsonError(w, http.StatusNotFound, "factory not found")
+		} else {
+			jsonError(w, http.StatusInternalServerError, "failed to load factory: "+err.Error())
+		}
 		return
 	}
 

@@ -982,9 +982,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if fp.DoneStatus != "" {
 				disk.DoneStatus = fp.DoneStatus
 			}
-			if fp.TerminateOnLeave {
-				disk.TerminateOnLeave = fp.TerminateOnLeave
-			}
+			disk.TerminateOnLeave = fp.TerminateOnLeave
 			if fp.Template != "" {
 				disk.Template = fp.Template
 			}
@@ -1018,9 +1016,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if fp.ConcurrencyGroup != "" {
 				disk.ConcurrencyGroup = fp.ConcurrencyGroup
 			}
-			if fp.EnableManualTrigger {
-				disk.EnableManualTrigger = fp.EnableManualTrigger
-			}
+			disk.EnableManualTrigger = fp.EnableManualTrigger
 			if fp.Inputs != nil {
 				disk.Inputs = fp.Inputs
 			}
@@ -1032,7 +1028,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				disk.Trigger = fp.Trigger
 			}
 
-			_ = saveExternalFactory(disk)
+			if err := saveExternalFactory(disk); err != nil {
+				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		updatedCfg.Factories = nil // never store factories in hubCfg
 	}

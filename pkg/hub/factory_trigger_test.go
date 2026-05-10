@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -110,7 +111,7 @@ func TestValidateFactoryInputs_MinMax(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
 				}
-				if tt.errSubstr != "" && !contains(err.Error(), tt.errSubstr) {
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
 					t.Fatalf("expected error containing %q, got: %v", tt.errSubstr, err)
 				}
 			} else {
@@ -122,15 +123,4 @@ func TestValidateFactoryInputs_MinMax(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
+// (uses strings.Contains from the standard library)
