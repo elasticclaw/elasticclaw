@@ -67,6 +67,12 @@ export function ManualTriggerModal({ open, onOpenChange, factory, onClawCreated 
             if (val !== undefined && val !== "") {
               const num = parseFloat(val)
               if (isNaN(num)) throw new Error(`Invalid number for "${input.name}"`)
+              if (input.min !== undefined && num < input.min) {
+                throw new Error(`${input.name} must be at least ${input.min}`)
+              }
+              if (input.max !== undefined && num > input.max) {
+                throw new Error(`${input.name} must be at most ${input.max}`)
+              }
               inputs[input.name] = num
             }
           } else {
