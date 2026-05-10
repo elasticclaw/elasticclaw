@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -73,34 +72,17 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 func (s *Server) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
 	nameFilter := strings.TrimSpace(r.URL.Query().Get("name"))
 
-	// Load from external storage first
 	factories, err := loadExternalFactories()
 	if err != nil {
 		http.Error(w, "fs error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Merge with in-memory factories (external takes precedence)
-	s.mu.RLock()
-	memFactories := s.hubCfg.Factories
-	s.mu.RUnlock()
-
-	merged := make(map[string]*types.FactoryConfig, len(factories)+len(memFactories))
-	for _, f := range memFactories {
-		if f == nil {
-			continue
-		}
-		merged[f.Name] = f
-	}
+	views := make([]FactoryPushView, 0, len(factories))
 	for _, f := range factories {
 		if f == nil {
 			continue
 		}
-		merged[f.Name] = f
-	}
-
-	views := make([]FactoryPushView, 0, len(merged))
-	for _, f := range merged {
 		if nameFilter != "" && !strings.EqualFold(f.Name, nameFilter) {
 			continue
 		}
@@ -125,33 +107,14 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Preserve inline webhook secrets before writing to external storage.
-	// Check in-memory config first, then fall back to external storage
-	// so that factories with secrets only on disk are also protected.
-	s.mu.RLock()
-	existing := make(map[string]*types.FactoryConfig)
-	for _, f := range s.hubCfg.Factories {
-		if f == nil {
-			continue
-		}
-		existing[f.Name] = f
-	}
-	s.mu.RUnlock()
+	// Preserve webhook secrets from external storage before overwriting.
 	for _, incoming := range req.Factories {
 		if incoming == nil || incoming.Name == "" {
 			continue
 		}
-		prev, ok := existing[incoming.Name]
-		if !ok {
-			// Factory not in memory — try external storage
-			if disk, err := loadExternalFactory(incoming.Name); err == nil {
-				prev = disk
-				ok = true
-			}
-		}
-		if ok {
-			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && prev.WebhookSecret != "" {
-				incoming.WebhookSecret = prev.WebhookSecret
+		if disk, err := loadExternalFactory(incoming.Name); err == nil {
+			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && disk.WebhookSecret != "" {
+				incoming.WebhookSecret = disk.WebhookSecret
 			}
 		}
 	}
@@ -173,50 +136,8 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also update in-memory config for backward compat during migration
-	s.mu.Lock()
-	existing = make(map[string]*types.FactoryConfig)
-	for _, f := range s.hubCfg.Factories {
-		if f == nil {
-			continue
-		}
-		existing[f.Name] = f
-	}
-	incomingByName := make(map[string]*types.FactoryConfig, len(req.Factories))
-	incomingOrder := make([]string, 0, len(req.Factories))
-	seenIncoming := make(map[string]bool, len(req.Factories))
-	for _, incoming := range req.Factories {
-		existing[incoming.Name] = incoming
-		incomingByName[incoming.Name] = incoming
-		if !seenIncoming[incoming.Name] {
-			seenIncoming[incoming.Name] = true
-			incomingOrder = append(incomingOrder, incoming.Name)
-		}
-	}
-	updated := make([]*types.FactoryConfig, 0, len(existing))
-	for _, f := range s.hubCfg.Factories {
-		if incoming, ok := incomingByName[f.Name]; ok {
-			updated = append(updated, incoming)
-			delete(incomingByName, f.Name)
-			continue
-		}
-		updated = append(updated, f)
-	}
-	for _, name := range incomingOrder {
-		if incoming, ok := incomingByName[name]; ok {
-			updated = append(updated, incoming)
-		}
-	}
-	cfgCopy := *s.hubCfg
-	cfgCopy.Factories = updated
-	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
-
-	// Save to hub.yaml for backward compat during migration
-	if err := config.SaveHubConfig(&cfgCopy); err != nil {
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// Keep hubCfg.Factories empty — external storage is the only source of truth.
+	// This prevents stale in-memory configs from shadowing disk state.
 
 	views := make([]FactoryPushView, 0, len(req.Factories))
 	for _, f := range req.Factories {
@@ -229,40 +150,9 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, name string) {
-	// Delete from external storage first
 	if err := deleteExternalFactory(name); err != nil {
 		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	s.mu.Lock()
-	factories := make([]*types.FactoryConfig, 0, len(s.hubCfg.Factories))
-	found := false
-	for _, f := range s.hubCfg.Factories {
-		if f == nil {
-			continue
-		}
-		if strings.EqualFold(f.Name, name) {
-			found = true
-			continue
-		}
-		factories = append(factories, f)
-	}
-	if !found {
-		s.mu.Unlock()
-		// If not in memory but deleted from disk, still report success
-		jsonOK(w, map[string]string{"deleted": name})
-		return
-	}
-	cfgCopy := *s.hubCfg
-	cfgCopy.Factories = factories
-	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
-
-	if err := config.SaveHubConfig(&cfgCopy); err != nil {
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	jsonOK(w, map[string]string{"deleted": name})
 }

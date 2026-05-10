@@ -212,20 +212,8 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load factory from external storage + in-memory
 	factory, err := loadExternalFactory(name)
 	if err != nil {
-		// Fall back to in-memory
-		s.mu.RLock()
-		for _, f := range s.hubCfg.Factories {
-			if f != nil && strings.EqualFold(f.Name, name) {
-				factory = f
-				break
-			}
-		}
-		s.mu.RUnlock()
-	}
-	if factory == nil {
 		jsonError(w, http.StatusNotFound, "factory not found")
 		return
 	}
