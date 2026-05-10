@@ -954,15 +954,22 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				if fp.OriginalName != "" {
 					matchName = fp.OriginalName
 				}
-				if disk, err := loadExternalFactory(matchName); err == nil && disk.WebhookSecret != "" {
-					webhookSecret = disk.WebhookSecret
+				if old, err := loadExternalFactory(matchName); err == nil && old.WebhookSecret != "" {
+					webhookSecret = old.WebhookSecret
 				}
 			}
 
-			// Start from disk if it exists, otherwise build fresh
+			// For renames, start from the original factory on disk so no fields are lost.
+			baseName := fp.Name
+			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+				baseName = fp.OriginalName
+			}
 			var disk *types.FactoryConfig
-			if d, err := loadExternalFactory(fp.Name); err == nil {
+			if d, err := loadExternalFactory(baseName); err == nil {
 				disk = d
+				if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+					disk.Name = fp.Name // apply the new name
+				}
 			} else {
 				disk = &types.FactoryConfig{Name: fp.Name}
 			}
@@ -1031,6 +1038,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if err := saveExternalFactory(disk); err != nil {
 				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
 				return
+			}
+
+			// If this was a rename, delete the old factory directory so it doesn't
+			// appear as a phantom duplicate in listings.
+			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+				_ = deleteExternalFactory(fp.OriginalName)
 			}
 		}
 		updatedCfg.Factories = nil // never store factories in hubCfg
