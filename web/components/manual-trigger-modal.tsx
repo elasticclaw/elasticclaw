@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { Zap, Play, AlertCircle, X } from "lucide-react"
+import { Zap, Play, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -13,8 +13,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
-import { cn } from "@/lib/utils"
-import { fetchFactories, triggerFactory, type Factory, type FactoryInput } from "@/lib/api"
+import { triggerFactory, type Factory, type FactoryInput } from "@/lib/api"
 
 interface ManualTriggerModalProps {
   open: boolean
@@ -75,6 +74,7 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
         }
       }
       const res = await triggerFactory(factory.name, inputs)
+      setTriggering(false)
       onOpenChange(false)
       router.push(`/claws/${res.claw_id}`)
     } catch (e) {
