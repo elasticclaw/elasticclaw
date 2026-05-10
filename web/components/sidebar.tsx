@@ -1,12 +1,12 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { clearConfig } from "@/lib/api"
+import { clearConfig, fetchFactories, type Factory } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,7 +32,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 
 type TagFilter = string
 
@@ -55,6 +55,7 @@ interface SidebarProps {
   isCollapsed: boolean
   onToggleCollapse: () => void
   isAdmin?: boolean
+  onSelectFactory?: (factory: Factory | null) => void
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -110,10 +111,28 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
   isAdmin = true,
+  onSelectFactory,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
+  const [manualFactories, setManualFactories] = useState<Factory[]>([])
+  const [showFactoryPicker, setShowFactoryPicker] = useState(false)
+
+  // Load manual-trigger factories
+  useEffect(() => {
+    let cancelled = false
+    fetchFactories()
+      .then((data) => {
+        if (cancelled) return
+        const manual = data.filter(
+          (f) => (f.enabled !== false) && f.enableManualTrigger
+        )
+        setManualFactories(manual)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [claws.length]) // re-check when claws change (new claw from trigger)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -248,7 +267,54 @@ export function Sidebar({
             className="pl-8 h-8 text-sm bg-background"
           />
         </div>
-        
+
+        {/* + Claw button — shows only when manual trigger factories exist */}
+        {manualFactories.length > 0 && (
+          <Button
+            size="sm"
+            className="w-full h-8 text-xs gap-1"
+            onClick={() => {
+              if (manualFactories.length === 1) {
+                onSelectFactory?.(manualFactories[0])
+              } else {
+                setShowFactoryPicker(true)
+              }
+            }}
+          >
+            <Plus className="size-3.5" />
+            + Claw
+          </Button>
+        )}
+
+        {/* Factory picker modal for >1 manual factories */}
+        {showFactoryPicker && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-[90vw]">
+              <div className="flex items-center justify-between p-3 border-b border-border">
+                <h3 className="text-sm font-medium">Select Factory</h3>
+                <Button variant="ghost" size="icon" className="size-7" onClick={() => setShowFactoryPicker(false)}>
+                  <X className="size-4" />
+                </Button>
+              </div>
+              <div className="p-2 space-y-1">
+                {manualFactories.map((f) => (
+                  <button
+                    key={f.name}
+                    className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors"
+                    onClick={() => {
+                      onSelectFactory?.(f)
+                      setShowFactoryPicker(false)
+                    }}
+                  >
+                    <div className="font-medium">{f.name}</div>
+                    <div className="text-xs text-muted-foreground">{f.template}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center gap-1.5 flex-wrap">
           {tagKeys.length > 0 && (
             <DropdownMenu>

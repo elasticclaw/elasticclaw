@@ -5,10 +5,10 @@ import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
 import { SpawnModal } from "@/components/spawn-modal"
 import { SetupScreen } from "@/components/setup-screen"
-import { ManualTriggerPanel } from "@/components/manual-trigger-panel"
+import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
-import { isConfigured } from "@/lib/api"
+import { isConfigured, type Factory } from "@/lib/api"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -21,6 +21,7 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
   const [isAdmin, setIsAdmin] = useState(true) // default true so UI doesn't flicker
+  const [selectedFactory, setSelectedFactory] = useState<Factory | null>(null)
 
   // Check configured on mount (needs browser for localStorage)
   useEffect(() => {
@@ -285,14 +286,9 @@ export default function Home() {
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
+        onSelectFactory={setSelectedFactory}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Manual trigger panel — only visible in board view (no claw selected) */}
-        {!selectedClaw && (
-          <div className="shrink-0 px-6 pt-4">
-            <ManualTriggerPanel />
-          </div>
-        )}
         <ConversationView
           claw={selectedClaw}
           allClaws={claws}
@@ -315,6 +311,11 @@ export default function Home() {
         open={spawnModalOpen}
         onOpenChange={setSpawnModalOpen}
         onSpawn={handleSpawn}
+      />
+      <ManualTriggerModal
+        open={!!selectedFactory}
+        onOpenChange={(open) => { if (!open) setSelectedFactory(null) }}
+        factory={selectedFactory}
       />
     </div>
   )
