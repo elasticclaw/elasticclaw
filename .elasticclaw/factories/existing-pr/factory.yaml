@@ -21,4 +21,4 @@ inputs:
     type: number
     required: true
     description: PR number to review
-    
+    min: 1
