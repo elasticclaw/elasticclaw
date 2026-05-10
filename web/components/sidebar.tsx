@@ -122,15 +122,27 @@ export function Sidebar({
   // Load manual-trigger factories
   useEffect(() => {
     let cancelled = false
-    fetchFactories()
-      .then((data) => {
-        if (cancelled) return
-        const manual = data.filter(
-          (f) => (f.enabled !== false) && f.enableManualTrigger
-        )
-        setManualFactories(manual)
-      })
-      .catch(() => {})
+    let attempts = 0
+    const load = () => {
+      fetchFactories()
+        .then((data) => {
+          if (cancelled) return
+          const manual = data.filter(
+            (f) => (f.enabled !== false) && f.enableManualTrigger
+          )
+          console.log("[sidebar] loaded factories:", data.length, "manual:", manual.length)
+          setManualFactories(manual)
+        })
+        .catch((err) => {
+          if (cancelled) return
+          console.error("[sidebar] fetchFactories error (attempt", attempts + 1, "):", err)
+          attempts++
+          if (attempts < 3) {
+            setTimeout(load, attempts * 500)
+          }
+        })
+    }
+    load()
     return () => { cancelled = true }
   }, [claws.length]) // re-check when claws change (new claw from trigger)
 
