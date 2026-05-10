@@ -420,7 +420,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   }
 
   function doRemove(name: string) {
-    onSave({ providers: { [name]: null } })
+    onSave({ providers: { [name]: { delete: true } } })
     setShowModal(false)
     resetForm()
   }
