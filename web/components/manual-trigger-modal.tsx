@@ -19,9 +19,10 @@ interface ManualTriggerModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   factory?: Factory | null
+  onClawCreated?: (clawId: string) => void
 }
 
-export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTriggerModalProps) {
+export function ManualTriggerModal({ open, onOpenChange, factory, onClawCreated }: ManualTriggerModalProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
@@ -76,12 +77,12 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
       const res = await triggerFactory(factory.name, inputs)
       setTriggering(false)
       onOpenChange(false)
-      router.push(`/claws/${res.claw_id}`)
+      onClawCreated?.(res.claw_id)
     } catch (e) {
       setTriggerError(String(e))
       setTriggering(false)
     }
-  }, [factory, inputValues, router, onOpenChange])
+  }, [factory, inputValues, onOpenChange, onClawCreated])
 
   if (!factory) return null
 

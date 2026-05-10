@@ -196,7 +196,7 @@ export function Sidebar({
   if (isCollapsed) {
     return (
       <aside className="w-12 h-screen flex flex-col border-r border-border bg-card">
-        <div className="p-2 border-b border-border">
+        <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -206,6 +206,23 @@ export function Sidebar({
           >
             <PanelLeft className="size-4" />
           </Button>
+          {manualFactories.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title="Create Claw"
+              onClick={() => {
+                if (manualFactories.length === 1) {
+                  onSelectFactory?.(manualFactories[0])
+                } else {
+                  setShowFactoryPicker(true)
+                }
+              }}
+            >
+              <Plus className="size-4" />
+            </Button>
+          )}
         </div>
         <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
           {allClaws.map((claw) => {
@@ -257,6 +274,23 @@ export function Sidebar({
           {appName}
         </h1>
         <div className="flex items-center gap-1">
+          {manualFactories.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title="Create Claw"
+              onClick={() => {
+                if (manualFactories.length === 1) {
+                  onSelectFactory?.(manualFactories[0])
+                } else {
+                  setShowFactoryPicker(true)
+                }
+              }}
+            >
+              <Plus className="size-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -279,36 +313,6 @@ export function Sidebar({
             className="pl-8 h-8 text-sm bg-background"
           />
         </div>
-
-        {/* + Claw button — shows only when manual trigger factories exist */}
-        {manualFactories.length > 0 && (
-          <Button
-            size="sm"
-            className="w-full h-8 text-xs gap-1"
-            onClick={() => {
-              if (manualFactories.length === 1) {
-                onSelectFactory?.(manualFactories[0])
-              } else {
-                setShowFactoryPicker(true)
-              }
-            }}
-          >
-            <Plus className="size-3.5" />
-            + Claw
-          </Button>
-        )}
-
-        {/* Factory picker modal for >1 manual factories */}
-        {showFactoryPicker && (
-          <FactoryPickerOverlay
-            factories={manualFactories}
-            onSelect={(f) => {
-              onSelectFactory?.(f)
-              setShowFactoryPicker(false)
-            }}
-            onClose={() => setShowFactoryPicker(false)}
-          />
-        )}
 
         <div className="flex items-center gap-1.5 flex-wrap">
           {tagKeys.length > 0 && (
@@ -451,6 +455,18 @@ export function Sidebar({
           ) : null}
         </DragOverlay>
       </DndContext>
+
+      {/* Factory picker modal for >1 manual factories */}
+      {showFactoryPicker && (
+        <FactoryPickerOverlay
+          factories={manualFactories}
+          onSelect={(f) => {
+            onSelectFactory?.(f)
+            setShowFactoryPicker(false)
+          }}
+          onClose={() => setShowFactoryPicker(false)}
+        />
+      )}
 
       {/* Logout + Settings */}
       <div className="p-2 border-t border-border">
