@@ -1,12 +1,12 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { clearConfig } from "@/lib/api"
+import { clearConfig, fetchFactories, type Factory } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,7 +32,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 
 type TagFilter = string
 
@@ -55,6 +55,7 @@ interface SidebarProps {
   isCollapsed: boolean
   onToggleCollapse: () => void
   isAdmin?: boolean
+  onSelectFactory?: (factory: Factory | null) => void
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -110,10 +111,40 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
   isAdmin = true,
+  onSelectFactory,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
+  const [manualFactories, setManualFactories] = useState<Factory[]>([])
+  const [showFactoryPicker, setShowFactoryPicker] = useState(false)
+
+  // Load manual-trigger factories
+  useEffect(() => {
+    let cancelled = false
+    let attempts = 0
+    const load = () => {
+      fetchFactories()
+        .then((data) => {
+          if (cancelled) return
+          const manual = data.filter(
+            (f) => (f.enabled !== false) && f.enableManualTrigger
+          )
+          console.log("[sidebar] loaded factories:", data.length, "manual:", manual.length)
+          setManualFactories(manual)
+        })
+        .catch((err) => {
+          if (cancelled) return
+          console.error("[sidebar] fetchFactories error (attempt", attempts + 1, "):", err)
+          attempts++
+          if (attempts < 3) {
+            setTimeout(load, attempts * 500)
+          }
+        })
+    }
+    load()
+    return () => { cancelled = true }
+  }, [claws.length]) // re-check when claws change (new claw from trigger)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -162,10 +193,12 @@ export function Sidebar({
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
 
+  let sidebar: React.ReactElement
+
   if (isCollapsed) {
-    return (
+    sidebar = (
       <aside className="w-12 h-screen flex flex-col border-r border-border bg-card">
-        <div className="p-2 border-b border-border">
+        <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -175,6 +208,23 @@ export function Sidebar({
           >
             <PanelLeft className="size-4" />
           </Button>
+          {manualFactories.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title="Create Claw"
+              onClick={() => {
+                if (manualFactories.length === 1) {
+                  onSelectFactory?.(manualFactories[0])
+                } else {
+                  setShowFactoryPicker(true)
+                }
+              }}
+            >
+              <Plus className="size-4" />
+            </Button>
+          )}
         </div>
         <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
           {allClaws.map((claw) => {
@@ -217,15 +267,31 @@ export function Sidebar({
         </div>
       </aside>
     )
-  }
-  
-  return (
-    <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
+  } else {
+    sidebar = (
+      <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between p-4 border-b border-border">
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
         </h1>
         <div className="flex items-center gap-1">
+          {manualFactories.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title="Create Claw"
+              onClick={() => {
+                if (manualFactories.length === 1) {
+                  onSelectFactory?.(manualFactories[0])
+                } else {
+                  setShowFactoryPicker(true)
+                }
+              }}
+            >
+              <Plus className="size-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -248,7 +314,7 @@ export function Sidebar({
             className="pl-8 h-8 text-sm bg-background"
           />
         </div>
-        
+
         <div className="flex items-center gap-1.5 flex-wrap">
           {tagKeys.length > 0 && (
             <DropdownMenu>
@@ -427,5 +493,76 @@ export function Sidebar({
         </div>
       </div>
     </aside>
+    )
+  }
+
+  return (
+    <>
+      {sidebar}
+      {showFactoryPicker && (
+        <FactoryPickerOverlay
+          factories={manualFactories}
+          onSelect={(f) => {
+            onSelectFactory?.(f)
+            setShowFactoryPicker(false)
+          }}
+          onClose={() => setShowFactoryPicker(false)}
+        />
+      )}
+    </>
+  )
+}
+
+/** FactoryPickerOverlay — a keyboard-accessible overlay for picking a factory.
+ *  Closes on Escape key and click outside the card. */
+function FactoryPickerOverlay({
+  factories,
+  onSelect,
+  onClose,
+}: {
+  factories: Factory[]
+  onSelect: (f: Factory) => void
+  onClose: () => void
+}) {
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    },
+    [onClose]
+  )
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown)
+    return () => document.removeEventListener("keydown", handleKeyDown)
+  }, [handleKeyDown])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
+      <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-[90vw]">
+        <div className="flex items-center justify-between p-3 border-b border-border">
+          <h3 className="text-sm font-medium">Select Factory</h3>
+          <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
+            <X className="size-4" />
+          </Button>
+        </div>
+        <div className="p-2 space-y-1">
+          {factories.map((f) => (
+            <button
+              key={f.name}
+              className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors"
+              onClick={() => onSelect(f)}
+            >
+              <div className="font-medium">{f.name}</div>
+              <div className="text-xs text-muted-foreground">{f.template}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   )
 }
