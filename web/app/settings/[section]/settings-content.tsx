@@ -1931,6 +1931,9 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   // Concurrency groups state — use local editable state so inputs are
   // responsive, then debounce saves to the server.
   const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
+  const groupsRef = useRef(groups)
+  groupsRef.current = groups
+
   const [groupLimits, setGroupLimits] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {}
     for (const g of groups) init[g.name] = g.limit
@@ -1966,6 +1969,8 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   }
 
   // Debounce group limit updates to avoid firing a PATCH on every keystroke.
+  // Use groupsRef inside the timeout so the callback always sees the latest
+  // groups array (e.g. if a group was removed while the timeout is pending).
   const groupLimitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   function updateGroupLimit(name: string, limit: number) {
@@ -1974,7 +1979,8 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
       clearTimeout(groupLimitTimeoutRef.current)
     }
     groupLimitTimeoutRef.current = setTimeout(() => {
-      const updated = groups.map(g => g.name === name ? { ...g, limit } : g)
+      const latest = groupsRef.current
+      const updated = latest.map(g => g.name === name ? { ...g, limit } : g)
       saveGroups(updated)
     }, 500)
   }
