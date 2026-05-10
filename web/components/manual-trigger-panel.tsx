@@ -47,13 +47,20 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
     return () => { cancelled = true }
   }, [])
 
-  // Reset input values when selecting a different factory
+  // Reset input values when selecting a different factory.
+  // Seed bool inputs with "false" and enum inputs with their first option when
+  // no explicit default is provided, so the select's visual state matches
+  // inputValues and required validation doesn't fail on untouched fields.
   useEffect(() => {
     if (selectedFactory?.inputs) {
       const defaults: Record<string, string> = {}
       for (const input of selectedFactory.inputs) {
         if (input.default) {
           defaults[input.name] = input.default
+        } else if (input.type === "bool") {
+          defaults[input.name] = "false"
+        } else if (input.type === "enum" && input.options && input.options.length > 0) {
+          defaults[input.name] = input.options[0]
         }
       }
       setInputValues(defaults)
