@@ -542,27 +542,13 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
 	// race where concurrent factory webhooks both read active < max and both
 	// insert as provisioning, exceeding the limit.
-	// Check concurrency limit (group-aware)
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	groupName := factory.ConcurrencyGroup
-	if groupName == "" {
-		groupName = "global"
-	}
-	var groupLimit int
-	for _, g := range s.hubCfg.ConcurrencyGroups {
-		if g.Name == groupName {
-			groupLimit = g.Limit
-			break
-		}
-	}
-	if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
-		groupLimit = s.hubCfg.MaxConcurrentClaws
-	}
+	groupName, groupLimit := s.resolveGroupLimit(factory)
 	s.mu.RUnlock()
 
-	activeCount := s.countActiveClaws()
+	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
@@ -579,10 +565,10 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now, factory.Name, groupName,
 	)
 
 	// Release promoteMu immediately after INSERT so we don't hold it across

@@ -482,6 +482,39 @@ func (s *Server) countActiveClaws() int {
 	return count
 }
 
+// countActiveClawsInGroup returns the number of active claws belonging to the
+// given concurrency group. This is the scoped count used for per-group limit
+// enforcement. The concurrency_group column is populated at insert time.
+func (s *Server) countActiveClawsInGroup(groupName string) int {
+	var count int
+	_ = s.db.QueryRow(`
+		SELECT COUNT(*) FROM claws
+		WHERE status IN ('provisioning','starting','connected','running','idle')
+		  AND concurrency_group = ?`, groupName).Scan(&count)
+	return count
+}
+
+// resolveGroupLimit returns the concurrency group name and limit for a factory.
+// It checks the factory's ConcurrencyGroup, falls back to "global", and looks up
+// the limit from hub config (group-specific or MaxConcurrentClaws).
+// Must be called with s.mu held (at least RLock).
+func (s *Server) resolveGroupLimit(factory *types.FactoryConfig) (groupName string, limit int) {
+	groupName = factory.ConcurrencyGroup
+	if groupName == "" {
+		groupName = "global"
+	}
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		if g.Name == groupName {
+			limit = g.Limit
+			break
+		}
+	}
+	if limit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+		limit = s.hubCfg.MaxConcurrentClaws
+	}
+	return groupName, limit
+}
+
 // promotePendingClaws checks if any pending claws can be promoted to provisioning
 // when a running claw terminates. Called after any claw deletion.
 func (s *Server) promotePendingClaws() {
@@ -491,34 +524,26 @@ func (s *Server) promotePendingClaws() {
 	s.promoteMu.Lock()
 	defer s.promoteMu.Unlock()
 
-	s.mu.RLock()
-	// Build a map of group name → limit for quick lookup
-	groupLimits := make(map[string]int)
-	for _, g := range s.hubCfg.ConcurrencyGroups {
-		groupLimits[g.Name] = g.Limit
-	}
-	// Fallback: global maxConcurrent maps to "global" group
-	if s.hubCfg.MaxConcurrentClaws > 0 {
-		if _, ok := groupLimits["global"]; !ok {
-			groupLimits["global"] = s.hubCfg.MaxConcurrentClaws
-		}
-	}
-	s.mu.RUnlock()
+	// Pre-load external factories outside the lock to avoid holding s.mu during I/O.
+	externalFactories, _ := loadExternalFactories()
 
-	for {
-		// Find the oldest pending claw
+	// Fetch all pending claws ordered by age so we can scan for the first one
+	// whose group still has capacity. A single-row LIMIT 1 would trap us in an
+	// infinite loop when the oldest claw belongs to a full group.
+	rows, err := s.db.Query(`SELECT id, tenant_id, name FROM claws WHERE status = 'pending' ORDER BY created_at ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
 		var clawID, tenantID, factoryName string
-		err := s.db.QueryRow(
-			`SELECT id, tenant_id, name FROM claws WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
-		).Scan(&clawID, &tenantID, &factoryName)
-		if err != nil {
-			// No pending claws
-			return
+		if err := rows.Scan(&clawID, &tenantID, &factoryName); err != nil {
+			continue
 		}
 
 		// Determine which group this claw belongs to by looking up its factory
 		groupName := "global"
-		var groupLimit int
 		s.mu.RLock()
 		for _, f := range s.hubCfg.Factories {
 			if f != nil && f.Name == factoryName {
@@ -528,28 +553,36 @@ func (s *Server) promotePendingClaws() {
 				break
 			}
 		}
-		// Also check external factories
+		// Also check external factories (already loaded outside the lock)
 		if groupName == "global" {
-			if externalFactories, err := loadExternalFactories(); err == nil {
-				for _, f := range externalFactories {
-					if f != nil && f.Name == factoryName && f.ConcurrencyGroup != "" {
-						groupName = f.ConcurrencyGroup
-						break
-					}
+			for _, f := range externalFactories {
+				if f != nil && f.Name == factoryName && f.ConcurrencyGroup != "" {
+					groupName = f.ConcurrencyGroup
+					break
 				}
 			}
 		}
-		groupLimit = groupLimits[groupName]
+		groupLimit := 0
+		for _, g := range s.hubCfg.ConcurrencyGroups {
+			if g.Name == groupName {
+				groupLimit = g.Limit
+				break
+			}
+		}
 		if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
 			groupLimit = s.hubCfg.MaxConcurrentClaws
 		}
 		s.mu.RUnlock()
 
-		active := s.countActiveClaws()
+		active := s.countActiveClawsInGroup(groupName)
 
 		// 0 means unlimited — promote all pending claws
 		if groupLimit > 0 && active >= groupLimit {
-			return
+			// This group is at capacity — skip this claw and check the next
+			// oldest pending claw (which may belong to a different group that
+			// still has capacity). Do NOT return; starvation of other groups
+			// would occur if we did.
+			continue
 		}
 
 		// Promote to provisioning — scope UPDATE to pending status so a

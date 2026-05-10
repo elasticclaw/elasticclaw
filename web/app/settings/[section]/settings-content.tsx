@@ -1928,8 +1928,21 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   const factories = settings.factories || []
   const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
 
-  // Concurrency groups state
+  // Concurrency groups state — use local editable state so inputs are
+  // responsive, then debounce saves to the server.
   const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
+  const [groupLimits, setGroupLimits] = useState<Record<string, number>>(() => {
+    const init: Record<string, number> = {}
+    for (const g of groups) init[g.name] = g.limit
+    return init
+  })
+  // Keep local state in sync when props change from outside (e.g. initial load)
+  useEffect(() => {
+    const next: Record<string, number> = {}
+    for (const g of groups) next[g.name] = g.limit
+    setGroupLimits(next)
+  }, [settings.concurrencyGroups])
+
   const [newGroupName, setNewGroupName] = useState("")
   const [newGroupLimit, setNewGroupLimit] = useState(0)
 
@@ -1952,8 +1965,18 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
     saveGroups(groups.filter(g => g.name !== name))
   }
 
+  // Debounce group limit updates to avoid firing a PATCH on every keystroke.
+  const groupLimitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   function updateGroupLimit(name: string, limit: number) {
-    saveGroups(groups.map(g => g.name === name ? { ...g, limit } : g))
+    setGroupLimits(prev => ({ ...prev, [name]: limit }))
+    if (groupLimitTimeoutRef.current) {
+      clearTimeout(groupLimitTimeoutRef.current)
+    }
+    groupLimitTimeoutRef.current = setTimeout(() => {
+      const updated = groups.map(g => g.name === name ? { ...g, limit } : g)
+      saveGroups(updated)
+    }, 500)
   }
 
   function updateFactoryGroup(factoryIdx: number, groupName: string) {
@@ -1989,7 +2012,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
               <Input
                 type="number"
                 min={0}
-                value={g.limit}
+                value={groupLimits[g.name] ?? g.limit}
                 onChange={(e) => updateGroupLimit(g.name, parseInt(e.target.value) || 0)}
                 className="w-24 text-sm h-7"
                 placeholder="0 = unlimited"
