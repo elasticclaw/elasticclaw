@@ -524,44 +524,27 @@ func (s *Server) promotePendingClaws() {
 	s.promoteMu.Lock()
 	defer s.promoteMu.Unlock()
 
-	// Pre-load external factories outside the lock to avoid holding s.mu during I/O.
-	externalFactories, _ := loadExternalFactories()
-
 	// Fetch all pending claws ordered by age so we can scan for the first one
 	// whose group still has capacity. A single-row LIMIT 1 would trap us in an
 	// infinite loop when the oldest claw belongs to a full group.
-	rows, err := s.db.Query(`SELECT id, tenant_id, name FROM claws WHERE status = 'pending' ORDER BY created_at ASC`)
+	// We select concurrency_group directly — it's stored at insert time, so
+	// no factory config lookup is needed.
+	rows, err := s.db.Query(`SELECT id, tenant_id, concurrency_group FROM claws WHERE status = 'pending' ORDER BY created_at ASC`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var clawID, tenantID, factoryName string
-		if err := rows.Scan(&clawID, &tenantID, &factoryName); err != nil {
+		var clawID, tenantID, groupName string
+		if err := rows.Scan(&clawID, &tenantID, &groupName); err != nil {
 			continue
 		}
+		if groupName == "" {
+			groupName = "global"
+		}
 
-		// Determine which group this claw belongs to by looking up its factory
-		groupName := "global"
 		s.mu.RLock()
-		for _, f := range s.hubCfg.Factories {
-			if f != nil && f.Name == factoryName {
-				if f.ConcurrencyGroup != "" {
-					groupName = f.ConcurrencyGroup
-				}
-				break
-			}
-		}
-		// Also check external factories (already loaded outside the lock)
-		if groupName == "global" {
-			for _, f := range externalFactories {
-				if f != nil && f.Name == factoryName && f.ConcurrencyGroup != "" {
-					groupName = f.ConcurrencyGroup
-					break
-				}
-			}
-		}
 		groupLimit := 0
 		for _, g := range s.hubCfg.ConcurrencyGroups {
 			if g.Name == groupName {
