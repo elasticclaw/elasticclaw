@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
+import { useRouter } from "next/navigation"
 import { Zap, Play, AlertCircle, Factory as FactoryIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,6 +22,7 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
+  const router = useRouter()
 
   // Load factories on mount
   useEffect(() => {
@@ -28,9 +30,11 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
     fetchFactories()
       .then((data) => {
         if (cancelled) return
-        // Filter to enabled factories with manual trigger enabled
+        // Filter to enabled factories with manual trigger enabled.
+        // Enabled is *bool on the backend (nil = enabled by default), so
+        // treat undefined/null as true.
         const manualFactories = data.filter(
-          (f) => f.enabled && f.enableManualTrigger
+          (f) => (f.enabled !== false) && f.enableManualTrigger
         )
         setFactories(manualFactories)
         setLoading(false)
@@ -81,8 +85,8 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
         body.inputs = inputs
       }
       const res = await triggerFactory(selectedFactory.name, body.inputs as Record<string, unknown>)
-      // Navigate to the new claw
-      window.location.href = `/claws/${res.claw_id}`
+      // Navigate to the new claw using Next.js router (preserves SPA state)
+      router.push(`/claws/${res.claw_id}`)
     } catch (e) {
       setTriggerError(String(e))
       setTriggering(false)
