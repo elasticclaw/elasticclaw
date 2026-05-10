@@ -637,17 +637,18 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
 	// race where concurrent factory webhooks both read active < max and both
 	// insert as provisioning, exceeding the limit.
+	// Check concurrency limit (group-aware)
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	groupName, groupLimit := s.resolveGroupLimit(factory)
 	s.mu.RUnlock()
 
-	activeCount := s.countActiveClaws()
+	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for GitHub issue %s as pending", activeCount, maxConcurrent, issueID)
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub issue %s as pending", groupName, activeCount, groupLimit, issueID)
 	}
 
 	// Insert claw record
@@ -661,10 +662,10 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, github_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, github_issue_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, initialStatus, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, issueID, initialStatus, now, factory.Name, groupName,
 	)
 
 	// Release promoteMu immediately after INSERT so we don't hold it across

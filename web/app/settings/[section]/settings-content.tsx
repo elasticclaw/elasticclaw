@@ -6,12 +6,13 @@ import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "doctor"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "webhooks" | "doctor"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "doctor"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "webhooks", "doctor"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -64,6 +65,7 @@ interface SettingsData {
     name: string; integration: string; workspace: string; team: string
     triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
     webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
+    concurrencyGroup?: string
     inputs?: Array<{
       name: string; type: string; required?: boolean; default?: string
       description?: string; options?: string[]; validation?: string
@@ -96,7 +98,13 @@ interface SettingsData {
     }
     disablePasswordAuth?: boolean
   }
+  concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
+}
+
+interface ConcurrencyGroup {
+  name: string
+  limit: number
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -198,6 +206,7 @@ export default function SettingsSectionPage() {
       { id: "github", label: "GitHub Apps", icon: Github },
       { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
       { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+      { id: "webhooks", label: "Webhooks", icon: Webhook },
     ],
     // Configuration
     [
@@ -297,6 +306,9 @@ export default function SettingsSectionPage() {
           {section === "ai-config" && (
             <AIConfigSection />
           )}
+          {section === "webhooks" && (
+            <WebhooksSection hubUrl={hubPublicUrl} />
+          )}
           {section === "doctor" && (
             <DoctorSection />
           )}
@@ -306,134 +318,300 @@ export default function SettingsSectionPage() {
   )
 }
 
+const SANDBOX_PROVIDER_OPTIONS = [
+  { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
+  { value: "daytona", label: "Daytona", description: "Development environment provider" },
+]
+
+interface SandboxProviderView {
+  name: string
+  type: string
+  label: string
+  description: string
+  configured: boolean
+  apiUrl?: string
+  apiKeySet?: boolean
+  defaultSnapshot?: string
+  tokenSet?: boolean
+  defaultTtl?: string
+  defaultInstanceType?: string
+}
+
 function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const [newKey, setNewKey] = useState("")
-  const rep = settings.providers?.replicated
-  const day = settings.providers?.daytona
+  const providers = settings.providers || {}
 
-  const [repToken, setRepToken] = useState("")
-  const [repTTL, setRepTTL] = useState(rep?.defaultTtl || "48h")
-  const [repType, setRepType] = useState(rep?.defaultInstanceType || "r1.large")
+  const configuredProviders: SandboxProviderView[] = Object.entries(providers)
+    .filter(([_, p]) => p != null)
+    .map(([name, p]) => {
+      const opt = SANDBOX_PROVIDER_OPTIONS.find(o => o.value === name)
+      return {
+        name,
+        type: p.type || name,
+        label: opt?.label || name,
+        description: opt?.description || "",
+        configured: !!(p.tokenSet || p.apiKeySet),
+        apiUrl: p.apiUrl,
+        apiKeySet: p.apiKeySet,
+        defaultSnapshot: p.defaultSnapshot,
+        tokenSet: p.tokenSet,
+        defaultTtl: p.defaultTtl,
+        defaultInstanceType: p.defaultInstanceType,
+      }
+    })
 
-  const [dayURL, setDayURL] = useState(day?.apiUrl || "")
-  const [dayKey, setDayKey] = useState("")
-  const [daySnapshot, setDaySnapshot] = useState(day?.defaultSnapshot || "")
+  // Modal state
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [editName, setEditName] = useState<string | null>(null)
+
+  // Form state
+  const [formProvider, setFormProvider] = useState("replicated")
+  const [formToken, setFormToken] = useState("")
+  const [formApiUrl, setFormApiUrl] = useState("")
+  const [formApiKey, setFormApiKey] = useState("")
+  const [formDefaultTtl, setFormDefaultTtl] = useState("")
+  const [formDefaultInstanceType, setFormDefaultInstanceType] = useState("")
+  const [formDefaultSnapshot, setFormDefaultSnapshot] = useState("")
+
+  const resetForm = () => {
+    setFormProvider("replicated")
+    setFormToken("")
+    setFormApiUrl("")
+    setFormApiKey("")
+    setFormDefaultTtl("")
+    setFormDefaultInstanceType("")
+    setFormDefaultSnapshot("")
+    setEditName(null)
+  }
+
+  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  const openEdit = (name: string) => {
+    const p = providers[name]
+    const opt = SANDBOX_PROVIDER_OPTIONS.find(o => o.value === name)
+    setFormProvider(name)
+    setFormToken("")
+    setFormApiUrl(p?.apiUrl || "")
+    setFormApiKey("")
+    setFormDefaultTtl(p?.defaultTtl || "")
+    setFormDefaultInstanceType(p?.defaultInstanceType || "")
+    setFormDefaultSnapshot(p?.defaultSnapshot || "")
+    setEditName(name)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  const availableProviders = SANDBOX_PROVIDER_OPTIONS.filter(o => !providers[o.value])
+
+  function doSave() {
+    const patch: Record<string, unknown> = {}
+    if (formProvider === "replicated") {
+      if (formDefaultTtl) patch.defaultTtl = formDefaultTtl
+      if (formDefaultInstanceType) patch.defaultInstanceType = formDefaultInstanceType
+      if (formToken) patch.token = formToken
+    } else if (formProvider === "daytona") {
+      if (formApiUrl) patch.apiUrl = formApiUrl
+      if (formApiKey) patch.apiKey = formApiKey
+      if (formDefaultSnapshot) patch.defaultSnapshot = formDefaultSnapshot
+    }
+    onSave({ providers: { [formProvider]: patch } })
+    setShowModal(false)
+    resetForm()
+  }
+
+  function doRemove(name: string) {
+    onSave({ providers: { [name]: null } })
+    setShowModal(false)
+    resetForm()
+  }
+
+  const modalTitle = modalMode === "add"
+    ? "Add Sandbox Provider"
+    : `Edit ${SANDBOX_PROVIDER_OPTIONS.find(o => o.value === formProvider)?.label || formProvider}`
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Sandbox Runtimes</h2>
-        <p className="text-sm text-muted-foreground mb-6">Configure VM providers for spawning claws.</p>
+        <p className="text-sm text-muted-foreground mb-4">Configure VM providers for spawning claws.</p>
 
-        {/* Replicated */}
-        <div className="border border-border rounded-lg p-5 mb-4">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-medium">Replicated CMX</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">Kubernetes-based VM provider</p>
-            </div>
-            {rep?.tokenSet && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Configured</span>}
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-              <Input
-                type="password"
-                placeholder={rep?.tokenSet ? "••••••••••• (set)" : "Enter Replicated API token"}
-                value={repToken}
-                onChange={e => setRepToken(e.target.value)}
-                className="h-8 text-sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Default TTL</label>
-                <Input value={repTTL} onChange={e => setRepTTL(e.target.value)} className="h-8 text-sm" placeholder="48h" />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Default Instance</label>
-                <Input value={repType} onChange={e => setRepType(e.target.value)} className="h-8 text-sm" placeholder="r1.large" />
-              </div>
-            </div>
-            <Button size="sm" disabled={saving || (!repToken && !repTTL && !repType)} onClick={() => {
-              const patch: Record<string, string> = {}
-              if (repTTL) patch.defaultTtl = repTTL
-              if (repType) patch.defaultInstanceType = repType
-              if (repToken) patch.token = repToken
-              onSave({ providers: { replicated: patch } })
-            }}>
-              Save Replicated
-            </Button>
-            {/* SSH Keys for Replicated VMs */}
-            <div className="border-t border-border mt-4 pt-4">
-              <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
-              <p className="text-xs text-muted-foreground mb-3">Public keys injected into Replicated VMs at bootstrap for direct SSH access.</p>
-              {(settings.sshPublicKeys || []).map((key, i) => {
-                const parts = key.trim().split(/\s+/)
-                const keyType = parts[0] || ""
-                const comment = parts[2] || ""
-                const keyBody = parts[1] || ""
-                const shortKey = keyBody.length > 12 ? keyBody.slice(0, 8) + "..." + keyBody.slice(-4) : keyBody
-                return (
-                <div key={i} className="flex items-center gap-2 mb-2">
-                  <div className="flex-1 min-w-0">
-                    <code className="text-xs font-mono">{keyType} {shortKey}</code>
-                    {comment && <span className="ml-2 text-xs text-muted-foreground">{comment}</span>}
-                  </div>
-                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
-                    onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
-                    Remove
-                  </Button>
-                </div>
-              )
-              })}
-              <div className="flex gap-2">
-                <Input value={newKey} onChange={e => setNewKey(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
-                  placeholder="ssh-ed25519 AAAA..." className="h-7 text-xs font-mono flex-1" />
-                <Button size="sm" disabled={saving || !newKey.trim()}
-                  onClick={() => { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}>
-                  Add
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Daytona */}
-        <div className="border border-border rounded-lg p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-medium">Daytona</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">Development environment provider</p>
-            </div>
-            {day?.apiKeySet && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Configured</span>}
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API URL</label>
-              <Input value={dayURL} onChange={e => setDayURL(e.target.value)} className="h-8 text-sm" placeholder="https://app.daytona.io" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
-              <Input type="password" placeholder={day?.apiKeySet ? "••••••••••• (set)" : "Enter Daytona API key"} value={dayKey} onChange={e => setDayKey(e.target.value)} className="h-8 text-sm" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Default Snapshot</label>
-              <Input value={daySnapshot} onChange={e => setDaySnapshot(e.target.value)} className="h-8 text-sm" placeholder="daytona-medium" />
-            </div>
-            <Button size="sm" disabled={saving} onClick={() => {
-              const patch: Record<string, string> = {}
-              if (dayURL) patch.apiUrl = dayURL
-              if (dayKey) patch.apiKey = dayKey
-              if (daySnapshot) patch.defaultSnapshot = daySnapshot
-              onSave({ providers: { daytona: patch } })
-            }}>
-              Save Daytona
-            </Button>
-          </div>
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {configuredProviders.length} provider{configuredProviders.length !== 1 ? "s" : ""} configured
+          </span>
         </div>
       </div>
+
+      {/* Configured providers list */}
+      {configuredProviders.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {configuredProviders.map((p) => (
+            <div
+              key={p.name}
+              onClick={() => openEdit(p.name)}
+              className="border border-border rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-muted/50 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                  <Cpu className="size-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{p.label}</span>
+                    {p.configured && (
+                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded flex items-center gap-1">
+                        <CheckCircle2 className="size-3" /> Configured
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{p.description}</p>
+                </div>
+              </div>
+              <span className="text-muted-foreground text-lg">⋯</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {configuredProviders.length === 0 && (
+        <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
+            <Cpu className="size-5 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">No sandbox providers configured</p>
+        </div>
+      )}
+
+      {availableProviders.length > 0 && (
+        <Button onClick={openAdd} className="gap-2">
+          <span className="text-sm">+</span> Add Sandbox Provider
+        </Button>
+      )}
+
+      {/* SSH Keys — global, stays at bottom */}
+      <div className="border-t border-border pt-6 mt-6">
+        <p className="text-xs font-medium mb-2">Additional SSH Keys</p>
+        <p className="text-xs text-muted-foreground mb-3">Public keys injected into VMs at bootstrap for direct SSH access.</p>
+        {(settings.sshPublicKeys || []).map((key, i) => {
+          const parts = key.trim().split(/\s+/)
+          const keyType = parts[0] || ""
+          const comment = parts[2] || ""
+          const keyBody = parts[1] || ""
+          const shortKey = keyBody.length > 12 ? keyBody.slice(0, 8) + "..." + keyBody.slice(-4) : keyBody
+          return (
+            <div key={i} className="flex items-center gap-2 mb-2">
+              <div className="flex-1 min-w-0">
+                <code className="text-xs font-mono">{keyType} {shortKey}</code>
+                {comment && <span className="ml-2 text-xs text-muted-foreground">{comment}</span>}
+              </div>
+              <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive px-2 h-7" disabled={saving}
+                onClick={() => onSave({ sshPublicKeys: (settings.sshPublicKeys || []).filter((_, j) => j !== i) })}>
+                Remove
+              </Button>
+            </div>
+          )
+        })}
+        <div className="flex gap-2">
+          <Input value={newKey} onChange={e => setNewKey(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && newKey.trim()) { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}}
+            placeholder="ssh-ed25519 AAAA..." className="h-7 text-xs font-mono flex-1" />
+          <Button size="sm" disabled={saving || !newKey.trim()}
+            onClick={() => { onSave({ sshPublicKeys: [...(settings.sshPublicKeys || []), newKey.trim()] }); setNewKey("") }}>
+            Add
+          </Button>
+        </div>
+      </div>
+
+      {/* Modal */}
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalTitle}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            {modalMode === "add" && (
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
+                <select
+                  value={formProvider}
+                  onChange={e => setFormProvider(e.target.value)}
+                  className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
+                >
+                  {availableProviders.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+            )}
+
+            {formProvider === "replicated" && (
+              <>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                  <Input
+                    type="password"
+                    value={formToken}
+                    onChange={e => setFormToken(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder={modalMode === "edit" && providers.replicated?.tokenSet ? "Leave blank to keep existing" : "Enter Replicated API token"}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Default TTL</label>
+                    <Input value={formDefaultTtl} onChange={e => setFormDefaultTtl(e.target.value)} className="h-8 text-sm" placeholder="48h" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Default Instance</label>
+                    <Input value={formDefaultInstanceType} onChange={e => setFormDefaultInstanceType(e.target.value)} className="h-8 text-sm" placeholder="r1.large" />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {formProvider === "daytona" && (
+              <>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API URL</label>
+                  <Input value={formApiUrl} onChange={e => setFormApiUrl(e.target.value)} className="h-8 text-sm" placeholder="https://app.daytona.io" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">API Key</label>
+                  <Input
+                    type="password"
+                    value={formApiKey}
+                    onChange={e => setFormApiKey(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder={modalMode === "edit" && providers.daytona?.apiKeySet ? "Leave blank to keep existing" : "Enter Daytona API key"}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Snapshot</label>
+                  <Input value={formDefaultSnapshot} onChange={e => setFormDefaultSnapshot(e.target.value)} className="h-8 text-sm" placeholder="daytona-medium" />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between px-5 py-4 border-t border-border">
+            {modalMode === "edit" && editName && (
+              <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => doRemove(editName)}>
+                <Trash2 className="size-3.5 mr-1" /> Remove
+              </Button>
+            )}
+            <div className="flex items-center gap-2 ml-auto">
+              <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
+              <Button
+                size="sm"
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey)}
+                onClick={doSave}
+              >
+                {modalMode === "add" ? "Add Provider" : "Save changes"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -650,17 +828,14 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetForm() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Name</label>
@@ -733,9 +908,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -938,17 +1112,14 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">Add GitHub App</h3>
-              <Button size="sm" variant="ghost" onClick={closeModal} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { if (!open) closeModal(); else setShowModal(true) }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">Add GitHub App</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">Add GitHub App</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
@@ -1077,14 +1248,14 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                 Save
               </Button>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
 
       {/* Confirm save modal — not tested or test failed */}
-      {showConfirmModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-md p-5 space-y-4">
+      <Dialog open={showConfirmModal} onOpenChange={open => { if (!open) setShowConfirmModal(false) }}>
+        <DialogContent className="max-w-md p-0 gap-0">
+          <DialogTitle className="sr-only">Confirm GitHub App Save</DialogTitle>
+          <div className="p-5 space-y-4">
             {testResult === null ? (
               <>
                 <div className="flex items-center gap-2">
@@ -1116,8 +1287,8 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
               </Button>
             </div>
           </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -1636,19 +1807,16 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
       </div>
 
       {/* Unified Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <div className="flex items-center gap-2">
-                {modalIcon}
-                <h3 className="font-medium">{modalTitle}</h3>
-              </div>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetModal() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
+        <DialogContent className="max-w-lg p-0 gap-0">
+          <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div className="flex items-center gap-2">
+              {modalIcon}
+              <h3 className="font-medium">{modalTitle}</h3>
             </div>
-            <div className="p-5 space-y-4">
+          </div>
+          <div className="p-5 space-y-4">
               <p className="text-sm text-muted-foreground">
                 Connect a {trackerTypeLabel(modalMode === "add" ? modalType : editType)} workspace to sync issues.
               </p>
@@ -1681,17 +1849,15 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
 
 
 
-function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
-  const [open, setOpen] = useState(false)
+function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   const [copied, setCopied] = useState<string | null>(null)
 
   const urls = [
@@ -1726,55 +1892,108 @@ function WebhookUrlsModal({ hubUrl }: { hubUrl: string }) {
   }
 
   return (
-    <>
-      <Button variant="outline" size="sm" className="gap-2" onClick={() => setOpen(true)}>
-        <Webhook className="size-4" />
-        Webhook URLs
-      </Button>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Webhook URLs</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Use these URLs to configure webhooks in your integrations.
+        </p>
+      </div>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">Webhook URLs</h3>
-              <Button size="sm" variant="ghost" onClick={() => setOpen(false)} className="h-8 w-8 p-0">
-                <X className="size-4" />
+      <div className="space-y-5">
+        {urls.map(({ name, url, hint }) => (
+          <div key={name} className="border border-border rounded-lg p-4 space-y-3">
+            <div>
+              <h4 className="text-sm font-medium">{name}</h4>
+              <p className="text-xs text-muted-foreground mt-1">{hint}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
+                {url || "Loading…"}
+              </code>
+              <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
+                {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
               </Button>
             </div>
-            <div className="p-5 space-y-5">
-              {urls.map(({ name, url, hint }) => (
-                <div key={name} className="space-y-2">
-                  <h4 className="text-sm font-medium">{name}</h4>
-                  <p className="text-xs text-muted-foreground">{hint}</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 text-xs font-mono bg-muted px-3 py-2 rounded-md border border-border truncate">
-                      {url || "Loading…"}
-                    </code>
-                    <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
-                      {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
-                      <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
-        </div>
-      )}
-    </>
+        ))}
+      </div>
+    </div>
   )
 }
 
 function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
   const [savedFactory, setSavedFactory] = useState<string | null>(null)
   const factories = settings.factories || []
-  const [maxConcurrent, setMaxConcurrent] = useState<number>(settings.maxConcurrentClaws || 0)
   const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
 
-  // Keep local state in sync when settings load
+  // Concurrency groups state — use local editable state so inputs are
+  // responsive, then debounce saves to the server.
+  const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
+  const groupsRef = useRef(groups)
+  groupsRef.current = groups
+
+  const [groupLimits, setGroupLimits] = useState<Record<string, number>>(() => {
+    const init: Record<string, number> = {}
+    for (const g of groups) init[g.name] = g.limit
+    return init
+  })
+  // Keep local state in sync when props change from outside (e.g. initial load)
   useEffect(() => {
-    setMaxConcurrent(settings.maxConcurrentClaws || 0)
-  }, [settings.maxConcurrentClaws])
+    const next: Record<string, number> = {}
+    for (const g of groups) next[g.name] = g.limit
+    setGroupLimits(next)
+  }, [settings.concurrencyGroups])
+
+  const [newGroupName, setNewGroupName] = useState("")
+  const [newGroupLimit, setNewGroupLimit] = useState(0)
+
+  const allGroupNames = groups.map(g => g.name)
+
+  function saveGroups(updatedGroups: typeof groups) {
+    onSave({ concurrencyGroups: updatedGroups.map(g => ({ name: g.name, limit: g.limit })) })
+  }
+
+  function addGroup() {
+    if (!newGroupName.trim() || groups.some(g => g.name === newGroupName.trim())) return
+    const updated = [...groups, { name: newGroupName.trim(), limit: newGroupLimit }]
+    setNewGroupName("")
+    setNewGroupLimit(0)
+    saveGroups(updated)
+  }
+
+  function removeGroup(name: string) {
+    if (name === "global") return
+    saveGroups(groups.filter(g => g.name !== name))
+  }
+
+  // Debounce group limit updates to avoid firing a PATCH on every keystroke.
+  // Each group gets its own timer so edits to different groups don't cancel
+  // each other — without this, editing group A then group B within 500ms would
+  // silently drop group A's change.
+  const groupLimitTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  function updateGroupLimit(name: string, limit: number) {
+    setGroupLimits(prev => ({ ...prev, [name]: limit }))
+    const timers = groupLimitTimersRef.current
+    if (timers[name]) {
+      clearTimeout(timers[name])
+    }
+    timers[name] = setTimeout(() => {
+      delete timers[name]
+      const latest = groupsRef.current
+      const updated = latest.map(g => g.name === name ? { ...g, limit } : g)
+      saveGroups(updated)
+    }, 500)
+  }
+
+  function updateFactoryGroup(factoryIdx: number, groupName: string) {
+    const updated = factories.map((x, j) => j === factoryIdx ? { ...x, concurrencyGroup: groupName } : x)
+    setSavedFactory(factories[factoryIdx].name)
+    setTimeout(() => setSavedFactory(null), 1500)
+    onSaveSilent({ factories: updated })
+  }
 
   return (
     <div className="space-y-6">
@@ -1785,50 +2004,64 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
         </p>
       </div>
 
-      {/* Concurrency Limit */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-medium text-sm">Concurrency Limit</p>
-            <p className="text-muted-foreground text-xs">
-              Maximum number of claws that can run simultaneously. New claws will queue as &ldquo;pending&rdquo; when the limit is reached.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              value={maxConcurrent}
-              onChange={(e) => setMaxConcurrent(parseInt(e.target.value) || 0)}
-              className="w-24 text-sm"
-              placeholder="0 = unlimited"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={saving || maxConcurrent === (settings.maxConcurrentClaws || 0)}
-              onClick={() => onSave({ maxConcurrentClaws: maxConcurrent })}
-            >
-              Save
-            </Button>
-          </div>
+      {/* Concurrency Groups */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-4">
+        <div>
+          <p className="font-medium text-sm">Concurrency Groups</p>
+          <p className="text-muted-foreground text-xs mt-0.5">
+            Limit how many claws can run simultaneously per group. 0 = unlimited.
+          </p>
         </div>
-        <p className="text-xs text-muted-foreground">
-          0 = unlimited (default). If lowered below current running count, existing claws keep running.
-        </p>
-      </div>
 
-      {/* Webhook URLs — hidden behind modal */}
-      <WebhookUrlsModal hubUrl={hubUrl} />
+        {/* Groups table */}
+        <div className="space-y-2">
+          {groups.map(g => (
+            <div key={g.name} className="flex items-center gap-3">
+              <span className="text-sm font-mono w-24 shrink-0">{g.name}</span>
+              <Input
+                type="number"
+                min={0}
+                value={groupLimits[g.name] ?? g.limit}
+                onChange={(e) => updateGroupLimit(g.name, parseInt(e.target.value) || 0)}
+                className="w-24 text-sm h-7"
+                placeholder="0 = unlimited"
+              />
+              <span className="text-xs text-muted-foreground">limit</span>
+              {g.name !== "global" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive h-7 px-2"
+                  onClick={() => removeGroup(g.name)}
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
 
-      {/* Factories-as-code callout */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
-        <p className="font-medium mb-1">Factories are managed as code</p>
-        <p className="text-muted-foreground text-xs">
-          Define factories in <code className="bg-muted px-1 rounded">.elasticclaw/factories/</code> and push to this hub with{" "}
-          <code className="bg-muted px-1 rounded">elasticclaw factory push</code>.
-          Use <code className="bg-muted px-1 rounded">elasticclaw factory create</code> to scaffold a new factory.
-        </p>
+        {/* Add group */}
+        <div className="flex items-center gap-2 pt-2 border-t border-border">
+          <Input
+            placeholder="Group name"
+            value={newGroupName}
+            onChange={(e) => setNewGroupName(e.target.value)}
+            className="w-32 text-sm h-7"
+            onKeyDown={(e) => { if (e.key === "Enter") addGroup() }}
+          />
+          <Input
+            type="number"
+            min={0}
+            value={newGroupLimit}
+            onChange={(e) => setNewGroupLimit(parseInt(e.target.value) || 0)}
+            className="w-24 text-sm h-7"
+            placeholder="Limit"
+          />
+          <Button size="sm" variant="outline" className="h-7" onClick={addGroup} disabled={!newGroupName.trim()}>
+            + Add Group
+          </Button>
+        </div>
       </div>
 
       {factories.length > 0 && (
@@ -1851,6 +2084,16 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                 {savedFactory === f.name && (
                   <span className="text-xs text-green-500">✓</span>
                 )}
+                {/* Concurrency group dropdown */}
+                <select
+                  value={f.concurrencyGroup || "global"}
+                  onChange={(e) => updateFactoryGroup(i, e.target.value)}
+                  className="text-xs rounded-md border border-border bg-background px-2 py-1 h-7"
+                >
+                  {allGroupNames.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
                 <button
                   onClick={async () => {
                     const enabled = !(f.enabled ?? true)
@@ -1875,7 +2118,6 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
                   )} />
                 </button>
                 <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
-                <FactoryTriggerButton factory={f} hubUrl={hubUrl} token={token} />
               </div>
             </div>
           ))}
@@ -1885,128 +2127,7 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   )
 }
 
-function FactoryTriggerButton({ factory, hubUrl, token }: { factory: NonNullable<SettingsData["factories"]>[number]; hubUrl: string; token: string }) {
-  const [open, setOpen] = useState(false)
-  const [values, setValues] = useState<Record<string, string>>({})
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
-  const hasInputs = factory.inputs && factory.inputs.length > 0
-
-  const handleTrigger = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const body: Record<string, unknown> = {}
-      if (factory.inputs) {
-        const inputs: Record<string, unknown> = {}
-        for (const input of factory.inputs) {
-          const val = values[input.name]
-          if (input.type === "bool") {
-            inputs[input.name] = val === "true"
-          } else if (input.type === "number") {
-            inputs[input.name] = parseFloat(val)
-          } else {
-            inputs[input.name] = val
-          }
-        }
-        body.inputs = inputs
-      }
-      const res = await fetch(`${hubUrl}/api/factories/${encodeURIComponent(factory.name)}/trigger`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      })
-      // Hub sends errors as either JSON {error: string} or text/plain via http.Error()
-      const contentType = res.headers.get("content-type") || ""
-      let errorMsg: string
-      let resData: Record<string, unknown> = {}
-      if (contentType.includes("application/json")) {
-        resData = await res.json().catch(() => ({}))
-        errorMsg = (resData.error as string) || `HTTP ${res.status}`
-      } else {
-        errorMsg = (await res.text().catch(() => "")).trim() || `HTTP ${res.status}`
-      }
-      if (!res.ok) {
-        setError(errorMsg)
-        setLoading(false)
-        return
-      }
-      setOpen(false)
-      window.location.href = `/claws/${resData.claw_id}`
-    } catch (e) {
-      setError(String(e))
-    }
-    setLoading(false)
-  }
-
-  if (!hasInputs) {
-    return (
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={handleTrigger} disabled={loading}>
-          {loading ? "..." : "Trigger"}
-        </Button>
-        {error && <span className="text-xs text-red-500">{error}</span>}
-      </div>
-    )
-  }
-
-  return (
-    <>
-      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>Trigger</Button>
-      {open && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-background border border-border rounded-lg p-6 w-full max-w-md space-y-4">
-            <h3 className="text-sm font-medium">Trigger {factory.name}</h3>
-            {factory.inputs!.map((input) => (
-              <div key={input.name} className="space-y-1">
-                <label className="text-xs font-medium">
-                  {input.name}
-                  {input.required && <span className="text-red-500">*</span>}
-                </label>
-                {input.description && <p className="text-xs text-muted-foreground">{input.description}</p>}
-                {input.type === "enum" && input.options ? (
-                  <select
-                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
-                    value={values[input.name] || input.default || ""}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                  >
-                    {input.options.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </select>
-                ) : input.type === "bool" ? (
-                  <select
-                    className="w-full text-sm border border-border rounded px-2 py-1 bg-background"
-                    value={values[input.name] || input.default || "false"}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                  >
-                    <option value="true">true</option>
-                    <option value="false">false</option>
-                  </select>
-                ) : (
-                  <Input
-                    type={input.type === "number" ? "number" : "text"}
-                    value={values[input.name] || input.default || ""}
-                    onChange={(e) => setValues({ ...values, [input.name]: e.target.value })}
-                    placeholder={input.default}
-                  />
-                )}
-              </div>
-            ))}
-            {error && <p className="text-xs text-red-500">{error}</p>}
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button size="sm" onClick={handleTrigger} disabled={loading}>
-                {loading ? "Triggering..." : "Trigger"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
 
 function SecretsSection({ settings }: { settings: SettingsData | null }) {
   const [secrets, setSecrets] = useState<string[]>([])
@@ -2971,17 +3092,14 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       </Button>
 
       {/* Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-background border border-border rounded-xl shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
-              <Button size="sm" variant="ghost" onClick={() => { setShowModal(false); resetForm() }} className="h-8 w-8 p-0">
-                <X className="size-4" />
-              </Button>
-            </div>
+      <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
+          </div>
 
-            <div className="p-5 space-y-4">
+          <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Name</label>
@@ -3113,9 +3231,8 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

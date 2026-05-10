@@ -43,6 +43,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
@@ -84,7 +86,9 @@ func migrate(db *sql.DB) error {
 		auto_fix_bugbot  INTEGER NOT NULL DEFAULT 1,
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
-		bootstrap_ok     INTEGER NOT NULL DEFAULT 0
+		bootstrap_ok     INTEGER NOT NULL DEFAULT 0,
+		factory_name     TEXT NOT NULL DEFAULT '',
+		concurrency_group TEXT NOT NULL DEFAULT ''
 	);
 
 

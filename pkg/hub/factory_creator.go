@@ -247,18 +247,18 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
-	// Check concurrency limit
+	// Check concurrency limit (group-aware)
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	groupName, groupLimit := s.resolveGroupLimit(factory)
 	s.mu.RUnlock()
 
-	activeCount := s.countActiveClaws()
+	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for factory %s as pending", activeCount, maxConcurrent, factory.Name)
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
 	}
 
 	// Insert claw record
@@ -279,11 +279,11 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot,
-		linearIssueID, githubIssueID, initialStatus, now,
+		linearIssueID, githubIssueID, initialStatus, now, factory.Name, groupName,
 	)
 
 	s.promoteMu.Unlock()

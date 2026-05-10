@@ -482,6 +482,55 @@ func (s *Server) countActiveClaws() int {
 	return count
 }
 
+// countActiveClawsInGroup returns the number of active claws belonging to the
+// given concurrency group. This is the scoped count used for per-group limit
+// enforcement. The concurrency_group column is populated at insert time.
+// Legacy rows (created before the migration) have concurrency_group = '' and
+// are treated as belonging to the "global" group.
+func (s *Server) countActiveClawsInGroup(groupName string) int {
+	var count int
+	if groupName == "global" {
+		_ = s.db.QueryRow(`
+			SELECT COUNT(*) FROM claws
+			WHERE status IN ('provisioning','starting','connected','running','idle')
+			  AND (concurrency_group = 'global' OR concurrency_group = '')`).Scan(&count)
+	} else {
+		_ = s.db.QueryRow(`
+			SELECT COUNT(*) FROM claws
+			WHERE status IN ('provisioning','starting','connected','running','idle')
+			  AND concurrency_group = ?`, groupName).Scan(&count)
+	}
+	return count
+}
+
+// resolveGroupLimit returns the concurrency group name and limit for a factory.
+// It checks the factory's ConcurrencyGroup, falls back to "global", and looks up
+// the limit from hub config. A limit of 0 means unlimited.
+// The deprecated MaxConcurrentClaws field is only used as a fallback when the
+// "global" group is not explicitly configured in ConcurrencyGroups.
+// Must be called with s.mu held (at least RLock).
+func (s *Server) resolveGroupLimit(factory *types.FactoryConfig) (groupName string, limit int) {
+	groupName = factory.ConcurrencyGroup
+	if groupName == "" {
+		groupName = "global"
+	}
+	found := false
+	for _, g := range s.hubCfg.ConcurrencyGroups {
+		if g.Name == groupName {
+			limit = g.Limit
+			found = true
+			break
+		}
+	}
+	// Only fall back to the deprecated MaxConcurrentClaws if the "global" group
+	// was not explicitly configured. This preserves Limit=0 (unlimited) when the
+	// user has explicitly set it in ConcurrencyGroups.
+	if !found && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+		limit = s.hubCfg.MaxConcurrentClaws
+	}
+	return groupName, limit
+}
+
 // promotePendingClaws checks if any pending claws can be promoted to provisioning
 // when a running claw terminates. Called after any claw deletion.
 func (s *Server) promotePendingClaws() {
@@ -491,31 +540,55 @@ func (s *Server) promotePendingClaws() {
 	s.promoteMu.Lock()
 	defer s.promoteMu.Unlock()
 
-	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
-	s.mu.RUnlock()
+	// Fetch all pending claws ordered by age so we can scan for the first one
+	// whose group still has capacity. A single-row LIMIT 1 would trap us in an
+	// infinite loop when the oldest claw belongs to a full group.
+	// We select concurrency_group directly — it's stored at insert time, so
+	// no factory config lookup is needed.
+	rows, err := s.db.Query(`SELECT id, tenant_id, concurrency_group FROM claws WHERE status = 'pending' ORDER BY created_at ASC`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
 
-	for {
-		active := s.countActiveClaws()
-
-		// 0 means unlimited — promote all pending claws
-		if maxConcurrent > 0 && active >= maxConcurrent {
-			return
+	for rows.Next() {
+		var clawID, tenantID, groupName string
+		if err := rows.Scan(&clawID, &tenantID, &groupName); err != nil {
+			continue
+		}
+		if groupName == "" {
+			groupName = "global"
 		}
 
-		// Find the oldest pending claw
-		var clawID, tenantID string
-		err := s.db.QueryRow(
-			`SELECT id, tenant_id FROM claws WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
-		).Scan(&clawID, &tenantID)
-		if err != nil {
-			// No pending claws
-			return
+		s.mu.RLock()
+		groupLimit := 0
+		found := false
+		for _, g := range s.hubCfg.ConcurrencyGroups {
+			if g.Name == groupName {
+				groupLimit = g.Limit
+				found = true
+				break
+			}
+		}
+		if !found && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+			groupLimit = s.hubCfg.MaxConcurrentClaws
+		}
+		s.mu.RUnlock()
+
+		active := s.countActiveClawsInGroup(groupName)
+
+		// 0 means unlimited — promote all pending claws
+		if groupLimit > 0 && active >= groupLimit {
+			// This group is at capacity — skip this claw and check the next
+			// oldest pending claw (which may belong to a different group that
+			// still has capacity). Do NOT return; starvation of other groups
+			// would occur if we did.
+			continue
 		}
 
 		// Promote to provisioning — scope UPDATE to pending status so a
 		// concurrent hard-delete doesn't match zero rows silently.
-		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, max=%d)", clawID[:8], active, maxConcurrent)
+		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, group=%s, limit=%d)", clawID[:8], active, groupName, groupLimit)
 		res, _ := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID)
 		n, _ := res.RowsAffected()
 		if n == 0 {

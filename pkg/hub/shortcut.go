@@ -545,14 +545,14 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	s.promoteMu.Lock()
 
 	s.mu.RLock()
-	maxConcurrent := s.hubCfg.MaxConcurrentClaws
+	groupName, groupLimit := s.resolveGroupLimit(factory)
 	s.mu.RUnlock()
 
-	activeCount := s.countActiveClaws()
+	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if maxConcurrent > 0 && activeCount >= maxConcurrent {
+	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached (active=%d, max=%d) — queueing claw for Shortcut story %s as pending", activeCount, maxConcurrent, storyID)
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for Shortcut story %s as pending", groupName, activeCount, groupLimit, storyID)
 	}
 
 	clawID := uuid.New().String()
@@ -565,10 +565,10 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now, factory.Name, groupName,
 	)
 
 	// Release promoteMu immediately after INSERT so we don't hold it across
