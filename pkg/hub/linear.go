@@ -496,20 +496,27 @@ func (s *Server) countActiveClawsInGroup(groupName string) int {
 
 // resolveGroupLimit returns the concurrency group name and limit for a factory.
 // It checks the factory's ConcurrencyGroup, falls back to "global", and looks up
-// the limit from hub config (group-specific or MaxConcurrentClaws).
+// the limit from hub config. A limit of 0 means unlimited.
+// The deprecated MaxConcurrentClaws field is only used as a fallback when the
+// "global" group is not explicitly configured in ConcurrencyGroups.
 // Must be called with s.mu held (at least RLock).
 func (s *Server) resolveGroupLimit(factory *types.FactoryConfig) (groupName string, limit int) {
 	groupName = factory.ConcurrencyGroup
 	if groupName == "" {
 		groupName = "global"
 	}
+	found := false
 	for _, g := range s.hubCfg.ConcurrencyGroups {
 		if g.Name == groupName {
 			limit = g.Limit
+			found = true
 			break
 		}
 	}
-	if limit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+	// Only fall back to the deprecated MaxConcurrentClaws if the "global" group
+	// was not explicitly configured. This preserves Limit=0 (unlimited) when the
+	// user has explicitly set it in ConcurrencyGroups.
+	if !found && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
 		limit = s.hubCfg.MaxConcurrentClaws
 	}
 	return groupName, limit
@@ -546,13 +553,15 @@ func (s *Server) promotePendingClaws() {
 
 		s.mu.RLock()
 		groupLimit := 0
+		found := false
 		for _, g := range s.hubCfg.ConcurrencyGroups {
 			if g.Name == groupName {
 				groupLimit = g.Limit
+				found = true
 				break
 			}
 		}
-		if groupLimit == 0 && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
+		if !found && groupName == "global" && s.hubCfg.MaxConcurrentClaws > 0 {
 			groupLimit = s.hubCfg.MaxConcurrentClaws
 		}
 		s.mu.RUnlock()
