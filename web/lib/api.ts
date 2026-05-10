@@ -238,6 +238,8 @@ export interface FactoryInput {
   description?: string
   options?: string[]
   validation?: string
+  min?: number
+  max?: number
 }
 
 // Factory matches FactoryPushView from GET /api/factories.

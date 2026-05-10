@@ -103,6 +103,20 @@ func validateFactoryInputs(inputs []types.FactoryInput, values map[string]interf
 			}
 		}
 
+		// Number range validation (min / max)
+		if def.Type == "number" && (def.Min != nil || def.Max != nil) {
+			num, err := strconv.ParseFloat(str, 64)
+			if err != nil {
+				return nil, fmt.Errorf("input %q: expected number, got %q", name, str)
+			}
+			if def.Min != nil && num < float64(*def.Min) {
+				return nil, fmt.Errorf("input %q: %v is below minimum %d", name, num, *def.Min)
+			}
+			if def.Max != nil && num > float64(*def.Max) {
+				return nil, fmt.Errorf("input %q: %v is above maximum %d", name, num, *def.Max)
+			}
+		}
+
 		result[name] = str
 	}
 
@@ -148,6 +162,7 @@ func coerceInput(typ string, raw interface{}) (string, error) {
 		default:
 			return "", fmt.Errorf("expected number, got %T", raw)
 		}
+		// unreachable — all branches above return
 	case "bool":
 		switch v := raw.(type) {
 		case bool:

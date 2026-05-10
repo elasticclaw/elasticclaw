@@ -402,6 +402,8 @@ type FactoryInput struct {
 	Description string   `yaml:"description,omitempty" json:"description,omitempty"`
 	Options     []string `yaml:"options,omitempty" json:"options,omitempty"`       // for enum type
 	Validation  string   `yaml:"validation,omitempty" json:"validation,omitempty"` // regex pattern
+	Min         *int     `yaml:"min,omitempty" json:"min,omitempty"`             // inclusive minimum for number type
+	Max         *int     `yaml:"max,omitempty" json:"max,omitempty"`             // inclusive maximum for number type
 }
 
 // ConcurrencyGroup limits the number of simultaneously running claws per group.
