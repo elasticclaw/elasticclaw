@@ -444,6 +444,8 @@ type FactoryConfig struct {
 	// ConcurrencyGroup assigns this factory to a concurrency group.
 	// If empty, the factory uses the "global" group.
 	ConcurrencyGroup string `yaml:"concurrency_group,omitempty" json:"concurrencyGroup,omitempty"`
+	// EnableManualTrigger allows this factory to be triggered manually from the dashboard.
+	EnableManualTrigger bool `yaml:"enable_manual_trigger,omitempty" json:"enableManualTrigger,omitempty"`
 	// GitHub factory fields (integration: github)
 	Repos   []string       `yaml:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
 	Trigger *GitHubTrigger `yaml:"trigger,omitempty"`
