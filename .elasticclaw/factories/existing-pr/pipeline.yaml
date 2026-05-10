@@ -4,18 +4,13 @@ stages:
     entry: true
     on_enter:
       inject: |
-        You are responsible for getting the pull request described in CONTEXT.md to a mergeable state.
+        You are responsible for getting github.com/{{ .Inputs.repo }}#{{ .Inputs.pr_number }} to a mergeable state.
         That means: resolve and fix any Greptile comments you agree with, watch for human review comments, and make sure CI is green.
 
-        Read BOOTSTRAP.md and AGENTS.md. Narrate your progress as you go.
-
-  - id: pr_opened
-    label: "PR Opened"
-    triggers:
-      - message_contains: "[DONE]"
-    on_enter:
-      inject: |
-        Continue watching CI, Greptile, and human review comments until the PR merges or closes.
+        Read BOOTSTRAP.md and AGENTS.md. 
+        Before you start, describe your understanding of your instructions.
+        Then, in a seperate message, describe your understanding of the PR.
+        Narrate your progress as you go.
 
   - id: merged
     label: "Merged"

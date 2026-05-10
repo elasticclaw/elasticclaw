@@ -5,3 +5,20 @@ repos:
   - elasticclaw/elasticclaw
 template: elasticclaw
 webhook_secret_ref: elasticclaw_webhook_secret
+
+# Enable manual triggering from the dashboard
+enable_manual_trigger: true
+
+# Inputs required when manually triggering
+inputs:
+  - name: repo
+    type: enum
+    required: true
+    description: Repository to target
+    options:
+      - elasticclaw/elasticclaw
+  - name: pr_number
+    type: number
+    required: true
+    description: PR number to review
+    
