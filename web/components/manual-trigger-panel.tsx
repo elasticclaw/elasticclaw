@@ -84,11 +84,15 @@ export function ManualTriggerPanel({ className }: ManualTriggerPanelProps) {
           if (input.type === "bool") {
             inputs[input.name] = val === "true"
           } else if (input.type === "number") {
-            const num = val !== undefined && val !== "" ? parseFloat(val) : undefined
-            if (num === undefined || isNaN(num)) {
-              throw new Error(`Invalid number for input "${input.name}"`)
+            if (val !== undefined && val !== "") {
+              const num = parseFloat(val)
+              if (isNaN(num)) {
+                throw new Error(`Invalid number for input "${input.name}"`)
+              }
+              inputs[input.name] = num
             }
-            inputs[input.name] = num
+            // Optional number inputs with no value are omitted — backend
+            // applies the default for missing optional fields.
           } else {
             inputs[input.name] = val || ""
           }
