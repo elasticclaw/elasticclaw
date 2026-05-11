@@ -92,8 +92,10 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 		ws := li.Workspace
 		wsFactories := workspaceFactories[ws]
 		// Also include workspace-agnostic factories (empty workspace/team)
-		if agnostic, ok := workspaceFactories[""]; ok {
-			wsFactories = append(wsFactories, agnostic...)
+		if ws != "" {
+			if agnostic, ok := workspaceFactories[""]; ok {
+				wsFactories = append(wsFactories, agnostic...)
+			}
 		}
 		if len(wsFactories) == 0 {
 			continue
@@ -332,8 +334,10 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		ws := sc.Workspace
 		wsFactories := workspaceFactories[ws]
 		// Also include workspace-agnostic factories (empty workspace)
-		if agnostic, ok := workspaceFactories[""]; ok {
-			wsFactories = append(wsFactories, agnostic...)
+		if ws != "" {
+			if agnostic, ok := workspaceFactories[""]; ok {
+				wsFactories = append(wsFactories, agnostic...)
+			}
 		}
 		if len(wsFactories) == 0 {
 			continue
@@ -526,11 +530,8 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 			continue
 		}
 
-		// Fetch events for AllowedLabelers checks
-		events, _ := s.queryGitHubIssueEvents(repo, token, since, base)
-
 		for _, issue := range issues {
-			s.processGitHubIssuesPollItem(issue, events, repoFactories, repo, token, base)
+			s.processGitHubIssuesPollItem(issue, repoFactories, repo, token, base)
 		}
 	}
 }
@@ -593,8 +594,8 @@ func (s *Server) queryGitHubIssues(repo, token, since, base string) ([]githubIss
 	return issues, nil
 }
 
-func (s *Server) queryGitHubIssueEvents(repo, token, since, base string) ([]githubIssueEvent, error) {
-	items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues/events?since=%s", repo, since), token)
+func (s *Server) queryGitHubIssueEvents(repo, token, base string, issueNumber int) ([]githubIssueEvent, error) {
+	items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues/%d/events", repo, issueNumber), token)
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +614,7 @@ func (s *Server) queryGitHubIssueEvents(repo, token, since, base string) ([]gith
 	return events, nil
 }
 
-func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, events []githubIssueEvent, factories []*types.FactoryConfig, repo, token, base string) {
+func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factories []*types.FactoryConfig, repo, token, base string) {
 	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
 	currentStatus := issue.State
 
@@ -631,6 +632,25 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, events 
 	if s.clawExistsForGitHubIssue(issueID) {
 		log.Printf("[poll-github-issues] %s: claw already exists — skipping", issueID)
 		return
+	}
+
+	// Fetch per-issue events only if any factory requires AllowedLabelers.
+	// The repo-level events endpoint does not support since filtering, so
+	// querying per-issue avoids missing events in repos with >100 total events.
+	var events []githubIssueEvent
+	needsEvents := false
+	for _, factory := range factories {
+		if factory.Integration == "github-issues" && len(factory.AllowedLabelers) > 0 {
+			needsEvents = true
+			break
+		}
+	}
+	if needsEvents {
+		var err error
+		events, err = s.queryGitHubIssueEvents(repo, token, base, issue.Number)
+		if err != nil {
+			log.Printf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
+		}
 	}
 
 	// Evaluate factories against current state (no transition gating)
