@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -212,21 +213,13 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load factory from external storage + in-memory
 	factory, err := loadExternalFactory(name)
 	if err != nil {
-		// Fall back to in-memory
-		s.mu.RLock()
-		for _, f := range s.hubCfg.Factories {
-			if f != nil && strings.EqualFold(f.Name, name) {
-				factory = f
-				break
-			}
+		if os.IsNotExist(err) {
+			jsonError(w, http.StatusNotFound, "factory not found")
+		} else {
+			jsonError(w, http.StatusInternalServerError, "failed to load factory: "+err.Error())
 		}
-		s.mu.RUnlock()
-	}
-	if factory == nil {
-		jsonError(w, http.StatusNotFound, "factory not found")
 		return
 	}
 

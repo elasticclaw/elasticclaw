@@ -172,6 +172,47 @@ func loadExternalFactories() ([]*types.FactoryConfig, error) {
 	return factories, nil
 }
 
+// sLoadExternalFactories is the server method wrapper that acquires the
+// server's read lock and loads from external storage, merging with in-memory
+// factories (external takes precedence). Use this anywhere that previously
+// read s.hubCfg.Factories.
+func (s *Server) sLoadExternalFactories() []*types.FactoryConfig {
+	s.mu.RLock()
+	memFactories := s.hubCfg.Factories
+	s.mu.RUnlock()
+
+	external, err := loadExternalFactories()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hub] loadExternalFactories: %v\n", err)
+		return memFactories
+	}
+
+	if len(external) == 0 {
+		return memFactories
+	}
+	if len(memFactories) == 0 {
+		return external
+	}
+
+	merged := make(map[string]*types.FactoryConfig, len(memFactories)+len(external))
+	for _, f := range memFactories {
+		if f != nil {
+			merged[f.Name] = f
+		}
+	}
+	for _, f := range external {
+		if f != nil {
+			merged[f.Name] = f
+		}
+	}
+
+	result := make([]*types.FactoryConfig, 0, len(merged))
+	for _, f := range merged {
+		result = append(result, f)
+	}
+	return result
+}
+
 // loadExternalFactory reads a single factory from disk.
 func loadExternalFactory(name string) (*types.FactoryConfig, error) {
 	if err := validateName(name); err != nil {

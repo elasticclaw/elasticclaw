@@ -55,9 +55,9 @@ func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
 	// Strip sha256= prefix if present
 	sig = strings.TrimPrefix(sig, "sha256=")
 	s.mu.RLock()
-	factories := s.hubCfg.Factories
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
+	factories := s.sLoadExternalFactories()
 	hasSecrets := false
 	for _, f := range factories {
 		if f.Integration != "shortcut" {
@@ -137,9 +137,7 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
-	s.mu.RLock()
-	factories := s.hubCfg.Factories
-	s.mu.RUnlock()
+	factories := s.sLoadExternalFactories()
 
 	for _, action := range payload.Actions {
 		if action.EntityType != "story" || action.Action != "update" {

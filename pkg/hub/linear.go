@@ -133,9 +133,10 @@ func (s *Server) isDuplicateWebhook(key string) bool {
 func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
-	factories := s.hubCfg.Factories
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
+
+	factories := s.sLoadExternalFactories()
 
 	hasAnySecret := false
 
@@ -156,26 +157,24 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	}
 
 	// Check factory-level secrets
-	if factories != nil {
-		for _, factory := range factories {
-			if factory.Integration != "linear" {
-				continue
-			}
-			// Resolve secret: inline value or named ref
-			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-				secret = secrets[factory.WebhookSecretRef]
-			}
-			if secret == "" {
-				continue
-			}
-			hasAnySecret = true
-			mac := hmac.New(sha256.New, []byte(secret))
-			mac.Write(body)
-			expected := hex.EncodeToString(mac.Sum(nil))
-			if hmac.Equal([]byte(sig), []byte(expected)) {
-				return true
-			}
+	for _, factory := range factories {
+		if factory.Integration != "linear" {
+			continue
+		}
+		// Resolve secret: inline value or named ref
+		secret := factory.WebhookSecret
+		if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+			secret = secrets[factory.WebhookSecretRef]
+		}
+		if secret == "" {
+			continue
+		}
+		hasAnySecret = true
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
 		}
 	}
 
@@ -187,10 +186,6 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 }
 
 func (s *Server) processLinearEvent(payload linearWebhookPayload) {
-	if s.hubCfg.Factories == nil {
-		return
-	}
-
 	currentStatus := payload.Data.State.Name
 	previousStatus := ""
 	if payload.UpdatedFrom != nil && payload.UpdatedFrom.State != nil {
@@ -199,8 +194,12 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	teamKey := payload.Data.Team.Key
 	issueID := payload.Data.Identifier // e.g. "ELA-123"
 
+	factories := s.sLoadExternalFactories()
+	if len(factories) == 0 {
+		return
+	}
 	matched := false
-	for _, factory := range s.hubCfg.Factories {
+	for _, factory := range factories {
 		if factory.Integration != "linear" {
 			continue
 		}
@@ -295,7 +294,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 
 	if !matched {
 		// Webhook received but no factory matched — log as not_actionable
-		for _, factory := range s.hubCfg.Factories {
+		for _, factory := range factories {
 			if factory.Integration == "linear" && (factory.Enabled == nil || *factory.Enabled) && (factory.Team == "" || strings.EqualFold(factory.Team, teamKey)) {
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "not_actionable",
 					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
@@ -973,13 +972,14 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	// First, try to find the factory that created this claw by looking up the factory tag
 	var tagsJSON string
+	factories := s.sLoadExternalFactories()
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
 			for _, tag := range tags {
 				if strings.HasPrefix(tag, "factory:") {
 					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range s.hubCfg.Factories {
+					for _, factory := range factories {
 						if factory.Name == factoryName {
 							return factory
 						}
@@ -995,7 +995,7 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 			for _, tag := range tags {
 				if strings.HasPrefix(tag, "factory:") {
 					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range s.hubCfg.Factories {
+					for _, factory := range factories {
 						if factory.Name == factoryName {
 							return factory
 						}
@@ -1021,7 +1021,7 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 		expectedIntegration = "github-issues"
 	}
 
-	for _, factory := range s.hubCfg.Factories {
+	for _, factory := range factories {
 		if factory.Integration != expectedIntegration {
 			continue
 		}

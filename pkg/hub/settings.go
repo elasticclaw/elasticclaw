@@ -267,25 +267,29 @@ type GitHubIssuesIntegrationPatch struct {
 }
 
 type FactoryPatch struct {
-	Name             string   `json:"name"`
-	OriginalName     string   `json:"originalName,omitempty"`
-	Integration      string   `json:"integration"`
-	Workspace        string   `json:"workspace"`
-	Team             string   `json:"team,omitempty"`
-	TriggerStatus    string   `json:"triggerStatus"`
-	DoneStatus       string   `json:"doneStatus,omitempty"`
-	TerminateOnLeave bool     `json:"terminateOnLeave"`
-	Template         string   `json:"template"`
-	NamePattern      string   `json:"namePattern,omitempty"`
-	WebhookSecret    string   `json:"webhookSecret,omitempty"`
-	WebhookSecretRef string   `json:"webhookSecretRef,omitempty"`
-	PipelineYAML     string   `json:"pipelineYAML,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
-	Color            string   `json:"color,omitempty"`
-	Labels           []string `json:"labels,omitempty"`
-	AssignedTo       string   `json:"assigned_to,omitempty"`
-	Enabled          *bool    `json:"enabled,omitempty"`
-	ConcurrencyGroup string   `json:"concurrencyGroup,omitempty"`
+	Name                string              `json:"name"`
+	OriginalName        string              `json:"originalName,omitempty"`
+	Integration         string              `json:"integration"`
+	Workspace           string              `json:"workspace"`
+	Team                string              `json:"team,omitempty"`
+	TriggerStatus       string              `json:"triggerStatus"`
+	DoneStatus          string              `json:"doneStatus,omitempty"`
+	TerminateOnLeave    bool                `json:"terminateOnLeave"`
+	Template            string              `json:"template"`
+	NamePattern         string              `json:"namePattern,omitempty"`
+	WebhookSecret       string              `json:"webhookSecret,omitempty"`
+	WebhookSecretRef    string              `json:"webhookSecretRef,omitempty"`
+	PipelineYAML        string              `json:"pipelineYAML,omitempty"`
+	Tags                []string            `json:"tags,omitempty"`
+	Color               string              `json:"color,omitempty"`
+	Labels              []string            `json:"labels,omitempty"`
+	AssignedTo          string              `json:"assigned_to,omitempty"`
+	Enabled             *bool               `json:"enabled,omitempty"`
+	ConcurrencyGroup    string              `json:"concurrencyGroup,omitempty"`
+	EnableManualTrigger bool                `json:"enableManualTrigger,omitempty"`
+	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
+	Repos               []string            `json:"repos,omitempty"`
+	Trigger             *types.GitHubTrigger `json:"trigger,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -433,29 +437,29 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Factories — merge external (disk) with in-memory (hub.yaml), external takes precedence
+	// Factories — load only from external storage (single source of truth)
 	view.Factories = []FactoryView{}
-	mergedFactories := make(map[string]*types.FactoryConfig)
-	for _, f := range s.hubCfg.Factories {
-		if f != nil {
-			mergedFactories[f.Name] = f
-		}
-	}
-	// Load from external storage and merge (external takes precedence)
-	externalFactories, _ := loadExternalFactories()
-	for _, f := range externalFactories {
-		if f != nil {
-			mergedFactories[f.Name] = f
-		}
+	factories, err := loadExternalFactories()
+	if err != nil {
+		http.Error(w, "failed to load factories: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	// Sort by name for stable ordering
-	factoryNames := make([]string, 0, len(mergedFactories))
-	for name := range mergedFactories {
-		factoryNames = append(factoryNames, name)
+	factoryNames := make([]string, 0, len(factories))
+	for _, f := range factories {
+		if f != nil {
+			factoryNames = append(factoryNames, f.Name)
+		}
 	}
 	sort.Strings(factoryNames)
+	factoryMap := make(map[string]*types.FactoryConfig, len(factories))
+	for _, f := range factories {
+		if f != nil {
+			factoryMap[f.Name] = f
+		}
+	}
 	for _, name := range factoryNames {
-		f := mergedFactories[name]
+		f := factoryMap[name]
 		view.Factories = append(view.Factories, FactoryView{
 			Name:                f.Name,
 			Integration:         f.Integration,
@@ -944,99 +948,112 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		updatedCfg.ConcurrencyGroups = groups
 	}
 
-	// Factories (full replace)
+	// Factories (full replace) — write directly to external storage, never hubCfg.Factories
 	if patch.Factories != nil {
-		var factories []*types.FactoryConfig
 		for _, fp := range patch.Factories {
 			// Preserve existing webhook secret if not being replaced
 			webhookSecret := fp.WebhookSecret
 			if webhookSecret == "" {
-				// Find existing factory by name and keep its secret
-				// Use originalName if provided (for renames), otherwise use name
 				matchName := fp.Name
 				if fp.OriginalName != "" {
 					matchName = fp.OriginalName
 				}
-				for _, existing := range s.hubCfg.Factories {
-					if existing.Name == matchName {
-						webhookSecret = existing.WebhookSecret
-						break
-					}
-				}
-				// Also check external storage for secrets
-				if webhookSecret == "" {
-					if disk, err := loadExternalFactory(matchName); err == nil && disk.WebhookSecret != "" {
-						webhookSecret = disk.WebhookSecret
-					}
+				if old, err := loadExternalFactory(matchName); err == nil && old.WebhookSecret != "" {
+					webhookSecret = old.WebhookSecret
 				}
 			}
-			factory := &types.FactoryConfig{
-				Name: fp.Name, Integration: fp.Integration,
-				Workspace: fp.Workspace, Team: fp.Team,
-				TriggerStatus: fp.TriggerStatus, DoneStatus: fp.DoneStatus,
-				TerminateOnLeave: fp.TerminateOnLeave, Template: fp.Template,
-				NamePattern: fp.NamePattern, WebhookSecret: webhookSecret,
-				WebhookSecretRef: fp.WebhookSecretRef, PipelineYAML: fp.PipelineYAML,
-				Tags: fp.Tags, Color: fp.Color, Labels: fp.Labels,
-				AssignedTo: fp.AssignedTo, Enabled: fp.Enabled,
-				ConcurrencyGroup: fp.ConcurrencyGroup,
-			}
-			factories = append(factories, factory)
 
-			// If this factory exists in external storage, update it there too
-			// so that toggles like Enabled are persisted to disk.
-			// Load the existing disk factory and overlay only the patch fields
-			// to avoid wiping integration-specific fields (Repos, Trigger, etc.).
-			if disk, err := loadExternalFactory(fp.Name); err == nil {
-				if fp.Workspace != "" {
-					disk.Workspace = fp.Workspace
+			// For renames, start from the original factory on disk so no fields are lost.
+			baseName := fp.Name
+			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+				baseName = fp.OriginalName
+			}
+			var disk *types.FactoryConfig
+			if d, err := loadExternalFactory(baseName); err == nil {
+				disk = d
+				if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+					disk.Name = fp.Name // apply the new name
 				}
-				if fp.Team != "" {
-					disk.Team = fp.Team
+			} else {
+				disk = &types.FactoryConfig{Name: fp.Name}
+			}
+
+			if fp.Integration != "" {
+				disk.Integration = fp.Integration
+			}
+			if fp.Workspace != "" {
+				disk.Workspace = fp.Workspace
+			}
+			if fp.Team != "" {
+				disk.Team = fp.Team
+			}
+			if fp.TriggerStatus != "" {
+				disk.TriggerStatus = fp.TriggerStatus
+			}
+			if fp.DoneStatus != "" {
+				disk.DoneStatus = fp.DoneStatus
+			}
+			disk.TerminateOnLeave = fp.TerminateOnLeave
+			if fp.Template != "" {
+				disk.Template = fp.Template
+			}
+			if fp.NamePattern != "" {
+				disk.NamePattern = fp.NamePattern
+			}
+			if webhookSecret != "" {
+				disk.WebhookSecret = webhookSecret
+			}
+			if fp.WebhookSecretRef != "" {
+				disk.WebhookSecretRef = fp.WebhookSecretRef
+			}
+			if fp.PipelineYAML != "" {
+				disk.PipelineYAML = fp.PipelineYAML
+			}
+			if fp.Tags != nil {
+				disk.Tags = fp.Tags
+			}
+			if fp.Color != "" {
+				disk.Color = fp.Color
+			}
+			if fp.Labels != nil {
+				disk.Labels = fp.Labels
+			}
+			if fp.AssignedTo != "" {
+				disk.AssignedTo = fp.AssignedTo
+			}
+			if fp.Enabled != nil {
+				disk.Enabled = fp.Enabled
+			}
+			if fp.ConcurrencyGroup != "" {
+				disk.ConcurrencyGroup = fp.ConcurrencyGroup
+			}
+			disk.EnableManualTrigger = fp.EnableManualTrigger
+			if fp.Inputs != nil {
+				disk.Inputs = fp.Inputs
+			}
+			// Integration-specific fields
+			if fp.Repos != nil {
+				disk.Repos = fp.Repos
+			}
+			if fp.Trigger != nil {
+				disk.Trigger = fp.Trigger
+			}
+
+			if err := saveExternalFactory(disk); err != nil {
+				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// If this was a rename, delete the old factory directory so it doesn't
+			// appear as a phantom duplicate in listings.
+			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
+				if err := deleteExternalFactory(fp.OriginalName); err != nil {
+					http.Error(w, "failed to delete old factory "+fp.OriginalName+": "+err.Error(), http.StatusInternalServerError)
+					return
 				}
-				if fp.TriggerStatus != "" {
-					disk.TriggerStatus = fp.TriggerStatus
-				}
-				if fp.DoneStatus != "" {
-					disk.DoneStatus = fp.DoneStatus
-				}
-				if fp.Template != "" {
-					disk.Template = fp.Template
-				}
-				if fp.NamePattern != "" {
-					disk.NamePattern = fp.NamePattern
-				}
-				if webhookSecret != "" {
-					disk.WebhookSecret = webhookSecret
-				}
-				if fp.WebhookSecretRef != "" {
-					disk.WebhookSecretRef = fp.WebhookSecretRef
-				}
-				if fp.PipelineYAML != "" {
-					disk.PipelineYAML = fp.PipelineYAML
-				}
-				if fp.Tags != nil {
-					disk.Tags = fp.Tags
-				}
-				if fp.Color != "" {
-					disk.Color = fp.Color
-				}
-				if fp.Labels != nil {
-					disk.Labels = fp.Labels
-				}
-				if fp.AssignedTo != "" {
-					disk.AssignedTo = fp.AssignedTo
-				}
-				if fp.Enabled != nil {
-					disk.Enabled = fp.Enabled
-				}
-				if fp.ConcurrencyGroup != "" {
-					disk.ConcurrencyGroup = fp.ConcurrencyGroup
-				}
-				_ = saveExternalFactory(disk)
 			}
 		}
-		updatedCfg.Factories = factories
+		updatedCfg.Factories = nil // never store factories in hubCfg
 	}
 
 	// Auth config
