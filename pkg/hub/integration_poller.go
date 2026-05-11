@@ -90,14 +90,10 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 			continue
 		}
 		ws := li.Workspace
-		wsFactories, ok := workspaceFactories[ws]
-		if !ok && ws != "" {
-			// Also try matching by Team if Workspace doesn't match
-			continue
-		}
-		if !ok {
-			// No workspace-specific factories; poll anyway in case factories have empty workspace/team
-			wsFactories = workspaceFactories[""]
+		wsFactories := workspaceFactories[ws]
+		// Also include workspace-agnostic factories (empty workspace/team)
+		if agnostic, ok := workspaceFactories[""]; ok {
+			wsFactories = append(wsFactories, agnostic...)
 		}
 		if len(wsFactories) == 0 {
 			continue
@@ -110,7 +106,7 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 		}
 
 		for _, issue := range issues {
-			s.processLinearPollItem(issue, wsFactories, ws, since)
+			s.processLinearPollItem(issue, wsFactories, ws)
 		}
 	}
 }
@@ -224,16 +220,16 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 			Team:        n.Team,
 			Assignee:    n.Assignee,
 		}
-	for _, l := range n.Labels.Nodes {
-		label := struct{ Name string `json:"name"` }{Name: l.Name}
-		li.Labels = append(li.Labels, label)
-	}
+		for _, l := range n.Labels.Nodes {
+			label := struct{ Name string `json:"name"` }{Name: l.Name}
+			li.Labels = append(li.Labels, label)
+		}
 		issues = append(issues, li)
 	}
 	return issues, nil
 }
 
-func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types.FactoryConfig, workspace, since string) {
+func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types.FactoryConfig, workspace string) {
 	entityID := issue.Identifier
 	currentStatus := issue.State.Name
 
@@ -334,9 +330,10 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 			continue
 		}
 		ws := sc.Workspace
-		wsFactories, ok := workspaceFactories[ws]
-		if !ok {
-			wsFactories = workspaceFactories[""]
+		wsFactories := workspaceFactories[ws]
+		// Also include workspace-agnostic factories (empty workspace)
+		if agnostic, ok := workspaceFactories[""]; ok {
+			wsFactories = append(wsFactories, agnostic...)
 		}
 		if len(wsFactories) == 0 {
 			continue
@@ -349,7 +346,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		}
 
 		for _, story := range stories {
-			s.processShortcutPollItem(story, wsFactories, ws, sc.Token, since)
+			s.processShortcutPollItem(story, wsFactories, ws, sc.Token)
 		}
 	}
 }
@@ -396,7 +393,7 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 	return result.Data, nil
 }
 
-func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token, since string) {
+func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string) {
 	storyID := fmt.Sprintf("sc-%d", story.ID)
 	currentStateName := s.shortcutStateName(token, story.WorkflowStateID)
 	if currentStateName == "" {
@@ -533,7 +530,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		events, _ := s.queryGitHubIssueEvents(repo, token, since, base)
 
 		for _, issue := range issues {
-			s.processGitHubIssuesPollItem(issue, events, repoFactories, repo, token, since, base)
+			s.processGitHubIssuesPollItem(issue, events, repoFactories, repo, token, base)
 		}
 	}
 }
@@ -616,7 +613,7 @@ func (s *Server) queryGitHubIssueEvents(repo, token, since, base string) ([]gith
 	return events, nil
 }
 
-func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, events []githubIssueEvent, factories []*types.FactoryConfig, repo, token, since, base string) {
+func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, events []githubIssueEvent, factories []*types.FactoryConfig, repo, token, base string) {
 	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
 	currentStatus := issue.State
 
@@ -772,7 +769,7 @@ func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 		}
 
 		for _, pr := range prs {
-			s.processGitHubPRPollItem(pr, repoFactories, repo, since, base)
+			s.processGitHubPRPollItem(pr, repoFactories, repo, base)
 		}
 	}
 }
@@ -814,7 +811,7 @@ func (s *Server) queryGitHubPRs(repo, token, since, base string) ([]githubPRPoll
 	return prs, nil
 }
 
-func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types.FactoryConfig, repo, since, base string) {
+func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types.FactoryConfig, repo, base string) {
 	prID := fmt.Sprintf("%s#%d", repo, pr.Number)
 
 	// If a non-deleted claw already exists for this PR, skip
