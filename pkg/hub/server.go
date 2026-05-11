@@ -2780,8 +2780,9 @@ func (s *Server) syncReplicatedVMs() {
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)")
+			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)")
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
+			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
 			continue
 		default:
