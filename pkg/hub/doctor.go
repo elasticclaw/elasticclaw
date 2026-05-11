@@ -398,7 +398,8 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
-	if len(cfg.Factories) == 0 {
+	factories, _ := loadExternalFactories()
+	if len(factories) == 0 {
 		checks = append(checks, DoctorCheck{
 			Category:    "factories",
 			Severity:    "info",
@@ -480,7 +481,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	}
 	triggers := make(map[triggerKey][]string)
 
-	for _, f := range cfg.Factories {
+	for _, f := range factories {
 		if f == nil {
 			continue
 		}
@@ -594,7 +595,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			Category:    "factories",
 			Severity:    "info",
 			Title:       "Factories configured",
-			Description: fmt.Sprintf("%d factory(ies) configured with no issues detected.", len(cfg.Factories)),
+			Description: fmt.Sprintf("%d factory(ies) configured with no issues detected.", len(factories)),
 			OK:          true,
 		})
 	}
@@ -686,7 +687,8 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 
 	// Build set of factory workspaces for cross-reference
 	factoryWorkspaces := make(map[string]map[string]bool) // integration -> workspace -> exists
-	for _, f := range cfg.Factories {
+	factories, _ := loadExternalFactories()
+	for _, f := range factories {
 		if f == nil || !isFactoryEnabled(f) {
 			continue
 		}
@@ -1046,12 +1048,14 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
-	if cfg.MaxConcurrentClaws == 1 && len(cfg.Factories) > 1 {
+	factories, _ := loadExternalFactories()
+	factoryCount := len(factories)
+	if cfg.MaxConcurrentClaws == 1 && factoryCount > 1 {
 		checks = append(checks, DoctorCheck{
 			Category:    "hub",
 			Severity:    "info",
 			Title:       "Low concurrency limit with multiple factories",
-			Description: fmt.Sprintf("Max concurrent claws is 1 but %d factories are configured. Most factory-created claws will queue as pending.", len(cfg.Factories)),
+			Description: fmt.Sprintf("Max concurrent claws is 1 but %d factories are configured. Most factory-created claws will queue as pending.", factoryCount),
 			OK:          false,
 			FixAction: &FixAction{
 				Type:   "navigate",
@@ -1064,7 +1068,7 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "hub",
 			Severity:    "info",
 			Title:       "Hub settings look good",
-			Description: fmt.Sprintf("Max concurrent claws is %d with %d factories configured.", cfg.MaxConcurrentClaws, len(cfg.Factories)),
+			Description: fmt.Sprintf("Max concurrent claws is %d with %d factories configured.", cfg.MaxConcurrentClaws, factoryCount),
 			OK:          true,
 		})
 	}

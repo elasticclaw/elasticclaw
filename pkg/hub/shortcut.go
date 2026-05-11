@@ -58,7 +58,7 @@ func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
 	s.mu.RLock()
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 	hasSecrets := false
 	for _, f := range factories {
 		if f.Integration != "shortcut" {
@@ -138,7 +138,7 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 
 	for _, action := range payload.Actions {
 		if action.EntityType != "story" || action.Action != "update" {
@@ -243,7 +243,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
 				} else {
 					var clawID string
-					_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
+					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
 				}
 			}
@@ -252,7 +252,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			if factory.TerminateOnLeave && !strings.EqualFold(newStateName, factory.TriggerStatus) {
 				var activeClaw string
 				_ = s.db.QueryRow(
-					`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
+					`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 					storyID,
 				).Scan(&activeClaw)
 				if activeClaw != "" {
@@ -393,7 +393,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// running, or connected.
 	var existingID, existingStatus string
 	_ = s.db.QueryRow(
-		`SELECT id, status FROM claws WHERE linear_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
+		`SELECT id, status FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		storyID,
 	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
@@ -564,7 +564,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, status, created_at, factory_name, concurrency_group)
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, shortcut_story_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, storyID, initialStatus, now, factory.Name, groupName,

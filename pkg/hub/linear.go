@@ -136,7 +136,7 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 
 	hasAnySecret := false
 
@@ -186,6 +186,11 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 }
 
 func (s *Server) processLinearEvent(payload linearWebhookPayload) {
+	factories := s.resolveFactories()
+	if len(factories) == 0 {
+		return
+	}
+
 	currentStatus := payload.Data.State.Name
 	previousStatus := ""
 	if payload.UpdatedFrom != nil && payload.UpdatedFrom.State != nil {
@@ -194,10 +199,6 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	teamKey := payload.Data.Team.Key
 	issueID := payload.Data.Identifier // e.g. "ELA-123"
 
-	factories := s.sLoadExternalFactories()
-	if len(factories) == 0 {
-		return
-	}
 	matched := false
 	for _, factory := range factories {
 		if factory.Integration != "linear" {
@@ -356,8 +357,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 func (s *Server) terminateClawForIssue(issueID string) {
 	var clawID, tenantID string
 	if err := s.db.QueryRow(
-		`SELECT id, tenant_id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
-		issueID,
+		`SELECT id, tenant_id FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueID, issueID,
 	).Scan(&clawID, &tenantID); err != nil {
 		return
 	}
@@ -972,7 +973,7 @@ func (s *Server) validateDonePRs(clawID string, prURLs []string, ghToken string)
 func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	// First, try to find the factory that created this claw by looking up the factory tag
 	var tagsJSON string
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {

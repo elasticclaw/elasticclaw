@@ -110,7 +110,7 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 
 	hasAnySecret := false
 
@@ -128,20 +128,22 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 	}
 
 	// Check factory-level secrets
-	for _, factory := range factories {
-		if factory.Integration != "github-issues" {
-			continue
-		}
-		secret := factory.WebhookSecret
-		if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-			secret = secrets[factory.WebhookSecretRef]
-		}
-		if secret == "" {
-			continue
-		}
-		hasAnySecret = true
-		if verifyGitHubHMAC(body, sig, secret) {
-			return true
+	if len(factories) > 0 {
+		for _, factory := range factories {
+			if factory.Integration != "github-issues" {
+				continue
+			}
+			secret := factory.WebhookSecret
+			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+				secret = secrets[factory.WebhookSecretRef]
+			}
+			if secret == "" {
+				continue
+			}
+			hasAnySecret = true
+			if verifyGitHubHMAC(body, sig, secret) {
+				return true
+			}
 		}
 	}
 
@@ -175,7 +177,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
 
-	factories := s.sLoadExternalFactories()
+	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		log.Printf("[github-issues-webhook] no factories configured — nothing to do")
 		return
@@ -952,31 +954,40 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 }
 
 // resolveGitHubIssuesTokenForRepo resolves a GitHub token for a specific repo by checking
-// all GitHub Issues integrations and factories.
+// factory configs and their matching integration workspaces.
 func (s *Server) resolveGitHubIssuesTokenForRepo(repoFullName string) string {
+	// Find a factory that matches this repo, then resolve its token.
+	factories := s.resolveFactories()
+	for _, factory := range factories {
+		if factory.Integration != "github-issues" {
+			continue
+		}
+		if len(factory.Repos) > 0 {
+			matched := false
+			for _, r := range factory.Repos {
+				if r == repoFullName {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		token := s.resolveGitHubIssuesTokenForFactory(factory)
+		if token != "" {
+			return token
+		}
+	}
+
+	// Fallback: return any global token.
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
-	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
-
 	if integrations != nil {
 		for _, gi := range integrations.GitHubIssues {
 			if gi.Token != "" {
 				return gi.Token
-			}
-		}
-	}
-
-	for _, factory := range s.sLoadExternalFactories() {
-		if factory.Integration != "github-issues" {
-			continue
-		}
-		if factory.WebhookSecret != "" {
-			return factory.WebhookSecret
-		}
-		if factory.WebhookSecretRef != "" && secrets != nil {
-			if secret := secrets[factory.WebhookSecretRef]; secret != "" {
-				return secret
 			}
 		}
 	}

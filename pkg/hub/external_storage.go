@@ -172,38 +172,32 @@ func loadExternalFactories() ([]*types.FactoryConfig, error) {
 	return factories, nil
 }
 
-// sLoadExternalFactories is the server method wrapper that acquires the
-// server's read lock and loads from external storage, merging with in-memory
-// factories (external takes precedence). Use this anywhere that previously
-// read s.hubCfg.Factories.
-func (s *Server) sLoadExternalFactories() []*types.FactoryConfig {
-	s.mu.RLock()
-	memFactories := s.hubCfg.Factories
-	s.mu.RUnlock()
-
+// resolveFactories returns the merged view of in-memory and external-storage
+// factories. External takes precedence. Used by polling and webhook handlers
+// so they always see the latest factories regardless of whether they were
+// loaded from hub.yaml or pushed via CLI/API.
+func (s *Server) resolveFactories() []*types.FactoryConfig {
 	external, err := loadExternalFactories()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[hub] loadExternalFactories: %v\n", err)
-		return memFactories
 	}
 
-	if len(external) == 0 {
-		return memFactories
-	}
-	if len(memFactories) == 0 {
-		return external
-	}
+	s.mu.RLock()
+	mem := s.hubCfg.Factories
+	s.mu.RUnlock()
 
-	merged := make(map[string]*types.FactoryConfig, len(memFactories)+len(external))
-	for _, f := range memFactories {
-		if f != nil {
-			merged[f.Name] = f
+	merged := make(map[string]*types.FactoryConfig, len(mem)+len(external))
+	for _, f := range mem {
+		if f == nil {
+			continue
 		}
+		merged[f.Name] = f
 	}
 	for _, f := range external {
-		if f != nil {
-			merged[f.Name] = f
+		if f == nil {
+			continue
 		}
+		merged[f.Name] = f
 	}
 
 	result := make([]*types.FactoryConfig, 0, len(merged))

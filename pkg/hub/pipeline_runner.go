@@ -559,7 +559,7 @@ func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string
 			continue
 		}
 		factoryName := strings.TrimPrefix(tag, "factory:")
-		for _, factory := range s.sLoadExternalFactories() {
+		for _, factory := range s.resolveFactories() {
 			if factory.Name == factoryName {
 				return factory, issueID
 			}

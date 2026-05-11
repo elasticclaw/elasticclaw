@@ -73,3 +73,8 @@ func (s *Server) PollPRsForTest() {
 func (s *Server) StartPRWatcherForTest() {
 	s.startPRWatcher()
 }
+
+// PollIntegrationsForTest triggers an immediate integration poll tick (for testing without waiting for the ticker).
+func (s *Server) PollIntegrationsForTest() {
+	s.pollTick()
+}
