@@ -127,6 +127,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.pollProviderStatus()
 	go srv.keepAliveDaytonaSandboxes()
 	srv.startPRWatcher()
+	go srv.startIntegrationPoller()
 
 	return srv, nil
 }

@@ -165,3 +165,46 @@ func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
 	// Should transition to idle
 	ts.WaitForClawStatus(t, clawID, "idle", 5*time.Second)
 }
+
+func TestFactoryFlow_PollingDetectsMissedWebhook(t *testing.T) {
+	ts := factorytest.NewTestServer(t)
+
+	issueID := "ELA-123"
+
+	// Mock Linear returns ELA-123 in "Backlog" initially.
+	ts.Linear.SetIssueStateName(issueID, "Backlog")
+
+	// First poll: bootstrap — records state, no claw created.
+	ts.Server.PollIntegrationsForTest()
+
+	// Verify no claw exists yet.
+	var clawID string
+	ts.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=?`, issueID).Scan(&clawID)
+	if clawID != "" {
+		t.Fatal("expected no claw after bootstrap poll")
+	}
+
+	// Simulate missed webhook: change issue state to "In Progress".
+	ts.Linear.SetIssueStateName(issueID, "In Progress")
+
+	// Second poll: detects transition from Backlog → In Progress.
+	ts.Server.PollIntegrationsForTest()
+
+	// Claw should now be created.
+	clawID = ts.WaitForClawWithIssue(t, issueID, 5*time.Second)
+	if clawID == "" {
+		t.Fatal("expected claw to be created after polling detected transition")
+	}
+
+	// Verify the claw is in a recognizable status.
+	var dbStatus string
+	ts.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&dbStatus)
+	validStatuses := map[string]bool{
+		"provisioning": true,
+		"starting":     true,
+		"connected":    true,
+	}
+	if !validStatuses[dbStatus] {
+		t.Fatalf("unexpected claw status after polling: %s", dbStatus)
+	}
+}
