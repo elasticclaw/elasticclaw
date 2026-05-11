@@ -304,7 +304,12 @@ export function useHub(selectedClawId: string | null): HubState {
             setClaws((prev) =>
               prev.map((c) =>
                 c.id === claw_id
-                  ? { ...c, status: mapApiStatus(status), isStreaming: status !== "connected" ? false : c.isStreaming }
+                  ? {
+                      ...c,
+                      status: mapApiStatus(status),
+                      isStreaming: status !== "connected" ? false : c.isStreaming,
+                      reason: status === "error" ? payload.reason : undefined,
+                    }
                   : c
               )
             )
@@ -316,14 +321,6 @@ export function useHub(selectedClawId: string | null): HubState {
               return prev
             })
           }
-        } else if (type === "claw_error") {
-          const { claw_id, error } = payload
-          console.warn(`Claw ${claw_id} error:`, error)
-          setClaws((prev) =>
-            prev.map((c) =>
-              c.id === claw_id ? { ...c, status: "error", isStreaming: false } : c
-            )
-          )
         }
       } catch (err) {
         console.warn("Failed to parse WS message:", err)
