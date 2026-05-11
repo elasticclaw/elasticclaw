@@ -107,9 +107,10 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
-	factories := s.hubCfg.Factories
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
+
+	factories := s.sLoadExternalFactories()
 
 	hasAnySecret := false
 
@@ -127,22 +128,20 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 	}
 
 	// Check factory-level secrets
-	if factories != nil {
-		for _, factory := range factories {
-			if factory.Integration != "github-issues" {
-				continue
-			}
-			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-				secret = secrets[factory.WebhookSecretRef]
-			}
-			if secret == "" {
-				continue
-			}
-			hasAnySecret = true
-			if verifyGitHubHMAC(body, sig, secret) {
-				return true
-			}
+	for _, factory := range factories {
+		if factory.Integration != "github-issues" {
+			continue
+		}
+		secret := factory.WebhookSecret
+		if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+			secret = secrets[factory.WebhookSecretRef]
+		}
+		if secret == "" {
+			continue
+		}
+		hasAnySecret = true
+		if verifyGitHubHMAC(body, sig, secret) {
+			return true
 		}
 	}
 
@@ -176,11 +175,12 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
 
-	if s.hubCfg.Factories == nil {
+	factories := s.sLoadExternalFactories()
+	if len(factories) == 0 {
 		log.Printf("[github-issues-webhook] no factories configured — nothing to do")
 		return
 	}
-	log.Printf("[github-issues-webhook] checking %d factories", len(s.hubCfg.Factories))
+	log.Printf("[github-issues-webhook] checking %d factories", len(factories))
 
 	currentStatus := payload.Issue.State
 	previousStatus := ""
@@ -244,7 +244,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	}
 
 	matched := false
-	for _, factory := range s.hubCfg.Factories {
+	for _, factory := range factories {
 		log.Printf("[github-issues-webhook] checking factory %q: integration=%q enabled=%v trigger_status=%q labels=%v assigned_to=%q allowed_labelers=%v",
 			factory.Name, factory.Integration,
 			func() bool {
@@ -435,7 +435,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 
 	if !matched {
 		log.Printf("[github-issues-webhook] no factory matched for issue %s — checking why:", issueID)
-		for _, factory := range s.hubCfg.Factories {
+		for _, factory := range factories {
 			if factory.Integration == "github-issues" && (factory.Enabled == nil || *factory.Enabled) {
 				log.Printf("[github-issues-webhook] factory %q: not_actionable — status '%s'→'%s' did not match trigger '%s' (labels=%v)",
 					factory.Name, previousStatus, currentStatus, factory.TriggerStatus, factory.Labels)
@@ -935,7 +935,6 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 func (s *Server) resolveGitHubIssuesTokenForRepo(repoFullName string) string {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
-	factories := s.hubCfg.Factories
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 
@@ -947,18 +946,16 @@ func (s *Server) resolveGitHubIssuesTokenForRepo(repoFullName string) string {
 		}
 	}
 
-	if factories != nil {
-		for _, factory := range factories {
-			if factory.Integration != "github-issues" {
-				continue
-			}
-			if factory.WebhookSecret != "" {
-				return factory.WebhookSecret
-			}
-			if factory.WebhookSecretRef != "" && secrets != nil {
-				if secret := secrets[factory.WebhookSecretRef]; secret != "" {
-					return secret
-				}
+	for _, factory := range s.sLoadExternalFactories() {
+		if factory.Integration != "github-issues" {
+			continue
+		}
+		if factory.WebhookSecret != "" {
+			return factory.WebhookSecret
+		}
+		if factory.WebhookSecretRef != "" && secrets != nil {
+			if secret := secrets[factory.WebhookSecretRef]; secret != "" {
+				return secret
 			}
 		}
 	}

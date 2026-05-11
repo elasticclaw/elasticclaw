@@ -120,10 +120,12 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 		return false
 	}
 
-	s.mu.RLock()
-	factories := s.hubCfg.Factories
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	factories := s.sLoadExternalFactories()
+	secrets := func() map[string]string {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.hubCfg.Secrets
+	}()
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
@@ -151,9 +153,7 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 
 // processGitHubPREvent finds matching factories and creates claws for a PR event.
 func (s *Server) processGitHubPREvent(payload githubPRPayload) {
-	s.mu.RLock()
-	factories := s.hubCfg.Factories
-	s.mu.RUnlock()
+	factories := s.sLoadExternalFactories()
 
 	repoFullName := payload.Repository.FullName
 	log.Printf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
@@ -306,9 +306,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		return
 	}
 
-	s.mu.RLock()
-	factories := s.hubCfg.Factories
-	s.mu.RUnlock()
+	factories := s.sLoadExternalFactories()
 
 	repoFullName := payload.Repository.FullName
 	prNumber := payload.Issue.Number
