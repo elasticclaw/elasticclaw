@@ -743,7 +743,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			}
 		}
 		if !pipelineHandled {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL), false)
+			go s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL), false)
 		}
 		return false
 	}
