@@ -624,7 +624,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &autoFixCI, &autoFixBugbot, &issueID)
 	if err != nil {
 		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
 		return
 	}
 
@@ -740,7 +740,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	}
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		// Slot is now free (error claws don't count toward limit); try to
 		// promote the next pending claw.
 		go s.promotePendingClaws()

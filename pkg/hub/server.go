@@ -937,7 +937,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 		if provErr != nil {
 			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Provisioning failed: %v", provErr))
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Provisioning failed: %v", provErr), false)
 		}
 	}()
 
@@ -2008,7 +2008,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
 	return nil
@@ -2487,7 +2487,7 @@ func (s *Server) provisionVercel(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapVercel(context.Background(), clawID, sandboxID, p, files); err != nil {
 			log.Printf("vercel bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Vercel bootstrap failed: %v", err))
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Vercel bootstrap failed: %v", err), false)
 		}
 	}()
 
@@ -2780,7 +2780,7 @@ func (s *Server) syncReplicatedVMs() {
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)")
+			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)", true)
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
@@ -2929,7 +2929,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
-		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured")
+		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
 
@@ -3029,7 +3029,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	}
 	if sshErr != nil {
 		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sshErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %v", sshErr))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %v", sshErr), false)
 		return
 	}
 

@@ -160,18 +160,18 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken == "" {
 				log.Printf("[pipeline] no linear token for factory %q, putting claw in error state", factory.Name)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no linear token for factory %s", factory.Name))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no linear token for factory %s", factory.Name), false)
 				return
 			}
 			details, err := s.fetchLinearIssueDetails(linearToken, issueID)
 			if err != nil {
 				log.Printf("[pipeline] fetchLinearIssueDetails FAILED for %s: %v", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			if details == nil {
 				log.Printf("[pipeline] fetchLinearIssueDetails returned nil details for %s", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID), false)
 				return
 			}
 			log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
@@ -179,7 +179,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
 				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			var buf bytes.Buffer
@@ -191,7 +191,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], data.Issue.Identifier, data.Issue.Title, data.Issue.URL)
 			if err := tmpl.Execute(&buf, data); err != nil {
 				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			injectMsg = buf.String()
@@ -201,20 +201,20 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 			if ghToken == "" {
 				log.Printf("[pipeline] no GitHub token for factory %q, putting claw in error state", factory.Name)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no GitHub token for factory %s", factory.Name))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no GitHub token for factory %s", factory.Name), false)
 				return
 			}
 			parts := strings.Split(issueID, "/")
 			if len(parts) != 3 {
 				log.Printf("[pipeline] invalid GitHub issue ID format %q, putting claw in error state", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: invalid GitHub issue ID format %q", issueID))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: invalid GitHub issue ID format %q", issueID), false)
 				return
 			}
 			repo := parts[0] + "/" + parts[1]
 			var issueNum int
 			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
 				log.Printf("[pipeline] invalid GitHub issue number in %q: %v, putting claw in error state", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			base := s.githubBaseURL
@@ -224,19 +224,19 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
 			if err != nil {
 				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v, putting claw in error state", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			if details == nil {
 				log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s, putting claw in error state", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID), false)
 				return
 			}
 			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
 				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			var buf bytes.Buffer
@@ -247,7 +247,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			if err := tmpl.Execute(&buf, data); err != nil {
 				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
 				return
 			}
 			injectMsg = buf.String()
@@ -453,7 +453,9 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // stopAgentWithReason is the centralized handler for unexpected agent termination.
 // Every path that means "the agent is dead" routes through here.
 // It: sets status='error', broadcasts to dashboard, writes issue-tracker comment, terminates VM.
-func (s *Server) stopAgentWithReason(clawID, reason string) {
+// skipVMTerminate should be true when the caller already knows the VM is gone (e.g. Replicated
+// poll saw "terminated") to avoid redundant delete attempts that spam the logs with 404 errors.
+func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool) {
 	// Resolve factory + issueID
 	factory, issueID := s.findFactoryForClaw(clawID)
 	if factory == nil {
@@ -522,7 +524,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string) {
 	s.mu.Unlock()
 
 	// 5. Terminate VM if still running
-	if providerID != "" {
+	if providerID != "" && !skipVMTerminate {
 		go s.terminateVM(provider, providerID)
 	}
 

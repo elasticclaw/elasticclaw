@@ -618,7 +618,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		}
 		if provErr != nil {
 			log.Printf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr))
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
 

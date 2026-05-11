@@ -727,7 +727,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 
 		if provErr != nil {
 			log.Printf("[factory] claw %s provision failed: %v", clawID[:8], provErr)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr))
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 			return
 		}
 
