@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -617,7 +618,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		}
 		if provErr != nil {
 			log.Printf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
 
@@ -712,6 +713,34 @@ func moveShortcutStory(token, storyIDStr, stateName string) error {
 	defer resp2.Body.Close()
 	if resp2.StatusCode >= 400 {
 		return fmt.Errorf("shortcut API error %d", resp2.StatusCode)
+	}
+	return nil
+}
+
+// commentShortcutIssue adds a comment to a Shortcut story.
+func commentShortcutIssue(token, storyIDStr, body string) error {
+	// Parse story ID (sc-123 → 123)
+	numStr := strings.TrimPrefix(storyIDStr, "sc-")
+	storyNum, err := strconv.ParseInt(numStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid story id %s", storyIDStr)
+	}
+
+	commentBody := map[string]interface{}{"text": body}
+	b, _ := json.Marshal(commentBody)
+	req, _ := http.NewRequest("POST",
+		fmt.Sprintf("https://api.app.shortcut.com/api/v3/stories/%d/comments", storyNum),
+		bytes.NewReader(b))
+	req.Header.Set("Shortcut-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("shortcut API error %d", resp.StatusCode)
 	}
 	return nil
 }

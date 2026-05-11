@@ -624,7 +624,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &autoFixCI, &autoFixBugbot, &issueID)
 	if err != nil {
 		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
 		return
 	}
 
@@ -740,7 +740,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	}
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		// Slot is now free (error claws don't count toward limit); try to
 		// promote the next pending claw.
 		go s.promotePendingClaws()
@@ -1110,6 +1110,94 @@ func moveLinearIssueWithBase(baseURL, token, issueIdentifier, targetStateName st
 		return err
 	}
 	resp2.Body.Close()
+	return nil
+}
+
+// commentLinearIssue adds a comment to a Linear issue using the commentCreate GraphQL mutation.
+func (s *Server) commentLinearIssue(token, issueIdentifier, body string) error {
+	base := s.linearBaseURL
+	if base == "" {
+		base = "https://api.linear.app"
+	}
+	return commentLinearIssueWithBase(base, token, issueIdentifier, body)
+}
+
+// commentLinearIssueWithBase adds a comment to a Linear issue against a custom base URL.
+func commentLinearIssueWithBase(baseURL, token, issueIdentifier, body string) error {
+	// Resolve issue ID from identifier
+	queryBody := map[string]interface{}{
+		"query": "query($id: String!) { issue(id: $id) { id } }",
+		"variables": map[string]string{"id": issueIdentifier},
+	}
+	queryJSON, _ := json.Marshal(queryBody)
+	req, _ := http.NewRequest("POST", baseURL+"/graphql", strings.NewReader(string(queryJSON)))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Linear API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data struct {
+			Issue struct {
+				ID string `json:"id"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	issueID := result.Data.Issue.ID
+	if issueID == "" {
+		return fmt.Errorf("issue %s not found", issueIdentifier)
+	}
+
+	// Create comment
+	mut := `mutation($issueId: String!, $body: String!) {
+		commentCreate(input: { issueId: $issueId, body: $body }) {
+			success
+			comment { id }
+		}
+	}`
+	mutBody := map[string]interface{}{
+		"query":     mut,
+		"variables": map[string]string{"issueId": issueID, "body": body},
+	}
+	mutJSON, _ := json.Marshal(mutBody)
+	req2, _ := http.NewRequest("POST", baseURL+"/graphql", strings.NewReader(string(mutJSON)))
+	req2.Header.Set("Authorization", token)
+	req2.Header.Set("Content-Type", "application/json")
+
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		return err
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp2.Body)
+		return fmt.Errorf("Linear API error %d: %s", resp2.StatusCode, string(body))
+	}
+
+	var commentResult struct {
+		Data struct {
+			CommentCreate struct {
+				Success bool `json:"success"`
+			} `json:"commentCreate"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&commentResult); err != nil {
+		return err
+	}
+	if !commentResult.Data.CommentCreate.Success {
+		return fmt.Errorf("commentCreate returned success=false")
+	}
 	return nil
 }
 

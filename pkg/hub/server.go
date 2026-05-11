@@ -937,11 +937,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 		if provErr != nil {
 			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
-			s.broadcastToUsers(tenantID, types.WSMessage{
-				Type:    "claw_error",
-				Payload: map[string]string{"claw_id": clawID, "error": provErr.Error()},
-			})
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Provisioning failed: %v", provErr), false)
 		}
 	}()
 
@@ -2012,14 +2008,8 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_ok=0 WHERE id=?`, clawID)
-		// Destroy the sandbox — auto-stop is disabled so it would run forever otherwise
-		log.Printf("[daytona] destroying failed sandbox %s for claw %s", instance.ID, clawName)
-		if delErr := p.Destroy(context.Background(), instance.ID, false); delErr != nil {
-			log.Printf("[daytona] warning: failed to destroy sandbox %s: %v", instance.ID, delErr)
-		} else {
-			log.Printf("[daytona] destroyed failed sandbox %s", instance.ID)
-		}
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
+		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
 	return nil
 }
@@ -2497,11 +2487,7 @@ func (s *Server) provisionVercel(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapVercel(context.Background(), clawID, sandboxID, p, files); err != nil {
 			log.Printf("vercel bootstrap failed for claw %s: %v", clawID, err)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
-			s.broadcastToUsers("", types.WSMessage{
-				Type:    "claw_error",
-				Payload: map[string]string{"claw_id": clawID, "error": err.Error()},
-			})
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Vercel bootstrap failed: %v", err), false)
 		}
 	}()
 
@@ -2793,15 +2779,12 @@ func (s *Server) syncReplicatedVMs() {
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg)
 			}
 		case "terminated", "error":
-			newStatus = "offline"
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			// Disconnect claw WebSocket if still connected
-			s.mu.Lock()
-			if cc, ok := s.claws[c.id]; ok {
-				cc.conn.Close(websocket.StatusGoingAway, "VM terminated")
-				delete(s.claws, c.id)
-			}
-			s.mu.Unlock()
+			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)", true)
+			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
+			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
+			// Skip the rest of the status update logic for this claw
+			continue
 		default:
 			// assigned, pending, etc — still coming up
 			newStatus = "provisioning"
@@ -2946,7 +2929,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
 
@@ -3046,7 +3029,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	}
 	if sshErr != nil {
 		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sshErr)
-		_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %v", sshErr), false)
 		return
 	}
 

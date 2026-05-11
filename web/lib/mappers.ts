@@ -106,6 +106,7 @@ export function mapApiClaw(
     color: overrides.color ?? (apiClaw.color || autoColor(apiClaw.name)),
     contextUsage: overrides.contextUsage ?? apiClaw.context_usage ?? 0,
     description: overrides.description,
+    reason: overrides.reason,
     ssh_host: apiClaw.ssh_host,
     ssh_port: apiClaw.ssh_port,
     ssh_user: apiClaw.ssh_user,

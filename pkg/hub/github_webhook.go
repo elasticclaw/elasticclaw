@@ -695,7 +695,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		}
 		if provErr != nil {
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
 
