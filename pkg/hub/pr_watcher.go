@@ -725,11 +725,10 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
 	if state == "closed" && !merged {
-		log.Printf("[pr-watcher] PR %s#%d closed without merge — notifying claw %s", pr.repo, pr.prNumber, clawID[:8])
-		// Stop polling this closed PR so we only notify once.
+		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
-		// Check if the pipeline handles pr_closed
+		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		factory, issueID := s.findFactoryForClaw(clawID)
 		pipelineHandled := false
 		if factory != nil {
@@ -744,7 +743,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			}
 		}
 		if !pipelineHandled {
-			s.injectHubMessageByID(clawID, fmt.Sprintf("PR %s was closed without being merged. Decide what to do: reopen it, open a new PR, or let the user know.", pr.prURL))
+			s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL))
 		}
 		return false
 	}

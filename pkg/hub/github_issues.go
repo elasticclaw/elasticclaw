@@ -727,11 +727,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 
 		if provErr != nil {
 			log.Printf("[factory] claw %s provision failed: %v", clawID[:8], provErr)
-			_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID)
-			s.broadcastToUsers(tenantID, types.WSMessage{
-				Type:    "claw_status",
-				Payload: map[string]string{"claw_id": clawID, "status": "error"},
-			})
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr))
 			return
 		}
 
@@ -815,6 +811,31 @@ func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 	b.WriteString("3. Implement the feature/fix described above\n")
 	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
 	return b.String()
+}
+
+// commentGitHubIssue adds a comment to a GitHub issue.
+func commentGitHubIssue(token, repo string, issueNumber int, body string) error {
+	base := "https://api.github.com"
+	commentBody := map[string]interface{}{"body": body}
+	b, _ := json.Marshal(commentBody)
+	req, _ := http.NewRequest("POST",
+		fmt.Sprintf("%s/repos/%s/issues/%d/comments", base, repo, issueNumber),
+		bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("github API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 // githubAPIPostWithBase makes a POST/PATCH/PUT request to the GitHub API.
