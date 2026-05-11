@@ -271,19 +271,21 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		initialStatus = "pending"
 	}
 
-	var linearIssueID, githubIssueID string
+	var linearIssueID, githubIssueID, shortcutStoryID string
 	if factory.Integration == "linear" && issueID != "" {
 		linearIssueID = issueID
 	} else if factory.Integration == "github-issues" && issueID != "" {
 		githubIssueID = issueID
+	} else if factory.Integration == "shortcut" && issueID != "" {
+		shortcutStoryID = issueID
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot,
-		linearIssueID, githubIssueID, initialStatus, now, factory.Name, groupName,
+		linearIssueID, githubIssueID, shortcutStoryID, initialStatus, now, factory.Name, groupName,
 	)
 
 	s.promoteMu.Unlock()

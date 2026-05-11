@@ -357,8 +357,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 func (s *Server) terminateClawForIssue(issueID string) {
 	var clawID, tenantID string
 	if err := s.db.QueryRow(
-		`SELECT id, tenant_id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
-		issueID,
+		`SELECT id, tenant_id FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueID, issueID,
 	).Scan(&clawID, &tenantID); err != nil {
 		return
 	}

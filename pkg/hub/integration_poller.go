@@ -476,7 +476,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 func (s *Server) clawExistsForShortcutStory(storyID string) bool {
 	var existingID string
 	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
+		`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		storyID).Scan(&existingID)
 	return existingID != ""
 }
@@ -686,7 +686,9 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 		if len(factory.AllowedLabelers) > 0 {
 			allowed := false
 			for _, event := range events {
-				if event.Event != "labeled" || event.Issue == nil || event.Issue.Number != issue.Number {
+				// Per-issue events endpoint (repos/{owner}/{repo}/issues/{n}/events)
+				// does not include an issue field — all events belong to the queried issue.
+				if event.Event != "labeled" {
 					continue
 				}
 				if event.Label == nil {
