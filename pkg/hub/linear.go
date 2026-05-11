@@ -1139,6 +1139,10 @@ func commentLinearIssueWithBase(baseURL, token, issueIdentifier, body string) er
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Linear API error %d: %s", resp.StatusCode, string(body))
+	}
 
 	var result struct {
 		Data struct {
@@ -1176,6 +1180,10 @@ func commentLinearIssueWithBase(baseURL, token, issueIdentifier, body string) er
 		return err
 	}
 	defer resp2.Body.Close()
+	if resp2.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp2.Body)
+		return fmt.Errorf("Linear API error %d: %s", resp2.StatusCode, string(body))
+	}
 
 	var commentResult struct {
 		Data struct {

@@ -171,7 +171,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			if details == nil {
 				log.Printf("[pipeline] fetchLinearIssueDetails returned nil details for %s", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID))
 				return
 			}
 			log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
@@ -229,7 +229,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			if details == nil {
 				log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s, putting claw in error state", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err))
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID))
 				return
 			}
 			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
