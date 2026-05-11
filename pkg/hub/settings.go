@@ -439,7 +439,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Factories — load only from external storage (single source of truth)
 	view.Factories = []FactoryView{}
-	factories, _ := loadExternalFactories()
+	factories, err := loadExternalFactories()
+	if err != nil {
+		http.Error(w, "failed to load factories: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	// Sort by name for stable ordering
 	factoryNames := make([]string, 0, len(factories))
 	for _, f := range factories {
@@ -1043,7 +1047,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			// If this was a rename, delete the old factory directory so it doesn't
 			// appear as a phantom duplicate in listings.
 			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
-				_ = deleteExternalFactory(fp.OriginalName)
+				if err := deleteExternalFactory(fp.OriginalName); err != nil {
+					http.Error(w, "failed to delete old factory "+fp.OriginalName+": "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 		updatedCfg.Factories = nil // never store factories in hubCfg
