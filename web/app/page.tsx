@@ -316,7 +316,6 @@ export default function Home() {
         open={!!selectedFactory}
         onOpenChange={(open) => { if (!open) setSelectedFactory(null) }}
         factory={selectedFactory}
-        onClawCreated={handleSelectClaw}
       />
     </div>
   )

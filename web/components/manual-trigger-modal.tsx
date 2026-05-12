@@ -19,10 +19,9 @@ interface ManualTriggerModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   factory?: Factory | null
-  onClawCreated?: (clawId: string) => void
 }
 
-export function ManualTriggerModal({ open, onOpenChange, factory, onClawCreated }: ManualTriggerModalProps) {
+export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTriggerModalProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
@@ -80,16 +79,15 @@ export function ManualTriggerModal({ open, onOpenChange, factory, onClawCreated 
           }
         }
       }
-      const res = await triggerFactory(factory.name, inputs)
+      await triggerFactory(factory.name, inputs)
       setTriggering(false)
       onOpenChange(false)
-      onClawCreated?.(res.claw_id)
     } catch (e) {
       setTriggering(false)
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))
     }
-  }, [factory, inputValues, onOpenChange, onClawCreated])
+  }, [factory, inputValues, onOpenChange])
 
   if (!factory) return null
 
