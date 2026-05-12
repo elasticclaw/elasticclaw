@@ -62,19 +62,23 @@ type githubIssuesWebhookPayload struct {
 
 func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		log.Printf("[github-issues-webhook] %s %s → 405 method not allowed", r.Method, r.URL.Path)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
+		log.Printf("[github-issues-webhook] %s %s → 400 read error: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
 
 	// Validate signature using X-Hub-Signature-256 header
 	sig := r.Header.Get("X-Hub-Signature-256")
-	if !s.validateGitHubIssuesSignature(body, sig) {
+	reason := s.validateGitHubIssuesSignatureReason(body, sig)
+	if reason != "" {
+		log.Printf("[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -104,7 +108,9 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
+// validateGitHubIssuesSignatureReason validates the webhook signature and returns
+// an empty string on success, or a human-readable reason on failure.
+func (s *Server) validateGitHubIssuesSignatureReason(body []byte, sig string) string {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
 	secrets := s.hubCfg.Secrets
@@ -112,7 +118,9 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 
 	factories := s.resolveFactories()
 
-	hasAnySecret := false
+	integrationSecretCount := 0
+	factorySecretCount := 0
+	factoryMatchCount := 0
 
 	// Check integration-level secrets
 	if integrations != nil {
@@ -120,9 +128,9 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 			if gi.WebhookSecret == "" {
 				continue
 			}
-			hasAnySecret = true
+			integrationSecretCount++
 			if verifyGitHubHMAC(body, sig, gi.WebhookSecret) {
-				return true
+				return "" // valid
 			}
 		}
 	}
@@ -133,6 +141,7 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 			if factory.Integration != "github-issues" {
 				continue
 			}
+			factoryMatchCount++
 			secret := factory.WebhookSecret
 			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
 				secret = secrets[factory.WebhookSecretRef]
@@ -140,24 +149,29 @@ func (s *Server) validateGitHubIssuesSignature(body []byte, sig string) bool {
 			if secret == "" {
 				continue
 			}
-			hasAnySecret = true
+			factorySecretCount++
 			if verifyGitHubHMAC(body, sig, secret) {
-				return true
+				return "" // valid
 			}
 		}
 	}
 
-	// If any secrets are configured but none matched, reject.
-	// Also reject if there are GitHub Issues integrations configured but
-	// none have secrets set — unauthenticated webhooks are a security risk.
-	if hasAnySecret {
-		return false
+	// Build a diagnostic reason string (never includes the secret itself)
+	if integrationSecretCount == 0 && factorySecretCount == 0 {
+		// No secrets configured at all
+		if integrations != nil && len(integrations.GitHubIssues) > 0 {
+			return "no webhook secrets configured for any github-issues integration"
+		}
+		if factoryMatchCount > 0 {
+			return "no webhook secrets configured for any github-issues factory"
+		}
+		// Dev/testing mode: no integrations and no factory secrets — allow
+		return ""
 	}
-	if integrations != nil && len(integrations.GitHubIssues) > 0 {
-		return false
+	if sig == "" {
+		return "missing X-Hub-Signature-256 header"
 	}
-	// No integrations and no factory secrets — allow (dev/testing)
-	return true
+	return fmt.Sprintf("signature mismatch (checked %d integration secrets, %d factory secrets across %d github-issues factories)", integrationSecretCount, factorySecretCount, factoryMatchCount)
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {

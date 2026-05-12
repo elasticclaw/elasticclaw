@@ -956,7 +956,13 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 		return nil, fmt.Errorf("github API response read error: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("github API returned status %d: %s", resp.StatusCode, string(body))
+		// GitHub returns 404 for auth failures to avoid leaking repo existence.
+		// Surface a clearer error when the token is likely the problem.
+		msg := string(body)
+		if resp.StatusCode == http.StatusNotFound && strings.Contains(msg, "Not Found") {
+			return nil, fmt.Errorf("github API returned 404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg)
+		}
+		return nil, fmt.Errorf("github API returned status %d: %s", resp.StatusCode, msg)
 	}
 	var result []interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
