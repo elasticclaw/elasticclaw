@@ -6,5 +6,7 @@ labels:
   - agent-ready
 allowed_labelers:
   - marccampbell
+
 webhook_secret_ref: elasticclaw_webhook_secret
+
 template: elasticclaw
