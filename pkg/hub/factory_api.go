@@ -46,7 +46,7 @@ type FactoryPushView struct {
 	HasWebhookSecret    bool                `json:"has_webhook_secret"`
 	WebhookSecretRef    string              `json:"webhook_secret_ref,omitempty"`
 	PipelineYAML        string              `json:"pipeline_yaml,omitempty"`
-	EnableManualTrigger bool                `json:"enableManualTrigger,omitempty"`
+	EnableManualTrigger bool                `json:"enable_manual_trigger,omitempty"`
 	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
 }
 
