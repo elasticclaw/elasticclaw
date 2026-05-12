@@ -3323,6 +3323,28 @@ function TemplatesSection() {
   )
 }
 
+// linkifyText converts URLs in text into clickable <a> elements.
+function linkifyText(text: string): React.ReactNode {
+  const urlRegex = /(https?:\/\/[^\s]+)/g
+  const parts = text.split(urlRegex)
+  return parts.map((part, i) => {
+    if (part.match(urlRegex)) {
+      return (
+        <a
+          key={i}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary hover:underline"
+        >
+          {part}
+        </a>
+      )
+    }
+    return part
+  })
+}
+
 function DoctorSection() {
   const [report, setReport] = useState<any>(null)
   const [loading, setLoading] = useState(false)
@@ -3451,7 +3473,7 @@ function DoctorSection() {
                         {!check.ok && severityBadge(check.severity)}
                       </div>
                       <p className="text-sm font-medium mt-1">{check.title}</p>
-                      <p className="text-sm text-muted-foreground mt-0.5">{check.description}</p>
+                      <p className="text-sm text-muted-foreground mt-0.5 whitespace-pre-wrap">{linkifyText(check.description)}</p>
                       {check.error && (
                         <p className="text-xs text-red-400 mt-1 font-mono">{check.error}</p>
                       )}
