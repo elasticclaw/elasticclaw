@@ -540,13 +540,38 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Resolve and inject template-requested secrets (typed refs + legacy)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
 				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
+			}
+		}
+	}
+
+	// Resolve and inject template-level secret_refs
+	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
+		for envName, secretRef := range tmplCfg.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+			} else {
+				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+			}
+		}
+	}
+
+	// Resolve and inject factory-level secret_refs (factory overrides template)
+	if len(factory.SecretRefs) > 0 {
+		for envName, secretRef := range factory.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+			} else {
+				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}

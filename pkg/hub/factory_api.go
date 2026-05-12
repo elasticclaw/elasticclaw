@@ -47,6 +47,7 @@ type FactoryPushView struct {
 	WebhookSecretRef    string              `json:"webhook_secret_ref,omitempty"`
 	PipelineYAML        string              `json:"pipeline_yaml,omitempty"`
 	EnableManualTrigger bool                `json:"enable_manual_trigger,omitempty"`
+	SecretRefs          map[string]string    `json:"secret_refs,omitempty"`
 	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
 }
 
@@ -65,6 +66,7 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 		WebhookSecretRef:    f.WebhookSecretRef,
 		PipelineYAML:        f.PipelineYAML,
 		EnableManualTrigger: f.EnableManualTrigger,
+		SecretRefs:          f.SecretRefs,
 		Inputs:              f.Inputs,
 	}
 }

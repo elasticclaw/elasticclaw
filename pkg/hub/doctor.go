@@ -539,7 +539,25 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			})
 		}
 
-		// Check 4: overlapping triggers
+		// Check 4: factory secret_refs point to existing secrets
+		for envName, secretRef := range f.SecretRefs {
+			if !secretNames[secretRef] {
+				checks = append(checks, DoctorCheck{
+					Category: "factories",
+					Severity: "warning",
+					Title:    fmt.Sprintf("Factory %q secret_refs references missing secret", f.Name),
+					Description: fmt.Sprintf("Factory %q secret_refs maps %q to secret %q which is not in the secrets map.", f.Name, envName, secretRef),
+					OK: false,
+					FixAction: &FixAction{
+						Type:   "navigate",
+						Target: "/settings/secrets",
+						Label:  "Create Secret",
+					},
+				})
+			}
+		}
+
+		// Check 5: overlapping triggers
 		var key triggerKey
 		switch f.Integration {
 		case "linear", "shortcut", "github-issues":
@@ -652,6 +670,39 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 						Label:  "Manage Templates",
 					},
 				})
+			} else {
+				// Check for deprecated secrets: list format
+				if data, err := os.ReadFile(configPath); err == nil {
+					tmplCfg, parseErr := config.ParseTemplateConfig(data)
+					if parseErr == nil && tmplCfg != nil {
+						if len(tmplCfg.Secrets) > 0 {
+							checks = append(checks, DoctorCheck{
+								Category:    "templates",
+								Severity:    "warning",
+								Title:       fmt.Sprintf("Template %q uses deprecated secrets: list", name),
+								Description: fmt.Sprintf("Template %q uses the deprecated 'secrets:' list format. Migrate to 'secret_refs:' map.\n\nExample:\n  secret_refs:\n    LINEAR_API_KEY: linear_api_key\n\nDocs: https://www.elasticclaw.ai/docs/troubleshooting", name),
+								OK:          false,
+							})
+						}
+						// Check for missing secret_refs references
+						for envName, secretRef := range tmplCfg.SecretRefs {
+							if !secretNames[secretRef] {
+								checks = append(checks, DoctorCheck{
+									Category:    "templates",
+									Severity:    "warning",
+									Title:       fmt.Sprintf("Template %q secret_refs references missing secret", name),
+									Description: fmt.Sprintf("Template %q secret_refs maps %q to secret %q which is not in the secrets map.", name, envName, secretRef),
+									OK:          false,
+									FixAction: &FixAction{
+										Type:   "navigate",
+										Target: "/settings/secrets",
+										Label:  "Create Secret",
+									},
+								})
+							}
+						}
+					}
+				}
 			}
 		}
 		if len(externalNames) == 0 {

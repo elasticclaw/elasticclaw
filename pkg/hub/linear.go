@@ -686,13 +686,38 @@ func (s *Server) provisionPendingClaw(clawID string) {
 
 	// Resolve and inject template-requested secrets (same as factory create paths).
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 && factory != nil {
+		log.Printf("[factory] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", template)
 		for _, ref := range tmplCfg.Secrets {
 			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = secretVal
-				log.Printf("[factory] injected secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
+				log.Printf("[factory] injected template secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
 			} else {
 				log.Printf("[factory] warning: requested secret (type=%s name=%s workspace=%s) not found for pending claw %s", ref.Type, ref.Name, ref.Workspace, clawID[:8])
+			}
+		}
+	}
+
+	// Resolve and inject template-level secret_refs
+	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
+		for envName, secretRef := range tmplCfg.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				log.Printf("[factory] injected template secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
+			} else {
+				log.Printf("[factory] WARNING: template secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
+			}
+		}
+	}
+
+	// Resolve and inject factory-level secret_refs (factory overrides template)
+	if factory != nil && len(factory.SecretRefs) > 0 {
+		for envName, secretRef := range factory.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				log.Printf("[factory] injected factory secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
+			} else {
+				log.Printf("[factory] WARNING: factory secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
 			}
 		}
 	}
