@@ -128,7 +128,7 @@ export function Sidebar({
         .then((data) => {
           if (cancelled) return
           const manual = data.filter(
-            (f) => (f.enabled !== false) && f.enableManualTrigger
+            (f) => (f.enabled !== false) && f.enable_manual_trigger
           )
           console.log("[sidebar] loaded factories:", data.length, "manual:", manual.length)
           setManualFactories(manual)

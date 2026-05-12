@@ -133,7 +133,7 @@ type FactoryView struct {
 	AssignedTo          string   `json:"assigned_to,omitempty"`
 	Enabled             bool     `json:"enabled"`
 	ConcurrencyGroup    string   `json:"concurrencyGroup,omitempty"`
-	EnableManualTrigger bool     `json:"enableManualTrigger,omitempty"`
+	EnableManualTrigger bool     `json:"enable_manual_trigger,omitempty"`
 }
 
 type ProviderView struct {
@@ -286,7 +286,7 @@ type FactoryPatch struct {
 	AssignedTo          string              `json:"assigned_to,omitempty"`
 	Enabled             *bool               `json:"enabled,omitempty"`
 	ConcurrencyGroup    string              `json:"concurrencyGroup,omitempty"`
-	EnableManualTrigger bool                `json:"enableManualTrigger,omitempty"`
+	EnableManualTrigger bool                `json:"enable_manual_trigger,omitempty"`
 	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
 	Repos               []string            `json:"repos,omitempty"`
 	Trigger             *types.GitHubTrigger `json:"trigger,omitempty"`
