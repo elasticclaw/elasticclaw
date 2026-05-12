@@ -463,15 +463,15 @@ type FactoryConfig struct {
 
 // GitHubTrigger defines what GitHub event triggers this factory.
 type GitHubTrigger struct {
-	On     string               `yaml:"on"`              // "pull_request" | "issue"
-	Action string               `yaml:"action"`          // "opened" | "synchronize" | "reopened" | "closed"
-	Filter *GitHubTriggerFilter `yaml:"filter,omitempty"`
+	On     string               `yaml:"on" json:"on"`              // "pull_request" | "issue"
+	Action string               `yaml:"action" json:"action"`          // "opened" | "synchronize" | "reopened" | "closed"
+	Filter *GitHubTriggerFilter `yaml:"filter,omitempty" json:"filter,omitempty"`
 }
 
 // GitHubTriggerFilter further constrains which events match the trigger.
 type GitHubTriggerFilter struct {
-	Author     string `yaml:"author,omitempty"`      // e.g. "dependabot[bot]"
-	BaseBranch string `yaml:"base_branch,omitempty"` // e.g. "main"
+	Author     string `yaml:"author,omitempty" json:"author,omitempty"`      // e.g. "dependabot[bot]"
+	BaseBranch string `yaml:"base_branch,omitempty" json:"base_branch,omitempty"` // e.g. "main"
 }
 
 type ProviderConfig struct {
