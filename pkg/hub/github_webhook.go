@@ -656,12 +656,38 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	filesJSON, _ := json.Marshal(templateFiles)
 	createdAt := now()
 
+	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
+	// race where concurrent factory webhooks both read active < max and both
+	// insert as provisioning, exceeding the limit.
+	s.promoteMu.Lock()
+
+	s.mu.RLock()
+	groupName, groupLimit := s.resolveGroupLimit(factory)
+	s.mu.RUnlock()
+
+	activeCount := s.countActiveClawsInGroup(groupName)
+	isPending := false
+	if groupLimit > 0 && activeCount >= groupLimit {
+		isPending = true
+		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub PR %s#%d as pending", groupName, activeCount, groupLimit, repoFullName, prNumber)
+	}
+
+	initialStatus := "provisioning"
+	if isPending {
+		initialStatus = "pending"
+	}
+
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, status, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, "", createdAt,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, "", "", "", initialStatus, createdAt, factory.Name, groupName,
 	)
+
+	// Release promoteMu immediately after INSERT so we don't hold it across
+	// the potentially slow async provisioning below.
+	s.promoteMu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
@@ -673,6 +699,16 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	s.logFactoryEvent(factory.Name,
 		fmt.Sprintf("%s#%d", repoFullName, prNumber),
 		pr.PullRequest.Title, "", pr.Action, "claw_created", clawID, "")
+
+	log.Printf("[factory] created claw %s (%s) for GitHub PR %s#%d (status=%s)", clawName, clawID[:8], repoFullName, prNumber, initialStatus)
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
+	})
+
+	if isPending {
+		return nil
+	}
 
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
@@ -721,12 +757,6 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
-
-	log.Printf("[factory] created claw %s (%s) for GitHub PR %s#%d", clawName, clawID[:8], repoFullName, prNumber)
-	s.broadcastToUsers(tenantID, types.WSMessage{
-		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "provisioning"},
-	})
 
 	return nil
 }
