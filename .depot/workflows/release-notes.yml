@@ -40,33 +40,28 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          COMMITS=$(cat /tmp/changelog.txt)
 
-          # Build the prompt — write to file to avoid shell interpolation
-          cat > /tmp/prompt.json << 'PROMPT_EOF'
-          {
+          # Build the prompt JSON safely with Python (handles quotes, newlines, backslashes)
+          python3 -c '
+          import json, sys
+
+          tag = sys.argv[1]
+          with open("/tmp/changelog.txt", "r") as f:
+            commits = f.read()
+
+          prompt = {
             "model": "gpt-oss-120b",
             "messages": [
-              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like 'The One With...' or a movie reference). You categorize changes into: What's New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don't just list commit messages."},
-              {"role": "user", "content": "Write release notes for ElasticClaw version TAG_PLACEHOLDER. Here are the commits since the last release:\n\nCOMMITS_PLACEHOLDER\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
+              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like \"The One With...\" or a movie reference). You categorize changes into: What\'s New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don\'t just list commit messages."},
+              {"role": "user", "content": "Write release notes for ElasticClaw version " + tag + ". Here are the commits since the last release:\n\n" + commits + "\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
             ],
             "temperature": 0.7,
             "max_tokens": 4096
           }
-          PROMPT_EOF
 
-          # Replace placeholders safely using Python (handles newlines, quotes, etc.)
-          python3 -c "
-          import json, sys
-          with open('/tmp/prompt.json', 'r') as f:
-            prompt = f.read()
-          with open('/tmp/changelog.txt', 'r') as f:
-            commits = f.read()
-          prompt = prompt.replace('TAG_PLACEHOLDER', sys.argv[1])
-          prompt = prompt.replace('COMMITS_PLACEHOLDER', commits)
-          with open('/tmp/prompt.json', 'w') as f:
-            f.write(prompt)
-          " "$TAG"
+          with open("/tmp/prompt.json", "w") as f:
+            json.dump(prompt, f)
+          ' "$TAG"
 
           RESPONSE=$(curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
             -H "Authorization: Bearer $GROQ_API_KEY" \
@@ -95,11 +90,24 @@ jobs:
           jq -c '.improvements' /tmp/notes.json > /tmp/improvements.json
           jq -c '.fixes' /tmp/notes.json > /tmp/fixes.json
 
-          echo "title=$(cat /tmp/title.txt)" >> "$GITHUB_OUTPUT"
-          echo "summary=$(cat /tmp/summary.txt)" >> "$GITHUB_OUTPUT"
-          echo "whatsNew=$(cat /tmp/whatsnew.json)" >> "$GITHUB_OUTPUT"
-          echo "improvements=$(cat /tmp/improvements.json)" >> "$GITHUB_OUTPUT"
-          echo "fixes=$(cat /tmp/fixes.json)" >> "$GITHUB_OUTPUT"
+          # Use heredoc for multi-line-safe GITHUB_OUTPUT
+          {
+            echo "title<<GH_EOF"
+            cat /tmp/title.txt
+            echo "GH_EOF"
+            echo "summary<<GH_EOF"
+            cat /tmp/summary.txt
+            echo "GH_EOF"
+            echo "whatsNew<<GH_EOF"
+            cat /tmp/whatsnew.json
+            echo "GH_EOF"
+            echo "improvements<<GH_EOF"
+            cat /tmp/improvements.json
+            echo "GH_EOF"
+            echo "fixes<<GH_EOF"
+            cat /tmp/fixes.json
+            echo "GH_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout elasticclaw.ai
         uses: actions/checkout@v4
@@ -123,9 +131,9 @@ jobs:
           date = sys.argv[2]
 
           with open("/tmp/title.txt", "r") as f:
-            title = f.read()
+            title = f.read().strip()
           with open("/tmp/summary.txt", "r") as f:
-            summary = f.read()
+            summary = f.read().strip()
 
           list_file = sys.argv[3]
           with open(list_file, "r") as f:
@@ -133,7 +141,7 @@ jobs:
 
           # Escape for TSX string literals
           def esc(s):
-            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
           new_entry = """  {{
     version: "{}",
@@ -157,7 +165,7 @@ jobs:
           date = sys.argv[2]
 
           with open("/tmp/title.txt", "r") as f:
-            title = f.read()
+            title = f.read().strip()
           with open("/tmp/whatsnew.json", "r") as f:
             whatsnew = json.load(f)
           with open("/tmp/improvements.json", "r") as f:
@@ -173,7 +181,7 @@ jobs:
 
           # Escape for TSX string literals
           def esc(s):
-            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
           def fmt_list(items):
             lines = ["    \"{}\",".format(esc(item)) for item in items]
