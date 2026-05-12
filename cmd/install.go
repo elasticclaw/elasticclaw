@@ -260,37 +260,58 @@ func trackSuffix(tag, track string) int {
 }
 
 // latestReleaseOnTrack queries GitHub for the most recent release whose tag
-// belongs to the same track as currentVersion.
+// belongs to the same track as currentVersion. It paginates through releases
+// until it finds at least one match or exhausts all pages (max 10 pages = 1000
+// releases) to avoid the case where >100 releases on other tracks push the
+// target track off the first page.
 func latestReleaseOnTrack(owner, repo, currentVersion string) (string, error) {
 	track := extractTrack(currentVersion)
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100", owner, repo)
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API error: HTTP %d", resp.StatusCode)
-	}
-	var releases []struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return "", err
-	}
-
+	const maxPages = 10
 	var best string
 	bestSuffix := -1
-	for _, r := range releases {
-		if !releaseMatchesTrack(r.TagName, track) {
-			continue
+
+	for page := 1; page <= maxPages; page++ {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100&page=%d", owner, repo, page)
+		resp, err := http.Get(url)
+		if err != nil {
+			return "", err
 		}
-		suf := trackSuffix(r.TagName, track)
-		if suf > bestSuffix {
-			bestSuffix = suf
-			best = r.TagName
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return "", fmt.Errorf("GitHub API error: HTTP %d", resp.StatusCode)
+		}
+
+		var releases []struct {
+			TagName string `json:"tag_name"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+			resp.Body.Close()
+			return "", err
+		}
+		resp.Body.Close()
+
+		if len(releases) == 0 {
+			break // no more pages
+		}
+
+		for _, r := range releases {
+			if !releaseMatchesTrack(r.TagName, track) {
+				continue
+			}
+			suf := trackSuffix(r.TagName, track)
+			if suf > bestSuffix {
+				bestSuffix = suf
+				best = r.TagName
+			}
+		}
+
+		// If we found at least one match, we can stop — GitHub returns releases
+		// newest-first, so any later page would only have older releases.
+		if best != "" {
+			break
 		}
 	}
+
 	if best == "" {
 		return "", fmt.Errorf("no releases found on track %s", track)
 	}
