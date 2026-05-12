@@ -419,59 +419,59 @@ type ConcurrencyGroup struct {
 
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
-	Name              string `yaml:"name"`
-	Enabled           *bool  `yaml:"enabled,omitempty"`  // nil = true (default on); set false to pause
-	Integration       string `yaml:"integration"`        // "linear", "shortcut", "github-issues", or "github"
-	Workspace         string `yaml:"workspace,omitempty"` // matches integrations.<type>[].workspace
-	Team              string `yaml:"team,omitempty"`     // Linear team key (e.g. "ELA")
-	TriggerStatus     string `yaml:"trigger_status,omitempty"` // entering this status → create claw
-	DoneStatus        string `yaml:"done_status,omitempty"`  // claw moves issue here when done
-	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
-	Template          string `yaml:"template"`           // template name (must be pushed to hub)
-	Provider          string `yaml:"provider,omitempty"` // override the default provider for this factory
-	NamePattern       string   `yaml:"name_pattern,omitempty"` // claw name pattern, e.g. "{issue_id}"
-	WebhookSecret     string   `yaml:"webhook_secret,omitempty"` // HMAC-SHA256 secret for validating webhooks
-	Tags              []string `yaml:"tags,omitempty"`          // tags applied to created claws
-	Color             string   `yaml:"color,omitempty"`         // color applied to created claws
+	Name              string `yaml:"name" json:"name"`
+	Enabled           *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`  // nil = true (default on); set false to pause
+	Integration       string `yaml:"integration" json:"integration"`        // "linear", "shortcut", "github-issues", or "github"
+	Workspace         string `yaml:"workspace,omitempty" json:"workspace,omitempty"` // matches integrations.<type>[].workspace
+	Team              string `yaml:"team,omitempty" json:"team,omitempty"`     // Linear team key (e.g. "ELA")
+	TriggerStatus     string `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"` // entering this status → create claw
+	DoneStatus        string `yaml:"done_status,omitempty" json:"done_status,omitempty"`  // claw moves issue here when done
+	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
+	Template          string `yaml:"template" json:"template"`           // template name (must be pushed to hub)
+	Provider          string `yaml:"provider,omitempty" json:"provider,omitempty"` // override the default provider for this factory
+	NamePattern       string   `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"` // claw name pattern, e.g. "{issue_id}"
+	WebhookSecret     string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"` // HMAC-SHA256 secret for validating webhooks
+	Tags              []string `yaml:"tags,omitempty" json:"tags,omitempty"`          // tags applied to created claws
+	Color             string   `yaml:"color,omitempty" json:"color,omitempty"`         // color applied to created claws
 	// Labels: all must be present on the issue to trigger (AND)
-	Labels []string `yaml:"labels,omitempty"`
+	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
-	AssignedTo string `yaml:"assigned_to,omitempty"`
+	AssignedTo string `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	// AllowedLabelers restricts who can trigger claw creation by labeling an issue.
 	// Only users in this list (GitHub logins, case-insensitive) can trigger.
 	// If empty, any user with label permissions can trigger.
-	AllowedLabelers []string `yaml:"allowed_labelers,omitempty"`
+	AllowedLabelers []string `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`
 	// WebhookSecretRef is a named key in HubConfig.Secrets (use instead of inline WebhookSecret for repo-defined factories)
-	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty"`
+	WebhookSecretRef string `yaml:"webhook_secret_ref,omitempty" json:"webhook_secret_ref,omitempty"`
 	// PipelineYAML is the raw pipeline.yaml content stored alongside this factory
-	PipelineYAML string `yaml:"pipeline_yaml,omitempty"`
+	PipelineYAML string `yaml:"pipeline_yaml,omitempty" json:"pipeline_yaml,omitempty"`
 	// Inputs are user-defined parameters for manual factory triggers (CLI/UI).
 	// Not used by webhook-triggered factories.
 	Inputs []FactoryInput `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 	// ConcurrencyGroup assigns this factory to a concurrency group.
 	// If empty, the factory uses the "global" group.
-	ConcurrencyGroup string `yaml:"concurrency_group,omitempty" json:"concurrencyGroup,omitempty"`
+	ConcurrencyGroup string `yaml:"concurrency_group,omitempty" json:"concurrency_group,omitempty"`
 	// EnableManualTrigger allows this factory to be triggered manually from the dashboard.
 	EnableManualTrigger bool `yaml:"enable_manual_trigger,omitempty" json:"enable_manual_trigger,omitempty"`
 	// SecretRefs maps env var names to hub secret names to inject into claws
 	// created by this factory. Resolved at claw creation time.
 	SecretRefs map[string]string `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
 	// GitHub factory fields (integration: github)
-	Repos   []string       `yaml:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
-	Trigger *GitHubTrigger `yaml:"trigger,omitempty"`
+	Repos   []string       `yaml:"repos,omitempty" json:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
+	Trigger *GitHubTrigger `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 }
 
 // GitHubTrigger defines what GitHub event triggers this factory.
 type GitHubTrigger struct {
-	On     string               `yaml:"on"`              // "pull_request" | "issue"
-	Action string               `yaml:"action"`          // "opened" | "synchronize" | "reopened" | "closed"
-	Filter *GitHubTriggerFilter `yaml:"filter,omitempty"`
+	On     string               `yaml:"on" json:"on"`              // "pull_request" | "issue"
+	Action string               `yaml:"action" json:"action"`          // "opened" | "synchronize" | "reopened" | "closed"
+	Filter *GitHubTriggerFilter `yaml:"filter,omitempty" json:"filter,omitempty"`
 }
 
 // GitHubTriggerFilter further constrains which events match the trigger.
 type GitHubTriggerFilter struct {
-	Author     string `yaml:"author,omitempty"`      // e.g. "dependabot[bot]"
-	BaseBranch string `yaml:"base_branch,omitempty"` // e.g. "main"
+	Author     string `yaml:"author,omitempty" json:"author,omitempty"`      // e.g. "dependabot[bot]"
+	BaseBranch string `yaml:"base_branch,omitempty" json:"base_branch,omitempty"` // e.g. "main"
 }
 
 type ProviderConfig struct {
