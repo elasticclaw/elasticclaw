@@ -219,6 +219,9 @@ func (s *Server) pollAllPRs() {
 			if r.autoFixBugbot {
 				s.checkBugbotComments(r.pr, commentsData)
 			}
+			if r.autoFixGreptile {
+				s.checkGreptileComments(r.pr, commentsData)
+			}
 			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
 			if isPipelineDriven {
 				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
