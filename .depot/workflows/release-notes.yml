@@ -52,7 +52,7 @@ jobs:
           prompt = {
             "model": "gpt-oss-120b",
             "messages": [
-              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like \"The One With...\" or a movie reference). You categorize changes into: What\'s New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don\'t just list commit messages."},
+              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like \"The One With...\" or a movie reference). You categorize changes into: What's New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don't just list commit messages."},
               {"role": "user", "content": "Write release notes for ElasticClaw version " + tag + ". Here are the commits since the last release:\n\n" + commits + "\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
             ],
             "temperature": 0.7,
@@ -125,7 +125,7 @@ jobs:
 
           # Update the list page (release-notes/page.tsx)
           cat > /tmp/update_list.py << 'PYEOF'
-          import json, re, sys
+          import re, sys
 
           tag = sys.argv[1]
           date = sys.argv[2]
