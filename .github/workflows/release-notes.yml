@@ -1,0 +1,224 @@
+name: Generate Release Notes
+
+on:
+  push:
+    tags:
+      # Non-prerelease CalVer tags only (no hyphen suffix)
+      - '20[0-9][0-9].[0-9]+.[0-9]+'
+      - '20[0-9][0-9].[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  generate-release-notes:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.ref_name, '-') }}  # skip prereleases
+    steps:
+      - name: Checkout elasticclaw
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for changelog
+
+      - name: Get previous tag
+        id: prev
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV=$(git tag --sort=-v:refname | grep -E '^20[0-9]+\.[0-9]+\.[0-9]+' | grep -v '\-' | head -n 2 | tail -n 1)
+          if [ "$PREV" = "$TAG" ]; then
+            # First release ever — get all commits
+            PREV=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+
+      - name: Generate raw changelog
+        id: changelog
+        run: |
+          PREV="${{ steps.prev.outputs.tag }}"
+          git log --pretty=format:'%h %s (%an)' "$PREV..${GITHUB_REF_NAME}" > /tmp/changelog.txt
+
+      - name: Generate release notes with Groq
+        id: groq
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          COMMITS=$(cat /tmp/changelog.txt)
+
+          # Build the prompt — write to file to avoid shell interpolation
+          cat > /tmp/prompt.json << 'PROMPT_EOF'
+          {
+            "model": "gpt-oss-120b",
+            "messages": [
+              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like 'The One With...' or a movie reference). You categorize changes into: What's New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don't just list commit messages."},
+              {"role": "user", "content": "Write release notes for ElasticClaw version TAG_PLACEHOLDER. Here are the commits since the last release:\n\nCOMMITS_PLACEHOLDER\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 4096
+          }
+          PROMPT_EOF
+
+          # Replace placeholders safely using Python (handles newlines, quotes, etc.)
+          python3 -c "
+          import json, sys
+          with open('/tmp/prompt.json', 'r') as f:
+            prompt = f.read()
+          with open('/tmp/changelog.txt', 'r') as f:
+            commits = f.read()
+          prompt = prompt.replace('TAG_PLACEHOLDER', sys.argv[1])
+          prompt = prompt.replace('COMMITS_PLACEHOLDER', commits)
+          with open('/tmp/prompt.json', 'w') as f:
+            f.write(prompt)
+          " "$TAG"
+
+          RESPONSE=$(curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
+            -H "Authorization: Bearer $GROQ_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/prompt.json)
+
+          echo "$RESPONSE" > /tmp/groq_response.json
+
+          # Extract JSON content from response
+          CONTENT=$(jq -r '.choices[0].message.content // empty' /tmp/groq_response.json)
+          if [ -z "$CONTENT" ]; then
+            echo "Groq response:" >&2
+            cat /tmp/groq_response.json >&2
+            exit 1
+          fi
+
+          # Clean up markdown code fences if present
+          echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' > /tmp/notes.json
+
+      - name: Parse release notes
+        id: parsed
+        run: |
+          jq -r '.title' /tmp/notes.json > /tmp/title.txt
+          jq -r '.summary' /tmp/notes.json > /tmp/summary.txt
+          jq -c '.whatsNew' /tmp/notes.json > /tmp/whatsnew.json
+          jq -c '.improvements' /tmp/notes.json > /tmp/improvements.json
+          jq -c '.fixes' /tmp/notes.json > /tmp/fixes.json
+
+          echo "title=$(cat /tmp/title.txt)" >> "$GITHUB_OUTPUT"
+          echo "summary=$(cat /tmp/summary.txt)" >> "$GITHUB_OUTPUT"
+          echo "whatsNew=$(cat /tmp/whatsnew.json)" >> "$GITHUB_OUTPUT"
+          echo "improvements=$(cat /tmp/improvements.json)" >> "$GITHUB_OUTPUT"
+          echo "fixes=$(cat /tmp/fixes.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout elasticclaw.ai
+        uses: actions/checkout@v4
+        with:
+          repository: elasticclaw/elasticclaw.ai
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-repo
+
+      - name: Update release notes pages
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DATE="$(date -u +%Y-%m-%d)"
+
+          cd docs-repo
+
+          # Update the list page (release-notes/page.tsx)
+          python3 -c '
+          import json, re, sys
+
+          tag = sys.argv[1]
+          date = sys.argv[2]
+
+          with open("/tmp/title.txt", "r") as f:
+            title = f.read()
+          with open("/tmp/summary.txt", "r") as f:
+            summary = f.read()
+
+          list_file = sys.argv[3]
+          with open(list_file, "r") as f:
+            content = f.read()
+
+          # Escape for TSX string literals
+          def esc(s):
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+          new_entry = """  {{
+    version: "{}",
+    date: "{}",
+    title: "{}",
+    summary: "{}",
+  }},""".format(tag, date, esc(title), esc(summary))
+
+          pattern = r"(const RELEASES: Release\[\] = \[)"
+          content = re.sub(pattern, r"\1\n" + new_entry, content, count=1)
+
+          with open(list_file, "w") as f:
+            f.write(content)
+          ' "$TAG" "$DATE" "src/app/docs/release-notes/page.tsx"
+
+          # Update the detail page (release-notes/[version]/page.tsx)
+          python3 -c '
+          import json, re, sys
+
+          tag = sys.argv[1]
+          date = sys.argv[2]
+
+          with open("/tmp/title.txt", "r") as f:
+            title = f.read()
+          with open("/tmp/whatsnew.json", "r") as f:
+            whatsnew = json.load(f)
+          with open("/tmp/improvements.json", "r") as f:
+            improvements = json.load(f)
+          with open("/tmp/fixes.json", "r") as f:
+            fixes = json.load(f)
+          with open("/tmp/changelog.txt", "r") as f:
+            raw_changelog = f.read()
+
+          detail_file = sys.argv[3]
+          with open(detail_file, "r") as f:
+            content = f.read()
+
+          # Escape for TSX string literals
+          def esc(s):
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+          def fmt_list(items):
+            lines = ["    \"{}\",".format(esc(item)) for item in items]
+            return "\n".join(lines)
+
+          new_entry = """  "{}": {{
+    version: "{}",
+    date: "{}",
+    title: "{}",
+    whatsNew: [
+{}
+    ],
+    improvements: [
+{}
+    ],
+    fixes: [
+{}
+    ],
+    rawChangelog: "{}",
+  }},""".format(
+            esc(tag), esc(tag), date, esc(title),
+            fmt_list(whatsnew), fmt_list(improvements), fmt_list(fixes),
+            esc(raw_changelog)
+          )
+
+          pattern = r"(const RELEASE_DETAILS: Record<string, ReleaseDetail> = \{)"
+          content = re.sub(pattern, r"\1\n" + new_entry, content, count=1)
+
+          with open(detail_file, "w") as f:
+            f.write(content)
+          ' "$TAG" "$DATE" "src/app/docs/release-notes/[version]/page.tsx"
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-repo
+          branch: release-notes-${{ github.ref_name }}
+          title: "docs: release notes for ${{ github.ref_name }}"
+          body: |
+            Automated release notes for **${{ github.ref_name }}**.
+
+            Generated by Groq (gpt-oss-120b) from commit history.
+
+            - Title: ${{ steps.parsed.outputs.title }}
+            - Summary: ${{ steps.parsed.outputs.summary }}
+          commit-message: "docs: release notes for ${{ github.ref_name }}"
+          delete-branch: true
