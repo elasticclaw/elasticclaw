@@ -3389,7 +3389,7 @@ function DoctorSection() {
               Cached {new Date(report.cachedAt).toLocaleTimeString()}
             </span>
           )}
-          {report && (
+          {report && passedChecks.length > 0 && (
             <Button
               size="sm"
               variant={showPassed ? "default" : "outline"}
