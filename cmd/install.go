@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -181,6 +182,119 @@ func latestGitHubRelease(owner, repo string) (string, error) {
 		return "", fmt.Errorf("no releases found")
 	}
 	return rel.TagName, nil
+}
+
+// findGitHubRelease checks whether a specific release tag exists on GitHub.
+func findGitHubRelease(owner, repo, tag string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, tag)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("release %s not found", tag)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitHub API error: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// extractTrack returns the non-incrementing prefix of a CalVer/SemVer tag.
+//   "2026.05.11-beta.2" → "2026.05.11-beta"
+//   "2026.05.11.1"      → "2026.05.11"
+//   "2026.05.11"        → "2026.05.11"
+func extractTrack(version string) string {
+	if idx := strings.LastIndex(version, "-"); idx != -1 {
+		suffix := version[idx+1:]
+		if dotIdx := strings.LastIndex(suffix, "."); dotIdx != -1 {
+			if _, err := strconv.Atoi(suffix[dotIdx+1:]); err == nil {
+				return version[:idx+1+dotIdx]
+			}
+		}
+		return version
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) >= 4 {
+		return strings.Join(parts[:3], ".")
+	}
+	return version
+}
+
+// releaseMatchesTrack reports whether a release tag belongs to the same
+// upgrade track as the given track prefix.
+func releaseMatchesTrack(tag, track string) bool {
+	if strings.Contains(track, "-") {
+		return tag == track || strings.HasPrefix(tag, track+".")
+	}
+	if tag == track {
+		return true
+	}
+	if !strings.HasPrefix(tag, track+".") {
+		return false
+	}
+	suffix := tag[len(track)+1:]
+	// Stable track: suffix must be numeric only (no prerelease indicators)
+	if strings.Contains(suffix, "-") {
+		return false
+	}
+	_, err := strconv.Atoi(suffix)
+	return err == nil
+}
+
+// trackSuffix returns the numeric suffix after the track prefix, or 0 if none.
+func trackSuffix(tag, track string) int {
+	if tag == track {
+		return 0
+	}
+	if !strings.HasPrefix(tag, track) {
+		return 0
+	}
+	rest := tag[len(track):]
+	if strings.HasPrefix(rest, ".") {
+		rest = rest[1:]
+	}
+	n, _ := strconv.Atoi(rest)
+	return n
+}
+
+// latestReleaseOnTrack queries GitHub for the most recent release whose tag
+// belongs to the same track as currentVersion.
+func latestReleaseOnTrack(owner, repo, currentVersion string) (string, error) {
+	track := extractTrack(currentVersion)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100", owner, repo)
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API error: HTTP %d", resp.StatusCode)
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", err
+	}
+
+	var best string
+	bestSuffix := -1
+	for _, r := range releases {
+		if !releaseMatchesTrack(r.TagName, track) {
+			continue
+		}
+		suf := trackSuffix(r.TagName, track)
+		if suf > bestSuffix {
+			bestSuffix = suf
+			best = r.TagName
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no releases found on track %s", track)
+	}
+	return best, nil
 }
 
 func parseSSHHost(host string) (user, addr string, err error) {

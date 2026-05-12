@@ -10,14 +10,23 @@ import (
 
 var hubUpgradeServer string
 var hubUpgradeSSHKey string
+var hubUpgradeVersion string
 
 var hubUpgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Upgrade the hub binary on a remote server",
+	Short: "Upgrade the hub binary on a remote server to the latest release on the current track",
 	Long: `Upgrade the elasticclaw hub on a remote server via SSH.
+
+By default the hub is upgraded to the latest release on the same track as
+the client binary — stable clients get the latest stable, prerelease clients
+(e.g. beta, rc) get the latest on their prerelease track. Cross-track jumps
+are prevented.
+
+Use --version to override and install a specific release.
 
 Examples:
   elasticclaw hub upgrade --server ssh://root@elasticclaw.example.com
+  elasticclaw hub upgrade --server ssh://root@elasticclaw.example.com --version 2026.5.11.2
 `,
 	RunE: runHubUpgrade,
 }
@@ -26,6 +35,7 @@ func init() {
 	hubCmd.AddCommand(hubUpgradeCmd)
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeServer, "server", "", "SSH target, e.g. ssh://root@host (required)")
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeSSHKey, "ssh-key", "", "SSH private key path (optional; defaults to profile ssh_key when available)")
+	hubUpgradeCmd.Flags().StringVar(&hubUpgradeVersion, "version", "", "Override the target version (default: client version)")
 }
 
 func runHubUpgrade(cmd *cobra.Command, args []string) error {
@@ -69,15 +79,28 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	remoteVer := parseVersionFromOutput(strings.TrimSpace(remoteVerOut))
 
-	// Check latest release
-	latest, err := latestGitHubRelease("elasticclaw", "elasticclaw")
-	if err != nil {
-		return fmt.Errorf("failed to fetch latest version: %w", err)
+	// Determine target version: --version flag overrides track-based lookup.
+	targetVer := hubUpgradeVersion
+	if targetVer == "" {
+		if Version == "dev" {
+			return fmt.Errorf("cannot upgrade hub from a dev build — use --version or download a release from https://github.com/elasticclaw/elasticclaw/releases")
+		}
+		// Find the latest release on the same track as the client.
+		var err error
+		targetVer, err = latestReleaseOnTrack("elasticclaw", "elasticclaw", Version)
+		if err != nil {
+			return fmt.Errorf("no releases found on track %s: %w", extractTrack(Version), err)
+		}
+	} else {
+		// Explicit --version: verify the release exists.
+		if err := findGitHubRelease("elasticclaw", "elasticclaw", targetVer); err != nil {
+			return fmt.Errorf("no matching release for version %s: %w", targetVer, err)
+		}
 	}
 
-	fmt.Printf("Remote: %s  →  Latest: %s\n", remoteVer, latest)
+	fmt.Printf("Remote: %s  →  Target: %s\n", remoteVer, targetVer)
 
-	if remoteVer == latest {
+	if remoteVer == targetVer {
 		fmt.Println("Already up to date.")
 		return nil
 	}
@@ -85,7 +108,7 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 	// Build download URL for linux/amd64 (server is always linux)
 	downloadURL := fmt.Sprintf(
 		"https://github.com/elasticclaw/elasticclaw/releases/download/%s/elasticclaw-linux-amd64",
-		latest,
+		targetVer,
 	)
 
 	moveCmd := "mv /tmp/elasticclaw-new \"$SELF\""
@@ -111,9 +134,9 @@ if %s; then
   %s
   echo "Hub service restarted."
 fi
-`, latest, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
+`, targetVer, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
 
-	fmt.Printf("Upgrading remote hub to %s...\n", latest)
+	fmt.Printf("Upgrading remote hub to %s...\n", targetVer)
 	out, err := sshRunClient(client, script)
 	if out != "" {
 		fmt.Print(out)
@@ -122,7 +145,7 @@ fi
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
 
-	fmt.Printf("✓ Hub upgraded to %s\n", latest)
+	fmt.Printf("✓ Hub upgraded to %s\n", targetVer)
 	return nil
 }
 

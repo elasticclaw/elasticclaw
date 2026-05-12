@@ -15,7 +15,12 @@ import (
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "Upgrade elasticclaw to the latest release",
+	Short: "Upgrade elasticclaw to the latest release on the current track",
+	Long: `Upgrades the elasticclaw binary to the latest release on the same track.
+
+Stable clients upgrade to the latest stable release; prerelease clients
+(e.g. beta, rc) upgrade to the latest release on the same prerelease track.
+Cross-track jumps (beta → stable) are prevented.`,
 	RunE:  runUpgrade,
 }
 
@@ -26,12 +31,17 @@ func init() {
 func runUpgrade(cmd *cobra.Command, args []string) error {
 	fmt.Println("Checking for updates...")
 
-	latest, err := latestGitHubRelease("elasticclaw", "elasticclaw")
-	if err != nil {
-		return fmt.Errorf("failed to check latest version: %w", err)
+	current := Version
+	if current == "dev" {
+		return fmt.Errorf("cannot upgrade a dev build — download a release from https://github.com/elasticclaw/elasticclaw/releases")
 	}
 
-	current := Version
+	// Find the latest release on the same track (stable→stable, beta→beta, etc.)
+	latest, err := latestReleaseOnTrack("elasticclaw", "elasticclaw", current)
+	if err != nil {
+		return fmt.Errorf("no releases found on track %s: %w", extractTrack(current), err)
+	}
+
 	if current == latest {
 		fmt.Printf("Already up to date (%s)\n", current)
 		return nil
