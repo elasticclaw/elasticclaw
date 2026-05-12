@@ -151,7 +151,7 @@ jobs:
   }},""".format(tag, date, esc(title), esc(summary))
 
           pattern = r"(const RELEASES: Release\[\] = \[)"
-          content = re.sub(pattern, r"\1\n" + new_entry, content, count=1)
+          content = re.sub(pattern, lambda m: m.group(1) + "\n" + new_entry, content, count=1)
 
           with open(list_file, "w") as f:
             f.write(content)
@@ -208,7 +208,7 @@ jobs:
           )
 
           pattern = r"(const RELEASE_DETAILS: Record<string, ReleaseDetail> = \{)"
-          content = re.sub(pattern, r"\1\n" + new_entry, content, count=1)
+          content = re.sub(pattern, lambda m: m.group(1) + "\n" + new_entry, content, count=1)
 
           with open(detail_file, "w") as f:
             f.write(content)
