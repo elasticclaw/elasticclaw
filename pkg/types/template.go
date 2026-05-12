@@ -89,6 +89,9 @@ type TemplateConfig struct {
 	// AutoWatchBugbot enables automatic bugbot comment detection and injection.
 	// Defaults to true when omitted.
 	AutoWatchBugbot *bool `yaml:"auto_watch_bugbot,omitempty"`
+	// AutoWatchGreptile enables automatic greptile code review comment detection and injection.
+	// Defaults to false when omitted (opt-in).
+	AutoWatchGreptile *bool `yaml:"auto_watch_greptile,omitempty"`
 	// GitHub specifies GitHub repos this template's claw needs access to.
 	GitHub  *GitHubTemplateConfig  `yaml:"github,omitempty"`
 	// Linear specifies which Linear workspace this template's claw should use.
@@ -538,6 +541,7 @@ type CreateClawRequest struct {
 	Color        string                `json:"color,omitempty"`
 	AutoWatchCI     *bool             `json:"auto_watch_ci,omitempty"`
 	AutoWatchBugbot *bool             `json:"auto_watch_bugbot,omitempty"`
+	AutoWatchGreptile *bool           `json:"auto_watch_greptile,omitempty"`
 	// MCPs is the list of resolved MCP server configs to start in the claw.
 	MCPs []*MCPConfig `json:"mcps,omitempty"`
 	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).

@@ -137,7 +137,7 @@ func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
 		       cp.last_comment_at, cp.pr_conditions_fired, cp.created_at,
-		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.status
+		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.auto_fix_greptile, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -152,23 +152,25 @@ func (s *Server) pollAllPRs() {
 	defer rows.Close()
 
 	type row struct {
-		pr            clawPR
-		autoFixCI     bool
-		autoFixBugbot bool
-		clawStatus    string
+		pr               clawPR
+		autoFixCI        bool
+		autoFixBugbot    bool
+		autoFixGreptile  bool
+		clawStatus       string
 	}
 	var prs []row
 	for rows.Next() {
 		var r row
-		var ciInt, bugbotInt, prConditionsFiredInt int
+		var ciInt, bugbotInt, greptileInt, prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
 			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt, &r.pr.createdAt,
-			&ciInt, &bugbotInt, &r.clawStatus); err != nil {
+			&ciInt, &bugbotInt, &greptileInt, &r.clawStatus); err != nil {
 			continue
 		}
 		r.pr.prConditionsFired = prConditionsFiredInt == 1
 		r.autoFixCI = ciInt == 1
 		r.autoFixBugbot = bugbotInt == 1
+		r.autoFixGreptile = greptileInt == 1
 		prs = append(prs, r)
 	}
 	rows.Close()
@@ -203,7 +205,7 @@ func (s *Server) pollAllPRs() {
 		if r.autoFixCI {
 			s.checkCIFailures(r.pr, token)
 		}
-		if r.autoFixBugbot || isPipelineDriven {
+		if r.autoFixBugbot || r.autoFixGreptile || isPipelineDriven {
 			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
 			if repoToken == "" {
 				repoToken = token
@@ -215,6 +217,9 @@ func (s *Server) pollAllPRs() {
 			}
 			if r.autoFixBugbot {
 				s.checkBugbotComments(r.pr, commentsData)
+			}
+			if r.autoFixGreptile {
+				s.checkGreptileComments(r.pr, commentsData)
 			}
 			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
 			if isPipelineDriven {
@@ -393,6 +398,42 @@ func (s *Server) checkBugbotComments(pr clawPR, commentsData []interface{}) {
 		pr.prNumber, pr.repo, pr.prURL, strings.Join(newComments, "\n\n---\n\n"))
 
 	s.injectUserMessage(pr.clawID, msg)
+}
+
+// checkGreptileComments polls PR review comments for new greptile entries.
+func (s *Server) checkGreptileComments(pr clawPR, commentsData []interface{}) {
+	var newComments []string
+
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id <= pr.lastCommentID {
+			continue
+		}
+		user, _ := comment["user"].(map[string]interface{})
+		login, _ := user["login"].(string)
+		body, _ := comment["body"].(string)
+		htmlURL, _ := comment["html_url"].(string)
+		if isGreptileComment(login, body) {
+			newComments = append(newComments, fmt.Sprintf("> %s\n\n[View comment](%s)",
+				strings.TrimSpace(body), htmlURL))
+		}
+	}
+
+	if len(newComments) == 0 {
+		return
+	}
+
+	msg := fmt.Sprintf("New greptile review comment on PR #%d ([%s](%s)):\n\n%s\n\nPlease address this in the same branch.",
+		pr.prNumber, pr.repo, pr.prURL, strings.Join(newComments, "\n\n---\n\n"))
+
+	s.injectUserMessage(pr.clawID, msg)
+}
+
+func isGreptileComment(login, body string) bool {
+	return strings.Contains(strings.ToLower(login), "greptile") ||
+		strings.Contains(strings.ToLower(body), "greptile")
 }
 
 func isBugbotComment(login, body string) bool {
@@ -650,24 +691,25 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	jsonOK(w, prs)
 }
 
-// handleClawSettings reads/writes per-claw settings (auto_fix_ci, auto_fix_bugbot).
+// handleClawSettings reads/writes per-claw settings (auto_fix_ci, auto_fix_bugbot, auto_fix_greptile).
 func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, clawID string) {
 	tenantID := tenantFromCtx(r)
 
 	if r.Method == http.MethodGet {
-		var autoCI, autoBugbot int
-		if err := s.db.QueryRow(`SELECT auto_fix_ci, auto_fix_bugbot FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).
-			Scan(&autoCI, &autoBugbot); err != nil {
+		var autoCI, autoBugbot, autoGreptile int
+		if err := s.db.QueryRow(`SELECT auto_fix_ci, auto_fix_bugbot, auto_fix_greptile FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).
+			Scan(&autoCI, &autoBugbot, &autoGreptile); err != nil {
 			http.Error(w, "claw not found", http.StatusNotFound)
 			return
 		}
-		jsonOK(w, map[string]bool{"autoFixCI": autoCI == 1, "autoFixBugbot": autoBugbot == 1})
+		jsonOK(w, map[string]bool{"autoFixCI": autoCI == 1, "autoFixBugbot": autoBugbot == 1, "autoFixGreptile": autoGreptile == 1})
 		return
 	}
 	if r.Method == http.MethodPatch {
 		var body struct {
-			AutoFixCI     *bool `json:"autoFixCI"`
-			AutoFixBugbot *bool `json:"autoFixBugbot"`
+			AutoFixCI       *bool `json:"autoFixCI"`
+			AutoFixBugbot   *bool `json:"autoFixBugbot"`
+			AutoFixGreptile *bool `json:"autoFixGreptile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -686,6 +728,13 @@ func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, claw
 				v = 1
 			}
 			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_bugbot=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
+		}
+		if body.AutoFixGreptile != nil {
+			v := 0
+			if *body.AutoFixGreptile {
+				v = 1
+			}
+			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_greptile=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
 		}
 		jsonOK(w, map[string]bool{"ok": true})
 		return

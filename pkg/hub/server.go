@@ -816,11 +816,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	if req.AutoWatchBugbot != nil && !*req.AutoWatchBugbot {
 		autoFixBugbot = 0
 	}
+	autoFixGreptile := 0
+	if req.AutoWatchGreptile != nil && *req.AutoWatchGreptile {
+		autoFixGreptile = 1
+	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, auto_fix_greptile, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, autoFixCI, autoFixBugbot, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, autoFixCI, autoFixBugbot, autoFixGreptile, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)

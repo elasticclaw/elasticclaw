@@ -43,6 +43,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`UPDATE claws SET shortcut_story_id = linear_issue_id WHERE linear_issue_id LIKE 'sc-%' AND shortcut_story_id = ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_ci INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_bugbot INTEGER NOT NULL DEFAULT 1`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN auto_fix_greptile INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
@@ -88,6 +89,7 @@ func migrate(db *sql.DB) error {
 		shortcut_story_id TEXT NOT NULL DEFAULT '',
 		auto_fix_ci      INTEGER NOT NULL DEFAULT 1,
 		auto_fix_bugbot  INTEGER NOT NULL DEFAULT 1,
+		auto_fix_greptile INTEGER NOT NULL DEFAULT 0,
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
 		bootstrap_ok     INTEGER NOT NULL DEFAULT 0,
