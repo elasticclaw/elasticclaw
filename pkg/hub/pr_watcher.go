@@ -121,22 +121,23 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id                string
-	clawID            string
-	repo              string
-	prNumber          int
-	prURL             string
-	lastCISHA         string
-	lastCommentID     int64
-	lastCommentAt     string
-	prConditionsFired bool
-	createdAt         string
+	id                   string
+	clawID               string
+	repo                 string
+	prNumber             int
+	prURL                string
+	lastCISHA            string
+	lastCommentID        int64
+	lastCommentAt        string
+	lastReviewCommentID  int64
+	prConditionsFired    bool
+	createdAt            string
 }
 
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
-		       cp.last_comment_at, cp.pr_conditions_fired, cp.created_at,
+		       cp.last_comment_at, cp.last_review_comment_id, cp.pr_conditions_fired, cp.created_at,
 		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.auto_fix_greptile, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
@@ -163,7 +164,7 @@ func (s *Server) pollAllPRs() {
 		var r row
 		var ciInt, bugbotInt, greptileInt, prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &prConditionsFiredInt, &r.pr.createdAt,
+			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &prConditionsFiredInt, &r.pr.createdAt,
 			&ciInt, &bugbotInt, &greptileInt, &r.clawStatus); err != nil {
 			continue
 		}
@@ -218,17 +219,29 @@ func (s *Server) pollAllPRs() {
 			if r.autoFixBugbot {
 				s.checkBugbotComments(r.pr, commentsData)
 			}
-			if r.autoFixGreptile {
-				s.checkGreptileComments(r.pr, commentsData)
-			}
 			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
 			if isPipelineDriven {
 				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
-				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
+				// When auto-fix bugbot/greptile is enabled, suppress those comments here
 				// so the same comment is not injected twice with different templates.
 				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot, r.autoFixGreptile)
 			}
 			s.updatePRCommentWatermark(r.pr, commentsData)
+		}
+		// Greptile posts inline review comments via the pulls/{n}/comments API.
+		// Fetch and track them separately from issue comments.
+		if r.autoFixGreptile {
+			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
+			if repoToken == "" {
+				repoToken = token
+			}
+			reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+			if err != nil {
+				log.Printf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
+			} else {
+				s.checkGreptileReviewComments(r.pr, reviewCommentsData)
+				s.updateReviewCommentWatermark(r.pr, reviewCommentsData)
+			}
 		}
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
@@ -480,6 +493,71 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 		} else {
 			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
 		}
+	}
+}
+
+// checkGreptileReviewComments polls PR review comments (pulls/{n}/comments) for
+// new greptile entries. These are inline code-review comments, distinct from
+// top-level issue comments.
+func (s *Server) checkGreptileReviewComments(pr clawPR, reviewCommentsData []interface{}) {
+	var newComments []string
+
+	for _, c := range reviewCommentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id <= pr.lastReviewCommentID {
+			continue
+		}
+		user, _ := comment["user"].(map[string]interface{})
+		login, _ := user["login"].(string)
+		body, _ := comment["body"].(string)
+		htmlURL, _ := comment["html_url"].(string)
+		path, _ := comment["path"].(string)
+		lineF, _ := comment["line"].(float64)
+		if isGreptileComment(login, body) {
+			loc := ""
+			if path != "" {
+				loc = fmt.Sprintf("`%s", path)
+				if lineF > 0 {
+					loc += fmt.Sprintf(":%d", int(lineF))
+				}
+				loc += "`"
+			}
+			entry := fmt.Sprintf("> %s", strings.TrimSpace(body))
+			if loc != "" {
+				entry += fmt.Sprintf("\n\n[View comment on %s](%s)", loc, htmlURL)
+			} else {
+				entry += fmt.Sprintf("\n\n[View comment](%s)", htmlURL)
+			}
+			newComments = append(newComments, entry)
+		}
+	}
+
+	if len(newComments) == 0 {
+		return
+	}
+
+	msg := fmt.Sprintf("New greptile review comment on PR #%d ([%s](%s)):\n\n%s\n\nPlease address this in the same branch.",
+		pr.prNumber, pr.repo, pr.prURL, strings.Join(newComments, "\n\n---\n\n"))
+
+	s.injectUserMessage(pr.clawID, msg)
+}
+
+// updateReviewCommentWatermark updates the last_review_comment_id watermark
+// after polling PR review comments.
+func (s *Server) updateReviewCommentWatermark(pr clawPR, reviewCommentsData []interface{}) {
+	maxID := pr.lastReviewCommentID
+	for _, c := range reviewCommentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		id := int64(idF)
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if maxID > pr.lastReviewCommentID {
+		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=?`, maxID, pr.id)
 	}
 }
 
