@@ -245,18 +245,52 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if cfg.DefaultModel == "" {
-		checks = append(checks, DoctorCheck{
-			Category:    "models",
-			Severity:    "info",
-			Title:       "No default model configured",
-			Description: "No default model is set. The first available LLM key will be used, but an explicit default is recommended.",
-			OK:          false,
-			FixAction: &FixAction{
-				Type:   "navigate",
-				Target: "/settings/models",
-				Label:  "Set Default Model",
-			},
-		})
+		// Check if a default LLM key has its own default_model set
+		var defaultKey *types.LLMKeyConfig
+		for _, k := range cfg.LLMKeys {
+			if k.Default {
+				defaultKey = k
+				break
+			}
+		}
+		// If no key is explicitly marked default, use the first key (same logic as resolveActiveLLMKey)
+		if defaultKey == nil && len(cfg.LLMKeys) > 0 {
+			defaultKey = cfg.LLMKeys[0]
+		}
+
+		if defaultKey != nil && defaultKey.DefaultModel != "" {
+			// Default model will be resolved from the LLM key's default_model
+			checks = append(checks, DoctorCheck{
+				Category:    "models",
+				Severity:    "info",
+				Title:       "Default model configured",
+				Description: fmt.Sprintf("Default model %q is set on LLM key %q. No hub-level default_model is set, which is fine.", defaultKey.DefaultModel, defaultKey.Name),
+				OK:          true,
+			})
+		} else if defaultKey != nil {
+			// Default model will be resolved via provider fallback in resolveDefaultModelForKey
+			checks = append(checks, DoctorCheck{
+				Category:    "models",
+				Severity:    "info",
+				Title:       "Default model configured",
+				Description: fmt.Sprintf("No explicit default model set, but provider %q will use its built-in default. Set hub-level default_model for explicit control.", defaultKey.Provider),
+				OK:          true,
+			})
+		} else {
+			// No LLM keys at all — this is already flagged by checkLLMKeys as critical
+			checks = append(checks, DoctorCheck{
+				Category:    "models",
+				Severity:    "info",
+				Title:       "No default model configured",
+				Description: "No default model is set and no LLM keys are configured.",
+				OK:          false,
+				FixAction: &FixAction{
+					Type:   "navigate",
+					Target: "/settings/models",
+					Label:  "Set Default Model",
+				},
+			})
+		}
 	} else if !strings.Contains(cfg.DefaultModel, "/") {
 		checks = append(checks, DoctorCheck{
 			Category:    "models",
