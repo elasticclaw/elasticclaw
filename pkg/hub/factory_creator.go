@@ -117,7 +117,20 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			if ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
+			}
+		}
+	}
+
+	// Resolve and inject factory-level secret_refs (env var → hub secret name)
+	if len(factory.SecretRefs) > 0 {
+		for envName, secretRef := range factory.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				resolvedSecrets[envName] = val
+				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+			} else {
+				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -165,10 +178,19 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 	for envName, val := range resolvedSecrets {
 		var refType string
-		for _, ref := range tmplCfg.Secrets {
-			if ref.EnvVarName() == envName {
-				refType = ref.Type
-				break
+		// Check template secrets first
+		if tmplCfg != nil {
+			for _, ref := range tmplCfg.Secrets {
+				if ref.EnvVarName() == envName {
+					refType = ref.Type
+					break
+				}
+			}
+		}
+		// Check factory secret_refs
+		if refType == "" {
+			if _, ok := factory.SecretRefs[envName]; ok {
+				refType = "factory secret_ref"
 			}
 		}
 		if refType == "" {

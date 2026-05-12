@@ -266,6 +266,7 @@ export interface Factory {
   webhook_secret_ref?: string
   pipeline_yaml?: string
   enable_manual_trigger?: boolean
+  secret_refs?: Record<string, string>
   inputs?: FactoryInput[]
 }
 

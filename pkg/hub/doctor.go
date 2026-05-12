@@ -539,7 +539,25 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			})
 		}
 
-		// Check 4: overlapping triggers
+		// Check 4: factory secret_refs point to existing secrets
+		for envName, secretRef := range f.SecretRefs {
+			if !secretNames[secretRef] {
+				checks = append(checks, DoctorCheck{
+					Category: "factories",
+					Severity: "warning",
+					Title:    fmt.Sprintf("Factory %q secret_refs references missing secret", f.Name),
+					Description: fmt.Sprintf("Factory %q secret_refs maps %q to secret %q which is not in the secrets map.", f.Name, envName, secretRef),
+					OK: false,
+					FixAction: &FixAction{
+						Type:   "navigate",
+						Target: "/settings/secrets",
+						Label:  "Create Secret",
+					},
+				})
+			}
+		}
+
+		// Check 5: overlapping triggers
 		var key triggerKey
 		switch f.Integration {
 		case "linear", "shortcut", "github-issues":
