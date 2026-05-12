@@ -245,7 +245,7 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if cfg.DefaultModel == "" {
-		// Check if a default LLM key has its own default_model set
+		// Find the default LLM key (explicitly marked default, or first key as fallback)
 		var defaultKey *types.LLMKeyConfig
 		for _, k := range cfg.LLMKeys {
 			if k.Default {
@@ -253,29 +253,35 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 				break
 			}
 		}
-		// If no key is explicitly marked default, use the first key (same logic as resolveActiveLLMKey)
 		if defaultKey == nil && len(cfg.LLMKeys) > 0 {
 			defaultKey = cfg.LLMKeys[0]
 		}
 
-		if defaultKey != nil && defaultKey.DefaultModel != "" {
-			// Default model will be resolved from the LLM key's default_model
-			checks = append(checks, DoctorCheck{
-				Category:    "models",
-				Severity:    "info",
-				Title:       "Default model configured",
-				Description: fmt.Sprintf("Default model %q is set on LLM key %q. No hub-level default_model is set, which is fine.", defaultKey.DefaultModel, defaultKey.Name),
-				OK:          true,
-			})
-		} else if defaultKey != nil {
-			// Default model will be resolved via provider fallback in resolveDefaultModelForKey
-			checks = append(checks, DoctorCheck{
-				Category:    "models",
-				Severity:    "info",
-				Title:       "Default model configured",
-				Description: fmt.Sprintf("No explicit default model set, but provider %q will use its built-in default. Set hub-level default_model for explicit control.", defaultKey.Provider),
-				OK:          true,
-			})
+		if defaultKey != nil {
+			// Delegate to the same resolution logic used at runtime to avoid false positives
+			resolved := resolveDefaultModelForKey(cfg, defaultKey)
+			if resolved != "" {
+				checks = append(checks, DoctorCheck{
+					Category:    "models",
+					Severity:    "info",
+					Title:       "Default model configured",
+					Description: fmt.Sprintf("Default model resolves to %q (from key %q). No hub-level default_model is set, which is fine.", resolved, defaultKey.Name),
+					OK:          true,
+				})
+			} else {
+				checks = append(checks, DoctorCheck{
+					Category:    "models",
+					Severity:    "warning",
+					Title:       "No default model configured",
+					Description: fmt.Sprintf("LLM key %q (provider %q) has no default model and no hub-level default_model is set. Set a default model on the key or configure hub-level default_model.", defaultKey.Name, defaultKey.Provider),
+					OK:          false,
+					FixAction: &FixAction{
+						Type:   "navigate",
+						Target: "/settings/models",
+						Label:  "Set Default Model",
+					},
+				})
+			}
 		} else {
 			// No LLM keys at all — this is already flagged by checkLLMKeys as critical
 			checks = append(checks, DoctorCheck{

@@ -161,6 +161,16 @@ func TestCheckDefaultModel(t *testing.T) {
 			expectOK:    true,
 			expectTitle: "Default model configured",
 		},
+		{
+			name: "provider without built-in fallback and no key default_model",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{
+					{Name: "google-prod", Provider: "google", APIKey: "g-...", Default: true}, // google has no fallback
+				},
+			},
+			expectOK:    false,
+			expectTitle: "No default model configured",
+		},
 	}
 
 	for _, tt := range tests {
