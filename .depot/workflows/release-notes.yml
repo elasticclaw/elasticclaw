@@ -124,8 +124,8 @@ jobs:
           cd docs-repo
 
           # Update the list page (release-notes/page.tsx)
-          python3 -c '
-          import json, re, sys
+          cat > /tmp/update_list.py << 'PYEOF'
+          import re, sys
 
           tag = sys.argv[1]
           date = sys.argv[2]
@@ -141,14 +141,16 @@ jobs:
 
           # Escape for TSX string literals
           def esc(s):
-            return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
-          new_entry = """  {{
-    version: "{}",
-    date: "{}",
-    title: "{}",
-    summary: "{}",
-  }},""".format(tag, date, esc(title), esc(summary))
+          new_entry = (
+            '  {\n'
+            '    version: "' + tag + '",\n'
+            '    date: "' + date + '",\n'
+            '    title: "' + esc(title) + '",\n'
+            '    summary: "' + esc(summary) + '",\n'
+            '  },'
+          )
 
           pattern = r"(const RELEASES: Release\[\] = \[)"
           original_content = content
@@ -157,10 +159,11 @@ jobs:
 
           with open(list_file, "w") as f:
             f.write(content)
-          ' "$TAG" "$DATE" "src/app/docs/release-notes/page.tsx"
+          PYEOF
+          python3 /tmp/update_list.py "$TAG" "$DATE" "src/app/docs/release-notes/page.tsx"
 
           # Update the detail page (release-notes/[version]/page.tsx)
-          python3 -c '
+          cat > /tmp/update_detail.py << 'PYEOF'
           import json, re, sys
 
           tag = sys.argv[1]
@@ -183,30 +186,28 @@ jobs:
 
           # Escape for TSX string literals
           def esc(s):
-            return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
           def fmt_list(items):
-            lines = ["    \"{}\",".format(esc(item)) for item in items]
+            lines = ['    "' + esc(item) + '",' for item in items]
             return "\n".join(lines)
 
-          new_entry = """  "{}": {{
-    version: "{}",
-    date: "{}",
-    title: "{}",
-    whatsNew: [
-{}
-    ],
-    improvements: [
-{}
-    ],
-    fixes: [
-{}
-    ],
-    rawChangelog: "{}",
-  }},""".format(
-            esc(tag), esc(tag), date, esc(title),
-            fmt_list(whatsnew), fmt_list(improvements), fmt_list(fixes),
-            esc(raw_changelog)
+          new_entry = (
+            '  "' + esc(tag) + '": {\n'
+            '    version: "' + esc(tag) + '",\n'
+            '    date: "' + date + '",\n'
+            '    title: "' + esc(title) + '",\n'
+            '    whatsNew: [\n'
+            + fmt_list(whatsnew) + '\n'
+            '    ],\n'
+            '    improvements: [\n'
+            + fmt_list(improvements) + '\n'
+            '    ],\n'
+            '    fixes: [\n'
+            + fmt_list(fixes) + '\n'
+            '    ],\n'
+            '    rawChangelog: "' + esc(raw_changelog) + '",\n'
+            '  },'
           )
 
           pattern = r"(const RELEASE_DETAILS: Record<string, ReleaseDetail> = \{)"
@@ -216,7 +217,8 @@ jobs:
 
           with open(detail_file, "w") as f:
             f.write(content)
-          ' "$TAG" "$DATE" "src/app/docs/release-notes/[version]/page.tsx"
+          PYEOF
+          python3 /tmp/update_detail.py "$TAG" "$DATE" "src/app/docs/release-notes/[version]/page.tsx"
 
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
