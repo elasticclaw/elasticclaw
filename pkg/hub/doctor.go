@@ -670,6 +670,44 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 						Label:  "Manage Templates",
 					},
 				})
+			} else {
+				// Check for deprecated secrets: list format
+				if data, err := os.ReadFile(configPath); err == nil {
+					tmplCfg, parseErr := config.ParseTemplateConfig(data)
+					if parseErr == nil && tmplCfg != nil {
+						if len(tmplCfg.Secrets) > 0 {
+							checks = append(checks, DoctorCheck{
+								Category:    "templates",
+								Severity:    "warning",
+								Title:       fmt.Sprintf("Template %q uses deprecated secrets: list", name),
+								Description: fmt.Sprintf("Template %q uses the deprecated 'secrets:' list format. Migrate to 'secret_refs:' map.\n\nExample:\n  secret_refs:\n    LINEAR_API_KEY: linear_api_key\n\nSee: https://elasticclaw.ai/docs/templates/secrets", name),
+								OK:          false,
+								FixAction: &FixAction{
+									Type:   "navigate",
+									Target: "/settings/templates",
+									Label:  "Manage Templates",
+								},
+							})
+						}
+						// Check for missing secret_refs references
+						for envName, secretRef := range tmplCfg.SecretRefs {
+							if !secretNames[secretRef] {
+								checks = append(checks, DoctorCheck{
+									Category:    "templates",
+									Severity:    "warning",
+									Title:       fmt.Sprintf("Template %q secret_refs references missing secret", name),
+									Description: fmt.Sprintf("Template %q secret_refs maps %q to secret %q which is not in the secrets map.", name, envName, secretRef),
+									OK:          false,
+									FixAction: &FixAction{
+										Type:   "navigate",
+										Target: "/settings/secrets",
+										Label:  "Create Secret",
+									},
+								})
+							}
+						}
+					}
+				}
 			}
 		}
 		if len(externalNames) == 0 {

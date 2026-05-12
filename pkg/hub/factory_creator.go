@@ -109,9 +109,10 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		}
 	}
 
-	// Resolve and inject template-requested secrets
+	// Resolve and inject template-requested secrets (deprecated list format)
 	resolvedSecrets := make(map[string]string)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
+		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
@@ -122,7 +123,22 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		}
 	}
 
+	// Resolve and inject template-level secret_refs (env var → hub secret name)
+	// Template-level refs go first; factory-level refs override them for the same env var.
+	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
+		for envName, secretRef := range tmplCfg.SecretRefs {
+			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				env[envName] = val
+				resolvedSecrets[envName] = val
+				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+			} else {
+				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+			}
+		}
+	}
+
 	// Resolve and inject factory-level secret_refs (env var → hub secret name)
+	// Factory-level refs win over template-level refs for the same env var.
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
@@ -178,13 +194,19 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 	for envName, val := range resolvedSecrets {
 		var refType string
-		// Check template secrets first
+		// Check template secrets (deprecated list format)
 		if tmplCfg != nil {
 			for _, ref := range tmplCfg.Secrets {
 				if ref.EnvVarName() == envName {
 					refType = ref.Type
 					break
 				}
+			}
+		}
+		// Check template secret_refs
+		if refType == "" && tmplCfg != nil {
+			if _, ok := tmplCfg.SecretRefs[envName]; ok {
+				refType = "template secret_ref"
 			}
 		}
 		// Check factory secret_refs

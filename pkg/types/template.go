@@ -112,7 +112,12 @@ type TemplateConfig struct {
 	// into the claw. Each entry can be a plain string (legacy: secret name from
 	// hub.yaml secrets, injected with that name) or a typed SecretRef that
 	// resolves the right secret and maps it to the correct env var name.
+	// DEPRECATED: Use secret_refs instead. Kept for backward compatibility.
 	Secrets SecretRefList `yaml:"secrets,omitempty"`
+	// SecretRefs maps env var names to hub secret names to inject into claws
+	// created from this template. Resolved at claw creation time.
+	// Example: {LINEAR_API_KEY: linear_api_key}
+	SecretRefs map[string]string `yaml:"secret_refs,omitempty"`
 	// MCPs is a list of MCP server names from hub.yaml mcp_servers to enable
 	// in this template's claws. Each claw will start these MCP servers as
 	// subprocesses and register their tools with the gateway.
