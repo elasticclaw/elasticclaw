@@ -305,11 +305,11 @@ func latestReleaseOnTrack(owner, repo, currentVersion string) (string, error) {
 			}
 		}
 
-		// If we found at least one match, we can stop — GitHub returns releases
-		// newest-first, so any later page would only have older releases.
-		if best != "" {
-			break
-		}
+		// Continue scanning all pages up to maxPages.
+		// GitHub returns releases newest-first by publication time, but
+		// bestSuffix is a version-number comparison — the two orderings
+		// can diverge (e.g. beta.5 published before beta.3). We stop
+		// only when a page is empty.
 	}
 
 	if best == "" {
