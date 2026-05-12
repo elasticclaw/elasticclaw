@@ -98,6 +98,97 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 	}
 }
 
+func TestCheckDefaultModel(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "")
+
+	tests := []struct {
+		name        string
+		hubCfg      *types.HubConfig
+		expectOK    bool
+		expectTitle string
+	}{
+		{
+			name: "hub default model set",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "anthropic/claude-sonnet-4-6",
+			},
+			expectOK:    true,
+			expectTitle: "Default model configured",
+		},
+		{
+			name: "no hub default but LLM key has default_model",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{
+					{Name: "fireworks-prod", Provider: "fireworks", APIKey: "fw_...", Default: true, DefaultModel: "fireworks/accounts/fireworks/models/kimi-k2p6"},
+				},
+			},
+			expectOK:    true,
+			expectTitle: "Default model configured",
+		},
+		{
+			name: "no hub default and no key default_model — provider fallback available",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{
+					{Name: "fireworks-prod", Provider: "fireworks", APIKey: "fw_...", Default: true},
+				},
+			},
+			expectOK:    true,
+			expectTitle: "Default model configured",
+		},
+		{
+			name: "no hub default and no LLM keys at all",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{},
+			},
+			expectOK:    false,
+			expectTitle: "No default model configured",
+		},
+		{
+			name: "invalid default model format",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "claude-sonnet",
+			},
+			expectOK:    false,
+			expectTitle: "Default model format is invalid",
+		},
+		{
+			name: "no explicit default key — first key used as fallback",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{
+					{Name: "anthropic-prod", Provider: "anthropic", APIKey: "sk-..."}, // not marked default
+				},
+			},
+			expectOK:    true,
+			expectTitle: "Default model configured",
+		},
+		{
+			name: "provider without built-in fallback and no key default_model",
+			hubCfg: &types.HubConfig{
+				LLMKeys: []*types.LLMKeyConfig{
+					{Name: "google-prod", Provider: "google", APIKey: "g-...", Default: true}, // google has no fallback
+				},
+			},
+			expectOK:    false,
+			expectTitle: "No default model configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks := s.checkDefaultModel(tt.hubCfg)
+			if len(checks) != 1 {
+				t.Fatalf("expected 1 check, got %d", len(checks))
+			}
+			if checks[0].OK != tt.expectOK {
+				t.Errorf("expected OK=%v, got OK=%v (title=%q)", tt.expectOK, checks[0].OK, checks[0].Title)
+			}
+			if checks[0].Title != tt.expectTitle {
+				t.Errorf("expected title %q, got %q", tt.expectTitle, checks[0].Title)
+			}
+		})
+	}
+}
+
 func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Auth: &types.AuthConfig{
