@@ -952,6 +952,9 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("github API returned status %d: %s", resp.StatusCode, string(body))
+	}
 	var result []interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("github API list parse error: %w", err)
