@@ -226,7 +226,7 @@ func (s *Server) pollAllPRs() {
 				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
 				// When auto-fix bugbot is enabled, suppress bugbot-like comments here
 				// so the same comment is not injected twice with different templates.
-				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot)
+				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot, r.autoFixGreptile)
 			}
 			s.updatePRCommentWatermark(r.pr, commentsData)
 		}
@@ -333,7 +333,7 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 
 // checkPRComments forwards new comments from any human reviewer to the claw.
 // Used for pipeline-driven claws that need to react to review feedback.
-func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugbot bool) {
+func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugbot bool, skipGreptile bool) {
 	var newComments []string
 
 	for _, c := range commentsData {
@@ -354,6 +354,9 @@ func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, skipBugb
 			continue
 		}
 		if skipBugbot && isBugbotComment(login, body) {
+			continue
+		}
+		if skipGreptile && isGreptileComment(login, body) {
 			continue
 		}
 
@@ -432,8 +435,9 @@ func (s *Server) checkGreptileComments(pr clawPR, commentsData []interface{}) {
 }
 
 func isGreptileComment(login, body string) bool {
-	return strings.Contains(strings.ToLower(login), "greptile") ||
-		strings.Contains(strings.ToLower(body), "greptile")
+	// Only match by bot login to avoid false positives from reviewers
+	// mentioning "greptile" in casual discussion.
+	return strings.Contains(strings.ToLower(login), "greptile")
 }
 
 func isBugbotComment(login, body string) bool {
