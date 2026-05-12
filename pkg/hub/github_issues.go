@@ -626,10 +626,22 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 	for envName := range resolvedSecrets {
 		var refType string
-		for _, ref := range tmplCfg.Secrets {
-			if ref.EnvVarName() == envName {
-				refType = ref.Type
-				break
+		if tmplCfg != nil {
+			for _, ref := range tmplCfg.Secrets {
+				if ref.EnvVarName() == envName {
+					refType = ref.Type
+					break
+				}
+			}
+			if refType == "" {
+				if _, ok := tmplCfg.SecretRefs[envName]; ok {
+					refType = "template secret_ref"
+				}
+			}
+		}
+		if refType == "" {
+			if _, ok := factory.SecretRefs[envName]; ok {
+				refType = "factory secret_ref"
 			}
 		}
 		if refType == "" {
