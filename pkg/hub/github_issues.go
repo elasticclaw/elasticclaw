@@ -607,6 +607,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		linearWorkspace string
 		autoFixCI       int = 1
 		autoFixBugbot   int = 1
+		autoFixGreptile int = 0
 	)
 	if tmplCfg != nil {
 		instanceType = tmplCfg.InstanceType
@@ -629,6 +630,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		}
 		if tmplCfg.AutoWatchBugbot != nil && !*tmplCfg.AutoWatchBugbot {
 			autoFixBugbot = 0
+		}
+		if tmplCfg.AutoWatchGreptile != nil && *tmplCfg.AutoWatchGreptile {
+			autoFixGreptile = 1
 		}
 	}
 
@@ -717,10 +721,10 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, auto_fix_greptile, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, "", issueID, "", initialStatus, now, factory.Name, groupName,
+		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, autoFixCI, autoFixBugbot, autoFixGreptile, "", issueID, "", initialStatus, now, factory.Name, groupName,
 	)
 
 	// Release promoteMu immediately after INSERT so we don't hold it across
