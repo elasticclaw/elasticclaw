@@ -73,6 +73,19 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	if clawName == factory.Name && issueID != "" {
 		clawName = issueID
 	}
+	// For manual triggers without a name_pattern, generate a descriptive name
+	// using the first input value (e.g., "my-factory: fix login bug")
+	if clawName == factory.Name && inputs != nil && len(inputs) > 0 {
+		// Use the first input's value as the descriptive part
+		var firstVal string
+		for _, v := range inputs {
+			firstVal = v
+			break
+		}
+		if firstVal != "" {
+			clawName = factory.Name + ": " + firstVal
+		}
+	}
 
 	// Find tenant
 	var tenantID string
