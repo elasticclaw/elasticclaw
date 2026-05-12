@@ -75,14 +75,12 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 	// For manual triggers without a name_pattern, generate a descriptive name
 	// using the first input value (e.g., "my-factory: fix login bug")
-	if clawName == factory.Name && inputs != nil && len(inputs) > 0 {
-		// Use the first input's value as the descriptive part
-		var firstVal string
-		for _, v := range inputs {
-			firstVal = v
-			break
-		}
-		if firstVal != "" {
+	if clawName == factory.Name && inputs != nil && len(factory.Inputs) > 0 {
+		// Use the first defined input's value as the descriptive part.
+		// factory.Inputs is an ordered slice, so this is deterministic even
+		// when inputs contains multiple keys (Go map iteration order is random).
+		firstKey := factory.Inputs[0].Name
+		if firstVal := inputs[firstKey]; firstVal != "" {
 			clawName = factory.Name + ": " + firstVal
 		}
 	}
