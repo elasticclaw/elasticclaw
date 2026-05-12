@@ -680,7 +680,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 								Category:    "templates",
 								Severity:    "warning",
 								Title:       fmt.Sprintf("Template %q uses deprecated secrets: list", name),
-								Description: fmt.Sprintf("Template %q uses the deprecated 'secrets:' list format. Migrate to 'secret_refs:' map.\n\nExample:\n  secret_refs:\n    LINEAR_API_KEY: linear_api_key\n\nDocs: https://elasticclaw.ai/docs/templates/secrets", name),
+								Description: fmt.Sprintf("Template %q uses the deprecated 'secrets:' list format. Migrate to 'secret_refs:' map.\n\nExample:\n  secret_refs:\n    LINEAR_API_KEY: linear_api_key\n\nDocs: https://www.elasticclaw.ai/docs/troubleshooting", name),
 								OK:          false,
 							})
 						}
