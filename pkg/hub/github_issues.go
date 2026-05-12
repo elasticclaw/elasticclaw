@@ -157,19 +157,21 @@ func (s *Server) validateGitHubIssuesSignatureReason(body []byte, sig string) st
 	}
 
 	// Build a diagnostic reason string (never includes the secret itself)
+	if integrationSecretCount == 0 && factorySecretCount == 0 {
+		// No secrets configured at all
+		if integrations != nil && len(integrations.GitHubIssues) > 0 {
+			return "no webhook secrets configured for any github-issues integration"
+		}
+		if factoryMatchCount > 0 {
+			return "no webhook secrets configured for any github-issues factory"
+		}
+		// Dev/testing mode: no integrations and no factory secrets — allow
+		return ""
+	}
 	if sig == "" {
 		return "missing X-Hub-Signature-256 header"
 	}
-	if integrationSecretCount > 0 || factorySecretCount > 0 {
-		return fmt.Sprintf("signature mismatch (checked %d integration secrets, %d factory secrets across %d github-issues factories)", integrationSecretCount, factorySecretCount, factoryMatchCount)
-	}
-	if integrations != nil && len(integrations.GitHubIssues) > 0 {
-		return "no webhook secrets configured for any github-issues integration"
-	}
-	if factoryMatchCount > 0 {
-		return "no webhook secrets configured for any github-issues factory"
-	}
-	return "no github-issues integrations or factories configured"
+	return fmt.Sprintf("signature mismatch (checked %d integration secrets, %d factory secrets across %d github-issues factories)", integrationSecretCount, factorySecretCount, factoryMatchCount)
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {
