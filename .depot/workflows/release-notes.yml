@@ -167,11 +167,11 @@ jobs:
           with open("/tmp/title.txt", "r") as f:
             title = f.read().strip()
           with open("/tmp/whatsnew.json", "r") as f:
-            whatsnew = json.load(f)
+            whatsnew = json.load(f) or []
           with open("/tmp/improvements.json", "r") as f:
-            improvements = json.load(f)
+            improvements = json.load(f) or []
           with open("/tmp/fixes.json", "r") as f:
-            fixes = json.load(f)
+            fixes = json.load(f) or []
           with open("/tmp/changelog.txt", "r") as f:
             raw_changelog = f.read()
 
