@@ -3349,6 +3349,7 @@ function DoctorSection() {
   const [report, setReport] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showPassed, setShowPassed] = useState(false)
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true)
@@ -3368,6 +3369,11 @@ function DoctorSection() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const failedChecks = report?.checks?.filter((c: any) => !c.ok) || []
+  const passedChecks = report?.checks?.filter((c: any) => c.ok) || []
+  const visibleChecks = showPassed ? report?.checks || [] : failedChecks
+  const allPassing = failedChecks.length === 0 && report?.checks?.length > 0
 
   const severityIcon = (s: string) => {
     switch (s) {
@@ -3405,6 +3411,16 @@ function DoctorSection() {
               Cached {new Date(report.cachedAt).toLocaleTimeString()}
             </span>
           )}
+          {report && passedChecks.length > 0 && (
+            <Button
+              size="sm"
+              variant={showPassed ? "default" : "outline"}
+              onClick={() => setShowPassed(!showPassed)}
+            >
+              <CheckCircle2 className="size-3.5 mr-1.5" />
+              {showPassed ? "Hide passed" : `Show passed (${passedChecks.length})`}
+            </Button>
+          )}
           <Button size="sm" variant="outline" onClick={() => load(true)} disabled={loading}>
             <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
             {loading ? "Checking…" : "Refresh"}
@@ -3439,11 +3455,21 @@ function DoctorSection() {
             </div>
           </div>
 
-          {report.checks.length === 0 ? (
-            <p className="text-sm text-muted-foreground">All checks passed — no issues found.</p>
+          {visibleChecks.length === 0 ? (
+            allPassing ? (
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-6 text-center">
+                <CheckCircle2 className="size-8 text-emerald-500 mx-auto mb-2" />
+                <p className="text-sm font-medium text-emerald-500">All checks passing</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {report.summary.passed} check{report.summary.passed !== 1 ? "s" : ""} passed with no issues
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No checks to display.</p>
+            )
           ) : (
             <div className="space-y-3">
-              {report.checks.map((check: any, i: number) => (
+              {visibleChecks.map((check: any, i: number) => (
                 <div
                   key={i}
                   className={cn(
