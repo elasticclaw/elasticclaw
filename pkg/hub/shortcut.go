@@ -158,6 +158,11 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 		oldStateID := toInt64(stateChange.Old)
 		storyID := fmt.Sprintf("sc-%d", action.ID)
 
+		// Build a per-token state-name cache so we only fetch the workflow list once
+		// per Shortcut workspace. A webhook with N factories sharing one token
+		// produces a single API call instead of 2N.
+		stateNameCache := map[string]map[int64]string{}
+
 		for _, factory := range factories {
 			if factory.Integration != "shortcut" {
 				continue
@@ -232,8 +237,13 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				}
 			}
 
-			newStateName := s.shortcutStateName(token, newStateID)
-			oldStateName := s.shortcutStateName(token, oldStateID) // only fetched when needed for logging
+			stateMap, ok := stateNameCache[token]
+			if !ok {
+				stateMap = buildShortcutStateMap(token)
+				stateNameCache[token] = stateMap
+			}
+			newStateName := stateMap[newStateID]
+			oldStateName := stateMap[oldStateID] // only fetched when needed for logging
 
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
@@ -365,14 +375,27 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 	return ""
 }
 
-// shortcutStateName fetches the workflow state name for a given state ID.
+// shortcutStateName resolves a single state ID to its name. Used by the poller
+// where only one state is needed per story; delegates to buildShortcutStateMap.
 func (s *Server) shortcutStateName(token string, stateID int64) string {
 	if stateID == 0 {
 		return ""
 	}
+	m := buildShortcutStateMap(token)
+	if name, ok := m[stateID]; ok {
+		return name
+	}
+	return strconv.FormatInt(stateID, 10)
+}
+
+// buildShortcutStateMap fetches the full workflow list once and returns a map of
+// state ID → state name. Callers cache the result per token so a single webhook
+// event with N factories only hits the Shortcut API once per workspace.
+func buildShortcutStateMap(token string) map[int64]string {
+	m := map[int64]string{}
 	resp, err := shortcutAPIList("workflows", token)
 	if err != nil {
-		return strconv.FormatInt(stateID, 10)
+		return m
 	}
 	for _, wf := range resp {
 		workflow, _ := wf.(map[string]interface{})
@@ -380,13 +403,13 @@ func (s *Server) shortcutStateName(token string, stateID int64) string {
 		for _, st := range states {
 			state, _ := st.(map[string]interface{})
 			idF, _ := state["id"].(float64)
-			if int64(idF) == stateID {
-				name, _ := state["name"].(string)
-				return name
+			name, _ := state["name"].(string)
+			if name != "" {
+				m[int64(idF)] = name
 			}
 		}
 	}
-	return strconv.FormatInt(stateID, 10)
+	return m
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
