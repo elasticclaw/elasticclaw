@@ -333,9 +333,11 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	var linearIssueID, githubIssueID, shortcutStoryID string
 	if factory.Integration == "linear" && issueID != "" {
 		linearIssueID = issueID
-	} else if factory.Integration == "github-issues" && issueID != "" {
+	}
+	if factory.Integration == "github-issues" && issueID != "" {
 		githubIssueID = issueID
-	} else if factory.Integration == "shortcut" && issueID != "" {
+	}
+	if factory.Integration == "shortcut" && issueID != "" {
 		shortcutStoryID = issueID
 	}
 
