@@ -137,6 +137,7 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 	p, err := pipeline.Parse([]byte(factory.PipelineYAML))
 	if err != nil {
 		log.Printf("[pipeline] factory %q: failed to parse pipeline_yaml: %v", factory.Name, err)
+		log.Printf("[pipeline] factory %q: pipeline_yaml content:\n%s", factory.Name, factory.PipelineYAML)
 		return nil
 	}
 	return p
