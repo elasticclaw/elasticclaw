@@ -104,6 +104,7 @@ jobs:
 
           awk -v arm_sha="${SHA_ARM64}" -v amd_sha="${SHA_AMD64}" -v ver="${VERSION_NO_V}" '
             /version ".*"/ { sub(/version ".*"/, "version \"" ver "\"") }
+            /url ".*"/ { sub(/v#{version}/, "#{version}") }
             /on_arm/ { in_arm=1 }
             /on_intel/ { in_arm=0; in_amd=1 }
             /end/ { in_arm=0; in_amd=0 }
