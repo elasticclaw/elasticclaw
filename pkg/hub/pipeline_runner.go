@@ -329,7 +329,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		return
 	}
 
-	// If pipeline specifies an explicit issue_id, resolve it from inputs or use directly
+	// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
 	resolvedIssueID := issueID
 	if stage.OnEnter.MoveIssue.IssueID != "" {
 		resolvedIssueID = stage.OnEnter.MoveIssue.IssueID
@@ -347,7 +347,59 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 				}
 			}
 		}
+		// Support template syntax {{.Issue.xxx}} for automatic triggers
+		if strings.Contains(resolvedIssueID, "{{.Issue.") {
+			var details *linearIssueDetails
+			if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
+				linearToken := s.resolveLinearTokenForFactory(factory)
+				if linearToken != "" {
+					d, err := s.fetchLinearIssueDetails(linearToken, issueID)
+					if err == nil && d != nil {
+						details = d
+					}
+				}
+			} else if strings.Contains(issueID, "/") {
+				ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+				if ghToken != "" {
+					parts := strings.Split(issueID, "/")
+					if len(parts) == 3 {
+						repo := parts[0] + "/" + parts[1]
+						var issueNum int
+						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+							base := s.githubBaseURL
+							if base == "" {
+								base = "https://api.github.com"
+							}
+							d, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+							if err == nil && d != nil {
+								var ghDetails githubIssueDetails = *d
+								tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+								if err == nil {
+									var buf bytes.Buffer
+									data := struct{ Issue *githubIssueDetails }{Issue: &ghDetails}
+									if err := tmpl.Execute(&buf, data); err == nil {
+										resolvedIssueID = buf.String()
+									}
+								}
+								goto issueResolved
+							}
+						}
+					}
+				}
+			}
+			if details != nil {
+				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+				if err == nil {
+					var buf bytes.Buffer
+					data := struct{ Issue *linearIssueDetails }{Issue: details}
+					if err := tmpl.Execute(&buf, data); err == nil {
+						resolvedIssueID = buf.String()
+					}
+				}
+			}
+		}
 	}
+issueResolved:
 	if resolvedIssueID == "" {
 		return
 	}
