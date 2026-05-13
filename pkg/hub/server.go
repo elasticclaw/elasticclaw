@@ -1060,6 +1060,47 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		var provider, providerID string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
 
+		// Post a comment on the linked issue/story when a factory-created claw is killed manually
+		factory, issueID := s.findFactoryForClaw(clawID)
+		if factory != nil && issueID != "" {
+			switch factory.Integration {
+			case "linear":
+				token := s.resolveLinearTokenForFactory(factory)
+				if token != "" {
+					if err := s.commentLinearIssue(token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
+						log.Printf("[kill] failed to comment Linear issue %s: %v", issueID, err)
+					} else {
+						log.Printf("[kill] commented Linear issue %s", issueID)
+					}
+				}
+			case "shortcut":
+				token := s.resolveShortcutToken(factory.Workspace)
+				if token != "" {
+					if err := commentShortcutIssue(token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
+						log.Printf("[kill] failed to comment Shortcut story %s: %v", issueID, err)
+					} else {
+						log.Printf("[kill] commented Shortcut story %s", issueID)
+					}
+				}
+			case "github-issues":
+				parts := strings.Split(issueID, "/")
+				if len(parts) == 3 {
+					token := s.resolveGitHubIssuesTokenForFactory(factory)
+					if token != "" {
+						repo := parts[0] + "/" + parts[1]
+						var issueNum int
+						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+							if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: killed manually via dashboard"); err != nil {
+								log.Printf("[kill] failed to comment GitHub issue %s: %v", issueID, err)
+							} else {
+								log.Printf("[kill] commented GitHub issue %s", issueID)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Delete messages first (FK constraint)
 		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
