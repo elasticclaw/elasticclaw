@@ -468,7 +468,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
-	// Select provider
+	// Select provider: prefer defaultModel provider, then fall back to first available
 	var anthropicKey, openaiKey, codexKey string
 	for _, k := range llmKeys {
 		if k.Provider == "anthropic" && anthropicKey == "" {
@@ -482,6 +482,28 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		}
 	}
 
+	if len(llmKeys) == 0 {
+		return "", fmt.Errorf("no LLM keys configured")
+	}
+
+	// Try defaultModel provider first
+	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+	switch defaultProvider {
+	case "anthropic":
+		if anthropicKey != "" {
+			return callAnthropic(anthropicKey, systemPrompt, msgs)
+		}
+	case "openai":
+		if openaiKey != "" {
+			return callOpenAI(openaiKey, systemPrompt, msgs)
+		}
+	case "codex":
+		if codexKey != "" {
+			return callOpenAI(codexKey, systemPrompt, msgs)
+		}
+	}
+
+	// Fall back to hard-coded priority
 	if anthropicKey != "" {
 		return callAnthropic(anthropicKey, systemPrompt, msgs)
 	}
@@ -491,10 +513,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 	if codexKey != "" {
 		return callOpenAI(codexKey, systemPrompt, msgs)
 	}
-	if len(llmKeys) == 0 {
-		return "", fmt.Errorf("no LLM keys configured")
-	}
-	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+
 	availableProviders := uniqueProviders(llmKeys)
 	if defaultProvider != "" {
 		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
@@ -527,6 +546,28 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		}
 	}
 
+	if firstKey == nil {
+		return fmt.Errorf("no LLM keys configured")
+	}
+
+	// Try defaultModel provider first
+	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+	switch defaultProvider {
+	case "anthropic":
+		if anthropicKey != "" {
+			return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
+		}
+	case "openai":
+		if openaiKey != "" {
+			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
+		}
+	case "codex":
+		if codexKey != "" {
+			return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken)
+		}
+	}
+
+	// Fall back to hard-coded priority
 	if anthropicKey != "" {
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
@@ -536,18 +577,15 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 	if codexKey != "" {
 		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken)
 	}
-	if firstKey != nil {
-		// firstKey.Provider is neither "anthropic" nor "openai" nor "codex" (those paths already
-		// returned above). Fall back to blocking call for unsupported providers.
-		reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
-		if err != nil {
-			return err
-		}
-		onToken(reply)
-		return nil
+
+	// firstKey.Provider is neither "anthropic" nor "openai" nor "codex" (those paths already
+	// returned above). Fall back to blocking call for unsupported providers.
+	reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
+	if err != nil {
+		return err
 	}
-	_ = defaultModel
-	return fmt.Errorf("no LLM keys configured")
+	onToken(reply)
+	return nil
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.

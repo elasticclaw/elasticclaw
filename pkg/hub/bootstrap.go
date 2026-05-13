@@ -340,7 +340,7 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) strin
 	case "deepseek":
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	case "codex":
-		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
+		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}

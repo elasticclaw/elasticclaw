@@ -235,9 +235,9 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 		{
 			name:       "codex",
 			provider:   "codex",
-			envVar:     "OPENAI_API_KEY",
-			authChoice: "openai-api-key",
-			flagName:   "--openai-api-key",
+			envVar:     "CODEX_API_KEY",
+			authChoice: "codex-api-key",
+			flagName:   "--codex-api-key",
 		},
 	}
 
@@ -277,8 +277,8 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	assertContains(t, snippet, "{'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}", "deepseek models")
 
 	assertContains(t, snippet, `'codex': {`, "codex provider entry")
-	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "codex baseUrl")
-	assertContains(t, snippet, "{'id': 'o4-mini', 'name': 'Codex o4-mini'}", "codex models")
+	assertContains(t, snippet, "'id': 'o4-mini', 'name': 'Codex o4-mini'", "codex models")
+	assertContains(t, snippet, "'codex': {\n            'apiKey': os.environ.get('CODEX_API_KEY', ''),", "codex apiKey with correct env var")
 }
 
 // ── Shellcheck test ───────────────────────────────────────────────────────────
