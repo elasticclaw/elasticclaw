@@ -42,7 +42,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
 
           # Build the prompt JSON safely with Python (handles quotes, newlines, backslashes)
-          python3 -c '
+          cat > /tmp/build_prompt.py << 'PYEOF'
           import json, sys
 
           tag = sys.argv[1]
@@ -61,7 +61,8 @@ jobs:
 
           with open("/tmp/prompt.json", "w") as f:
             json.dump(prompt, f)
-          ' "$TAG"
+          PYEOF
+          python3 /tmp/build_prompt.py "$TAG"
 
           RESPONSE=$(curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
             -H "Authorization: Bearer $GROQ_API_KEY" \
