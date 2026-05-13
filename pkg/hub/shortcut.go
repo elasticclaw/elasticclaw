@@ -379,8 +379,6 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 	return ""
 }
 
-
-
 // buildShortcutStateMap fetches the full workflow list once and returns a map of
 // state ID → state name. Callers cache the result per token so a single webhook
 // event with N factories only hits the Shortcut API once per workspace.
