@@ -2741,16 +2741,21 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	// Wait for VM to be reachable
 	host := vmName + ".exe.xyz"
+	reachable := false
 	for i := 0; i < 30; i++ {
 		cmd := exec.CommandContext(ctx, "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", host, "echo ready")
 		if err := cmd.Run(); err == nil {
+			reachable = true
 			break
 		}
 		time.Sleep(5 * time.Second)
 	}
+	if !reachable {
+		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
+	}
 
 	// Write template files
-	workdir := "/home/daytona/workspace"
+	workdir := "/home/exedev/workspace"
 	_, _ = p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir})
 	for path, content := range files {
 		fullPath := workdir + "/" + path
@@ -2759,13 +2764,24 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		}
 	}
 
+	// Generate a random fallback token in case reading from disk fails
+	fallbackToken := make([]byte, 32)
+	if _, err := rand.Read(fallbackToken); err == nil {
+		// encode as hex string
+		for i := range fallbackToken {
+			fallbackToken[i] = 'a' + (fallbackToken[i] % 26)
+		}
+	}
+	fallbackTokenStr := string(fallbackToken)
+
 	// Install OpenClaw
-	installScript := `set -e
+	installScript := fmt.Sprintf(`set -e
 npm install -g openclaw@2026.5.6 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
-openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
+TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo %q)
+openclaw gateway run --port 18789 --auth password --password "$TOKEN" &
 sleep 8
-echo "OpenClaw ready"`
+echo "OpenClaw ready"`, fallbackTokenStr)
 	if _, err := p.Exec(ctx, vmName, []string{"bash", "-c", installScript}); err != nil {
 		return fmt.Errorf("openclaw install failed: %w", err)
 	}

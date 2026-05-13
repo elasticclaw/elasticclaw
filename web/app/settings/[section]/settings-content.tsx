@@ -423,6 +423,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       if (formDefaultSnapshot) patch.defaultSnapshot = formDefaultSnapshot
     } else if (formProvider === "exedev") {
       // exe.dev uses SSH key authentication; no API key needed in config
+      patch.enabled = true
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -601,6 +602,14 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 </div>
               </>
             )}
+
+            {formProvider === "exedev" && (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  exe.dev uses SSH key authentication. Ensure your SSH key is registered at <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev</a>.
+                </p>
+              </>
+            )}
           </div>
 
           <div className="flex items-center justify-between px-5 py-4 border-t border-border">
@@ -613,7 +622,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
               <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev")}
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey)}
                 onClick={doSave}
               >
                 {modalMode === "add" ? "Add Provider" : "Save changes"}
