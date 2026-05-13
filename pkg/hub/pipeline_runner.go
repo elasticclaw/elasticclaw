@@ -147,8 +147,9 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 // - stage.OnEnter.Inject: injects a user message into the claw
 // - stage.OnEnter.MoveIssue: moves the Linear/Shortcut issue to the named status
 //
-// factory and issueID are required for MoveIssue; if either is nil/empty the
-// move is skipped silently.
+// factory is required for MoveIssue; if nil the move is skipped silently.
+// issueID is the default issue from the factory/webhook; it can be overridden
+// by MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
@@ -323,40 +324,62 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		}
 	}
 
-	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
+	targetStatus := stage.OnEnter.MoveIssue.Status
+	if targetStatus == "" || factory == nil {
 		return
 	}
 
-	targetStatus := stage.OnEnter.MoveIssue
+	// If pipeline specifies an explicit issue_id, resolve it from inputs or use directly
+	resolvedIssueID := issueID
+	if stage.OnEnter.MoveIssue.IssueID != "" {
+		resolvedIssueID = stage.OnEnter.MoveIssue.IssueID
+		// Support template syntax {{.Inputs.xxx}} for manual trigger inputs
+		if strings.Contains(resolvedIssueID, "{{.Inputs.") {
+			inputs := s.loadManualTriggerInputs(clawID)
+			if inputs != nil {
+				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+				if err == nil {
+					var buf bytes.Buffer
+					data := struct{ Inputs map[string]string }{Inputs: inputs}
+					if err := tmpl.Execute(&buf, data); err == nil {
+						resolvedIssueID = buf.String()
+					}
+				}
+			}
+		}
+	}
+	if resolvedIssueID == "" {
+		return
+	}
 
-	if strings.HasPrefix(issueID, "sc-") {
+	if strings.HasPrefix(resolvedIssueID, "sc-") {
 		// Shortcut story
 		scToken := s.resolveShortcutToken(factory.Workspace)
 		if scToken == "" {
 			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := moveShortcutStory(scToken, issueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move story %s to %q: %v", issueID, targetStatus, err)
+		if err := moveShortcutStory(scToken, resolvedIssueID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move story %s to %q: %v", resolvedIssueID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved story %s to %q", issueID, targetStatus)
+			log.Printf("[pipeline] moved story %s to %q", resolvedIssueID, targetStatus)
 		}
-	} else if strings.Contains(issueID, "/") {
+	} else if strings.Contains(resolvedIssueID, "/") {
 		// GitHub issue (owner/repo/number format)
 		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 		if ghToken == "" {
 			log.Printf("[pipeline] factory %q: no GitHub token for move_issue, skipping", factory.Name)
 			return
 		}
-		parts := strings.Split(issueID, "/")
+		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) == 3 {
 			repo := parts[0] + "/" + parts[1]
 			var issueNum int
 			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 				if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
-					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", issueID, targetStatus, err)
+					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
 				} else {
-					log.Printf("[pipeline] moved GitHub issue %s to %q", issueID, targetStatus)
+					log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
 				}
 			}
 		}
@@ -367,10 +390,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] factory %q: no Linear token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move issue %s to %q: %v", issueID, targetStatus, err)
+		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved issue %s to %q", issueID, targetStatus)
+			log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
 		}
 	}
 }

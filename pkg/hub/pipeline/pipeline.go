@@ -79,12 +79,20 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// MoveIssueAction specifies the target status and optional explicit issue ID
+// for the move_issue pipeline action. If IssueID is empty, the issue is looked
+// up from the claw's factory tracking (webhook issue or manual trigger inputs).
+type MoveIssueAction struct {
+	Status  string `yaml:"status"`
+	IssueID string `yaml:"issue_id,omitempty"`
+}
+
 // OnEnter holds the actions to run when entering a stage.
 type OnEnter struct {
 	// Inject sends this message to the claw as a user message.
 	Inject string `yaml:"inject"`
 	// MoveIssue moves the associated Linear/Shortcut issue to this status name.
-	MoveIssue string `yaml:"move_issue"`
+	MoveIssue MoveIssueAction `yaml:"move_issue"`
 	// MergePR triggers the GitHub merge API for the tracked PR (stub — not yet implemented).
 	MergePR bool `yaml:"merge_pr,omitempty"`
 	// CloseIssue closes the associated GitHub issue when entering this stage.
@@ -93,6 +101,47 @@ type OnEnter struct {
 	AddLabels []string `yaml:"add_labels,omitempty"`
 	// RemoveLabels removes the specified labels from the associated GitHub issue.
 	RemoveLabels []string `yaml:"remove_labels,omitempty"`
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for OnEnter so that move_issue can
+// be specified either as a scalar string (backward compat) or as a mapping.
+func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
+	// Use a shadow type to avoid infinite recursion.
+	type rawOnEnter struct {
+		Inject       string            `yaml:"inject"`
+		MoveIssueRaw yaml.Node          `yaml:"move_issue"`
+		MergePR      bool              `yaml:"merge_pr,omitempty"`
+		CloseIssue   bool              `yaml:"close_issue,omitempty"`
+		AddLabels    []string          `yaml:"add_labels,omitempty"`
+		RemoveLabels []string          `yaml:"remove_labels,omitempty"`
+	}
+	var raw rawOnEnter
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	oe.Inject = raw.Inject
+	oe.MergePR = raw.MergePR
+	oe.CloseIssue = raw.CloseIssue
+	oe.AddLabels = raw.AddLabels
+	oe.RemoveLabels = raw.RemoveLabels
+
+	if raw.MoveIssueRaw.Kind == 0 {
+		// move_issue not present
+		return nil
+	}
+
+	if raw.MoveIssueRaw.Kind == yaml.ScalarNode {
+		// Bare string: treat as status, no explicit issue_id
+		oe.MoveIssue = MoveIssueAction{Status: raw.MoveIssueRaw.Value}
+	} else if raw.MoveIssueRaw.Kind == yaml.MappingNode {
+		var mia MoveIssueAction
+		if err := raw.MoveIssueRaw.Decode(&mia); err != nil {
+			return err
+		}
+		oe.MoveIssue = mia
+	}
+	return nil
 }
 
 // Parse decodes YAML bytes into a Pipeline. Returns an error if the YAML is invalid.
