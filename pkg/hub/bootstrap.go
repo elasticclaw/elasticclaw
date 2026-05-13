@@ -114,6 +114,15 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
                 {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini'}
             ]
         }`, envVar)
+		case "codex":
+			return fmt.Sprintf(`'codex': {
+            'apiKey': os.environ.get('%s', ''),
+            'baseUrl': 'https://api.openai.com/v1',
+            'api': 'openai-completions',
+            'models': [
+                {'id': 'o4-mini', 'name': 'Codex o4-mini'}
+            ]
+        }`, envVar)
 		case "groq":
 			return fmt.Sprintf(`'groq': {
             'apiKey': os.environ.get('%s', ''),
@@ -330,6 +339,8 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) strin
 		return fmt.Sprintf(`--auth-choice groq-api-key --groq-api-key "${%s:-}"`, envVar)
 	case "deepseek":
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
+	case "codex":
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
