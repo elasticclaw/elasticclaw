@@ -609,14 +609,16 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID, githubIssueID, tagsJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &tagsJSON); err != nil {
+	var issueID, githubIssueID, shortcutStoryID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &tagsJSON); err != nil {
 		return nil, ""
 	}
 
-	// Prefer github_issue_id for GitHub issue-based claws
+	// Prefer github_issue_id for GitHub issue-based claws, then shortcut
 	if githubIssueID != "" {
 		issueID = githubIssueID
+	} else if shortcutStoryID != "" {
+		issueID = shortcutStoryID
 	}
 
 	if issueID != "" {
