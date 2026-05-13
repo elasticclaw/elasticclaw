@@ -328,6 +328,7 @@ export default function SettingsSectionPage() {
 const SANDBOX_PROVIDER_OPTIONS = [
   { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
   { value: "daytona", label: "Daytona", description: "Development environment provider" },
+  { value: "exedev", label: "exe.dev", description: "Persistent VM provider with SSH access" },
 ]
 
 interface SandboxProviderView {
@@ -420,6 +421,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       if (formApiUrl) patch.apiUrl = formApiUrl
       if (formApiKey) patch.apiKey = formApiKey
       if (formDefaultSnapshot) patch.defaultSnapshot = formDefaultSnapshot
+    } else if (formProvider === "exedev") {
+      // exe.dev uses SSH key authentication; no API key needed in config
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -610,7 +613,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
               <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey)}
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev")}
                 onClick={doSave}
               >
                 {modalMode === "add" ? "Add Provider" : "Save changes"}

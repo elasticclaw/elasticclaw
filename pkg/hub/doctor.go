@@ -346,7 +346,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	validProviders := map[string]bool{
-		"daytona": true, "vercel": true, "replicated": true, "local": true,
+		"daytona": true, "vercel": true, "replicated": true, "local": true, "exedev": true,
 	}
 
 	allProvidersValid := true
@@ -357,7 +357,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 				Category:    "sandboxes",
 				Severity:    "warning",
 				Title:       fmt.Sprintf("Unknown sandbox provider: %q", name),
-				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, vercel, replicated, local).", name),
+				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, vercel, replicated, local, exedev).", name),
 				OK:          false,
 				FixAction: &FixAction{
 					Type:   "navigate",
@@ -418,6 +418,8 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			}
 		case "local":
 			// Local provider doesn't need credentials
+		case "exedev":
+			// exe.dev uses SSH key authentication; no explicit API key needed in config
 		}
 	}
 	if allProvidersValid {
