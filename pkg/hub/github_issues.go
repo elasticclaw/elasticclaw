@@ -811,6 +811,27 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 		return
 	}
 	log.Printf("[factory] terminating claw %s for GitHub issue %s", clawID[:8], issueID)
+
+	// Post a comment on the linked GitHub issue before terminating
+	factory := s.findFactoryForIssue(issueID)
+	if factory != nil && issueID != "" && factory.Integration == "github-issues" {
+		parts := strings.Split(issueID, "/")
+		if len(parts) == 3 {
+			token := s.resolveGitHubIssuesTokenForFactory(factory)
+			if token != "" {
+				repo := parts[0] + "/" + parts[1]
+				var issueNum int
+				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+					if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: issue left trigger status"); err != nil {
+						log.Printf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
+					} else {
+						log.Printf("[factory] commented GitHub issue %s", issueID)
+					}
+				}
+			}
+		}
+	}
+
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
 		cc.conn.Close(1000, "factory: issue left trigger status")
