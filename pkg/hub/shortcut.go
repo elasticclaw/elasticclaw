@@ -140,6 +140,11 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 	factories := s.resolveFactories()
 
+	// Build a per-token state-name cache so we only fetch the workflow list once
+	// per Shortcut workspace across all actions in this payload. A webhook with K
+	// actions and N factories sharing one token produces a single API call.
+	stateNameCache := map[string]map[int64]string{}
+
 	for _, action := range payload.Actions {
 		if action.EntityType != "story" || action.Action != "update" {
 			continue
@@ -157,11 +162,6 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 		newStateID := toInt64(stateChange.New)
 		oldStateID := toInt64(stateChange.Old)
 		storyID := fmt.Sprintf("sc-%d", action.ID)
-
-		// Build a per-token state-name cache so we only fetch the workflow list once
-		// per Shortcut workspace. A webhook with N factories sharing one token
-		// produces a single API call instead of 2N.
-		stateNameCache := map[string]map[int64]string{}
 
 		for _, factory := range factories {
 			if factory.Integration != "shortcut" {
