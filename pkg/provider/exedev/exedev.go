@@ -100,10 +100,9 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	if req.Name != "" {
 		args = append(args, "--name="+req.Name)
 	}
-	// Pass any env vars
-	for k, v := range req.Env {
-		args = append(args, "--env", fmt.Sprintf("%s=%s", k, v))
-	}
+	// NOTE: env vars are intentionally NOT passed as --env flags to avoid
+	// exposing secrets in process listings (ps aux). Env vars are injected
+	// during bootstrap via WriteFile/SetupScript instead.
 
 	out, err := p.run(ctx, args...)
 	if err != nil {
