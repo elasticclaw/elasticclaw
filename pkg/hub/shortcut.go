@@ -140,6 +140,11 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 	factories := s.resolveFactories()
 
+	// Build a per-token state-name cache so we only fetch the workflow list once
+	// per Shortcut workspace across all actions in this payload. A webhook with K
+	// actions and N factories sharing one token produces a single API call.
+	stateNameCache := map[string]map[int64]string{}
+
 	for _, action := range payload.Actions {
 		if action.EntityType != "story" || action.Action != "update" {
 			continue
@@ -232,8 +237,18 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				}
 			}
 
-			newStateName := s.shortcutStateName(token, newStateID)
-			oldStateName := s.shortcutStateName(token, oldStateID) // only fetched when needed for logging
+			stateMap, ok := stateNameCache[token]
+			if !ok {
+				stateMap = buildShortcutStateMap(token)
+				if len(stateMap) > 0 {
+					stateNameCache[token] = stateMap
+				} else {
+					log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
+					stateMap = nil // ensure we don't use the empty map for lookups
+				}
+			}
+			newStateName := stateMap[newStateID]
+			oldStateName := stateMap[oldStateID] // only fetched when needed for logging
 
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
@@ -365,17 +380,28 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 	return ""
 }
 
-// shortcutStateName fetches the workflow state name for a given state ID.
-func (s *Server) shortcutStateName(token string, stateID int64) string {
-	if stateID == 0 {
-		return ""
-	}
-	data, err := shortcutAPI(fmt.Sprintf("workflow-states/%d", stateID), token)
+// buildShortcutStateMap fetches the full workflow list once and returns a map of
+// state ID → state name. Callers cache the result per token so a single webhook
+// event with N factories only hits the Shortcut API once per workspace.
+func buildShortcutStateMap(token string) map[int64]string {
+	m := map[int64]string{}
+	resp, err := shortcutAPIList("workflows", token)
 	if err != nil {
-		return strconv.FormatInt(stateID, 10)
+		return m
 	}
-	name, _ := data["name"].(string)
-	return name
+	for _, wf := range resp {
+		workflow, _ := wf.(map[string]interface{})
+		states, _ := workflow["states"].([]interface{})
+		for _, st := range states {
+			state, _ := st.(map[string]interface{})
+			idF, _ := state["id"].(float64)
+			name, _ := state["name"].(string)
+			if name != "" {
+				m[int64(idF)] = name
+			}
+		}
+	}
+	return m
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
