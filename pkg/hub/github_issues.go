@@ -551,7 +551,10 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 	if ghToken != "" {
 		env["GITHUB_ISSUES_API_KEY"] = ghToken
-		env["GITHUB_TOKEN"] = ghToken // also set generic GITHUB_TOKEN for GitHub API access
+		// Note: We intentionally do NOT set GITHUB_TOKEN here. The credential
+		// helper provides a proper GitHub App token for git operations. Setting
+		// GITHUB_TOKEN would override the credential helper and cause git/gh to
+		// use the issue-reading PAT which lacks repo permissions.
 	}
 
 	// Resolve and inject template-requested secrets
@@ -640,7 +643,8 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	var secretList []string
 	if ghToken != "" {
 		secretList = append(secretList, "- `GITHUB_ISSUES_API_KEY` — GitHub Issues API token")
-		secretList = append(secretList, "- `GITHUB_TOKEN` — GitHub API token")
+		// Note: GITHUB_TOKEN is intentionally NOT set — the credential helper
+		// provides the proper token for git operations. See issue #181.
 	}
 	for envName := range resolvedSecrets {
 		var refType string

@@ -666,7 +666,11 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		env["LINEAR_API_KEY"] = linearToken
 	}
 	if githubToken != "" {
-		env["GITHUB_TOKEN"] = githubToken
+		env["GITHUB_ISSUES_API_KEY"] = githubToken
+		// Note: We intentionally do NOT set GITHUB_TOKEN here. The credential
+		// helper provides a proper GitHub App token for git operations. Setting
+		// GITHUB_TOKEN would override the credential helper and cause git/gh to
+		// use the issue-reading PAT which lacks repo permissions.
 	}
 	if shortcutToken != "" {
 		env["SHORTCUT_API_KEY"] = shortcutToken
