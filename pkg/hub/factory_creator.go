@@ -19,7 +19,9 @@ import (
 // inputs is the validated map of user inputs for manual triggers; nil for webhooks.
 // prebuiltTemplateFiles is optional — when provided (e.g. from linear.go with CONTEXT.md
 // already injected), it skips template resolution. When nil, templates are resolved here.
-func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string) (string, error) {
+// reason is a human-readable string describing why the claw is being created
+// (e.g. "linear webhook", "manual trigger", "poll"). It is logged for debugging.
+func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, error) {
 	// Resolve template files (or use pre-built ones from caller)
 	var templateFiles map[string]string
 	var err error
@@ -355,7 +357,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		return "", fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s)", clawName, clawID[:8], factory.Name, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},

@@ -238,7 +238,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
 				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
-				if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
+				if err := s.createClawForShortcutStory(factory, action, storyID, token, "shortcut webhook"); err != nil {
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
 				} else {
@@ -379,7 +379,7 @@ func (s *Server) shortcutStateName(token string, stateID int64) string {
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
-func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string) error {
+func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string, reason string) error {
 	// Verify we can read the story before spending money on a sandbox.
 	// Non-negotiable: if the story is unreadable, we can't do any work.
 	if _, err := shortcutAPI(fmt.Sprintf("stories/%s", storyID), token); err != nil {
@@ -603,7 +603,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s)", clawName, clawID[:8], storyID, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
