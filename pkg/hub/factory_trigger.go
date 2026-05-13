@@ -252,9 +252,12 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	// Create claw from factory with manual trigger inputs
 	clawID, err := s.createClawFromFactory(factory, "", validatedInputs, nil)
 	if err != nil {
+		s.trackFactoryCreationFailure(factory.Name, "", err.Error())
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
 	}
+
+	s.trackFactoryCreationSuccess(factory.Name, "", clawID)
 
 	jsonOK(w, map[string]string{
 		"claw_id": clawID,

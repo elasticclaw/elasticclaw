@@ -241,10 +241,12 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
+					s.trackFactoryCreationFailure(factory.Name, storyID, err.Error())
 				} else {
 					var clawID string
 					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
+					s.trackFactoryCreationSuccess(factory.Name, storyID, clawID)
 				}
 			}
 

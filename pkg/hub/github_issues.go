@@ -420,10 +420,12 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			if err := s.createClawForGitHubIssue(factory, payload); err != nil {
 				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
+				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
 				log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
+				s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
 			}
 		} else if triggerMatched && previousMatched {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — issue %s already in trigger '%s', no transition",
