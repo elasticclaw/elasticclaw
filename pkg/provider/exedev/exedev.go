@@ -48,13 +48,25 @@ type exeVMList struct {
 	VMs []exeVM `json:"vms"`
 }
 
-// sshArgs returns the base ssh arguments, including identity file if configured.
+// sshArgs returns the base ssh arguments for control-plane commands (ssh exe.dev ...),
+// including identity file if configured.
 func (p *Provider) sshArgs() []string {
 	var args []string
 	if p.sshKeyPath != "" {
 		args = append(args, "-i", p.sshKeyPath)
 	}
 	args = append(args, "exe.dev")
+	return args
+}
+
+// sshVMArgs returns SSH arguments for per-VM commands (ssh <host> ...),
+// including identity file and common options if configured.
+func (p *Provider) sshVMArgs(host string) []string {
+	var args []string
+	if p.sshKeyPath != "" {
+		args = append(args, "-i", p.sshKeyPath)
+	}
+	args = append(args, "-o", "StrictHostKeyChecking=no", host)
 	return args
 }
 
@@ -157,8 +169,9 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 		return nil, fmt.Errorf("exedev exec: cannot determine host for %s", instanceID)
 	}
 
-	sshCmd := fmt.Sprintf("ssh %s %s", host, shellQuote(cmdArgs))
-	cmd := exec.CommandContext(ctx, "bash", "-c", sshCmd)
+	args := p.sshVMArgs(host)
+	args = append(args, cmdArgs...)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &outBuf
@@ -274,6 +287,11 @@ func (p *Provider) vmHost(instanceID string) string {
 	return instanceID + ".exe.xyz"
 }
 
+// SSHKeyPath returns the configured SSH private key path (may be empty).
+func (p *Provider) SSHKeyPath() string {
+	return p.sshKeyPath
+}
+
 // extractVMName tries to extract a vm name from plain text output.
 func extractVMName(out string) string {
 	lines := strings.Split(out, "\n")
@@ -308,14 +326,18 @@ func (p *Provider) WriteFile(ctx context.Context, instanceID string, path string
 		return fmt.Errorf("exedev writefile: cannot determine host for %s", instanceID)
 	}
 
+	args := p.sshVMArgs(host)
+
 	// Ensure parent directory exists
-	mkdirCmd := exec.CommandContext(ctx, "ssh", host, "mkdir", "-p", filepath.Dir(path))
+	mkdirArgs := append(args, "mkdir", "-p", filepath.Dir(path))
+	mkdirCmd := exec.CommandContext(ctx, "ssh", mkdirArgs...)
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("exedev writefile mkdir %s: %w (out: %s)", path, err, string(out))
 	}
 
 	// Pipe raw content via stdin to cat on the remote — no escaping needed
-	cmd := exec.CommandContext(ctx, "ssh", host, "cat", ">", path)
+	catArgs := append(args, "cat", ">", path)
+	cmd := exec.CommandContext(ctx, "ssh", catArgs...)
 	cmd.Stdin = bytes.NewReader(content)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -331,8 +353,11 @@ func (p *Provider) SetupScript(ctx context.Context, instanceID string, script st
 		return fmt.Errorf("exedev setup: cannot determine host for %s", instanceID)
 	}
 
+	args := p.sshVMArgs(host)
+	args = append(args, "bash", "-s")
+
 	// Pipe script via stdin to bash on the remote
-	cmd := exec.CommandContext(ctx, "ssh", host, "bash", "-s")
+	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -2743,7 +2743,12 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	host := vmName + ".exe.xyz"
 	reachable := false
 	for i := 0; i < 30; i++ {
-		cmd := exec.CommandContext(ctx, "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", host, "echo ready")
+		sshArgs := []string{"-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no"}
+		if p.SSHKeyPath() != "" {
+			sshArgs = append(sshArgs, "-i", p.SSHKeyPath())
+		}
+		sshArgs = append(sshArgs, host, "echo ready")
+		cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 		if err := cmd.Run(); err == nil {
 			reachable = true
 			break
@@ -2754,8 +2759,8 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
 	}
 
-	// Write template files
-	workdir := "/home/exedev/workspace"
+	// Write template files — use ~/workspace so it works regardless of the VM's default user
+	workdir := "~/workspace"
 	_, _ = p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir})
 	for path, content := range files {
 		fullPath := workdir + "/" + path
@@ -2765,14 +2770,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	}
 
 	// Generate a random fallback token in case reading from disk fails
-	fallbackToken := make([]byte, 32)
-	if _, err := rand.Read(fallbackToken); err == nil {
-		// encode as hex string
-		for i := range fallbackToken {
-			fallbackToken[i] = 'a' + (fallbackToken[i] % 26)
-		}
-	}
-	fallbackTokenStr := string(fallbackToken)
+	fallbackTokenStr := randomHex(16)
 
 	// Install OpenClaw
 	installScript := fmt.Sprintf(`set -e
