@@ -619,6 +619,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
+  { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
@@ -632,6 +633,9 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2" },
     { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B" },
     { id: "fireworks/accounts/fireworks/models/deepseek-v3",                name: "DeepSeek V3" },
+  ],
+  codex: [
+    { id: "codex/o4-mini", name: "Codex o4-mini" },
   ],
 }
 
@@ -777,7 +781,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
-                    {k.provider === "anthropic" ? (
+                    {k.provider === "anthropic" || k.provider === "codex" ? (
                       <Sparkles className="size-4 text-muted-foreground" />
                     ) : (
                       <Zap className="size-4 text-muted-foreground" />
