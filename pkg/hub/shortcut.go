@@ -414,20 +414,22 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
 
 	// Enforce 1:1 — check if a claw already exists for this story.
-	// If the claw is offline, error, or stopped, delete and recreate it since
-	// the underlying sandbox is gone. Only skip if it's actively starting,
-	// running, or connected.
+	// Skip if actively starting, running, connected, provisioning, or pending —
+	// the claw is being created and we must not race another webhook or trigger.
+	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
 	var existingID, existingStatus string
 	_ = s.db.QueryRow(
 		`SELECT id, status FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		storyID,
 	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
-		if existingStatus == "starting" || existingStatus == "connected" || existingStatus == "running" {
+		switch existingStatus {
+		case "starting", "connected", "running", "provisioning", "pending":
 			return fmt.Errorf("claw %s already exists for story %s (status=%s)", existingID[:8], storyID, existingStatus)
+		default:
+			log.Printf("[factory:%s] claw %s exists for story %s but status=%s, deleting and recreating", factory.Name, existingID[:8], storyID, existingStatus)
+			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 		}
-		log.Printf("[factory:%s] claw %s exists for story %s but status=%s, deleting and recreating", factory.Name, existingID[:8], storyID, existingStatus)
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 	}
 
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
