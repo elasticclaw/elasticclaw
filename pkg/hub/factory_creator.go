@@ -339,6 +339,20 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		shortcutStoryID = issueID
 	}
 
+	// For manual triggers, issueID is empty but inputs may contain the issue ID.
+	// Populate DB columns from inputs so findFactoryForClaw can resolve the issue.
+	if issueID == "" && inputs != nil {
+		if v := inputs["linear_issue_id"]; v != "" {
+			linearIssueID = v
+		}
+		if v := inputs["github_issue_id"]; v != "" {
+			githubIssueID = v
+		}
+		if v := inputs["shortcut_story_id"]; v != "" {
+			shortcutStoryID = v
+		}
+	}
+
 	_, err = s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, auto_fix_greptile, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
