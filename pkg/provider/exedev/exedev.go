@@ -202,7 +202,7 @@ func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.Conne
 	return &types.ConnectInfo{
 		Shell: &types.ShellConnect{
 			Command: "ssh",
-			Args:    []string{host},
+			Args:    p.sshVMArgs(host),
 		},
 	}, nil
 }
