@@ -137,6 +137,10 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 	p, err := pipeline.Parse([]byte(factory.PipelineYAML))
 	if err != nil {
 		log.Printf("[pipeline] factory %q: failed to parse pipeline_yaml: %v", factory.Name, err)
+		log.Printf("[pipeline] factory %q: pipeline_yaml content:\n%s", factory.Name, factory.PipelineYAML)
+		// NOTE: pipeline YAML may contain secrets in inject blocks. This log is
+		// only emitted on parse failure (not routine operation) to aid debugging.
+		// Audit your log aggregator retention policy if this is a concern.
 		return nil
 	}
 	return p
