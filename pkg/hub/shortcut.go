@@ -370,12 +370,23 @@ func (s *Server) shortcutStateName(token string, stateID int64) string {
 	if stateID == 0 {
 		return ""
 	}
-	data, err := shortcutAPI(fmt.Sprintf("workflow-states/%d", stateID), token)
+	resp, err := shortcutAPIList("workflows", token)
 	if err != nil {
 		return strconv.FormatInt(stateID, 10)
 	}
-	name, _ := data["name"].(string)
-	return name
+	for _, wf := range resp {
+		workflow, _ := wf.(map[string]interface{})
+		states, _ := workflow["states"].([]interface{})
+		for _, st := range states {
+			state, _ := st.(map[string]interface{})
+			idF, _ := state["id"].(float64)
+			if int64(idF) == stateID {
+				name, _ := state["name"].(string)
+				return name
+			}
+		}
+	}
+	return strconv.FormatInt(stateID, 10)
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
