@@ -116,14 +116,19 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
-	var summaries []AnalyticsSummary
+	var factoryNames []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			continue
 		}
+		factoryNames = append(factoryNames, name)
+	}
+	rows.Close()
+
+	var summaries []AnalyticsSummary
+	for _, name := range factoryNames {
 		summary, err := s.computeFactoryAnalytics(name, since)
 		if err != nil {
 			continue
@@ -277,20 +282,4 @@ func (s *Server) trackDoneSignal(factoryName, issueID, clawID string, prCount in
 	s.logFactoryAnalytics(factoryName, issueID, clawID, "done_signal", fmt.Sprintf("prs=%d", prCount), "success")
 }
 
-// getFactoryNameForClaw returns the factory name associated with a claw.
-func (s *Server) getFactoryNameForClaw(clawID string) string {
-	var factoryName string
-	_ = s.db.QueryRow(`SELECT factory_name FROM claws WHERE id = ?`, clawID).Scan(&factoryName)
-	return factoryName
-}
 
-// getIssueIDForClaw returns the issue ID associated with a claw.
-func (s *Server) getIssueIDForClaw(clawID string) string {
-	var issueID string
-	_ = s.db.QueryRow(
-		`SELECT COALESCE(NULLIF(linear_issue_id,''), NULLIF(github_issue_id,''), NULLIF(shortcut_story_id,'')) 
-		 FROM claws WHERE id = ?`,
-		clawID,
-	).Scan(&issueID)
-	return issueID
-}

@@ -3749,6 +3749,7 @@ function AnalyticsSection() {
                                 event.action === "claw_terminated" && "bg-orange-500/20 text-orange-400",
                                 event.action === "pr_opened" && "bg-blue-500/20 text-blue-400",
                                 event.action === "pr_merged" && "bg-purple-500/20 text-purple-400",
+                                event.action === "pr_closed" && "bg-red-500/20 text-red-400",
                                 event.action === "done_signal" && "bg-emerald-500/20 text-emerald-400",
                               )}>
                                 {event.action}

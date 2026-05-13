@@ -246,7 +246,9 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 					var clawID string
 					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
-					s.trackFactoryCreationSuccess(factory.Name, storyID, clawID)
+					if clawID != "" {
+						s.trackFactoryCreationSuccess(factory.Name, storyID, clawID)
+					}
 				}
 			}
 

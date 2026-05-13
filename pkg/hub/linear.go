@@ -274,7 +274,9 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 				// Look up the newly created claw ID
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_created", clawID, "")
-				s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				if clawID != "" {
+					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				}
 			}
 		}
 
@@ -857,10 +859,6 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 
 	// Track analytics for done signal
 	s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
-	// Track PR opens
-	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		s.trackPROpened(factory.Name, issueID, clawID, pr.repo, pr.number)
-	}
 
 	// Check if the pipeline handles the [DONE] signal
 	pipelineHandledDone := false
