@@ -152,7 +152,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 func Parse(yamlBytes []byte) (*Pipeline, error) {
 	var p Pipeline
 	if err := yaml.Unmarshal(yamlBytes, &p); err != nil {
-		return nil, fmt.Errorf("pipeline YAML parse error: %w\n\nHint: template expressions like {{.Issue.Identifier}} must be quoted when used as inline values (e.g. issue_id: \"{{.Issue.Identifier}}\"). Literal blocks (inject: |) do not need quoting.", err)
+		return nil, fmt.Errorf("pipeline YAML parse error: %w (hint: template expressions like {{.Issue.Identifier}} must be quoted when used as inline values, e.g. issue_id: \"{{.Issue.Identifier}}\"; literal blocks do not need quoting)", err)
 	}
 	return &p, nil
 }
