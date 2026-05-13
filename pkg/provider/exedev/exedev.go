@@ -186,10 +186,14 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 		}
 	}
 
-	return &types.ExecResult{
+	result := &types.ExecResult{
 		ExitCode: exitCode,
 		Stdout:   outBuf.String(),
-	}, nil
+	}
+	if exitCode != 0 {
+		return result, fmt.Errorf("exedev exec: remote command exited with code %d: %s", exitCode, outBuf.String())
+	}
+	return result, nil
 }
 
 // Connect returns SSH connection info.
