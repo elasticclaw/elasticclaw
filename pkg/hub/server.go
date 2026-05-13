@@ -12,6 +12,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	vercelProvider "github.com/elasticclaw/elasticclaw/pkg/provider/vercel"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -936,6 +938,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			provErr = s.provisionLocal(ctx, clawID, req, templateFiles, env)
 		case "replicated":
 			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		case "exedev":
+			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -2563,6 +2567,89 @@ func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.Cr
 		return fmt.Errorf("local create: %w", err)
 	}
 	log.Printf("local instance created: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
+	return nil
+}
+
+func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	p, err := newExedevProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("exedev init: %w", err)
+	}
+
+	createReq := types.CreateRequest{
+		Name:          req.ProviderName,
+		TemplateFiles: files,
+		Env:           env,
+	}
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("exedev create: %w", err)
+	}
+	log.Printf("exedev VM created: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
+
+	// Bootstrap asynchronously
+	go func() {
+		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
+			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %v", err), false)
+		}
+	}()
+
+	return nil
+}
+
+func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte) error {
+	log.Printf("[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
+
+	// Wait for VM to be reachable
+	host := vmName + ".exe.xyz"
+	for i := 0; i < 30; i++ {
+		cmd := exec.CommandContext(ctx, "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", host, "echo ready")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	// Write template files
+	workdir := "/home/daytona/workspace"
+	_, _ = p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir})
+	for path, content := range files {
+		fullPath := workdir + "/" + path
+		if err := p.WriteFile(ctx, vmName, fullPath, content); err != nil {
+			log.Printf("[exedev] warning: failed to write %s: %v", path, err)
+		}
+	}
+
+	// Install OpenClaw
+	installScript := `set -e
+npm install -g openclaw@2026.5.6 --ignore-scripts 2>&1 | tail -5
+openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
+openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
+sleep 8
+echo "OpenClaw ready"`
+	if _, err := p.Exec(ctx, vmName, []string{"bash", "-c", installScript}); err != nil {
+		return fmt.Errorf("openclaw install failed: %w", err)
+	}
+	log.Printf("[exedev] OpenClaw installed on %s", vmName)
+
+	// Install and start claw-bridge
+	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
+	}
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	bridgeScript := fmt.Sprintf(`curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
+echo "claw-bridge started"`, bridgeURL, s.clawHubURL(), clawID, clawToken)
+	if _, err := p.Exec(ctx, vmName, []string{"bash", "-c", bridgeScript}); err != nil {
+		return fmt.Errorf("claw-bridge install failed: %w", err)
+	}
+	log.Printf("[exedev] claw-bridge started on %s", vmName)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
 	return nil
 }

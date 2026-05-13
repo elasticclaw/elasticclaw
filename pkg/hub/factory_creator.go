@@ -395,6 +395,8 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "vercel":
 			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		case "exedev":
+			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
 		case "noop":
 			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
