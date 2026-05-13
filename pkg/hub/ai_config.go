@@ -495,11 +495,11 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		}
 	case "openai":
 		if openaiKey != "" {
-			return callOpenAI(openaiKey, systemPrompt, msgs)
+			return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
 		}
 	case "codex":
 		if codexKey != "" {
-			return callOpenAI(codexKey, systemPrompt, msgs)
+			return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
 		}
 	}
 
@@ -508,10 +508,10 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		return callAnthropic(anthropicKey, systemPrompt, msgs)
 	}
 	if openaiKey != "" {
-		return callOpenAI(openaiKey, systemPrompt, msgs)
+		return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
 	}
 	if codexKey != "" {
-		return callOpenAI(codexKey, systemPrompt, msgs)
+		return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
 	}
 
 	availableProviders := uniqueProviders(llmKeys)
@@ -559,11 +559,11 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		}
 	case "openai":
 		if openaiKey != "" {
-			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
+			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
 		}
 	case "codex":
 		if codexKey != "" {
-			return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken)
+			return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
 		}
 	}
 
@@ -572,10 +572,10 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
 	if openaiKey != "" {
-		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
+		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
 	}
 	if codexKey != "" {
-		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken)
+		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
 	}
 
 	// firstKey.Provider is neither "anthropic" nor "openai" nor "codex" (those paths already
@@ -681,7 +681,7 @@ func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []ai
 }
 
 // streamOpenAI calls OpenAI Chat Completions API with stream:true, forwarding delta.content.
-func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
+func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -697,7 +697,7 @@ func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiCha
 		openAIMsgs = append(openAIMsgs, openAIMsg{Role: m.Role, Content: m.Content})
 	}
 	body, _ := json.Marshal(openAIReq{
-		Model:    "gpt-4o",
+		Model:    model,
 		Messages: openAIMsgs,
 		Stream:   true,
 	})
@@ -829,7 +829,7 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, e
 	return "", fmt.Errorf("no text content in Anthropic response")
 }
 
-func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
+func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -854,7 +854,7 @@ func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage) (string, erro
 	}
 
 	body, _ := json.Marshal(openAIReq{
-		Model:    "gpt-4o",
+		Model:    model,
 		Messages: openAIMsgs,
 	})
 
