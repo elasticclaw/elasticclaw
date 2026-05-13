@@ -480,21 +480,23 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	// Enforce 1:1 — check if a claw already exists for this issue.
-	// If the claw is offline, error, or stopped, delete and recreate it since
-	// the underlying sandbox is gone. Only skip if it's actively starting,
-	// running, or connected.
+	// Skip if actively starting, running, connected, provisioning, or pending —
+	// the claw is being created and we must not race another webhook or trigger.
+	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
 	var existingID, existingStatus string
 	_ = s.db.QueryRow(
 		`SELECT id, status FROM claws WHERE github_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		issueID,
 	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
-		if existingStatus == "starting" || existingStatus == "connected" || existingStatus == "running" {
+		switch existingStatus {
+		case "starting", "connected", "running", "provisioning", "pending":
 			log.Printf("[factory:%s] claw %s already exists for issue %s (status=%s) — treating as idempotent success", factory.Name, existingID[:8], issueID, existingStatus)
 			return nil
+		default:
+			log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
+			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 		}
-		log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 	}
 
 	// Load template
