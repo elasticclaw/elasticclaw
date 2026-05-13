@@ -230,7 +230,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 
 		// No existing claw — create one (regardless of action, first event wins)
 		log.Printf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
-		if err := s.createClawForGitHubPR(factory, payload); err != nil {
+		if err := s.createClawForGitHubPR(factory, payload, "github-pr webhook"); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, payload.Number, err)
 			s.logFactoryEvent(factory.Name, fmt.Sprintf("%s#%d", repoFullName, payload.Number),
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
@@ -386,7 +386,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 			}
 		}
 		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
-		if err := s.createClawForGitHubPR(factory, prPayload); err != nil {
+		if err := s.createClawForGitHubPR(factory, prPayload, "github-pr webhook (issue_comment)"); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
 			continue // let next matching factory try
 		}
@@ -463,7 +463,7 @@ func (s *Server) findClawForGitHubPR(prURL string) string {
 	return clawID
 }
 
-func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload) error {
+func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload, reason string) error {
 	repoFullName := pr.Repository.FullName
 	prNumber := pr.Number
 	prURL := pr.PullRequest.HTMLURL
@@ -704,7 +704,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		fmt.Sprintf("%s#%d", repoFullName, prNumber),
 		pr.PullRequest.Title, "", pr.Action, "claw_created", clawID, "")
 
-	log.Printf("[factory] created claw %s (%s) for GitHub PR %s#%d (status=%s)", clawName, clawID[:8], repoFullName, prNumber, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for GitHub PR %s#%d (status=%s, reason=%s)", clawName, clawID[:8], repoFullName, prNumber, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},

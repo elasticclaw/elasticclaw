@@ -273,7 +273,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 
 		// Build synthetic webhook payload and create claw
 		payload := s.buildLinearPollPayload(issue)
-		if err := s.createClawForIssue(factory, payload); err != nil {
+		if err := s.createClawForIssue(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-linear] failed to create claw for %s: %v", entityID, err)
 		} else {
 			log.Printf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
@@ -471,7 +471,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			AppURL:      story.AppURL,
 			Description: story.Description,
 		}
-		if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
+		if err := s.createClawForShortcutStory(factory, action, storyID, token, "poll"); err != nil {
 			log.Printf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
 		} else {
 			log.Printf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
@@ -717,7 +717,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 		}
 
 		payload := s.buildGitHubIssuesPollPayload(issue, repo)
-		if err := s.createClawForGitHubIssue(factory, payload); err != nil {
+		if err := s.createClawForGitHubIssue(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
 		} else {
 			log.Printf("[poll-github-issues] created claw for %s via factory %s", issueID, factory.Name)
@@ -872,7 +872,7 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 		}
 
 		payload := s.buildGitHubPRPollPayload(pr, repo)
-		if err := s.createClawForGitHubPR(factory, payload); err != nil {
+		if err := s.createClawForGitHubPR(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-github-prs] failed to create claw for %s: %v", prID, err)
 		} else {
 			log.Printf("[poll-github-prs] created claw for %s via factory %s", prID, factory.Name)

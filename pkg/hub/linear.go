@@ -266,7 +266,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			matched = true
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
-			if err := s.createClawForIssue(factory, payload); err != nil {
+			if err := s.createClawForIssue(factory, payload, "linear webhook"); err != nil {
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
 			} else {
@@ -304,7 +304,7 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 	}
 }
 
-func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload) error {
+func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload, reason string) error {
 	issueID := payload.Data.Identifier
 
 	// Verify we can read the issue before spending money on a sandbox.
@@ -346,7 +346,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	templateFiles["CONTEXT.md"] = issueContext
 
 	// Create claw using shared factory creator, passing pre-built template files
-	clawID, err := s.createClawFromFactory(factory, issueID, nil, templateFiles)
+	clawID, err := s.createClawFromFactory(factory, issueID, nil, templateFiles, reason)
 	if err != nil {
 		return err
 	}

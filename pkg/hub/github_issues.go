@@ -417,7 +417,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			log.Printf("[github-issues-webhook] factory %q: ✓ CREATING CLAW — issue %s entered trigger '%s' (was not in trigger before)",
 				factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
-			if err := s.createClawForGitHubIssue(factory, payload); err != nil {
+			if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
 				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
 			} else {
@@ -462,7 +462,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	}
 }
 
-func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload) error {
+func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 
 	// Verify we can read the issue before spending money on a sandbox
@@ -739,7 +739,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s)", clawName, clawID[:8], issueID, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
