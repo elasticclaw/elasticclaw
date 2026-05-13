@@ -242,9 +242,10 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				stateMap = buildShortcutStateMap(token)
 				if len(stateMap) > 0 {
 					stateNameCache[token] = stateMap
-				} else {
-					log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
-				}
+			} else {
+				log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
+				continue
+			}
 			}
 			newStateName := stateMap[newStateID]
 			oldStateName := stateMap[oldStateID] // only fetched when needed for logging
