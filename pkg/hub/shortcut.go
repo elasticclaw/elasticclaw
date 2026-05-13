@@ -379,18 +379,7 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 	return ""
 }
 
-// shortcutStateName resolves a single state ID to its name. Used by the poller
-// where only one state is needed per story; delegates to buildShortcutStateMap.
-func (s *Server) shortcutStateName(token string, stateID int64) string {
-	if stateID == 0 {
-		return ""
-	}
-	m := buildShortcutStateMap(token)
-	if name, ok := m[stateID]; ok {
-		return name
-	}
-	return strconv.FormatInt(stateID, 10)
-}
+
 
 // buildShortcutStateMap fetches the full workflow list once and returns a map of
 // state ID → state name. Callers cache the result per token so a single webhook
