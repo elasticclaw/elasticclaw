@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,10 +50,11 @@ type exeVMList struct {
 
 // sshArgs returns the base ssh arguments, including identity file if configured.
 func (p *Provider) sshArgs() []string {
-	args := []string{"exe.dev"}
+	var args []string
 	if p.sshKeyPath != "" {
 		args = append(args, "-i", p.sshKeyPath)
 	}
+	args = append(args, "exe.dev")
 	return args
 }
 
@@ -298,19 +300,23 @@ func shellQuote(args []string) string {
 	return b.String()
 }
 
-// WriteFile writes content to a file inside the VM via SCP/SSH cat.
+// WriteFile writes content to a file inside the VM via SSH + cat.
+// Pipes raw bytes through stdin to avoid shell escaping issues with binary data.
 func (p *Provider) WriteFile(ctx context.Context, instanceID string, path string, content []byte) error {
 	host := p.vmHost(instanceID)
 	if host == "" {
 		return fmt.Errorf("exedev writefile: cannot determine host for %s", instanceID)
 	}
 
-	// Use scp if available, otherwise fall back to ssh + base64
-	escaped := strings.ReplaceAll(string(content), "'", "'\"'\"'")
-	cmdStr := fmt.Sprintf("ssh %s 'mkdir -p $(dirname %s) && printf %%s %s > %s'",
-		host, shellQuote([]string{path}), shellQuote([]string{escaped}), shellQuote([]string{path}))
+	// Ensure parent directory exists
+	mkdirCmd := exec.CommandContext(ctx, "ssh", host, "mkdir", "-p", filepath.Dir(path))
+	if out, err := mkdirCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("exedev writefile mkdir %s: %w (out: %s)", path, err, string(out))
+	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", cmdStr)
+	// Pipe raw content via stdin to cat on the remote — no escaping needed
+	cmd := exec.CommandContext(ctx, "ssh", host, "cat", ">", path)
+	cmd.Stdin = bytes.NewReader(content)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("exedev writefile %s: %w (out: %s)", path, err, string(out))
