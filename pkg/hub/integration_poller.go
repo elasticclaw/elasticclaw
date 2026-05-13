@@ -352,6 +352,10 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		// Pre-fetch workflow states once per workspace so the poller loop does
 		// not repeat the full /workflows API call for every story.
 		stateNameMap := buildShortcutStateMap(sc.Token)
+		if len(stateNameMap) == 0 {
+			log.Printf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
+			continue
+		}
 		for _, story := range stories {
 			s.processShortcutPollItem(story, wsFactories, ws, sc.Token, stateNameMap)
 		}
