@@ -423,9 +423,14 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
-				log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
-				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
-				s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				if clawID != "" {
+					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
+					s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
+					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				} else {
+					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw for issue %s (claw ID not yet available)", factory.Name, issueID)
+					s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", "", "")
+				}
 			}
 		} else if triggerMatched && previousMatched {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — issue %s already in trigger '%s', no transition",

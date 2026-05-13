@@ -147,6 +147,7 @@ func (s *Server) computeFactoryAnalytics(factoryName, since string) (*AnalyticsS
 	summary := &AnalyticsSummary{
 		FactoryName:     factoryName,
 		ByTriggerStatus: make(map[string]int),
+		RecentEvents:    []AnalyticsEvent{},
 	}
 
 	// Count actions
