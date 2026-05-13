@@ -333,10 +333,19 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	var linearIssueID, githubIssueID, shortcutStoryID string
 	if factory.Integration == "linear" && issueID != "" {
 		linearIssueID = issueID
-	} else if factory.Integration == "github-issues" && issueID != "" {
+	} else if factory.Integration == "linear" && inputs != nil {
+		// Manual trigger: extract issue ID from inputs if available
+		linearIssueID = inputs["linear_issue_id"]
+	}
+	if factory.Integration == "github-issues" && issueID != "" {
 		githubIssueID = issueID
-	} else if factory.Integration == "shortcut" && issueID != "" {
+	} else if factory.Integration == "github-issues" && inputs != nil {
+		githubIssueID = inputs["github_issue_id"]
+	}
+	if factory.Integration == "shortcut" && issueID != "" {
 		shortcutStoryID = issueID
+	} else if factory.Integration == "shortcut" && inputs != nil {
+		shortcutStoryID = inputs["shortcut_story_id"]
 	}
 
 	_, err = s.db.Exec(`
