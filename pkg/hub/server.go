@@ -2716,7 +2716,6 @@ exit 1
 		return fmt.Errorf("claw-bridge install failed (exit %d): %s", code, out)
 	}
 	log.Printf("[vercel] claw-bridge started: %s", sandboxID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
 	return nil
 }
 
@@ -2859,7 +2858,6 @@ exit 1`, bridgeURL, s.clawHubURL(), clawID, clawToken)
 		return fmt.Errorf("claw-bridge install failed: %w", err)
 	}
 	log.Printf("[exedev] claw-bridge started on %s", vmName)
-	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
 	return nil
 }
 
