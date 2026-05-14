@@ -2795,7 +2795,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	// Install OpenClaw
 	installScript := fmt.Sprintf(`set -e
 set -o pipefail
-npm install -g openclaw@2026.5.6 --ignore-scripts 2>&1 | tail -5
+npm install -g openclaw@2026.5.12 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
 TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo %q)
 openclaw gateway run --port 18789 --auth password --password "$TOKEN" &
