@@ -417,13 +417,21 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			log.Printf("[github-issues-webhook] factory %q: ✓ CREATING CLAW — issue %s entered trigger '%s' (was not in trigger before)",
 				factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
-			if err := s.createClawForGitHubIssue(factory, payload); err != nil {
+			if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
 				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
+				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
-				log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
+				if clawID != "" {
+					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
+				} else {
+					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw for issue %s (claw ID not yet available)", factory.Name, issueID)
+				}
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
+				if clawID != "" {
+					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				}
 			}
 		} else if triggerMatched && previousMatched {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — issue %s already in trigger '%s', no transition",
@@ -462,7 +470,7 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	}
 }
 
-func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload) error {
+func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 
 	// Verify we can read the issue before spending money on a sandbox
@@ -480,21 +488,23 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	// Enforce 1:1 — check if a claw already exists for this issue.
-	// If the claw is offline, error, or stopped, delete and recreate it since
-	// the underlying sandbox is gone. Only skip if it's actively starting,
-	// running, or connected.
+	// Skip if actively starting, running, connected, provisioning, or pending —
+	// the claw is being created and we must not race another webhook or trigger.
+	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
 	var existingID, existingStatus string
 	_ = s.db.QueryRow(
 		`SELECT id, status FROM claws WHERE github_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		issueID,
 	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
-		if existingStatus == "starting" || existingStatus == "connected" || existingStatus == "running" {
+		switch existingStatus {
+		case "starting", "connected", "running", "provisioning", "pending":
 			log.Printf("[factory:%s] claw %s already exists for issue %s (status=%s) — treating as idempotent success", factory.Name, existingID[:8], issueID, existingStatus)
 			return nil
+		default:
+			log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
+			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 		}
-		log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 	}
 
 	// Load template
@@ -739,12 +749,37 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s)", clawName, clawID[:8], issueID, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
+
+	// Move the issue to WorkingStatus if configured (only if not pending —
+	// a queued claw hasn't actually started working yet)
+	if !isPending && factory.WorkingStatus != "" {
+		if ghToken != "" {
+			rest := strings.TrimPrefix(issueID, "gh-")
+			lastSlash := strings.LastIndex(rest, "/")
+			if lastSlash > 0 {
+				repo := rest[:lastSlash]
+				issueNumStr := rest[lastSlash+1:]
+				var issueNum int
+				if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+						log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
+					} else {
+						log.Printf("[factory] moved GitHub issue %s to working status '%s'", issueID, factory.WorkingStatus)
+					}
+				}
+			}
+		}
+	}
 
 	if isPending {
 		return nil
@@ -813,6 +848,27 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 		return
 	}
 	log.Printf("[factory] terminating claw %s for GitHub issue %s", clawID[:8], issueID)
+
+	// Post a comment on the linked GitHub issue before terminating
+	factory := s.findFactoryForIssue(issueID)
+	if factory != nil && issueID != "" && factory.Integration == "github-issues" {
+		parts := strings.Split(issueID, "/")
+		if len(parts) == 3 {
+			token := s.resolveGitHubIssuesTokenForFactory(factory)
+			if token != "" {
+				repo := parts[0] + "/" + parts[1]
+				var issueNum int
+				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+					if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: issue left trigger status"); err != nil {
+						log.Printf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
+					} else {
+						log.Printf("[factory] commented GitHub issue %s", issueID)
+					}
+				}
+			}
+		}
+	}
+
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
 		cc.conn.Close(1000, "factory: issue left trigger status")

@@ -468,8 +468,8 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
-	// Select provider
-	var anthropicKey, openaiKey string
+	// Select provider: prefer defaultModel provider, then fall back to first available
+	var anthropicKey, openaiKey, codexKey string
 	for _, k := range llmKeys {
 		if k.Provider == "anthropic" && anthropicKey == "" {
 			anthropicKey = k.APIKey
@@ -477,23 +477,48 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		if k.Provider == "openai" && openaiKey == "" {
 			openaiKey = k.APIKey
 		}
+		if k.Provider == "codex" && codexKey == "" {
+			codexKey = k.APIKey
+		}
 	}
 
+	if len(llmKeys) == 0 {
+		return "", fmt.Errorf("no LLM keys configured")
+	}
+
+	// Try defaultModel provider first
+	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+	switch defaultProvider {
+	case "anthropic":
+		if anthropicKey != "" {
+			return callAnthropic(anthropicKey, systemPrompt, msgs)
+		}
+	case "openai":
+		if openaiKey != "" {
+			return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
+		}
+	case "codex":
+		if codexKey != "" {
+			return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
+		}
+	}
+
+	// Fall back to hard-coded priority
 	if anthropicKey != "" {
 		return callAnthropic(anthropicKey, systemPrompt, msgs)
 	}
 	if openaiKey != "" {
-		return callOpenAI(openaiKey, systemPrompt, msgs)
+		return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
 	}
-	if len(llmKeys) == 0 {
-		return "", fmt.Errorf("no LLM keys configured")
+	if codexKey != "" {
+		return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
 	}
-	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+
 	availableProviders := uniqueProviders(llmKeys)
 	if defaultProvider != "" {
-		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
+		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
 	}
-	return "", fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai; configured: %s)", strings.Join(availableProviders, ", "))
+	return "", fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex; configured: %s)", strings.Join(availableProviders, ", "))
 }
 
 // callLLMForConfigStream selects the best available provider and streams tokens via onToken.
@@ -504,7 +529,7 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
-	var anthropicKey, openaiKey string
+	var anthropicKey, openaiKey, codexKey string
 	var firstKey *types.LLMKeyConfig
 	for _, k := range llmKeys {
 		if firstKey == nil {
@@ -516,26 +541,51 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		if k.Provider == "openai" && openaiKey == "" {
 			openaiKey = k.APIKey
 		}
+		if k.Provider == "codex" && codexKey == "" {
+			codexKey = k.APIKey
+		}
 	}
 
+	if firstKey == nil {
+		return fmt.Errorf("no LLM keys configured")
+	}
+
+	// Try defaultModel provider first
+	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
+	switch defaultProvider {
+	case "anthropic":
+		if anthropicKey != "" {
+			return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
+		}
+	case "openai":
+		if openaiKey != "" {
+			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
+		}
+	case "codex":
+		if codexKey != "" {
+			return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
+		}
+	}
+
+	// Fall back to hard-coded priority
 	if anthropicKey != "" {
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
 	if openaiKey != "" {
-		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken)
+		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
 	}
-	if firstKey != nil {
-		// firstKey.Provider is neither "anthropic" nor "openai" (those paths already
-		// returned above). Fall back to blocking call for unsupported providers.
-		reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
-		if err != nil {
-			return err
-		}
-		onToken(reply)
-		return nil
+	if codexKey != "" {
+		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
 	}
-	_ = defaultModel
-	return fmt.Errorf("no LLM keys configured")
+
+	// firstKey.Provider is neither "anthropic" nor "openai" nor "codex" (those paths already
+	// returned above). Fall back to blocking call for unsupported providers.
+	reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
+	if err != nil {
+		return err
+	}
+	onToken(reply)
+	return nil
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
@@ -631,7 +681,7 @@ func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []ai
 }
 
 // streamOpenAI calls OpenAI Chat Completions API with stream:true, forwarding delta.content.
-func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
+func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -647,7 +697,7 @@ func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiCha
 		openAIMsgs = append(openAIMsgs, openAIMsg{Role: m.Role, Content: m.Content})
 	}
 	body, _ := json.Marshal(openAIReq{
-		Model:    "gpt-4o",
+		Model:    model,
 		Messages: openAIMsgs,
 		Stream:   true,
 	})
@@ -779,7 +829,7 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, e
 	return "", fmt.Errorf("no text content in Anthropic response")
 }
 
-func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
+func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -804,7 +854,7 @@ func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage) (string, erro
 	}
 
 	body, _ := json.Marshal(openAIReq{
-		Model:    "gpt-4o",
+		Model:    model,
 		Messages: openAIMsgs,
 	})
 

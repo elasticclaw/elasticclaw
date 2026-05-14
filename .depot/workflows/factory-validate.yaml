@@ -31,6 +31,14 @@ jobs:
           path: .elasticclaw/factories/existing-pr
           dry-run: true
 
+      - name: Validate factory (design)
+        uses: elasticclaw/actions/publish-factory@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/factories/design
+          dry-run: true
+
       - name: Validate template
         uses: elasticclaw/actions/publish-template@main
         with:

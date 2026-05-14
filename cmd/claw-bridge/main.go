@@ -935,10 +935,10 @@ echo "Node: $(node --version)"
 	return runShell(script)
 }
 
-// installOpenClaw installs openclaw@2026.5.6 via npm.
+// installOpenClaw installs openclaw@2026.5.12 via npm.
 func installOpenClaw() error {
-	log.Printf("[bootstrap] installing openclaw@2026.5.6...")
-	if err := runShell("sudo npm install -g openclaw@2026.5.6 --ignore-scripts"); err != nil {
+	log.Printf("[bootstrap] installing openclaw@2026.5.12...")
+	if err := runShell("sudo npm install -g openclaw@2026.5.12 --ignore-scripts"); err != nil {
 		return fmt.Errorf("npm install openclaw: %w", err)
 	}
 	out, _ := exec.Command("openclaw", "--version").Output()
@@ -1433,6 +1433,9 @@ func main() {
 	}
 	log.Printf("[bridge] gateway session ready: %s", gwSession.sessionKey)
 
+	// Start status channel goroutine (lightweight second WS to hub)
+	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
+
 	for {
 		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue); err != nil {
 			if ctx.Err() != nil {
@@ -1449,6 +1452,110 @@ func main() {
 				return
 			case <-time.After(5 * time.Second):
 			}
+		}
+	}
+}
+
+// runStatusChannel maintains a lightweight second WebSocket to the hub for
+// watchdog / health pings. It replies to status_ping with status_pong.
+func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName, token string) {
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+			HTTPHeader: http.Header{
+				"User-Agent":                 {"claw-bridge/1.0"},
+				"ngrok-skip-browser-warning": {"true"},
+			},
+		})
+		if err != nil {
+			log.Printf("[status] dial failed: %v — retry in %v", err, backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+		}
+		backoff = time.Second
+		conn.SetReadLimit(1 << 20) // 1MB
+
+		reg := hubMsg{
+			Type: "register",
+			Payload: mustJSON(map[string]interface{}{
+				"claw_id":  clawID,
+				"name":     clawName,
+				"template": templateName,
+				"token":    token,
+				"channel":  "status",
+			}),
+		}
+		if err := wsjson.Write(ctx, conn, reg); err != nil {
+			conn.CloseNow()
+			log.Printf("[status] register failed: %v — retry", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		var ack hubMsg
+		if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
+			conn.CloseNow()
+			log.Printf("[status] register ack failed: %v — retry", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		log.Printf("[status] connected")
+
+		// Start a background goroutine to send WebSocket ping frames every 30s.
+		// This keeps the connection alive at the TCP/WebSocket layer, preventing
+		// proxies and the nhooyr/websocket library from dropping the idle connection.
+		pingCtx, pingCancel := context.WithCancel(ctx)
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pingCtx.Done():
+					return
+				case <-ticker.C:
+					if err := conn.Ping(pingCtx); err != nil {
+						log.Printf("[status] ping failed: %v", err)
+						return
+					}
+				}
+			}
+		}()
+
+		// Read loop — reply to pings
+		for {
+			var msg hubMsg
+			if err := wsjson.Read(ctx, conn, &msg); err != nil {
+				log.Printf("[status] read error: %v — reconnecting", err)
+				break
+			}
+			if msg.Type == "status_ping" {
+				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
+			}
+		}
+		pingCancel()   // stop the ping goroutine before closing the connection
+		conn.CloseNow()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
 		}
 	}
 }

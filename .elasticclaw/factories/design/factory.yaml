@@ -1,0 +1,22 @@
+name: design
+integration: github-issues
+workspace: elasticclaw
+trigger_status: "needs-design"
+
+labels:
+  - needs-design
+
+allowed_labelers:
+  - marccampbell
+  - noahecampbell
+
+# Removing the `needs-design` label terminates the design claw.
+terminate_on_leave: true
+
+# Keep design work in its own concurrency bucket so it doesn't fight
+# regular implementation claws for slots.
+concurrency_group: design
+
+webhook_secret_ref: elasticclaw_webhook_secret
+
+template: elasticclaw

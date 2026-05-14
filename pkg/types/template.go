@@ -61,6 +61,8 @@ func (k *LLMKeyConfig) EnvVarName() string {
 		return "ANTHROPIC_API_KEY"
 	case "fireworks":
 		return "FIREWORKS_API_KEY"
+	case "codex":
+		return "CODEX_API_KEY"
 	default:
 		// Generic: PROVIDER_API_KEY uppercased
 		return strings.ToUpper(k.Provider) + "_API_KEY"
@@ -428,7 +430,9 @@ type FactoryConfig struct {
 	Workspace         string `yaml:"workspace,omitempty" json:"workspace,omitempty"` // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty" json:"team,omitempty"`     // Linear team key (e.g. "ELA")
 	TriggerStatus     string `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"` // entering this status → create claw
-	DoneStatus        string `yaml:"done_status,omitempty" json:"done_status,omitempty"`  // claw moves issue here when done
+	WorkingStatus     string `yaml:"working_status,omitempty" json:"working_status,omitempty"` // claw moves issue here when it starts working
+	FinishedStatus    string `yaml:"finished_status,omitempty" json:"finished_status,omitempty"` // claw moves issue here when it finishes working
+	DoneStatus        string `yaml:"done_status,omitempty" json:"done_status,omitempty"`  // claw moves issue here when done (PR merged)
 	TerminateOnLeave  bool   `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
 	Template          string `yaml:"template" json:"template"`           // template name (must be pushed to hub)
 	Provider          string `yaml:"provider,omitempty" json:"provider,omitempty"` // override the default provider for this factory

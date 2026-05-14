@@ -137,6 +137,10 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 	p, err := pipeline.Parse([]byte(factory.PipelineYAML))
 	if err != nil {
 		log.Printf("[pipeline] factory %q: failed to parse pipeline_yaml: %v", factory.Name, err)
+		log.Printf("[pipeline] factory %q: pipeline_yaml content:\n%s", factory.Name, factory.PipelineYAML)
+		// NOTE: pipeline YAML may contain secrets in inject blocks. This log is
+		// only emitted on parse failure (not routine operation) to aid debugging.
+		// Audit your log aggregator retention policy if this is a concern.
 		return nil
 	}
 	return p
@@ -147,8 +151,9 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 // - stage.OnEnter.Inject: injects a user message into the claw
 // - stage.OnEnter.MoveIssue: moves the Linear/Shortcut issue to the named status
 //
-// factory and issueID are required for MoveIssue; if either is nil/empty the
-// move is skipped silently.
+// factory is required for MoveIssue; if nil the move is skipped silently.
+// issueID is the default issue from the factory/webhook; it can be overridden
+// by MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
@@ -323,40 +328,114 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		}
 	}
 
-	if stage.OnEnter.MoveIssue == "" || factory == nil || issueID == "" {
+	targetStatus := stage.OnEnter.MoveIssue.Status
+	if targetStatus == "" || factory == nil {
 		return
 	}
 
-	targetStatus := stage.OnEnter.MoveIssue
+	// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
+	resolvedIssueID := issueID
+	if stage.OnEnter.MoveIssue.IssueID != "" {
+		resolvedIssueID = stage.OnEnter.MoveIssue.IssueID
+		// Support template syntax {{.Inputs.xxx}} for manual trigger inputs
+		if strings.Contains(resolvedIssueID, "{{.Inputs.") {
+			inputs := s.loadManualTriggerInputs(clawID)
+			if inputs != nil {
+				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+				if err == nil {
+					var buf bytes.Buffer
+					data := struct{ Inputs map[string]string }{Inputs: inputs}
+					if err := tmpl.Execute(&buf, data); err == nil {
+						resolvedIssueID = buf.String()
+					}
+				}
+			}
+		}
+		// Support template syntax {{.Issue.xxx}} for automatic triggers
+		if strings.Contains(resolvedIssueID, "{{.Issue.") {
+			var details *linearIssueDetails
+			if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
+				linearToken := s.resolveLinearTokenForFactory(factory)
+				if linearToken != "" {
+					d, err := s.fetchLinearIssueDetails(linearToken, issueID)
+					if err == nil && d != nil {
+						details = d
+					}
+				}
+			} else if strings.Contains(issueID, "/") {
+				ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+				if ghToken != "" {
+					parts := strings.Split(issueID, "/")
+					if len(parts) == 3 {
+						repo := parts[0] + "/" + parts[1]
+						var issueNum int
+						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+							base := s.githubBaseURL
+							if base == "" {
+								base = "https://api.github.com"
+							}
+							d, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+							if err == nil && d != nil {
+								var ghDetails githubIssueDetails = *d
+								tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+								if err == nil {
+									var buf bytes.Buffer
+									data := struct{ Issue *githubIssueDetails }{Issue: &ghDetails}
+									if err := tmpl.Execute(&buf, data); err == nil {
+										resolvedIssueID = buf.String()
+									}
+								}
+								goto issueResolved
+							}
+						}
+					}
+				}
+			}
+			if details != nil {
+				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
+				if err == nil {
+					var buf bytes.Buffer
+					data := struct{ Issue *linearIssueDetails }{Issue: details}
+					if err := tmpl.Execute(&buf, data); err == nil {
+						resolvedIssueID = buf.String()
+					}
+				}
+			}
+		}
+	}
+issueResolved:
+	if resolvedIssueID == "" {
+		return
+	}
 
-	if strings.HasPrefix(issueID, "sc-") {
+	if strings.HasPrefix(resolvedIssueID, "sc-") {
 		// Shortcut story
 		scToken := s.resolveShortcutToken(factory.Workspace)
 		if scToken == "" {
 			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := moveShortcutStory(scToken, issueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move story %s to %q: %v", issueID, targetStatus, err)
+		if err := moveShortcutStory(scToken, resolvedIssueID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move story %s to %q: %v", resolvedIssueID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved story %s to %q", issueID, targetStatus)
+			log.Printf("[pipeline] moved story %s to %q", resolvedIssueID, targetStatus)
 		}
-	} else if strings.Contains(issueID, "/") {
+	} else if strings.Contains(resolvedIssueID, "/") {
 		// GitHub issue (owner/repo/number format)
 		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 		if ghToken == "" {
 			log.Printf("[pipeline] factory %q: no GitHub token for move_issue, skipping", factory.Name)
 			return
 		}
-		parts := strings.Split(issueID, "/")
+		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) == 3 {
 			repo := parts[0] + "/" + parts[1]
 			var issueNum int
 			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 				if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
-					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", issueID, targetStatus, err)
+					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
 				} else {
-					log.Printf("[pipeline] moved GitHub issue %s to %q", issueID, targetStatus)
+					log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
 				}
 			}
 		}
@@ -367,10 +446,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			log.Printf("[pipeline] factory %q: no Linear token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move issue %s to %q: %v", issueID, targetStatus, err)
+		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved issue %s to %q", issueID, targetStatus)
+			log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
 		}
 	}
 }
@@ -534,14 +613,16 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID, githubIssueID, tagsJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &tagsJSON); err != nil {
+	var issueID, githubIssueID, shortcutStoryID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &tagsJSON); err != nil {
 		return nil, ""
 	}
 
-	// Prefer github_issue_id for GitHub issue-based claws
+	// Prefer github_issue_id for GitHub issue-based claws, then shortcut
 	if githubIssueID != "" {
 		issueID = githubIssueID
+	} else if shortcutStoryID != "" {
+		issueID = shortcutStoryID
 	}
 
 	if issueID != "" {

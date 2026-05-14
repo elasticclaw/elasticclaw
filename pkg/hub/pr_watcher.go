@@ -49,11 +49,18 @@ func extractPRs(content string) []struct {
 }
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
+// Also tracks analytics for the first detection of a PR open.
 func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		return
+	}
+
+	// Track analytics: PR was opened (detected for the first time)
+	factory, issueID := s.findFactoryForClaw(clawID)
+	if factory != nil {
+		s.trackPROpened(factory.Name, issueID, clawID, repo, prNumber)
 	}
 
 	// Get the current max comment ID and head SHA to avoid flooding with historical data
@@ -636,6 +643,62 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 		})
 	}
 
+	// If this is a user/hub message injection (not a claw response), move the issue
+	// to WorkingStatus if the claw was idle (watching for PR events).
+	// Only move if the message was actually delivered to the agent (ok=true).
+	if ok && (role == "user" || role == "hub") {
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus == "idle" {
+			// Find the factory and issue for this claw
+			factory, issueID := s.findFactoryForClaw(clawID)
+			if factory != nil && factory.WorkingStatus != "" && issueID != "" {
+				if strings.HasPrefix(issueID, "sc-") {
+					scToken := s.resolveShortcutToken(factory.Workspace)
+					if scToken != "" {
+						if err := moveShortcutStory(scToken, issueID, factory.WorkingStatus); err != nil {
+							log.Printf("[factory] failed to move story %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+						} else {
+							log.Printf("[factory] moved story %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+						}
+					}
+				} else if strings.HasPrefix(issueID, "gh-") {
+					ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+					if ghToken != "" {
+						rest := strings.TrimPrefix(issueID, "gh-")
+						lastSlash := strings.LastIndex(rest, "/")
+						if lastSlash > 0 {
+							repo := rest[:lastSlash]
+							issueNumStr := rest[lastSlash+1:]
+							var issueNum int
+							if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+								base := s.githubBaseURL
+								if base == "" {
+									base = "https://api.github.com"
+								}
+								if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+									log.Printf("[factory] failed to move GitHub issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+								} else {
+									log.Printf("[factory] moved GitHub issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+								}
+							}
+						}
+					}
+				} else {
+					// Linear issue
+					linearToken := s.resolveLinearTokenForFactory(factory)
+					if linearToken != "" {
+						if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
+							log.Printf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+						} else {
+							log.Printf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Broadcast to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type: "message",
@@ -862,8 +925,13 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
-		// Check if the pipeline handles pr_closed (run on_enter before stopping)
+		// Track analytics for PR close
 		factory, issueID := s.findFactoryForClaw(clawID)
+		if factory != nil {
+			s.trackPRClosed(factory.Name, issueID, clawID, pr.repo, pr.prNumber)
+		}
+
+		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		pipelineHandled := false
 		if factory != nil {
 			if pl := parsePipelineForFactory(factory); pl != nil {
@@ -885,8 +953,13 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
-	// Check if the pipeline handles pr_merged (run on_enter before terminating)
+	// Track analytics for PR merge
 	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
+	if mergeFactory != nil {
+		s.trackPRMerged(mergeFactory.Name, mergeIssueID, clawID, pr.repo, pr.prNumber)
+	}
+
+	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	pipelineHandled := false
 	if mergeFactory != nil {
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
@@ -894,6 +967,53 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
 				if stage.Terminal {
 					pipelineHandled = true
+				}
+			}
+		}
+	}
+
+	// Move the issue to DoneStatus if configured (final status after PR merge)
+	// Skip if pipeline already handled it (mirrors handleClawDoneSignal pattern)
+	if !pipelineHandled && mergeFactory != nil && mergeFactory.DoneStatus != "" {
+		if strings.HasPrefix(mergeIssueID, "sc-") {
+			scToken := s.resolveShortcutToken(mergeFactory.Workspace)
+			if scToken != "" {
+				if err := moveShortcutStory(scToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move story %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved story %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+				}
+			}
+		} else if strings.HasPrefix(mergeIssueID, "gh-") {
+			ghToken := s.resolveGitHubIssuesTokenForFactory(mergeFactory)
+			if ghToken != "" {
+				rest := strings.TrimPrefix(mergeIssueID, "gh-")
+				lastSlash := strings.LastIndex(rest, "/")
+				if lastSlash > 0 {
+					repo := rest[:lastSlash]
+					issueNumStr := rest[lastSlash+1:]
+					var issueNum int
+					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						if err := moveGitHubIssue(ghToken, repo, issueNum, mergeFactory.DoneStatus, base); err != nil {
+							log.Printf("[factory] failed to move GitHub issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+						} else {
+							log.Printf("[factory] moved GitHub issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+						}
+					}
+				}
+			}
+		} else {
+			// Linear issue
+			linearToken := s.resolveLinearTokenForFactory(mergeFactory)
+			if linearToken != "" {
+				if err := s.moveLinearIssueOnServer(linearToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
 				}
 			}
 		}

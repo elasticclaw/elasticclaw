@@ -3,16 +3,16 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, BarChart3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "webhooks" | "doctor"
+type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "webhooks" | "doctor" | "analytics"
 
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "webhooks", "doctor"]
+const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "webhooks", "doctor", "analytics"]
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -222,6 +222,10 @@ export default function SettingsSectionPage() {
     [
       { id: "ai-config", label: "Configure with AI", icon: Sparkles },
     ],
+    // Analytics
+    [
+      { id: "analytics", label: "Analytics", icon: BarChart3 },
+    ],
     // Diagnostics
     [
       { id: "doctor", label: "Doctor", icon: Stethoscope },
@@ -311,6 +315,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "doctor" && (
             <DoctorSection />
+          )}
+          {section === "analytics" && (
+            <AnalyticsSection />
           )}
         </main>
       </div>
@@ -631,6 +638,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
+  { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
@@ -644,6 +652,9 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2" },
     { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B" },
     { id: "fireworks/accounts/fireworks/models/deepseek-v3",                name: "DeepSeek V3" },
+  ],
+  codex: [
+    { id: "codex/o4-mini", name: "Codex o4-mini" },
   ],
 }
 
@@ -789,7 +800,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
-                    {k.provider === "anthropic" ? (
+                    {k.provider === "anthropic" || k.provider === "codex" ? (
                       <Sparkles className="size-4 text-muted-foreground" />
                     ) : (
                       <Zap className="size-4 text-muted-foreground" />
@@ -3548,6 +3559,249 @@ function DoctorSection() {
               ))}
             </div>
           )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Analytics Section ───────────────────────────────────────────────────────
+
+interface AnalyticsSummary {
+  factoryName: string
+  totalTriggers: number
+  successfulCreations: number
+  failedCreations: number
+  terminations: number
+  prOpened: number
+  prMerged: number
+  prClosed: number
+  doneSignals: number
+  errors: number
+  successRate: number
+  prMergeRate: number
+  byTriggerStatus: Record<string, number>
+  recentEvents: Array<{
+    id: string
+    factoryName: string
+    issueId: string
+    clawId: string
+    action: string
+    detail: string
+    result: string
+    createdAt: string
+  }>
+  computeError?: string
+}
+
+function AnalyticsSection() {
+  const [summaries, setSummaries] = useState<AnalyticsSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [days, setDays] = useState(30)
+  const [selectedFactory, setSelectedFactory] = useState<string | null>(null)
+  const [partialData, setPartialData] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    setPartialData(false)
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const res = await fetch(`${hubUrl}/api/analytics/factories?days=${days}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setPartialData(res.headers.get("X-Analytics-Partial") === "true")
+      const data = await res.json()
+      setSummaries(data || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load analytics")
+    } finally {
+      setLoading(false)
+    }
+  }, [days])
+
+  useEffect(() => { load() }, [load])
+
+  const totalTriggers = summaries.reduce((sum, s) => sum + s.totalTriggers, 0)
+  const totalSuccess = summaries.reduce((sum, s) => sum + s.successfulCreations, 0)
+  const totalFailed = summaries.reduce((sum, s) => sum + s.failedCreations, 0)
+  const totalPRsOpened = summaries.reduce((sum, s) => sum + s.prOpened, 0)
+  const totalPRsMerged = summaries.reduce((sum, s) => sum + s.prMerged, 0)
+  const overallSuccessRate = totalTriggers > 0 ? (totalSuccess / totalTriggers * 100).toFixed(1) : "0"
+  const overallMergeRate = totalPRsOpened > 0 ? (totalPRsMerged / totalPRsOpened * 100).toFixed(1) : "0"
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Factory Analytics</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Usage and success metrics for factories. Data is retained for up to 1 year.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-4">
+        <label className="text-sm text-muted-foreground">Time range:</label>
+        <select
+          value={days}
+          onChange={e => setDays(Number(e.target.value))}
+          className="h-8 rounded-md border border-border bg-background px-2 text-sm"
+        >
+          <option value={7}>Last 7 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+        </select>
+        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+          <RotateCcw className="size-3 mr-1" /> Refresh
+        </Button>
+      </div>
+
+      {error && <p className="text-sm text-red-500">{error}</p>}
+
+      {partialData && (
+        <div className="flex items-center gap-2 text-sm text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
+          <AlertTriangle className="size-4 shrink-0" />
+          Some factory data could not be loaded. Metrics shown may be incomplete.
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground">Loading analytics...</p>
+      ) : summaries.length === 0 ? (
+        <div className="border border-dashed border-border rounded-lg p-8 text-center">
+          <BarChart3 className="size-8 text-muted-foreground mx-auto mb-3" />
+          <p className="text-sm text-muted-foreground">No analytics data yet</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Factory activity will appear here once factories start creating claws.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Overall stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="border border-border rounded-lg p-4">
+              <p className="text-xs text-muted-foreground uppercase">Total Triggers</p>
+              <p className="text-2xl font-semibold mt-1">{totalTriggers}</p>
+            </div>
+            <div className="border border-border rounded-lg p-4">
+              <p className="text-xs text-muted-foreground uppercase">Success Rate</p>
+              <p className="text-2xl font-semibold mt-1">{overallSuccessRate}%</p>
+            </div>
+            <div className="border border-border rounded-lg p-4">
+              <p className="text-xs text-muted-foreground uppercase">PRs Opened</p>
+              <p className="text-2xl font-semibold mt-1">{totalPRsOpened}</p>
+            </div>
+            <div className="border border-border rounded-lg p-4">
+              <p className="text-xs text-muted-foreground uppercase">PR Merge Rate</p>
+              <p className="text-2xl font-semibold mt-1">{overallMergeRate}%</p>
+            </div>
+          </div>
+
+          {/* Per-factory breakdown */}
+          <div className="space-y-4">
+            <h3 className="text-sm font-medium">Per Factory</h3>
+            {summaries.map(summary => (
+              <div key={summary.factoryName} className="border border-border rounded-lg overflow-hidden">
+                <button
+                  onClick={() => setSelectedFactory(selectedFactory === summary.factoryName ? null : summary.factoryName)}
+                  className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors text-left"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium">{summary.factoryName}</p>
+                      {summary.computeError && (
+                        <span className="inline-flex items-center gap-1 text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">
+                          <AlertTriangle className="size-3" /> Error
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(1)}% success · {summary.prOpened} PRs · {summary.prMergeRate.toFixed(1)}% merge rate
+                    </p>
+                    {summary.computeError && (
+                      <p className="text-xs text-red-400 mt-1">{summary.computeError}</p>
+                    )}
+                  </div>
+                  <ArrowRight className={cn("size-4 transition-transform", selectedFactory === summary.factoryName ? "rotate-90" : "")} />
+                </button>
+
+                {selectedFactory === summary.factoryName && (
+                  <div className="border-t border-border p-4 space-y-4">
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">Created</p>
+                        <p className="text-lg font-semibold">{summary.successfulCreations}</p>
+                      </div>
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">Failed</p>
+                        <p className="text-lg font-semibold text-red-500">{summary.failedCreations}</p>
+                      </div>
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">Terminated</p>
+                        <p className="text-lg font-semibold">{summary.terminations}</p>
+                      </div>
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">PRs Opened</p>
+                        <p className="text-lg font-semibold">{summary.prOpened}</p>
+                      </div>
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">PRs Merged</p>
+                        <p className="text-lg font-semibold text-green-500">{summary.prMerged}</p>
+                      </div>
+                      <div className="bg-muted rounded-lg p-3">
+                        <p className="text-xs text-muted-foreground">PRs Closed</p>
+                        <p className="text-lg font-semibold text-orange-500">{summary.prClosed}</p>
+                      </div>
+                    </div>
+
+                    {Object.keys(summary.byTriggerStatus).length > 0 && (
+                      <div>
+                        <p className="text-xs font-medium mb-2">By Trigger Status</p>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(summary.byTriggerStatus).map(([status, count]) => (
+                            <span key={status} className="text-xs bg-muted px-2 py-1 rounded">
+                              {status}: {count}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {summary.recentEvents.length > 0 && (
+                      <div>
+                        <p className="text-xs font-medium mb-2">Recent Events</p>
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                          {summary.recentEvents.slice(0, 20).map(event => (
+                            <div key={event.id} className="flex items-center gap-2 text-xs p-2 rounded hover:bg-muted/50">
+                              <span className={cn(
+                                "px-1.5 py-0.5 rounded font-medium",
+                                event.action === "claw_created" && "bg-green-500/20 text-green-400",
+                                event.action === "error" && "bg-red-500/20 text-red-400",
+                                event.action === "claw_terminated" && "bg-orange-500/20 text-orange-400",
+                                event.action === "pr_opened" && "bg-blue-500/20 text-blue-400",
+                                event.action === "pr_merged" && "bg-purple-500/20 text-purple-400",
+                                event.action === "pr_closed" && "bg-red-500/20 text-red-400",
+                                event.action === "done_signal" && "bg-emerald-500/20 text-emerald-400",
+                              )}>
+                                {event.action}
+                              </span>
+                              <span className="text-muted-foreground">{event.issueId}</span>
+                              {event.detail && <span className="text-muted-foreground truncate">{event.detail}</span>}
+                              <span className="ml-auto text-muted-foreground/50">
+                                {new Date(event.createdAt).toLocaleDateString()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </>
       )}
     </div>
