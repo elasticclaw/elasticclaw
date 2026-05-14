@@ -2528,7 +2528,7 @@ gh auth status`
 			}
 			log.Printf("[daytona] verify gh auth done")
 
-			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
+			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; pwd; ls -la; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
 			for _, repo := range githubRepos {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
@@ -2537,18 +2537,19 @@ gh auth status`
 				}
 				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$GH_TOKEN@github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
 			}
+			cloneScript += "echo '--- clone done ---'; pwd; ls -la; "
 			if err := exec("clone repos", 2*time.Minute, cloneScript); err != nil {
 				return fmt.Errorf("clone repos: %w", err)
 			}
 			if len(githubRepos) > 0 {
-				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; echo '--- verify cwd ---'; pwd; ls -la; "
 				for _, repo := range githubRepos {
 					repoParts := strings.SplitN(repo.Repo, "/", 2)
 					repoName := repo.Repo
 					if len(repoParts) == 2 {
 						repoName = repoParts[1]
 					}
-					verifyCloneScript += fmt.Sprintf("[ -d %q/.git ] || exit 1; ", repoName)
+					verifyCloneScript += fmt.Sprintf("[ -d %q/.git ] || { echo 'MISSING: %q/.git'; exit 1; }; echo 'FOUND: %q/.git'; ", repoName, repoName, repoName)
 				}
 				if err := exec("verify cloned repos", 20*time.Second, verifyCloneScript); err != nil {
 					return fmt.Errorf("verify cloned repos: %w", err)
@@ -2562,8 +2563,11 @@ gh auth status`
 
 	// Start the bridge last so the first registration happens only after the
 	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
+	// The bridge (and therefore the agent) must run inside the workspace
+	// directory so that repo-relative paths resolve correctly.
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
+cd /home/daytona/.openclaw/workspace && \
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
