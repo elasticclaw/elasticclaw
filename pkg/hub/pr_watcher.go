@@ -637,8 +637,9 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 	}
 
 	// If this is a user/hub message injection (not a claw response), move the issue
-	// to WorkingStatus if the claw was idle (watching for PR events)
-	if role == "user" || role == "hub" {
+	// to WorkingStatus if the claw was idle (watching for PR events).
+	// Only move if the message was actually delivered to the agent (ok=true).
+	if ok && (role == "user" || role == "hub") {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "idle" {
