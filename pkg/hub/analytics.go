@@ -135,8 +135,10 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			hasErrors = true
 			summaries = append(summaries, AnalyticsSummary{
-				FactoryName:  name,
-				ComputeError: err.Error(),
+				FactoryName:     name,
+				ComputeError:    err.Error(),
+				ByTriggerStatus: make(map[string]int),
+				RecentEvents:    []AnalyticsEvent{},
 			})
 			continue
 		}
