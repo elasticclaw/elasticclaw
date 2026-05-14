@@ -645,12 +645,46 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 			// Find the factory and issue for this claw
 			factory, issueID := s.findFactoryForClaw(clawID)
 			if factory != nil && factory.WorkingStatus != "" && issueID != "" {
-				linearToken := s.resolveLinearTokenForFactory(factory)
-				if linearToken != "" {
-					if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
-						log.Printf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
-					} else {
-						log.Printf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+				if strings.HasPrefix(issueID, "sc-") {
+					scToken := s.resolveShortcutToken(factory.Workspace)
+					if scToken != "" {
+						if err := moveShortcutStory(scToken, issueID, factory.WorkingStatus); err != nil {
+							log.Printf("[factory] failed to move story %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+						} else {
+							log.Printf("[factory] moved story %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+						}
+					}
+				} else if strings.HasPrefix(issueID, "gh-") {
+					ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+					if ghToken != "" {
+						rest := strings.TrimPrefix(issueID, "gh-")
+						lastSlash := strings.LastIndex(rest, "/")
+						if lastSlash > 0 {
+							repo := rest[:lastSlash]
+							issueNumStr := rest[lastSlash+1:]
+							var issueNum int
+							if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+								base := s.githubBaseURL
+								if base == "" {
+									base = "https://api.github.com"
+								}
+								if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+									log.Printf("[factory] failed to move GitHub issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+								} else {
+									log.Printf("[factory] moved GitHub issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+								}
+							}
+						}
+					}
+				} else {
+					// Linear issue
+					linearToken := s.resolveLinearTokenForFactory(factory)
+					if linearToken != "" {
+						if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
+							log.Printf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+						} else {
+							log.Printf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+						}
 					}
 				}
 			}
