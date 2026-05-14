@@ -2684,7 +2684,9 @@ exit 1`, fallbackTokenStr)
 	s.mu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	bridgeScript := fmt.Sprintf(`curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
+	bridgeScript := fmt.Sprintf(`set -e
+set -o pipefail
+curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
 echo "claw-bridge started"`, bridgeURL, s.clawHubURL(), clawID, clawToken)
 	if err := p.SetupScript(ctx, vmName, bridgeScript); err != nil {
