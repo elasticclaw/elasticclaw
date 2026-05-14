@@ -955,7 +955,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 
 	// Move the issue to DoneStatus if configured (final status after PR merge)
-	if mergeFactory != nil && mergeFactory.DoneStatus != "" {
+	// Skip if pipeline already handled it (mirrors handleClawDoneSignal pattern)
+	if !pipelineHandled && mergeFactory != nil && mergeFactory.DoneStatus != "" {
 		if strings.HasPrefix(mergeIssueID, "sc-") {
 			scToken := s.resolveShortcutToken(mergeFactory.Workspace)
 			if scToken != "" {
