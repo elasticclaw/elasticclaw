@@ -2541,7 +2541,7 @@ gh auth status`
 				if len(repoParts) == 2 {
 					repoName = repoParts[1]
 				}
-				cloneScript += fmt.Sprintf("echo '[daytona] cloning %s into %s'; if [ ! -d %q ]; then git clone https://x-access-token:${GH_TOKEN}@github.com/%s %s 2>&1 | sed 's/${GH_TOKEN}/***REDACTED***/g' || { echo '[daytona] clone FAILED: %s'; exit 1; }; echo '[daytona] clone OK: %s'; else git -C %s pull --ff-only 2>&1 | sed 's/${GH_TOKEN}/***REDACTED***/g' || { echo '[daytona] pull FAILED: %s'; exit 1; }; echo '[daytona] pull OK: %s'; fi; ", repo.Repo, repoName, repoName, repo.Repo, repoName, repo.Repo, repo.Repo, repoName, repo.Repo, repo.Repo)
+				cloneScript += fmt.Sprintf("echo '[daytona] cloning %s into %s'; if [ ! -d %q ]; then git clone https://x-access-token:${GH_TOKEN}@github.com/%s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] clone FAILED: %s'; exit 1; }; echo '[daytona] clone OK: %s'; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] pull FAILED: %s'; exit 1; }; echo '[daytona] pull OK: %s'; fi; ", repo.Repo, repoName, repoName, repo.Repo, repoName, repo.Repo, repo.Repo, repoName, repo.Repo, repo.Repo)
 			}
 			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
 			if cloneErr != nil {
