@@ -19,7 +19,10 @@ import (
 // inputs is the validated map of user inputs for manual triggers; nil for webhooks.
 // prebuiltTemplateFiles is optional — when provided (e.g. from linear.go with CONTEXT.md
 // already injected), it skips template resolution. When nil, templates are resolved here.
-func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string) (string, error) {
+// reason is a human-readable string describing why the claw is being created
+// (e.g. "linear webhook", "manual trigger", "poll"). It is logged for debugging.
+// Returns the claw ID, whether it was queued as pending (concurrency limit), and any error.
+func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, bool, error) {
 	// Resolve template files (or use pre-built ones from caller)
 	var templateFiles map[string]string
 	var err error
@@ -28,7 +31,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	} else {
 		templateFiles, err = s.resolveTemplateFiles(factory.Template)
 		if err != nil {
-			return "", fmt.Errorf("template %q not found: %w", factory.Template, err)
+			return "", false, fmt.Errorf("template %q not found: %w", factory.Template, err)
 		}
 	}
 
@@ -74,21 +77,21 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		clawName = issueID
 	}
 	// For manual triggers without a name_pattern, generate a descriptive name
-	// using the first input value (e.g., "my-factory: fix login bug")
+	// using the first input value (e.g., "fix login bug")
 	if clawName == factory.Name && inputs != nil && len(factory.Inputs) > 0 {
 		// Use the first defined input's value as the descriptive part.
 		// factory.Inputs is an ordered slice, so this is deterministic even
 		// when inputs contains multiple keys (Go map iteration order is random).
 		firstKey := factory.Inputs[0].Name
 		if firstVal := inputs[firstKey]; firstVal != "" {
-			clawName = factory.Name + ": " + firstVal
+			clawName = firstVal
 		}
 	}
 
 	// Find tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
-		return "", fmt.Errorf("no tenant: %w", err)
+		return "", false, fmt.Errorf("no tenant: %w", err)
 	}
 
 	// Find provider: factory override > template config > hub default
@@ -102,7 +105,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		provider = s.defaultProvider()
 	}
 	if provider == "" {
-		return "", fmt.Errorf("no provider configured")
+		return "", false, fmt.Errorf("no provider configured")
 	}
 
 	// Build env vars
@@ -333,9 +336,11 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	var linearIssueID, githubIssueID, shortcutStoryID string
 	if factory.Integration == "linear" && issueID != "" {
 		linearIssueID = issueID
-	} else if factory.Integration == "github-issues" && issueID != "" {
+	}
+	if factory.Integration == "github-issues" && issueID != "" {
 		githubIssueID = issueID
-	} else if factory.Integration == "shortcut" && issueID != "" {
+	}
+	if factory.Integration == "shortcut" && issueID != "" {
 		shortcutStoryID = issueID
 	}
 
@@ -350,17 +355,17 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	s.promoteMu.Unlock()
 
 	if err != nil {
-		return "", fmt.Errorf("db insert: %w", err)
+		return "", false, fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s)", clawName, clawID[:8], factory.Name, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
 
 	if isPending {
-		return clawID, nil
+		return clawID, true, nil
 	}
 
 	// Provision asynchronously
@@ -411,7 +416,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		}
 	}()
 
-	return clawID, nil
+	return clawID, false, nil
 }
 
 // buildManualTriggerContext creates a CONTEXT.md for manually triggered claws.

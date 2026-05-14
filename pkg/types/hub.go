@@ -66,5 +66,6 @@ type RegisterPayload struct {
 	Template      string `json:"template"`
 	Token         string `json:"token"` // hub claw token for auth
 	GatewayReady  *bool  `json:"gateway_ready,omitempty"` // true once openclaw gateway session is established; nil means unknown (old bridge, assume ready)
+	Channel       string `json:"channel,omitempty"`       // "status" for status channel, empty for main
 }
 

@@ -140,6 +140,11 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 	factories := s.resolveFactories()
 
+	// Build a per-token state-name cache so we only fetch the workflow list once
+	// per Shortcut workspace across all actions in this payload. A webhook with K
+	// actions and N factories sharing one token produces a single API call.
+	stateNameCache := map[string]map[int64]string{}
+
 	for _, action := range payload.Actions {
 		if action.EntityType != "story" || action.Action != "update" {
 			continue
@@ -232,13 +237,23 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				}
 			}
 
-			newStateName := s.shortcutStateName(token, newStateID)
-			oldStateName := s.shortcutStateName(token, oldStateID) // only fetched when needed for logging
+			stateMap, ok := stateNameCache[token]
+			if !ok {
+				stateMap = buildShortcutStateMap(token)
+				if len(stateMap) > 0 {
+					stateNameCache[token] = stateMap
+			} else {
+				log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
+				continue
+			}
+			}
+			newStateName := stateMap[newStateID]
+			oldStateName := stateMap[oldStateID] // only fetched when needed for logging
 
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
 				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
-				if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
+				if err := s.createClawForShortcutStory(factory, action, storyID, token, "shortcut webhook"); err != nil {
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
 					s.trackFactoryCreationFailure(factory.Name, storyID, err.Error())
@@ -369,21 +384,32 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 	return ""
 }
 
-// shortcutStateName fetches the workflow state name for a given state ID.
-func (s *Server) shortcutStateName(token string, stateID int64) string {
-	if stateID == 0 {
-		return ""
-	}
-	data, err := shortcutAPI(fmt.Sprintf("workflow-states/%d", stateID), token)
+// buildShortcutStateMap fetches the full workflow list once and returns a map of
+// state ID → state name. Callers cache the result per token so a single webhook
+// event with N factories only hits the Shortcut API once per workspace.
+func buildShortcutStateMap(token string) map[int64]string {
+	m := map[int64]string{}
+	resp, err := shortcutAPIList("workflows", token)
 	if err != nil {
-		return strconv.FormatInt(stateID, 10)
+		return m
 	}
-	name, _ := data["name"].(string)
-	return name
+	for _, wf := range resp {
+		workflow, _ := wf.(map[string]interface{})
+		states, _ := workflow["states"].([]interface{})
+		for _, st := range states {
+			state, _ := st.(map[string]interface{})
+			idF, _ := state["id"].(float64)
+			name, _ := state["name"].(string)
+			if name != "" {
+				m[int64(idF)] = name
+			}
+		}
+	}
+	return m
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
-func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string) error {
+func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string, reason string) error {
 	// Verify we can read the story before spending money on a sandbox.
 	// Non-negotiable: if the story is unreadable, we can't do any work.
 	if _, err := shortcutAPI(fmt.Sprintf("stories/%s", storyID), token); err != nil {
@@ -392,20 +418,22 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
 
 	// Enforce 1:1 — check if a claw already exists for this story.
-	// If the claw is offline, error, or stopped, delete and recreate it since
-	// the underlying sandbox is gone. Only skip if it's actively starting,
-	// running, or connected.
+	// Skip if actively starting, running, connected, provisioning, or pending —
+	// the claw is being created and we must not race another webhook or trigger.
+	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
 	var existingID, existingStatus string
 	_ = s.db.QueryRow(
 		`SELECT id, status FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
 		storyID,
 	).Scan(&existingID, &existingStatus)
 	if existingID != "" {
-		if existingStatus == "starting" || existingStatus == "connected" || existingStatus == "running" {
+		switch existingStatus {
+		case "starting", "connected", "running", "provisioning", "pending":
 			return fmt.Errorf("claw %s already exists for story %s (status=%s)", existingID[:8], storyID, existingStatus)
+		default:
+			log.Printf("[factory:%s] claw %s exists for story %s but status=%s, deleting and recreating", factory.Name, existingID[:8], storyID, existingStatus)
+			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 		}
-		log.Printf("[factory:%s] claw %s exists for story %s but status=%s, deleting and recreating", factory.Name, existingID[:8], storyID, existingStatus)
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 	}
 
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
@@ -607,11 +635,23 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s)", clawName, clawID[:8], storyID, initialStatus)
+	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
+
+	// Move the story to WorkingStatus if configured (only if not pending —
+	// a queued claw hasn't actually started working yet)
+	if !isPending && factory.WorkingStatus != "" {
+		if token != "" {
+			if err := moveShortcutStory(token, storyID, factory.WorkingStatus); err != nil {
+				log.Printf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
+			} else {
+				log.Printf("[factory] moved story %s to working status '%s'", storyID, factory.WorkingStatus)
+			}
+		}
+	}
 
 	if isPending {
 		return nil

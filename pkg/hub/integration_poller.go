@@ -273,7 +273,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 
 		// Build synthetic webhook payload and create claw
 		payload := s.buildLinearPollPayload(issue)
-		if err := s.createClawForIssue(factory, payload); err != nil {
+		if err := s.createClawForIssue(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-linear] failed to create claw for %s: %v", entityID, err)
 			s.trackFactoryCreationFailure(factory.Name, entityID, err.Error())
 		} else {
@@ -355,8 +355,15 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 			continue
 		}
 
+		// Pre-fetch workflow states once per workspace so the poller loop does
+		// not repeat the full /workflows API call for every story.
+		stateNameMap := buildShortcutStateMap(sc.Token)
+		if len(stateNameMap) == 0 {
+			log.Printf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
+			continue
+		}
 		for _, story := range stories {
-			s.processShortcutPollItem(story, wsFactories, ws, sc.Token)
+			s.processShortcutPollItem(story, wsFactories, ws, sc.Token, stateNameMap)
 		}
 	}
 }
@@ -403,9 +410,9 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 	return result.Data, nil
 }
 
-func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string) {
+func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
 	storyID := fmt.Sprintf("sc-%d", story.ID)
-	currentStateName := s.shortcutStateName(token, story.WorkflowStateID)
+	currentStateName := stateNameMap[story.WorkflowStateID]
 	if currentStateName == "" {
 		currentStateName = strconv.FormatInt(story.WorkflowStateID, 10)
 	}
@@ -470,7 +477,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			AppURL:      story.AppURL,
 			Description: story.Description,
 		}
-		if err := s.createClawForShortcutStory(factory, action, storyID, token); err != nil {
+		if err := s.createClawForShortcutStory(factory, action, storyID, token, "poll"); err != nil {
 			log.Printf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
 		} else {
 			log.Printf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
@@ -716,7 +723,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 		}
 
 		payload := s.buildGitHubIssuesPollPayload(issue, repo)
-		if err := s.createClawForGitHubIssue(factory, payload); err != nil {
+		if err := s.createClawForGitHubIssue(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
 		} else {
 			log.Printf("[poll-github-issues] created claw for %s via factory %s", issueID, factory.Name)
@@ -871,7 +878,7 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 		}
 
 		payload := s.buildGitHubPRPollPayload(pr, repo)
-		if err := s.createClawForGitHubPR(factory, payload); err != nil {
+		if err := s.createClawForGitHubPR(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-github-prs] failed to create claw for %s: %v", prID, err)
 		} else {
 			log.Printf("[poll-github-prs] created claw for %s via factory %s", prID, factory.Name)
