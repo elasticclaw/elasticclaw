@@ -2892,8 +2892,12 @@ func (s *Server) checkClawStatus() {
 			cc.mu.Unlock()
 		}
 
-		// Context usage warning (>90%)
-		if contextUsage > 90 && !contextWarningSent {
+		// Context usage warning (>90%) — skip if a streaming turn is in progress
+		// so the heartbeat's more-urgent 95% in-streaming warning isn't suppressed.
+		cc.mu.RLock()
+		streaming := !cc.streamingStartedAt.IsZero()
+		cc.mu.RUnlock()
+		if contextUsage > 90 && !contextWarningSent && !streaming {
 			msg := fmt.Sprintf("⚠️ Claw %s is at %d%% context usage. It should wrap up soon or restart.", name, contextUsage)
 			log.Printf("[watchdog] %s", msg)
 			s.broadcastToUsers(tenantID, types.WSMessage{
