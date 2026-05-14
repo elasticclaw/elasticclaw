@@ -2647,22 +2647,35 @@ func (s *Server) bootstrapVercel(ctx context.Context, clawID, sandboxID string, 
 	if _, _, err := p.Exec(ctx, sandboxID, "mkdir -p "+workdir); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
 	}
+	var writeErrs []string
 	for path, content := range files {
 		fullPath := workdir + "/" + path
 		if err := p.WriteFile(ctx, sandboxID, fullPath, content); err != nil {
-			log.Printf("[vercel] warning: failed to write %s: %v", path, err)
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", path, err))
 		}
+	}
+	if len(writeErrs) > 0 {
+		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
 	}
 
 	// Install OpenClaw
-	installScript := `
+	fallbackToken := randomHex(16)
+	installScript := fmt.Sprintf(`
 set -e
 npm install -g openclaw@2026.5.12 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
-openclaw gateway run --port 18789 --auth password --password "$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo changeme)" &
-sleep 8
-echo "OpenClaw ready"
-`
+TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo %q)
+openclaw gateway run --port 18789 --auth password --password "$TOKEN" &
+for i in $(seq 1 30); do
+  if nc -z localhost 18789 2>/dev/null; then
+    echo "OpenClaw ready"
+    exit 0
+  fi
+  sleep 1
+done
+echo "gateway not ready" >&2
+exit 1
+`, fallbackToken)
 	out, code, err := p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(installScript, "'", "'\"'\"'")+"'")
 	if err != nil || code != 0 {
 		return fmt.Errorf("openclaw install failed (exit %d): %s", code, out)
@@ -2761,12 +2774,18 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	// Write template files — use ~/workspace so it works regardless of the VM's default user
 	workdir := "~/workspace"
-	_, _ = p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir})
+	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir}); err != nil {
+		return fmt.Errorf("create workdir: %w", err)
+	}
+	var writeErrs []string
 	for path, content := range files {
 		fullPath := workdir + "/" + path
 		if err := p.WriteFile(ctx, vmName, fullPath, content); err != nil {
-			log.Printf("[exedev] warning: failed to write %s: %v", path, err)
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", path, err))
 		}
+	}
+	if len(writeErrs) > 0 {
+		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
 	}
 
 	// Generate a random fallback token in case reading from disk fails
@@ -2779,8 +2798,15 @@ npm install -g openclaw@2026.5.6 --ignore-scripts 2>&1 | tail -5
 openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
 TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo %q)
 openclaw gateway run --port 18789 --auth password --password "$TOKEN" &
-sleep 8
-echo "OpenClaw ready"`, fallbackTokenStr)
+for i in $(seq 1 30); do
+  if nc -z localhost 18789 2>/dev/null; then
+    echo "OpenClaw ready"
+    exit 0
+  fi
+  sleep 1
+done
+echo "gateway not ready" >&2
+exit 1`, fallbackTokenStr)
 	if _, err := p.Exec(ctx, vmName, []string{"bash", "-c", installScript}); err != nil {
 		return fmt.Errorf("openclaw install failed: %w", err)
 	}
