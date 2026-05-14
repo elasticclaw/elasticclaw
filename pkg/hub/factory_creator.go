@@ -21,7 +21,8 @@ import (
 // already injected), it skips template resolution. When nil, templates are resolved here.
 // reason is a human-readable string describing why the claw is being created
 // (e.g. "linear webhook", "manual trigger", "poll"). It is logged for debugging.
-func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, error) {
+// Returns the claw ID, whether it was queued as pending (concurrency limit), and any error.
+func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, bool, error) {
 	// Resolve template files (or use pre-built ones from caller)
 	var templateFiles map[string]string
 	var err error
@@ -30,7 +31,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	} else {
 		templateFiles, err = s.resolveTemplateFiles(factory.Template)
 		if err != nil {
-			return "", fmt.Errorf("template %q not found: %w", factory.Template, err)
+			return "", false, fmt.Errorf("template %q not found: %w", factory.Template, err)
 		}
 	}
 
@@ -90,7 +91,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	// Find tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
-		return "", fmt.Errorf("no tenant: %w", err)
+		return "", false, fmt.Errorf("no tenant: %w", err)
 	}
 
 	// Find provider: factory override > template config > hub default
@@ -104,7 +105,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		provider = s.defaultProvider()
 	}
 	if provider == "" {
-		return "", fmt.Errorf("no provider configured")
+		return "", false, fmt.Errorf("no provider configured")
 	}
 
 	// Build env vars
@@ -354,7 +355,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	s.promoteMu.Unlock()
 
 	if err != nil {
-		return "", fmt.Errorf("db insert: %w", err)
+		return "", false, fmt.Errorf("db insert: %w", err)
 	}
 
 	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
@@ -364,7 +365,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	})
 
 	if isPending {
-		return clawID, nil
+		return clawID, true, nil
 	}
 
 	// Provision asynchronously
@@ -415,7 +416,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		}
 	}()
 
-	return clawID, nil
+	return clawID, false, nil
 }
 
 // buildManualTriggerContext creates a CONTEXT.md for manually triggered claws.

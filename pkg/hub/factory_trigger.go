@@ -250,7 +250,7 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create claw from factory with manual trigger inputs
-	clawID, err := s.createClawFromFactory(factory, "", validatedInputs, nil, "manual trigger")
+	clawID, _, err := s.createClawFromFactory(factory, "", validatedInputs, nil, "manual trigger")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
