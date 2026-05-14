@@ -2533,8 +2533,7 @@ gh auth status`
 				log.Printf("[daytona] repo[%d]: %s", i, repo.Repo)
 			}
 
-			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
-			cloneScript += "set +x; " // ensure xtrace is off before any credential-bearing commands
+			cloneScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
 			for _, repo := range githubRepos {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
