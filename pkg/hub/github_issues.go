@@ -748,6 +748,30 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
 
+	// Move the issue to WorkingStatus if configured
+	if factory.WorkingStatus != "" {
+		if ghToken != "" {
+			rest := strings.TrimPrefix(issueID, "gh-")
+			lastSlash := strings.LastIndex(rest, "/")
+			if lastSlash > 0 {
+				repo := rest[:lastSlash]
+				issueNumStr := rest[lastSlash+1:]
+				var issueNum int
+				if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+						log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
+					} else {
+						log.Printf("[factory] moved GitHub issue %s to working status '%s'", issueID, factory.WorkingStatus)
+					}
+				}
+			}
+		}
+	}
+
 	if isPending {
 		return nil
 	}
