@@ -2691,10 +2691,25 @@ exit 1
 	s.mu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	bridgeScript := fmt.Sprintf(`
+	bridgeScript := fmt.Sprintf(`set -e
+set -o pipefail
 curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
-echo "claw-bridge started"
+BRIDGE_PID=$!
+for i in $(seq 1 10); do
+  if grep -q "registered with hub" /tmp/claw-bridge.log 2>/dev/null; then
+    echo "claw-bridge started"
+    exit 0
+  fi
+  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
+    echo "claw-bridge exited early" >&2
+    cat /tmp/claw-bridge.log >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "claw-bridge startup timeout" >&2
+exit 1
 `, bridgeURL, s.clawHubURL(), clawID, clawToken)
 	out, code, err = p.Exec(ctx, sandboxID, "bash -c '"+strings.ReplaceAll(bridgeScript, "'", "'\"'\"'")+"'")
 	if err != nil || code != 0 {
@@ -2825,7 +2840,21 @@ exit 1`, fallbackTokenStr)
 set -o pipefail
 curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
-echo "claw-bridge started"`, bridgeURL, s.clawHubURL(), clawID, clawToken)
+BRIDGE_PID=$!
+for i in $(seq 1 10); do
+  if grep -q "registered with hub" /tmp/claw-bridge.log 2>/dev/null; then
+    echo "claw-bridge started"
+    exit 0
+  fi
+  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
+    echo "claw-bridge exited early" >&2
+    cat /tmp/claw-bridge.log >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "claw-bridge startup timeout" >&2
+exit 1`, bridgeURL, s.clawHubURL(), clawID, clawToken)
 	if err := p.SetupScript(ctx, vmName, bridgeScript); err != nil {
 		return fmt.Errorf("claw-bridge install failed: %w", err)
 	}
