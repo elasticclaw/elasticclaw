@@ -2562,8 +2562,12 @@ gh auth status`
 
 	// Start the bridge last so the first registration happens only after the
 	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
+	// The bridge (and therefore the agent) must run inside the workspace
+	// directory so that repo-relative paths resolve correctly.
 	startCmd := fmt.Sprintf(
 		`export HOME=/home/daytona; \
+mkdir -p /home/daytona/.openclaw/workspace && \
+cd /home/daytona/.openclaw/workspace && \
 ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
 setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
 echo started`,
