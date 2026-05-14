@@ -349,14 +349,15 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	templateFiles["CONTEXT.md"] = issueContext
 
 	// Create claw using shared factory creator, passing pre-built template files
-	clawID, err := s.createClawFromFactory(factory, issueID, nil, templateFiles, reason)
+	clawID, isPending, err := s.createClawFromFactory(factory, issueID, nil, templateFiles, reason)
 	if err != nil {
 		return err
 	}
 	log.Printf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
 
-	// Move the issue to WorkingStatus if configured
-	if factory.WorkingStatus != "" {
+	// Move the issue to WorkingStatus if configured (only if not pending —
+	// a queued claw hasn't actually started working yet)
+	if !isPending && factory.WorkingStatus != "" {
 		linearToken := s.resolveLinearTokenForFactory(factory)
 		if linearToken != "" {
 			if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
