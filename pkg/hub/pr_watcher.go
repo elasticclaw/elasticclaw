@@ -636,6 +636,27 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 		})
 	}
 
+	// If this is a user/hub message injection (not a claw response), move the issue
+	// to WorkingStatus if the claw was idle (watching for PR events)
+	if role == "user" || role == "hub" {
+		var currentStatus string
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		if currentStatus == "idle" {
+			// Find the factory and issue for this claw
+			factory, issueID := s.findFactoryForClaw(clawID)
+			if factory != nil && factory.WorkingStatus != "" && issueID != "" {
+				linearToken := s.resolveLinearTokenForFactory(factory)
+				if linearToken != "" {
+					if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
+						log.Printf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+					} else {
+						log.Printf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+					}
+				}
+			}
+		}
+	}
+
 	// Broadcast to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type: "message",
@@ -894,6 +915,52 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
 				if stage.Terminal {
 					pipelineHandled = true
+				}
+			}
+		}
+	}
+
+	// Move the issue to DoneStatus if configured (final status after PR merge)
+	if mergeFactory != nil && mergeFactory.DoneStatus != "" {
+		if strings.HasPrefix(mergeIssueID, "sc-") {
+			scToken := s.resolveShortcutToken(mergeFactory.Workspace)
+			if scToken != "" {
+				if err := moveShortcutStory(scToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move story %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved story %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+				}
+			}
+		} else if strings.HasPrefix(mergeIssueID, "gh-") {
+			ghToken := s.resolveGitHubIssuesTokenForFactory(mergeFactory)
+			if ghToken != "" {
+				rest := strings.TrimPrefix(mergeIssueID, "gh-")
+				lastSlash := strings.LastIndex(rest, "/")
+				if lastSlash > 0 {
+					repo := rest[:lastSlash]
+					issueNumStr := rest[lastSlash+1:]
+					var issueNum int
+					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						if err := moveGitHubIssue(ghToken, repo, issueNum, mergeFactory.DoneStatus, base); err != nil {
+							log.Printf("[factory] failed to move GitHub issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+						} else {
+							log.Printf("[factory] moved GitHub issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+						}
+					}
+				}
+			}
+		} else {
+			// Linear issue
+			linearToken := s.resolveLinearTokenForFactory(mergeFactory)
+			if linearToken != "" {
+				if err := s.moveLinearIssueOnServer(linearToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
+					log.Printf("[factory] failed to move issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+				} else {
+					log.Printf("[factory] moved issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
 				}
 			}
 		}
