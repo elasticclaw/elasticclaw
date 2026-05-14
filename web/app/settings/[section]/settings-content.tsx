@@ -3579,6 +3579,7 @@ interface AnalyticsSummary {
     result: string
     createdAt: string
   }>
+  computeError?: string
 }
 
 function AnalyticsSection() {
@@ -3587,10 +3588,12 @@ function AnalyticsSection() {
   const [error, setError] = useState("")
   const [days, setDays] = useState(30)
   const [selectedFactory, setSelectedFactory] = useState<string | null>(null)
+  const [partialData, setPartialData] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError("")
+    setPartialData(false)
     try {
       const hubUrl = getHubUrl()
       const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
@@ -3598,6 +3601,7 @@ function AnalyticsSection() {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) throw new Error(await res.text())
+      setPartialData(res.headers.get("X-Analytics-Partial") === "true")
       const data = await res.json()
       setSummaries(data || [])
     } catch (e) {
@@ -3644,6 +3648,13 @@ function AnalyticsSection() {
 
       {error && <p className="text-sm text-red-500">{error}</p>}
 
+      {partialData && (
+        <div className="flex items-center gap-2 text-sm text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
+          <AlertTriangle className="size-4 shrink-0" />
+          Some factory data could not be loaded. Metrics shown may be incomplete.
+        </div>
+      )}
+
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading analytics...</p>
       ) : summaries.length === 0 ? (
@@ -3685,11 +3696,21 @@ function AnalyticsSection() {
                   onClick={() => setSelectedFactory(selectedFactory === summary.factoryName ? null : summary.factoryName)}
                   className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors text-left"
                 >
-                  <div>
-                    <p className="font-medium">{summary.factoryName}</p>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium">{summary.factoryName}</p>
+                      {summary.computeError && (
+                        <span className="inline-flex items-center gap-1 text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">
+                          <AlertTriangle className="size-3" /> Error
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {summary.totalTriggers} triggers · {summary.successRate.toFixed(1)}% success · {summary.prOpened} PRs · {summary.prMergeRate.toFixed(1)}% merge rate
                     </p>
+                    {summary.computeError && (
+                      <p className="text-xs text-red-400 mt-1">{summary.computeError}</p>
+                    )}
                   </div>
                   <ArrowRight className={cn("size-4 transition-transform", selectedFactory === summary.factoryName ? "rotate-90" : "")} />
                 </button>
