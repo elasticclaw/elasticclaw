@@ -2528,18 +2528,31 @@ gh auth status`
 			}
 			log.Printf("[daytona] verify gh auth done")
 
+			log.Printf("[daytona] cloning %d repo(s) for claw %s", len(githubRepos), clawID)
+			for i, repo := range githubRepos {
+				log.Printf("[daytona] repo[%d]: %s", i, repo.Repo)
+			}
+
 			cloneScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; "
+			cloneScript += "set +x; " // ensure xtrace is off before any credential-bearing commands
 			for _, repo := range githubRepos {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
 				if len(repoParts) == 2 {
 					repoName = repoParts[1]
 				}
-				cloneScript += fmt.Sprintf("if [ ! -d %q ]; then git clone https://x-access-token:$GH_TOKEN@github.com/%s %s; else git -C %s pull --ff-only; fi; ", repoName, repo.Repo, repoName, repoName)
+				cloneScript += fmt.Sprintf("echo '[daytona] cloning %s into %s'; if [ ! -d %q ]; then git clone https://x-access-token:${GH_TOKEN}@github.com/%s %s 2>&1 | sed 's/${GH_TOKEN}/***REDACTED***/g' || { echo '[daytona] clone FAILED: %s'; exit 1; }; echo '[daytona] clone OK: %s'; else git -C %s pull --ff-only 2>&1 | sed 's/${GH_TOKEN}/***REDACTED***/g' || { echo '[daytona] pull FAILED: %s'; exit 1; }; echo '[daytona] pull OK: %s'; fi; ", repo.Repo, repoName, repoName, repo.Repo, repoName, repo.Repo, repo.Repo, repoName, repo.Repo, repo.Repo)
 			}
-			if err := exec("clone repos", 2*time.Minute, cloneScript); err != nil {
-				return fmt.Errorf("clone repos: %w", err)
+			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
+			if cloneErr != nil {
+				return fmt.Errorf("clone repos: %w", cloneErr)
 			}
+			log.Printf("[daytona] clone repos stdout: %s", cloneResult.Stdout)
+			if cloneResult.ExitCode != 0 {
+				return fmt.Errorf("clone repos failed (exit %d): %s", cloneResult.ExitCode, cloneResult.Stdout)
+			}
+			log.Printf("[daytona] clone repos done")
+
 			if len(githubRepos) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 				for _, repo := range githubRepos {
@@ -2548,11 +2561,17 @@ gh auth status`
 					if len(repoParts) == 2 {
 						repoName = repoParts[1]
 					}
-					verifyCloneScript += fmt.Sprintf("[ -d %q/.git ] || exit 1; ", repoName)
+					verifyCloneScript += fmt.Sprintf("echo '[daytona] verifying %s'; [ -d %q/.git ] || { echo '[daytona] verify FAILED: %s/.git missing'; exit 1; }; echo '[daytona] verify OK: %s'; ", repoName, repoName, repoName, repoName)
 				}
-				if err := exec("verify cloned repos", 20*time.Second, verifyCloneScript); err != nil {
-					return fmt.Errorf("verify cloned repos: %w", err)
+				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, 20*time.Second)
+				if verifyErr != nil {
+					return fmt.Errorf("verify cloned repos: %w", verifyErr)
 				}
+				log.Printf("[daytona] verify cloned repos stdout: %s", verifyResult.Stdout)
+				if verifyResult.ExitCode != 0 {
+					return fmt.Errorf("verify cloned repos failed (exit %d): %s", verifyResult.ExitCode, verifyResult.Stdout)
+				}
+				log.Printf("[daytona] verify cloned repos done")
 			}
 		}
 	}
