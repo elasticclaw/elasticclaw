@@ -126,6 +126,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
 	go srv.keepAliveDaytonaSandboxes()
+	go srv.pruneAnalytics()
 	srv.startPRWatcher()
 	srv.startIntegrationPoller()
 
@@ -2641,6 +2642,15 @@ func (s *Server) keepAliveDaytonaSandboxes() {
 	defer ticker.Stop()
 	for range ticker.C {
 		s.petDaytonaSandboxes()
+	}
+}
+
+// pruneAnalytics runs a daily cleanup of factory_analytics rows older than 1 year.
+func (s *Server) pruneAnalytics() {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		pruneFactoryAnalytics(s.db)
 	}
 }
 
