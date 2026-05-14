@@ -328,6 +328,7 @@ export default function SettingsSectionPage() {
 const SANDBOX_PROVIDER_OPTIONS = [
   { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
   { value: "daytona", label: "Daytona", description: "Development environment provider" },
+  { value: "exedev", label: "exe.dev", description: "Persistent VM provider with SSH access" },
 ]
 
 interface SandboxProviderView {
@@ -420,6 +421,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       if (formApiUrl) patch.apiUrl = formApiUrl
       if (formApiKey) patch.apiKey = formApiKey
       if (formDefaultSnapshot) patch.defaultSnapshot = formDefaultSnapshot
+    } else if (formProvider === "exedev") {
+      // exe.dev uses SSH key authentication; no API key needed in config
+      patch.enabled = true
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -596,6 +600,14 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                   <label className="text-xs text-muted-foreground mb-1 block">Default Snapshot</label>
                   <Input value={formDefaultSnapshot} onChange={e => setFormDefaultSnapshot(e.target.value)} className="h-8 text-sm" placeholder="daytona-medium" />
                 </div>
+              </>
+            )}
+
+            {formProvider === "exedev" && (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  exe.dev uses SSH key authentication. Ensure your SSH key is registered at <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev</a>.
+                </p>
               </>
             )}
           </div>

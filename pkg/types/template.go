@@ -508,6 +508,9 @@ type ProviderConfig struct {
 	// ExtraSSHPublicKeys are additional keys from hub config's ssh_public_keys list.
 	ExtraSSHPublicKeys []string `yaml:"-"`
 
+	// exe.dev
+	SSHKeyPath string `yaml:"ssh_key_path,omitempty"` // optional SSH private key path
+
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`
 }

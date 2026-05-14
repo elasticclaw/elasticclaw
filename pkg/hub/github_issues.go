@@ -817,6 +817,8 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "vercel":
 			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
+		case "exedev":
+			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
 		case "noop":
 			// Noop provider is not implemented; skip
 		default:
