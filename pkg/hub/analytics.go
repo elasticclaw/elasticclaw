@@ -201,6 +201,9 @@ func (s *Server) computeFactoryAnalytics(factoryName, since string) (*AnalyticsS
 			summary.DoneSignals += count
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	// Compute rates
 	if summary.TotalTriggers > 0 {
@@ -230,6 +233,9 @@ func (s *Server) computeFactoryAnalytics(factoryName, since string) (*AnalyticsS
 		}
 		summary.RecentEvents = append(summary.RecentEvents, e)
 	}
+	if err := recentRows.Err(); err != nil {
+		return nil, err
+	}
 
 	// Get trigger status breakdown from factory_events (which has more detail)
 	// We join with factory_events to get status transitions
@@ -254,6 +260,9 @@ func (s *Server) computeFactoryAnalytics(factoryName, since string) (*AnalyticsS
 			if status != "" {
 				summary.ByTriggerStatus[status] = count
 			}
+		}
+		if err := triggerRows.Err(); err != nil {
+			return nil, err
 		}
 	}
 
