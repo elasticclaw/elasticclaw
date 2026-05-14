@@ -1424,6 +1424,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
 	s.mu.Lock()
+	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
+		cc.statusConn = old.statusConn
+		cc.lastStatusAt = old.lastStatusAt
+	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
