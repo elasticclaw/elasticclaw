@@ -1519,6 +1519,26 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 		}
 		log.Printf("[status] connected")
 
+		// Start a background goroutine to send WebSocket ping frames every 30s.
+		// This keeps the connection alive at the TCP/WebSocket layer, preventing
+		// proxies and the nhooyr/websocket library from dropping the idle connection.
+		pingCtx, pingCancel := context.WithCancel(ctx)
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pingCtx.Done():
+					return
+				case <-ticker.C:
+					if err := conn.Ping(pingCtx); err != nil {
+						log.Printf("[status] ping failed: %v", err)
+						return
+					}
+				}
+			}
+		}()
+
 		// Read loop — reply to pings
 		for {
 			var msg hubMsg
@@ -1530,6 +1550,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
 			}
 		}
+		pingCancel()   // stop the ping goroutine before closing the connection
 		conn.CloseNow()
 		select {
 		case <-ctx.Done():
