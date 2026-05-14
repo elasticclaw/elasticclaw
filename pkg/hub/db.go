@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
@@ -53,6 +54,21 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
+
+	// Factory analytics — persistent metrics table
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_analytics (
+		id           TEXT PRIMARY KEY,
+		factory_name TEXT NOT NULL,
+		issue_id     TEXT NOT NULL DEFAULT '',
+		claw_id      TEXT NOT NULL DEFAULT '',
+		action       TEXT NOT NULL,  -- 'claw_created', 'claw_terminated', 'error', 'pr_opened', 'pr_merged', 'pr_closed', 'done_signal'
+		detail       TEXT NOT NULL DEFAULT '',
+		result       TEXT NOT NULL DEFAULT '', -- 'success', 'failure', 'timeout', 'cancelled'
+		created_at   DATETIME NOT NULL
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_analytics_factory ON factory_analytics(factory_name, created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_analytics_action ON factory_analytics(action, created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_analytics_claw ON factory_analytics(claw_id)`)
 
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
@@ -149,6 +165,15 @@ func migrate(db *sql.DB) error {
 	);
 	`)
 	return err
+}
+
+// pruneFactoryAnalytics deletes factory_analytics rows older than 1 year.
+// Should be called periodically (e.g. daily) from a background goroutine.
+func pruneFactoryAnalytics(db *sql.DB) {
+	_, err := db.Exec(`DELETE FROM factory_analytics WHERE created_at < datetime('now', '-1 year')`)
+	if err != nil {
+		log.Printf("[db] factory analytics prune error: %v", err)
+	}
 }
 
 func now() time.Time { return time.Now().UTC() }

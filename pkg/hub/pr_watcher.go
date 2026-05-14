@@ -49,11 +49,18 @@ func extractPRs(content string) []struct {
 }
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
+// Also tracks analytics for the first detection of a PR open.
 func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		return
+	}
+
+	// Track analytics: PR was opened (detected for the first time)
+	factory, issueID := s.findFactoryForClaw(clawID)
+	if factory != nil {
+		s.trackPROpened(factory.Name, issueID, clawID, repo, prNumber)
 	}
 
 	// Get the current max comment ID and head SHA to avoid flooding with historical data
@@ -918,8 +925,13 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
-		// Check if the pipeline handles pr_closed (run on_enter before stopping)
+		// Track analytics for PR close
 		factory, issueID := s.findFactoryForClaw(clawID)
+		if factory != nil {
+			s.trackPRClosed(factory.Name, issueID, clawID, pr.repo, pr.prNumber)
+		}
+
+		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		pipelineHandled := false
 		if factory != nil {
 			if pl := parsePipelineForFactory(factory); pl != nil {
@@ -941,8 +953,13 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
-	// Check if the pipeline handles pr_merged (run on_enter before terminating)
+	// Track analytics for PR merge
 	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
+	if mergeFactory != nil {
+		s.trackPRMerged(mergeFactory.Name, mergeIssueID, clawID, pr.repo, pr.prNumber)
+	}
+
+	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	pipelineHandled := false
 	if mergeFactory != nil {
 		if pl := parsePipelineForFactory(mergeFactory); pl != nil {

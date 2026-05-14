@@ -275,9 +275,15 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 		payload := s.buildLinearPollPayload(issue)
 		if err := s.createClawForIssue(factory, payload, "poll"); err != nil {
 			log.Printf("[poll-linear] failed to create claw for %s: %v", entityID, err)
+			s.trackFactoryCreationFailure(factory.Name, entityID, err.Error())
 		} else {
 			log.Printf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
 			s.logFactoryEvent(factory.Name, entityID, issue.Title, "", currentStatus, "claw_created", "", "poll")
+			var clawID string
+			_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, entityID).Scan(&clawID)
+			if clawID != "" {
+				s.trackFactoryCreationSuccess(factory.Name, entityID, clawID)
+			}
 		}
 	}
 }

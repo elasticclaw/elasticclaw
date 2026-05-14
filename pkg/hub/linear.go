@@ -269,10 +269,14 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			if err := s.createClawForIssue(factory, payload, "linear webhook"); err != nil {
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
+				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
 				// Look up the newly created claw ID
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_created", clawID, "")
+				if clawID != "" {
+					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
+				}
 			}
 		}
 
@@ -372,11 +376,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 }
 
 func (s *Server) terminateClawForIssue(issueID string) {
-	var clawID, tenantID string
+	var clawID, tenantID, factoryName string
 	if err := s.db.QueryRow(
-		`SELECT id, tenant_id FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
+		`SELECT id, tenant_id, factory_name FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
 		issueID, issueID,
-	).Scan(&clawID, &tenantID); err != nil {
+	).Scan(&clawID, &tenantID, &factoryName); err != nil {
 		return
 	}
 	log.Printf("[factory] terminating claw %s for issue %s", clawID[:8], issueID)
@@ -434,6 +438,10 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
 	})
+	// Track analytics
+	if factoryName != "" {
+		s.trackFactoryTermination(factoryName, issueID, clawID, "issue left trigger status")
+	}
 	// Promote any pending claws now that a slot is free
 	go s.promotePendingClaws()
 }
@@ -907,6 +915,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if factory == nil {
 		return
 	}
+
+	// Track analytics for done signal
+	s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
 
 	// Check if the pipeline handles the [DONE] signal
 	pipelineHandledDone := false
