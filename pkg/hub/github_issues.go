@@ -748,8 +748,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
 
-	// Move the issue to WorkingStatus if configured
-	if factory.WorkingStatus != "" {
+	// Move the issue to WorkingStatus if configured (only if not pending —
+	// a queued claw hasn't actually started working yet)
+	if !isPending && factory.WorkingStatus != "" {
 		if ghToken != "" {
 			rest := strings.TrimPrefix(issueID, "gh-")
 			lastSlash := strings.LastIndex(rest, "/")

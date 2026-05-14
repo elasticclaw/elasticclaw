@@ -637,8 +637,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
 	})
 
-	// Move the story to WorkingStatus if configured
-	if factory.WorkingStatus != "" {
+	// Move the story to WorkingStatus if configured (only if not pending —
+	// a queued claw hasn't actually started working yet)
+	if !isPending && factory.WorkingStatus != "" {
 		if token != "" {
 			if err := moveShortcutStory(token, storyID, factory.WorkingStatus); err != nil {
 				log.Printf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
