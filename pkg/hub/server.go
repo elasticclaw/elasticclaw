@@ -62,6 +62,8 @@ type Server struct {
 }
 
 type clawConn struct {
+	mu sync.RWMutex // protects mutable fields below
+
 	id                    string
 	tenantID              string
 	conn                  *websocket.Conn
@@ -74,6 +76,12 @@ type clawConn struct {
 	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
+
+	// Status channel for watchdog / progress reporting (second session on bridge)
+	statusConn             *websocket.Conn // separate WS for lightweight status queries
+	lastStatusAt           time.Time       // when we last got a status response
+	lastUserMessageAt      time.Time       // when the user last sent a message (for idle detection)
+	lastStatusBroadcastAt  time.Time       // when we last broadcast status to user
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -126,6 +134,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
 	go srv.keepAliveDaytonaSandboxes()
+	go srv.statusWatchdog()
 	srv.startPRWatcher()
 	srv.startIntegrationPoller()
 
@@ -1225,6 +1234,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		cc := s.claws[clawID]
 		s.mu.RUnlock()
 		if cc != nil {
+			cc.mu.Lock()
+		cc.lastUserMessageAt = time.Now()
+		cc.mu.Unlock()
 			_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
 			// Immediately signal to UI that agent is working, before first chunk arrives
 			s.broadcastToUsers(tenantID, types.WSMessage{
@@ -1350,27 +1362,38 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		clawID = uuid.New().String()
 	}
 
+	// Check if this is a status channel registration BEFORE any DB upsert.
+	// Status channels must not mutate claw DB state (rp.GatewayReady is nil,
+	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
+	isStatusChannel := rp.Channel == "status"
+
 	var bootstrapOK int
 	var provider string
+	var currentStatus string
 	_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&bootstrapOK, &provider)
 
-	// Upsert claw and keep terminal/watching states sticky across reconnects.
-	desiredStatus := initialStatus(rp.GatewayReady)
-	if provider == "daytona" && bootstrapOK != 1 {
-		desiredStatus = "starting"
-	}
-	currentStatus := desiredStatus
-	_ = s.db.QueryRow(
-		`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
-		 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
-		 last_seen=excluded.last_seen
-		 RETURNING status`,
-		clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),
-	).Scan(&currentStatus)
-	if currentStatus == "deleted" {
-		conn.Close(websocket.StatusPolicyViolation, "claw deleted")
-		return
+	if !isStatusChannel {
+		// Upsert claw and keep terminal/watching states sticky across reconnects.
+		desiredStatus := initialStatus(rp.GatewayReady)
+		if provider == "daytona" && bootstrapOK != 1 {
+			desiredStatus = "starting"
+		}
+		currentStatus = desiredStatus
+		_ = s.db.QueryRow(
+			`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
+			 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
+			 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
+			 last_seen=excluded.last_seen
+			 RETURNING status`,
+			clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),
+		).Scan(&currentStatus)
+		if currentStatus == "deleted" {
+			conn.Close(websocket.StatusPolicyViolation, "claw deleted")
+			return
+		}
+	} else {
+		// For status channel, just read current status from DB
+		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
 	}
 
 	var registrationTagsJSON string
@@ -1378,8 +1401,54 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	allowWake := bootstrapOK == 1 || provider != "daytona"
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags}
+
+	if isStatusChannel {
+		// Status channel connects to existing claw
+		s.mu.Lock()
+		if existing, ok := s.claws[clawID]; ok {
+			existing.mu.Lock()
+			existing.statusConn = conn
+			existing.mu.Unlock()
+			s.mu.Unlock()
+			log.Printf("[bridge] ✓ status channel connected: %s (%s)", rp.Name, clawID[:8])
+			_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID, "channel": "status"}})
+			// Simple read loop for status channel — just keepalive
+			for {
+				var msg types.WSMessage
+				if err := wsjson.Read(ctx, conn, &msg); err != nil {
+					s.mu.Lock()
+					if existing2, ok2 := s.claws[clawID]; ok2 {
+						existing2.mu.Lock()
+						existing2.statusConn = nil
+						existing2.mu.Unlock()
+					}
+					s.mu.Unlock()
+					return
+				}
+				if msg.Type == "status_pong" {
+					s.mu.Lock()
+					if existing2, ok2 := s.claws[clawID]; ok2 {
+						existing2.mu.Lock()
+						existing2.lastStatusAt = time.Now()
+						existing2.mu.Unlock()
+					}
+					s.mu.Unlock()
+				}
+			}
+		}
+		s.mu.Unlock()
+		conn.Close(websocket.StatusPolicyViolation, "main channel not connected")
+		return
+	}
+
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
 	s.mu.Lock()
+	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
+		old.mu.RLock()
+		cc.statusConn = old.statusConn
+		cc.lastStatusAt = old.lastStatusAt
+		old.mu.RUnlock()
+	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
@@ -1479,9 +1548,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					var wakeConn *clawConn
 					var shouldWake bool
+					var shouldWarnContext bool
 					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
+						cc.mu.Lock()
 						// Log only on status changes, not every heartbeat
 						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
@@ -1523,15 +1594,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
 							cc.gatewayUnhealthyCount = 0
 						}
-					}
-					// Inject context warning once per streaming turn when usage is >=95%
-					var shouldWarnContext bool
-					if cc2, ok2 := s.claws[clawID]; ok2 &&
-						!cc2.streamingStartedAt.IsZero() &&
-						hb.ContextUsage >= 95 &&
-						!cc2.contextWarningSent {
-						cc2.contextWarningSent = true
-						shouldWarnContext = true
+						// Inject context warning once per streaming turn when usage is >=95%
+						if !cc.streamingStartedAt.IsZero() &&
+							hb.ContextUsage >= 95 &&
+							!cc.contextWarningSent {
+							cc.contextWarningSent = true
+							shouldWarnContext = true
+						}
+						cc.mu.Unlock()
 					}
 					s.mu.Unlock()
 					if shouldWarnContext {
@@ -2685,12 +2755,11 @@ func (s *Server) keepAliveDaytonaSandboxes() {
 
 func (s *Server) petDaytonaSandboxes() {
 	rows, err := s.db.Query(`
-		SELECT DISTINCT c.id, c.name, c.provider_id
-		FROM claws c
-		JOIN claw_prs cp ON cp.claw_id = c.id
-		WHERE c.provider = 'daytona'
-		  AND c.provider_id != ''
-		  AND c.status NOT IN ('idle','deleted','error','offline')
+		SELECT id, name, provider_id
+		FROM claws
+		WHERE provider = 'daytona'
+		  AND provider_id != ''
+		  AND status NOT IN ('idle','deleted','error','offline')
 	`)
 	if err != nil {
 		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
@@ -2732,6 +2801,118 @@ func (s *Server) petDaytonaSandboxes() {
 			continue
 		}
 		log.Printf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
+	}
+}
+
+// statusWatchdog runs every 2 minutes to check claw health and request status
+// updates from the status channel. It also detects silent deaths and alerts the user.
+func (s *Server) statusWatchdog() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.checkClawStatus()
+	}
+}
+
+// checkClawStatus queries active claws, sends status requests via the status channel,
+// and detects claws that have gone silent (no status response, no user message recently).
+func (s *Server) checkClawStatus() {
+	now := time.Now()
+
+	s.mu.RLock()
+	var clawIDs []string
+	for id := range s.claws {
+		clawIDs = append(clawIDs, id)
+	}
+	s.mu.RUnlock()
+
+	for _, id := range clawIDs {
+		s.mu.RLock()
+		cc, ok := s.claws[id]
+		s.mu.RUnlock()
+		if !ok {
+			continue
+		}
+
+		cc.mu.RLock()
+		lastUserMessageAt := cc.lastUserMessageAt
+		lastStatusAt := cc.lastStatusAt
+		lastStatusBroadcastAt := cc.lastStatusBroadcastAt
+		statusConn := cc.statusConn
+		gatewayReady := cc.gatewayReady
+		contextUsage := cc.contextUsage
+		contextWarningSent := cc.contextWarningSent
+		tenantID := cc.tenantID
+		cc.mu.RUnlock()
+
+		// If user sent a message in the last 2 minutes, skip status broadcast
+		if now.Sub(lastUserMessageAt) < 2*time.Minute {
+			continue
+		}
+
+		// If we have a status channel, ping it (hold lock during write)
+		if statusConn != nil {
+			cc.mu.RLock()
+			sc := cc.statusConn
+			cc.mu.RUnlock()
+			if sc != nil {
+				_ = wsjson.Write(context.Background(), sc, types.WSMessage{
+					Type: "status_ping",
+					Payload: mustJSONRaw(map[string]interface{}{
+						"claw_id": id,
+						"ts":      now.Unix(),
+					}),
+				})
+			}
+		}
+
+		var name string
+		_ = s.db.QueryRow(`SELECT name FROM claws WHERE id=?`, id).Scan(&name)
+
+		// Detect silent death: no status response AND no user message for >5 min
+		// while the claw is supposedly connected and gateway was ready
+		if gatewayReady &&
+			now.Sub(lastStatusAt) > 5*time.Minute &&
+			now.Sub(lastUserMessageAt) > 5*time.Minute &&
+			now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
+			msg := fmt.Sprintf("🚨 Claw %s appears unresponsive (no status in 5m). It may have crashed.", name)
+			log.Printf("[watchdog] %s", msg)
+			// Inject as system message so user sees it in the chat stream
+			s.broadcastToUsers(tenantID, types.WSMessage{
+				Type: "message",
+				Payload: map[string]interface{}{
+					"role":    "system",
+					"content": msg,
+					"claw_id": id,
+				},
+			})
+			// Update lastStatusBroadcastAt under per-claw lock so we don't spam
+			cc.mu.Lock()
+			cc.lastStatusBroadcastAt = now
+			cc.mu.Unlock()
+		}
+
+		// Context usage warning (>90%) — skip if a streaming turn is in progress
+		// so the heartbeat's more-urgent 95% in-streaming warning isn't suppressed.
+		cc.mu.RLock()
+		streaming := !cc.streamingStartedAt.IsZero()
+		cc.mu.RUnlock()
+		if contextUsage > 90 && !contextWarningSent && !streaming {
+			msg := fmt.Sprintf("⚠️ Claw %s is at %d%% context usage. It should wrap up soon or restart.", name, contextUsage)
+			log.Printf("[watchdog] %s", msg)
+			s.broadcastToUsers(tenantID, types.WSMessage{
+				Type: "message",
+				Payload: map[string]interface{}{
+					"role":    "system",
+					"content": msg,
+					"claw_id": id,
+				},
+			})
+			// Update contextWarningSent under per-claw lock
+			cc.mu.Lock()
+			cc.contextWarningSent = true
+			cc.mu.Unlock()
+		}
 	}
 }
 
