@@ -126,6 +126,11 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		}
 		factoryNames = append(factoryNames, name)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[analytics] error iterating factory names: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 	rows.Close()
 
 	var summaries []AnalyticsSummary
