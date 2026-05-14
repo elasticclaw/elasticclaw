@@ -251,6 +251,7 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 	known := []string{
 		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
 		"USER.md", "MEMORY.md", "BOOTSTRAP.md", "HEARTBEAT.md",
+		"elasticclaw-config.yaml",
 	}
 	files := make(map[string]string)
 	for _, name := range known {
