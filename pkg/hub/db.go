@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
@@ -164,6 +165,15 @@ func migrate(db *sql.DB) error {
 	);
 	`)
 	return err
+}
+
+// pruneFactoryAnalytics deletes factory_analytics rows older than 1 year.
+// Should be called periodically (e.g. daily) from a background goroutine.
+func pruneFactoryAnalytics(db *sql.DB) {
+	_, err := db.Exec(`DELETE FROM factory_analytics WHERE created_at < datetime('now', '-1 year')`)
+	if err != nil {
+		log.Printf("[db] factory analytics prune error: %v", err)
+	}
 }
 
 func now() time.Time { return time.Now().UTC() }

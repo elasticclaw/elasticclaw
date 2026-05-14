@@ -35,6 +35,7 @@ type AnalyticsSummary struct {
 	PRMergeRate           float64           `json:"prMergeRate"` // percentage of opened PRs that merged
 	ByTriggerStatus       map[string]int    `json:"byTriggerStatus"`
 	RecentEvents          []AnalyticsEvent  `json:"recentEvents"`
+	ComputeError          string            `json:"computeError,omitempty"` // set if aggregation failed for this factory
 }
 
 // AnalyticsEvent is a single analytics record.
@@ -128,9 +129,15 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 	rows.Close()
 
 	var summaries []AnalyticsSummary
+	var hasErrors bool
 	for _, name := range factoryNames {
 		summary, err := s.computeFactoryAnalytics(name, since)
 		if err != nil {
+			hasErrors = true
+			summaries = append(summaries, AnalyticsSummary{
+				FactoryName:  name,
+				ComputeError: err.Error(),
+			})
 			continue
 		}
 		summaries = append(summaries, *summary)
@@ -138,6 +145,9 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 
 	if summaries == nil {
 		summaries = []AnalyticsSummary{}
+	}
+	if hasErrors {
+		w.Header().Set("X-Analytics-Partial", "true")
 	}
 	jsonOK(w, summaries)
 }
