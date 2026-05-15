@@ -772,6 +772,8 @@ func (gs *gatewaySession) setReady() {
 	gs.readyMu.Lock()
 	gs.ready = true
 	gs.readyMu.Unlock()
+	// Initial context usage refresh now that session is ready
+	go gs.refreshContextUsage(context.Background())
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -1639,6 +1641,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Refresh context usage before sending heartbeat (best-effort)
+				gwSession.refreshContextUsage(ctx)
 				health := checkGateway(gwClient.addr)
 				_ = wsjson.Write(ctx, conn, hubMsg{
 					Type: "heartbeat",
