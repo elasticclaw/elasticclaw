@@ -1,0 +1,24 @@
+name: bug-research
+integration: github-issues
+workspace: elasticclaw
+trigger_status: "needs-bug-research"
+
+repos:
+  - elasticclaw/elasticclaw
+
+labels:
+  - needs-bug-research
+
+allowed_labelers:
+  - marccampbell
+  - noahecampbell
+
+# Human removes `needs-bug-research` when the research pass is finished
+# (the label stays on while the claw runs — see pipeline on_enter).
+terminate_on_leave: true
+
+concurrency_group: bug-research
+
+webhook_secret_ref: elasticclaw_webhook_secret
+
+template: elasticclaw
