@@ -15,6 +15,7 @@ allowed_labelers:
 
 # Human removes `needs-bug-research` when the research pass is finished
 # (the label stays on while the claw runs — see pipeline on_enter).
+
 terminate_on_leave: true
 
 concurrency_group: bug-research
