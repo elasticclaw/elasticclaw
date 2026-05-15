@@ -39,6 +39,13 @@ jobs:
           token: ${{ secrets.ELASTICCLAW_TOKEN }}
           path: .elasticclaw/factories/design
 
+      - name: Publish factory (bug-research)
+        uses: elasticclaw/actions/publish-factory@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/factories/bug-research
+
       - name: Publish template
         uses: elasticclaw/actions/publish-template@main
         with:
