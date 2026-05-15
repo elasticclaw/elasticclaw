@@ -506,12 +506,11 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		if f.Enabled != nil && !*f.Enabled {
 			continue
 		}
-		// Use workspace as repo if no explicit repos configured
-		repos := []string{f.Workspace}
-		if len(f.Repos) > 0 {
-			repos = f.Repos
+		if len(f.Repos) == 0 {
+			log.Printf("[poll-github-issues] factory %q: missing required 'repos' field — skipping", f.Name)
+			continue
 		}
-		for _, repo := range repos {
+		for _, repo := range f.Repos {
 			if repo == "" {
 				continue
 			}
