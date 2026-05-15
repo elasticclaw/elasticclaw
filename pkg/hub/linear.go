@@ -1002,7 +1002,8 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
 	})
 	// Notify the claw it's in watch mode — skip if the pipeline already injected a message
-	if !pipelineHandledDone {
+	// Also skip for no-issue manual trigger claws (issueID == "")
+	if !pipelineHandledDone && issueID != "" {
 		var issueTracker string
 		switch {
 		case strings.HasPrefix(issueID, "sc-"):
