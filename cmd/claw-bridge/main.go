@@ -727,31 +727,36 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 	}
 }
 
-// refreshContextUsage polls sessions.get and updates contextUsage.
+// refreshContextUsage polls sessions.describe and updates contextUsage.
 func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := gs.sendReq(pollCtx, "sessions.get", map[string]string{"key": gs.sessionKey})
+	resp, err := gs.sendReq(pollCtx, "sessions.describe", map[string]string{"key": gs.sessionKey})
 	if err != nil {
-		log.Printf("[session] sessions.get for context usage: %v", err)
+		log.Printf("[session] sessions.describe for context usage: %v", err)
 		return
 	}
-	var info struct {
-		TotalTokens   int `json:"totalTokens"`
-		ContextTokens int `json:"contextTokens"`
+	var payload struct {
+		Session struct {
+			TotalTokens   int `json:"totalTokens"`
+			ContextTokens int `json:"contextTokens"`
+		} `json:"session"`
 	}
-	if err := json.Unmarshal(resp.Payload, &info); err != nil || info.ContextTokens == 0 {
+	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
+		log.Printf("[session] unmarshal sessions.describe response: %v", err)
 		return
 	}
-	usage := info.TotalTokens * 100 / info.ContextTokens
+	if payload.Session.ContextTokens == 0 {
+		return
+	}
+	usage := payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
 	if usage > 100 {
 		usage = 100
 	}
 	gs.ctxMu.Lock()
 	gs.contextUsage = usage
 	gs.ctxMu.Unlock()
-	log.Printf("[session] context usage: %d%% (%d/%d tokens)", usage, info.TotalTokens, info.ContextTokens)
 }
 
 // ContextUsage returns the last-known context window usage percentage (0-100).
@@ -772,6 +777,8 @@ func (gs *gatewaySession) setReady() {
 	gs.readyMu.Lock()
 	gs.ready = true
 	gs.readyMu.Unlock()
+	// Initial context usage refresh now that session is ready
+	go gs.refreshContextUsage(context.Background())
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -1639,13 +1646,17 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Refresh context usage before sending heartbeat (best-effort)
+				go gwSession.refreshContextUsage(ctx)
 				health := checkGateway(gwClient.addr)
+				cu := gwSession.ContextUsage()
+				log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%%", health, gwSession.IsReady(), cu)
 				_ = wsjson.Write(ctx, conn, hubMsg{
 					Type: "heartbeat",
 					Payload: mustJSON(map[string]interface{}{
 						"gateway_healthy": health,
 						"gateway_ready":   gwSession.IsReady(),
-						"context_usage":   gwSession.ContextUsage(),
+						"context_usage":   cu,
 					}),
 				})
 			}
