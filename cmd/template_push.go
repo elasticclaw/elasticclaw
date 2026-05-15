@@ -80,10 +80,8 @@ func runTemplatePush(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("validation failed: invalid elasticclaw-config.yaml: %w", err)
 		}
-		if cfg != nil {
-			if err := cfg.Validate(); err != nil {
-				return fmt.Errorf("validation failed: %w", err)
-			}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("validation failed: %w", err)
 		}
 	} else {
 		return fmt.Errorf("validation failed: elasticclaw-config.yaml is required")
