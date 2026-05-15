@@ -408,19 +408,27 @@ issueResolved:
 		return
 	}
 
-	if strings.HasPrefix(resolvedIssueID, "sc-") {
-		// Shortcut story
+	// Determine issue tracker from factory integration when the ID format is ambiguous
+	isShortcut := strings.HasPrefix(resolvedIssueID, "sc-") || factory.Integration == "shortcut"
+	isGitHub := strings.Contains(resolvedIssueID, "/") || factory.Integration == "github" || factory.Integration == "github-issues"
+
+	if isShortcut {
+		// Shortcut story — ensure sc- prefix if missing (e.g. template rendered bare number)
+		scID := resolvedIssueID
+		if !strings.HasPrefix(scID, "sc-") {
+			scID = "sc-" + scID
+		}
 		scToken := s.resolveShortcutToken(factory.Workspace)
 		if scToken == "" {
 			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := moveShortcutStory(scToken, resolvedIssueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move story %s to %q: %v", resolvedIssueID, targetStatus, err)
+		if err := moveShortcutStory(scToken, scID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved story %s to %q", resolvedIssueID, targetStatus)
+			log.Printf("[pipeline] moved story %s to %q", scID, targetStatus)
 		}
-	} else if strings.Contains(resolvedIssueID, "/") {
+	} else if isGitHub {
 		// GitHub issue (owner/repo/number format)
 		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 		if ghToken == "" {
