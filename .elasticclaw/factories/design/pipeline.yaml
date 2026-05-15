@@ -27,18 +27,8 @@ stages:
         via the elasticclaw git credential helper, which mints a proper
         GitHub App token with `write` on this repo.
 
-        DO NOT:
-          • set or pass `GITHUB_TOKEN` (it will override the credential
-            helper and you'll end up with a token that can't post comments),
-          • use `GITHUB_ISSUES_API_KEY` — that PAT is for the hub's
-            *trigger* path only; it doesn't have the permissions you need,
-          • call `curl https://api.github.com/...` with a hand-rolled
-            Authorization header,
-          • `git push` with an explicit token.
-
-        Just run `gh ...` and `git ...` plainly — the credential helper
-        handles auth. If you ever feel the need to mention a token, stop:
-        that's the wrong path.
+        You should *ALWAYS* use the GITHUB_ISSUES_API_KEY environment variable
+        to read/write to the issue.
 
         ── The one-comment rule ─────────────────────────────────────────────
         There must be exactly ONE design comment on this issue, owned by you.
