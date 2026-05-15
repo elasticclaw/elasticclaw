@@ -3,6 +3,8 @@ integration: github-issues
 workspace: elasticclaw
 trigger_status: "agent-ready"
 
+repos:
+  - elasticclaw/elasticclaw
 labels:
   - agent-ready
 
