@@ -3,6 +3,9 @@ integration: github-issues
 workspace: elasticclaw
 trigger_status: "needs-design"
 
+repos:
+  - elasticclaw/elasticclaw
+  
 labels:
   - needs-design
 
