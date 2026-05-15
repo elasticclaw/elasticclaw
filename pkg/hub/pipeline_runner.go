@@ -408,19 +408,36 @@ issueResolved:
 		return
 	}
 
-	if strings.HasPrefix(resolvedIssueID, "sc-") {
-		// Shortcut story
+	// Determine issue tracker: explicit factory.Integration takes precedence,
+	// fall back to ID-format heuristics only when integration is empty.
+	var isShortcut, isGitHub bool
+	switch factory.Integration {
+	case "shortcut":
+		isShortcut = true
+	case "github", "github-issues":
+		isGitHub = true
+	default:
+		isShortcut = strings.HasPrefix(resolvedIssueID, "sc-")
+		isGitHub = strings.Contains(resolvedIssueID, "/")
+	}
+
+	if isShortcut {
+		// Shortcut story — ensure sc- prefix if missing (e.g. template rendered bare number)
+		scID := resolvedIssueID
+		if !strings.HasPrefix(scID, "sc-") {
+			scID = "sc-" + scID
+		}
 		scToken := s.resolveShortcutToken(factory.Workspace)
 		if scToken == "" {
 			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := moveShortcutStory(scToken, resolvedIssueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move story %s to %q: %v", resolvedIssueID, targetStatus, err)
+		if err := moveShortcutStory(scToken, scID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
 		} else {
-			log.Printf("[pipeline] moved story %s to %q", resolvedIssueID, targetStatus)
+			log.Printf("[pipeline] moved story %s to %q", scID, targetStatus)
 		}
-	} else if strings.Contains(resolvedIssueID, "/") {
+	} else if isGitHub {
 		// GitHub issue (owner/repo/number format)
 		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 		if ghToken == "" {
@@ -428,16 +445,20 @@ issueResolved:
 			return
 		}
 		parts := strings.Split(resolvedIssueID, "/")
-		if len(parts) == 3 {
-			repo := parts[0] + "/" + parts[1]
-			var issueNum int
-			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
-				if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
-					log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
-				} else {
-					log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
-				}
-			}
+		if len(parts) != 3 {
+			log.Printf("[pipeline] factory %q: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", factory.Name, resolvedIssueID)
+			return
+		}
+		repo := parts[0] + "/" + parts[1]
+		var issueNum int
+		if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
+			log.Printf("[pipeline] factory %q: invalid GitHub issue number in %q — skipping move_issue", factory.Name, resolvedIssueID)
+			return
+		}
+		if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
+			log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
+		} else {
+			log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
 		}
 	} else {
 		// Linear issue
