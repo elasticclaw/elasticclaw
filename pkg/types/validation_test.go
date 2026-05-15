@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -129,6 +130,26 @@ func TestFactoryConfigValidate(t *testing.T) {
 				Integration:   "linear",
 				Template:      "base",
 				NamePattern:   "{issue_id}-test",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid name pattern with multiple placeholders",
+			factory: &FactoryConfig{
+				Name:          "test-factory",
+				Integration:   "linear",
+				Template:      "base",
+				NamePattern:   "{issue_id}-{title}",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid name pattern with prefix and multiple placeholders",
+			factory: &FactoryConfig{
+				Name:          "test-factory",
+				Integration:   "linear",
+				Template:      "base",
+				NamePattern:   "prefix-{project}-{issue_id}-fix",
 			},
 			wantErr: false,
 		},
@@ -868,14 +889,5 @@ func floatPtr(f float64) *float64 {
 }
 
 func contains(s, substr string) bool {
-	return len(substr) <= len(s) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, substr)
 }

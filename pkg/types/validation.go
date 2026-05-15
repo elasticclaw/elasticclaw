@@ -47,8 +47,9 @@ var validGitHubTriggerTypes = map[string]bool{
 // repoRegex validates owner/repo format
 var repoRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 
-// namePatternRegex validates that name_pattern only contains allowed placeholders
-var namePatternRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]*(\{[a-zA-Z0-9_]+\})*[a-zA-Z0-9_-]*$`)
+// namePatternRegex validates that name_pattern only contains allowed placeholders.
+// Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
+var namePatternRegex = regexp.MustCompile(`^([a-zA-Z0-9_-]*\{[a-zA-Z0-9_]+\})*[a-zA-Z0-9_-]*$`)
 
 // Validate validates a FactoryConfig and returns an error if invalid.
 func (f *FactoryConfig) Validate() error {
@@ -284,18 +285,18 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 		return fmt.Errorf("provider %q: config is nil", name)
 	}
 
-	// Type is required
-	if cfg.Type == "" && name != "" {
-		// If name is provided but type is empty, use name as type
-		cfg.Type = name
+	// Type is required. If name is provided but type is empty, use name as type.
+	providerType := cfg.Type
+	if providerType == "" && name != "" {
+		providerType = name
 	}
 
-	if cfg.Type == "" {
+	if providerType == "" {
 		return fmt.Errorf("provider type is required")
 	}
 
-	if !validProviders[cfg.Type] {
-		return fmt.Errorf("invalid provider type %q (must be one of: replicated, daytona, vercel, local, noop)", cfg.Type)
+	if !validProviders[providerType] {
+		return fmt.Errorf("invalid provider type %q (must be one of: replicated, daytona, vercel, local, noop)", providerType)
 	}
 
 	return nil
