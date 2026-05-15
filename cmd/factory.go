@@ -239,6 +239,11 @@ func runFactoryPush(filterName string) error {
 			f.PipelineYAML = string(pdata)
 		}
 
+		// Validate factory configuration before pushing
+		if err := f.Validate(); err != nil {
+			return fmt.Errorf("validation failed for %s: %w", match, err)
+		}
+
 		factories = append(factories, &f)
 	}
 

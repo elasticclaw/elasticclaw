@@ -74,6 +74,19 @@ func runTemplatePush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("template directory is empty")
 	}
 
+	// Validate template configuration before pushing
+	if configData, ok := fsFiles["elasticclaw-config.yaml"]; ok {
+		cfg, err := config.ParseTemplateConfig([]byte(configData))
+		if err != nil {
+			return fmt.Errorf("validation failed: invalid elasticclaw-config.yaml: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("validation failed: %w", err)
+		}
+	} else {
+		return fmt.Errorf("validation failed: elasticclaw-config.yaml is required")
+	}
+
 	// Push to hub
 	h, _, err := config.ResolveHub(profile)
 	if err != nil {
