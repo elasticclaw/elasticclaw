@@ -109,6 +109,18 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate all factories before saving
+	for _, f := range req.Factories {
+		if f == nil {
+			http.Error(w, "factory cannot be nil", http.StatusBadRequest)
+			return
+		}
+		if err := f.Validate(); err != nil {
+			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Preserve webhook secrets from external storage before overwriting.
 	for _, incoming := range req.Factories {
 		if incoming == nil || incoming.Name == "" {

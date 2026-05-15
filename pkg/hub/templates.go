@@ -119,6 +119,21 @@ func (s *Server) pushTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate template configuration if present
+	if configData, ok := body.Files["elasticclaw-config.yaml"]; ok {
+		cfg, err := config.ParseTemplateConfig([]byte(configData))
+		if err != nil {
+			http.Error(w, "invalid elasticclaw-config.yaml: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if cfg != nil {
+			if err := cfg.Validate(); err != nil {
+				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
 	// Write to external storage
 	if err := saveExternalTemplate(body.Name, body.Files); err != nil {
 		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
