@@ -1642,7 +1642,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				return
 			case <-ticker.C:
 				// Refresh context usage before sending heartbeat (best-effort)
-				gwSession.refreshContextUsage(ctx)
+				go gwSession.refreshContextUsage(ctx)
 				health := checkGateway(gwClient.addr)
 				_ = wsjson.Write(ctx, conn, hubMsg{
 					Type: "heartbeat",
