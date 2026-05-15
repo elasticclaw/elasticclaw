@@ -401,13 +401,11 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 		return nil, fmt.Errorf("shortcut API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result struct {
-		Data []shortcutPollStory `json:"data"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	var stories []shortcutPollStory
+	if err := json.Unmarshal(respBody, &stories); err != nil {
 		return nil, fmt.Errorf("parse shortcut response: %w", err)
 	}
-	return result.Data, nil
+	return stories, nil
 }
 
 func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
