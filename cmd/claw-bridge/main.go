@@ -395,8 +395,8 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 	}
 
 	connectParams := map[string]interface{}{
-		"minProtocol": 3,
-		"maxProtocol": 3,
+		"minProtocol": 4,
+		"maxProtocol": 4,
 		"client": map[string]interface{}{
 			"id":         clientID,
 			"version":    "1.0.0",
@@ -446,7 +446,7 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 				conn.CloseNow()
 				return nil, fmt.Errorf("connect rejected: %s", msg)
 			}
-			log.Printf("[gateway] connected (protocol 3)")
+			log.Printf("[gateway] connected (protocol 4)")
 			return conn, nil
 		}
 		// Skip health/tick events during handshake
