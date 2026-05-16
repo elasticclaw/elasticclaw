@@ -31,8 +31,11 @@ var trackers = []trackerDispatcher{
 		},
 		webhook: func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response {
 			payload := buildLinearWebhookPayload(id, prevStatus, newStatus)
-			resp, _ := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
+			resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
 				strings.NewReader(string(payload)))
+			if err != nil {
+				panic(fmt.Sprintf("linear webhook post failed: %v", err))
+			}
 			return resp
 		},
 		issueID: "ELA-123",
@@ -71,10 +74,16 @@ var trackers = []trackerDispatcher{
 				newID = 5003
 			}
 			payload, sig := ts.Shortcut.BuildWebhookPayload(storyNum, prevID, newID, "test-webhook-secret")
-			req, _ := http.NewRequest("POST", ts.URL()+"/api/integrations/shortcut/webhook", strings.NewReader(string(payload)))
+			req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/shortcut/webhook", strings.NewReader(string(payload)))
+			if err != nil {
+				panic(fmt.Sprintf("shortcut webhook request build failed: %v", err))
+			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Payload-Signature", sig)
-			resp, _ := http.DefaultClient.Do(req)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				panic(fmt.Sprintf("shortcut webhook post failed: %v", err))
+			}
 			return resp
 		},
 		issueID: "sc-123",
@@ -127,6 +136,9 @@ func TestParity_WebhookSpawnsClaw(t *testing.T) {
 
 			// Fire webhook
 			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			if resp == nil {
+				t.Fatal("webhook returned nil response")
+			}
 			if resp.StatusCode != 200 {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
@@ -153,6 +165,9 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 			// Spawn claw via webhook
 			td.setIssue(ts, td.issueID, td.trigger)
 			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			if resp == nil {
+				t.Fatal("webhook returned nil response")
+			}
 			if resp.StatusCode != 200 {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
@@ -185,6 +200,9 @@ func TestParity_MoveIssueResolvesTracker(t *testing.T) {
 
 			td.setIssue(ts, td.issueID, td.trigger)
 			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			if resp == nil {
+				t.Fatal("webhook returned nil response")
+			}
 			if resp.StatusCode != 200 {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
@@ -225,6 +243,9 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 
 			// Fire webhook
 			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			if resp == nil {
+				t.Fatal("webhook returned nil response")
+			}
 			if resp.StatusCode != 200 {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
