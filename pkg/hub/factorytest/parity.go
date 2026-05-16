@@ -69,6 +69,46 @@ var Trackers = []TrackerDispatcher{
 		Trigger: "In Progress",
 		Done:    "Done",
 	},
+	{
+		Name: "github-issues",
+		SetIssue: func(ts *TestServer, id string, status string) {
+			// id is "testorg/testrepo/42"
+			parts := strings.Split(id, "/")
+			if len(parts) != 3 {
+				return
+			}
+			repo := parts[0] + "/" + parts[1]
+			var num int
+			fmt.Sscanf(parts[2], "%d", &num)
+			ts.GitHubIssues.SetIssueState(repo, num, status)
+		},
+		Webhook: func(t *testing.T, ts *TestServer, id string, prevStatus, newStatus string) *http.Response {
+			t.Helper()
+			parts := strings.Split(id, "/")
+			if len(parts) != 3 {
+				t.Fatalf("invalid github issue id: %s", id)
+			}
+			repo := parts[0] + "/" + parts[1]
+			var num int
+			fmt.Sscanf(parts[2], "%d", &num)
+			payload, sig := ts.GitHubIssues.BuildWebhookPayload(repo, num, prevStatus, newStatus)
+			req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/github-issues/webhook", strings.NewReader(string(payload)))
+			if err != nil {
+				t.Fatalf("github issues webhook request build failed: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Hub-Signature-256", sig)
+			req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-%s-%d", repo, num))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("github issues webhook post failed: %v", err)
+			}
+			return resp
+		},
+		IssueID: "testorg/testrepo/42",
+		Trigger: "open",
+		Done:    "closed",
+	},
 }
 
 // ParseStoryNum converts "sc-123" → 123.
@@ -91,14 +131,25 @@ func RunParityMatrix(t *testing.T, sc Scenario) {
 		t.Run(td.Name+"/"+sc.Name, func(t *testing.T) {
 			t.Helper()
 			var ts *TestServer
-			if td.Name == "shortcut" {
+			switch td.Name {
+			case "shortcut":
 				ts = NewTestServerWithShortcut(t)
 				ts.Shortcut.SetStory(123, StoryState{
 					Name:            "Test Story",
 					WorkflowStateID: 5001, // Backlog
 					Description:     "Test description",
 				})
-			} else {
+			case "github-issues":
+				ts = NewTestServerWithGitHubIssues(t)
+				ts.GitHubIssues.SetIssue("testorg/testrepo", 42, IssueState{
+					Title:  "Test Issue",
+					Body:   "Test body",
+					State:  "open",
+					Labels: []string{},
+				})
+				// Set the initial state in the mock so pre-flight checks succeed
+				ts.GitHubIssues.SetIssueState("testorg/testrepo", 42, "open")
+			default:
 				ts = NewTestServer(t)
 			}
 			sc.Fn(t, td, ts)
@@ -114,9 +165,12 @@ func WaitForClawWithTracker(t *testing.T, ts *TestServer, td TrackerDispatcher, 
 	for time.Now().Before(deadline) {
 		var clawID string
 		var err error
-		if td.Name == "shortcut" {
+		switch td.Name {
+		case "shortcut":
 			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=?`, td.IssueID).Scan(&clawID)
-		} else {
+		case "github-issues":
+			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE github_issue_id=?`, td.IssueID).Scan(&clawID)
+		default:
 			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=?`, td.IssueID).Scan(&clawID)
 		}
 		if err == nil && clawID != "" {
@@ -134,9 +188,12 @@ func CountClawsForTracker(t *testing.T, ts *TestServer, td TrackerDispatcher) in
 	t.Helper()
 	var count int
 	var err error
-	if td.Name == "shortcut" {
+	switch td.Name {
+	case "shortcut":
 		err = ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=?`, td.IssueID).Scan(&count)
-	} else {
+	case "github-issues":
+		err = ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id=?`, td.IssueID).Scan(&count)
+	default:
 		err = ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, td.IssueID).Scan(&count)
 	}
 	if err != nil {

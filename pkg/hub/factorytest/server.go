@@ -11,12 +11,13 @@ import (
 )
 
 type TestServer struct {
-	Server   *hub.Server
-	HTTPSrv  *httptest.Server
-	GitHub   *MockGitHub
-	Linear   *MockLinear
-	Shortcut *MockShortcut
-	DB       *sql.DB
+	Server      *hub.Server
+	HTTPSrv     *httptest.Server
+	GitHub      *MockGitHub
+	GitHubIssues *MockGitHubIssues
+	Linear      *MockLinear
+	Shortcut    *MockShortcut
+	DB          *sql.DB
 }
 
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
@@ -175,11 +176,73 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 	t.Cleanup(httpSrv.Close)
 
 	return &TestServer{
-		Server:   s,
-		HTTPSrv:  httpSrv,
-		GitHub:   gh,
-		Linear:   li,
-		Shortcut: sc,
-		DB:       db,
+		Server:      s,
+		HTTPSrv:     httpSrv,
+		GitHub:      gh,
+		Linear:      li,
+		Shortcut:    sc,
+		DB:          db,
+	}
+}
+
+// NewTestServerWithGitHubIssues creates a TestServer that includes GitHub Issues integration.
+func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
+	t.Helper()
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	gh := NewMockGitHub(t)
+	ghi := NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "test-webhook-secret"
+	li := NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "test-factory",
+				Integration:   "github-issues",
+				Workspace:     "test-workspace",
+				TriggerStatus: "open",
+				DoneStatus:    "closed",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				Repos:         []string{"testorg/testrepo"},
+				WebhookSecret: "test-webhook-secret",
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			GitHubIssues: []*types.GitHubIssuesIntegrationConfig{
+				{
+					Workspace:     "test-workspace",
+					Token:         "test-github-issues-token",
+					WebhookSecret: "test-webhook-secret",
+				},
+			},
+		},
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	s.StartPRWatcherForTest()
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	return &TestServer{
+		Server:       s,
+		HTTPSrv:      httpSrv,
+		GitHub:       gh,
+		GitHubIssues: ghi,
+		Linear:       li,
+		DB:           db,
 	}
 }

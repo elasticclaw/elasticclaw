@@ -5,6 +5,7 @@ package hub
 import (
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -49,6 +50,7 @@ func NewTestServerWithConfig(t interface {
 		hubCfg:          cfg,
 		claws:           make(map[string]*clawConn),
 		users:           make(map[string]*userConn),
+		webhookDedup:    make(map[string]time.Time),
 		githubBaseURL:   githubBaseURL,
 		linearBaseURL:   linearBaseURL,
 		shortcutBaseURL: shortcutBaseURL,

@@ -71,9 +71,12 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 			clawID := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 
 			var trackerField string
-			if td.Name == "shortcut" {
+			switch td.Name {
+			case "shortcut":
 				trackerField = "shortcut_story_id"
-			} else {
+			case "github-issues":
+				trackerField = "github_issue_id"
+			default:
 				trackerField = "linear_issue_id"
 			}
 			var dbID string
@@ -110,9 +113,12 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				var sawPoll bool
-				if td.Name == "shortcut" {
+				switch td.Name {
+				case "shortcut":
 					sawPoll = ts.Shortcut.SawPollCall()
-				} else {
+				case "github-issues":
+					sawPoll = ts.GitHubIssues.SawPollCall()
+				default:
 					sawPoll = ts.Linear.SawPollCall()
 				}
 				if sawPoll {
