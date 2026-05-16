@@ -134,3 +134,23 @@ func (m *MockLinear) SetIssueStateName(identifier, stateName string) {
 		issue["updatedAt"] = "2026-05-10T00:01:00Z"
 	}
 }
+
+// SawPollCall returns true if the mock has received an issues(filter:) GraphQL query
+// (the polling endpoint) since the last reset.
+func (m *MockLinear) SawPollCall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.GraphQLCalls {
+		if strings.Contains(c, `issues(filter:`) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetCalls clears the GraphQL call log.
+func (m *MockLinear) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.GraphQLCalls = nil
+}

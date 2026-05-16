@@ -207,6 +207,26 @@ func (m *MockShortcut) stateNameForID(id int64) string {
 	return ""
 }
 
+// SawPollCall returns true if the mock has received a stories/search call
+// (the polling endpoint) since the last reset.
+func (m *MockShortcut) SawPollCall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.Calls {
+		if strings.Contains(c, "stories/search") {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetCalls clears the call log.
+func (m *MockShortcut) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = nil
+}
+
 func (m *MockShortcut) BuildWebhookPayload(storyID int64, prevStateID, newStateID int64, secret string) ([]byte, string) {
 	payload := map[string]interface{}{
 		"id":         fmt.Sprintf("webhook-%d", storyID),

@@ -240,8 +240,22 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			// Trigger integration poll
 			ts.Server.PollIntegrationsForTest()
 
-			// Wait a bit for poll to process
-			time.Sleep(200 * time.Millisecond)
+			// Wait for poll to fully process by checking the mock's call log
+			// rather than a fixed sleep. The poll calls the tracker API; once
+			// we see that call, the poll goroutine has finished its work.
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				var sawPoll bool
+				if td.name == "shortcut" {
+					sawPoll = ts.Shortcut.SawPollCall()
+				} else {
+					sawPoll = ts.Linear.SawPollCall()
+				}
+				if sawPoll {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
 
 			// Count claws for this issue — should be exactly 1
 			var count int
