@@ -134,3 +134,62 @@ func (m *MockLinear) SetIssueStateName(identifier, stateName string) {
 		issue["updatedAt"] = "2026-05-10T00:01:00Z"
 	}
 }
+
+// SawPollCall returns true if the mock has received an issues(filter:) GraphQL query
+// (the polling endpoint) since the last reset.
+func (m *MockLinear) SawPollCall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.GraphQLCalls {
+		if strings.Contains(c, `issues(filter:`) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetCalls clears the GraphQL call log.
+func (m *MockLinear) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.GraphQLCalls = nil
+}
+
+// SawAPICall returns true if the mock has recorded at least one HTTP request.
+// Used as a smoke check that the test server's integration logic actually
+// hit the mock (not just the webhook endpoint on the test server itself).
+func (m *MockLinear) SawAPICall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.GraphQLCalls) > 0
+}
+
+// BuildWebhookPayload returns a JSON webhook payload and the HMAC-SHA256
+// signature for the given issue state transition.
+func (m *MockLinear) BuildWebhookPayload(issueID, prevStatus, newStatus string) ([]byte, string) {
+	payload := map[string]interface{}{
+		"type":   "Issue",
+		"action": "update",
+		"data": map[string]interface{}{
+			"id":          "issue-uuid-123",
+			"identifier":  issueID,
+			"title":       "Add hello world to README",
+			"description": "Add a Hello World section to README.md",
+			"url":         "https://linear.app/test/issue/" + issueID,
+			"team": map[string]interface{}{
+				"key":  "ELA",
+				"name": "Engineering",
+			},
+			"state": map[string]interface{}{
+				"name": newStatus,
+			},
+		},
+		"updatedFrom": map[string]interface{}{
+			"state": map[string]interface{}{
+				"name": prevStatus,
+			},
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return b, ""
+}

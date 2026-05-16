@@ -656,7 +656,7 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 				if strings.HasPrefix(issueID, "sc-") {
 					scToken := s.resolveShortcutToken(factory.Workspace)
 					if scToken != "" {
-						if err := moveShortcutStory(scToken, issueID, factory.WorkingStatus); err != nil {
+						if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, factory.WorkingStatus); err != nil {
 							log.Printf("[factory] failed to move story %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
 						} else {
 							log.Printf("[factory] moved story %s to working status '%s' on resume", issueID, factory.WorkingStatus)
@@ -978,7 +978,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		if strings.HasPrefix(mergeIssueID, "sc-") {
 			scToken := s.resolveShortcutToken(mergeFactory.Workspace)
 			if scToken != "" {
-				if err := moveShortcutStory(scToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
+				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
 					log.Printf("[factory] failed to move story %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
 				} else {
 					log.Printf("[factory] moved story %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)

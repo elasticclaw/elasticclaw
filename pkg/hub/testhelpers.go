@@ -5,17 +5,18 @@ package hub
 import (
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 // NewTestServerWithConfig creates a Server for integration testing with mock backends.
-// Only call from tests. Uses the provided githubBaseURL and linearBaseURL to override
-// external API calls so tests can use httptest.Server instances.
+// Only call from tests. Uses the provided githubBaseURL, linearBaseURL, and
+// shortcutBaseURL to override external API calls so tests can use httptest.Server instances.
 func NewTestServerWithConfig(t interface {
 	Helper()
 	Cleanup(func())
-}, cfg *types.HubConfig, githubBaseURL, linearBaseURL string) (*Server, *sql.DB) {
+}, cfg *types.HubConfig, githubBaseURL, linearBaseURL, shortcutBaseURL string) (*Server, *sql.DB) {
 	db, err := openDB(":memory:")
 	if err != nil {
 		panic("NewTestServerWithConfig: openDB: " + err.Error())
@@ -45,12 +46,14 @@ func NewTestServerWithConfig(t interface {
 	}
 
 	s := &Server{
-		db:            db,
-		hubCfg:        cfg,
-		claws:         make(map[string]*clawConn),
-		users:         make(map[string]*userConn),
-		githubBaseURL: githubBaseURL,
-		linearBaseURL: linearBaseURL,
+		db:              db,
+		hubCfg:          cfg,
+		claws:           make(map[string]*clawConn),
+		users:           make(map[string]*userConn),
+		webhookDedup:    make(map[string]time.Time),
+		githubBaseURL:   githubBaseURL,
+		linearBaseURL:   linearBaseURL,
+		shortcutBaseURL: shortcutBaseURL,
 	}
 	// Register routes (same as Run but without serving web UI or starting relay)
 	mux := http.NewServeMux()

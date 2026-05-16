@@ -11,11 +11,13 @@ import (
 )
 
 type TestServer struct {
-	Server  *hub.Server
-	HTTPSrv *httptest.Server
-	GitHub  *MockGitHub
-	Linear  *MockLinear
-	DB      *sql.DB
+	Server      *hub.Server
+	HTTPSrv     *httptest.Server
+	GitHub      *MockGitHub
+	GitHubIssues *MockGitHubIssues
+	Linear      *MockLinear
+	Shortcut    *MockShortcut
+	DB          *sql.DB
 }
 
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
@@ -37,6 +39,21 @@ func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout
 	return ""
 }
 
+func (ts *TestServer) WaitForClawWithStory(t *testing.T, storyID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var clawID string
+		ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=?`, storyID).Scan(&clawID)
+		if clawID != "" {
+			return clawID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("WaitForClawWithStory: no claw for story %s after %v", storyID, timeout)
+	return ""
+}
+
 func (ts *TestServer) WaitForClawStatus(t *testing.T, clawID, status string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -55,8 +72,6 @@ func (ts *TestServer) WaitForClawStatus(t *testing.T, clawID, status string, tim
 
 func NewTestServer(t *testing.T) *TestServer {
 	t.Helper()
-	// Enable noop provider for tests
-	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	gh := NewMockGitHub(t)
 	li := NewMockLinear(t)
 
@@ -94,7 +109,7 @@ func NewTestServer(t *testing.T) *TestServer {
 		},
 	}
 
-	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL)
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, "")
 	s.StartPRWatcherForTest()
 
 	httpSrv := httptest.NewServer(s.Handler())
@@ -106,5 +121,124 @@ func NewTestServer(t *testing.T) *TestServer {
 		GitHub:  gh,
 		Linear:  li,
 		DB:      db,
+	}
+}
+
+// NewTestServerWithShortcut creates a TestServer that includes Shortcut integration.
+func NewTestServerWithShortcut(t *testing.T) *TestServer {
+	t.Helper()
+	gh := NewMockGitHub(t)
+	li := NewMockLinear(t)
+	sc := NewMockShortcut(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "test-factory",
+				Integration:   "shortcut",
+				Workspace:     "test-workspace",
+				TriggerStatus: "In Progress",
+				DoneStatus:    "Done",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				WebhookSecret: "test-webhook-secret",
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			Shortcut: []*types.ShortcutIntegrationConfig{
+				{
+					Workspace: "test-workspace",
+					Token:     "test-shortcut-token",
+				},
+			},
+		},
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, sc.URL)
+	s.StartPRWatcherForTest()
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	return &TestServer{
+		Server:      s,
+		HTTPSrv:     httpSrv,
+		GitHub:      gh,
+		Linear:      li,
+		Shortcut:    sc,
+		DB:          db,
+	}
+}
+
+// NewTestServerWithGitHubIssues creates a TestServer that includes GitHub Issues integration.
+func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
+	t.Helper()
+	gh := NewMockGitHub(t)
+	ghi := NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "test-webhook-secret"
+	li := NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "test-factory",
+				Integration:   "github-issues",
+				Workspace:     "test-workspace",
+				TriggerStatus: "open",
+				DoneStatus:    "closed",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				Repos:         []string{"testorg/testrepo"},
+				WebhookSecret: "test-webhook-secret",
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			GitHubIssues: []*types.GitHubIssuesIntegrationConfig{
+				{
+					Workspace:     "test-workspace",
+					Token:         "test-github-issues-token",
+					WebhookSecret: "test-webhook-secret",
+				},
+			},
+		},
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	s.StartPRWatcherForTest()
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	return &TestServer{
+		Server:       s,
+		HTTPSrv:      httpSrv,
+		GitHub:       gh,
+		GitHubIssues: ghi,
+		Linear:       li,
+		DB:           db,
 	}
 }

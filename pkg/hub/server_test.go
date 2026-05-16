@@ -99,7 +99,7 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 }
 
 func TestCheckDefaultModel(t *testing.T) {
-	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 
 	tests := []struct {
 		name        string
@@ -194,7 +194,7 @@ func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 		Auth: &types.AuthConfig{
 			Access: &types.AccessConfig{InteractRequiresTags: []string{"owner={user}"}},
 		},
-	}, "", "")
+	}, "", "", "")
 
 	for _, tt := range []struct {
 		name   string
@@ -235,7 +235,7 @@ func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
 				InteractRequiresTags: []string{"owner={user}"},
 			},
 		},
-	}, "", "")
+	}, "", "", "")
 	_, err := db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"claw-1", "test-tenant-id", "claw 1", `["owner=alice"]`,
@@ -276,7 +276,7 @@ func TestGitHubWritesRequireViewAndInteractAccess(t *testing.T) {
 				ViewRequiresTags: []string{"owner={user}"},
 			},
 		},
-	}, "", "")
+	}, "", "", "")
 	_, err := db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"claw-1", "test-tenant-id", "claw 1", `["owner=alice"]`,
@@ -326,7 +326,7 @@ func TestGitHubMessagesRequireInteractAccessOnly(t *testing.T) {
 				InteractRequiresTags: []string{"operator={user}"},
 			},
 		},
-	}, "", "")
+	}, "", "", "")
 	_, err := db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"claw-1", "test-tenant-id", "claw 1", `["operator=bob"]`,
@@ -348,7 +348,7 @@ func TestGitHubMessagesRequireInteractAccessOnly(t *testing.T) {
 }
 
 func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, nil, "", "")
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"claw-1", "test-tenant-id", "claw 1", `[]`,
@@ -395,7 +395,7 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 			GitHubOAuth:   &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
 			Access:        &types.AccessConfig{Admins: []string{"admin-user"}},
 		},
-	}, "", "")
+	}, "", "", "")
 
 	forgedSession, err := signGitHubSession("hub-token", "admin-user", "", "")
 	if err != nil {
@@ -467,7 +467,7 @@ func TestBroadcastToUsersFiltersGitHubSessionsByClawTags(t *testing.T) {
 		Auth: &types.AuthConfig{
 			Access: &types.AccessConfig{ViewRequiresTags: []string{"owner={user}"}},
 		},
-	}, "", "")
+	}, "", "", "")
 
 	s.users["allowed"] = &userConn{
 		tenantID:    "test-tenant-id",

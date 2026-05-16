@@ -5,12 +5,20 @@ package hub_test
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 )
+
+func TestMain(m *testing.M) {
+	// All integration tests need the noop provider. Set once for the test binary
+	// lifetime — no cleanup, no per-test race.
+	_ = os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	os.Exit(m.Run())
+}
 
 func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
 	payload := map[string]interface{}{
@@ -44,9 +52,6 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-123"
-	ts.GitHub.SetPR("testorg", "testrepo", 1, factorytest.PRState{State: "open", Merged: false})
-
-	// Fire Linear webhook
 	payload := buildLinearWebhookPayload(issueID, "Backlog", "In Progress")
 	resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
 		strings.NewReader(string(payload)))
@@ -82,6 +87,7 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 
 	// Wait for claw to be deleted — but since no GH token, pollAllPRs returns early.
 	// Just verify idle status persists.
+
 	time.Sleep(200 * time.Millisecond)
 	var status string
 	ts.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status)
@@ -205,6 +211,6 @@ func TestFactoryFlow_PollingDetectsMissedWebhook(t *testing.T) {
 		"connected":    true,
 	}
 	if !validStatuses[dbStatus] {
-		t.Fatalf("unexpected claw status after polling: %s", dbStatus)
+		t.Fatalf("unexpected claw status after poll: %s", dbStatus)
 	}
 }

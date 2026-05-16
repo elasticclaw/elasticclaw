@@ -52,6 +52,8 @@ type Server struct {
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
 	linearBaseURL string
+	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
+	shortcutBaseURL string
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -1092,7 +1094,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			case "shortcut":
 				token := s.resolveShortcutToken(factory.Workspace)
 				if token != "" {
-					if err := commentShortcutIssue(token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
+					if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
 						log.Printf("[kill] failed to comment Shortcut story %s: %v", issueID, err)
 					} else {
 						log.Printf("[kill] commented Shortcut story %s", issueID)
