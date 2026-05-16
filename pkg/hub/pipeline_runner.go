@@ -432,7 +432,7 @@ issueResolved:
 			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
 			return
 		}
-		if err := moveShortcutStory(scToken, scID, targetStatus); err != nil {
+		if err := moveShortcutStoryWithBase(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
 		} else {
 			log.Printf("[pipeline] moved story %s to %q", scID, targetStatus)
@@ -590,7 +590,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 		case "shortcut":
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token != "" {
-				if err := commentShortcutIssue(token, issueID, fmt.Sprintf("Agent stopped: %s", reason)); err != nil {
+				if err := commentShortcutIssueWithBase(s.resolveShortcutBaseURL(), token, issueID, fmt.Sprintf("Agent stopped: %s", reason)); err != nil {
 					log.Printf("[stopAgent] failed to comment Shortcut story %s: %v", issueID, err)
 				} else {
 					log.Printf("[stopAgent] commented Shortcut story %s", issueID)

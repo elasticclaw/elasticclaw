@@ -2,9 +2,7 @@ package factorytest
 
 import (
 	"database/sql"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -112,7 +110,7 @@ func NewTestServer(t *testing.T) *TestServer {
 		},
 	}
 
-	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL)
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, "")
 	s.StartPRWatcherForTest()
 
 	httpSrv := httptest.NewServer(s.Handler())
@@ -134,20 +132,6 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 	gh := NewMockGitHub(t)
 	li := NewMockLinear(t)
 	sc := NewMockShortcut(t)
-
-	// Override HTTP client for Shortcut API calls to route to the mock server.
-	// NOTE: This replaces the global http.DefaultClient for the duration of the test.
-	// Tests using this helper must not run in parallel. A future refactor should
-	// inject an *http.Client into the Server struct (like githubBaseURL/linearBaseURL)
-	// instead of relying on global state.
-	origClient := http.DefaultClient
-	http.DefaultClient = &http.Client{
-		Transport: &shortcutTestTransport{
-			mockURL:  sc.URL,
-			fallback: http.DefaultTransport,
-		},
-	}
-	t.Cleanup(func() { http.DefaultClient = origClient })
 
 	cfg := &types.HubConfig{
 		ClawToken: "test-claw-token",
@@ -184,7 +168,7 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 		},
 	}
 
-	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL)
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, sc.URL)
 	s.StartPRWatcherForTest()
 
 	httpSrv := httptest.NewServer(s.Handler())
@@ -198,22 +182,4 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 		Shortcut: sc,
 		DB:       db,
 	}
-}
-
-// shortcutTestTransport intercepts Shortcut API calls and routes them to the mock server.
-type shortcutTestTransport struct {
-	mockURL  string
-	fallback http.RoundTripper
-}
-
-func (t *shortcutTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Host, "shortcut.com") {
-		// Clone the request before mutating its URL to satisfy the RoundTripper contract.
-		newURL := *req.URL
-		newURL.Scheme = "http"
-		newURL.Host = strings.TrimPrefix(t.mockURL, "http://")
-		req = req.Clone(req.Context())
-		req.URL = &newURL
-	}
-	return t.fallback.RoundTrip(req)
 }

@@ -239,7 +239,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 
 			stateMap, ok := stateNameCache[token]
 			if !ok {
-				stateMap = buildShortcutStateMap(token)
+				stateMap = buildShortcutStateMapWithBase(s.resolveShortcutBaseURL(), token)
 				if len(stateMap) > 0 {
 					stateNameCache[token] = stateMap
 			} else {
@@ -292,7 +292,7 @@ func (s *Server) loadShortcutStoryFilterData(token string, storyID int64) *short
 		labels:    map[string]bool{},
 		assignees: map[string]bool{},
 	}
-	story, err := shortcutAPI(fmt.Sprintf("stories/%d", storyID), token)
+	story, err := shortcutAPIWithBase(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%d", storyID), token)
 	if err != nil {
 		data.loadErr = err
 		return data
@@ -330,7 +330,7 @@ func (s *Server) loadShortcutStoryFilterData(token string, storyID int64) *short
 	data.hasOwner = len(ownerIDs) > 0
 
 	for _, ownerID := range ownerIDs {
-		member, err := shortcutAPI("members/"+ownerID, token)
+		member, err := shortcutAPIWithBase(s.resolveShortcutBaseURL(), "members/"+ownerID, token)
 		if err != nil {
 			continue
 		}
@@ -388,8 +388,12 @@ func (s *Server) resolveShortcutToken(workspace string) string {
 // state ID → state name. Callers cache the result per token so a single webhook
 // event with N factories only hits the Shortcut API once per workspace.
 func buildShortcutStateMap(token string) map[int64]string {
+	return buildShortcutStateMapWithBase("https://api.app.shortcut.com", token)
+}
+
+func buildShortcutStateMapWithBase(baseURL, token string) map[int64]string {
 	m := map[int64]string{}
-	resp, err := shortcutAPIList("workflows", token)
+	resp, err := shortcutAPIListWithBase(baseURL, "workflows", token)
 	if err != nil {
 		return m
 	}
@@ -412,7 +416,7 @@ func buildShortcutStateMap(token string) map[int64]string {
 func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string, reason string) error {
 	// Verify we can read the story before spending money on a sandbox.
 	// Non-negotiable: if the story is unreadable, we can't do any work.
-	if _, err := shortcutAPI(fmt.Sprintf("stories/%s", storyID), token); err != nil {
+	if _, err := shortcutAPIWithBase(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%s", storyID), token); err != nil {
 		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
 	}
 	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
@@ -650,7 +654,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// a queued claw hasn't actually started working yet)
 	if !isPending && factory.WorkingStatus != "" {
 		if token != "" {
-			if err := moveShortcutStory(token, storyID, factory.WorkingStatus); err != nil {
+			if err := moveShortcutStoryWithBase(s.resolveShortcutBaseURL(), token, storyID, factory.WorkingStatus); err != nil {
 				log.Printf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
 			} else {
 				log.Printf("[factory] moved story %s to working status '%s'", storyID, factory.WorkingStatus)
@@ -721,9 +725,22 @@ func buildShortcutContext(action shortcutAction, storyID string) string {
 	return b.String()
 }
 
+// resolveShortcutBaseURL returns the base URL for Shortcut API calls.
+// Uses the server's override if set (for testing), otherwise the production endpoint.
+func (s *Server) resolveShortcutBaseURL() string {
+	if s.shortcutBaseURL != "" {
+		return s.shortcutBaseURL
+	}
+	return "https://api.app.shortcut.com"
+}
+
 // shortcutAPI makes a GET request to the Shortcut API.
 func shortcutAPI(path, token string) (map[string]interface{}, error) {
-	req, _ := http.NewRequest("GET", "https://api.app.shortcut.com/api/v3/"+path, nil)
+	return shortcutAPIWithBase("https://api.app.shortcut.com", path, token)
+}
+
+func shortcutAPIWithBase(baseURL, path, token string) (map[string]interface{}, error) {
+	req, _ := http.NewRequest("GET", baseURL+"/api/v3/"+path, nil)
 	req.Header.Set("Shortcut-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -741,8 +758,12 @@ func shortcutAPI(path, token string) (map[string]interface{}, error) {
 
 // moveShortcutStory updates a story's workflow state.
 func moveShortcutStory(token, storyIDStr, stateName string) error {
+	return moveShortcutStoryWithBase("https://api.app.shortcut.com", token, storyIDStr, stateName)
+}
+
+func moveShortcutStoryWithBase(baseURL, token, storyIDStr, stateName string) error {
 	// First find the state ID by name
-	resp, err := shortcutAPIList("workflows", token)
+	resp, err := shortcutAPIListWithBase(baseURL, "workflows", token)
 	if err != nil {
 		return fmt.Errorf("list workflows: %w", err)
 	}
@@ -776,7 +797,7 @@ func moveShortcutStory(token, storyIDStr, stateName string) error {
 
 	body := fmt.Sprintf(`{"workflow_state_id":%d}`, stateID)
 	req, _ := http.NewRequest("PUT",
-		fmt.Sprintf("https://api.app.shortcut.com/api/v3/stories/%d", storyNum),
+		fmt.Sprintf("%s/api/v3/stories/%d", baseURL, storyNum),
 		strings.NewReader(body))
 	req.Header.Set("Shortcut-Token", token)
 	req.Header.Set("Content-Type", "application/json")
@@ -793,6 +814,10 @@ func moveShortcutStory(token, storyIDStr, stateName string) error {
 
 // commentShortcutIssue adds a comment to a Shortcut story.
 func commentShortcutIssue(token, storyIDStr, body string) error {
+	return commentShortcutIssueWithBase("https://api.app.shortcut.com", token, storyIDStr, body)
+}
+
+func commentShortcutIssueWithBase(baseURL, token, storyIDStr, body string) error {
 	// Parse story ID (sc-123 → 123)
 	numStr := strings.TrimPrefix(storyIDStr, "sc-")
 	storyNum, err := strconv.ParseInt(numStr, 10, 64)
@@ -803,7 +828,7 @@ func commentShortcutIssue(token, storyIDStr, body string) error {
 	commentBody := map[string]interface{}{"text": body}
 	b, _ := json.Marshal(commentBody)
 	req, _ := http.NewRequest("POST",
-		fmt.Sprintf("https://api.app.shortcut.com/api/v3/stories/%d/comments", storyNum),
+		fmt.Sprintf("%s/api/v3/stories/%d/comments", baseURL, storyNum),
 		bytes.NewReader(b))
 	req.Header.Set("Shortcut-Token", token)
 	req.Header.Set("Content-Type", "application/json")
@@ -820,7 +845,11 @@ func commentShortcutIssue(token, storyIDStr, body string) error {
 }
 
 func shortcutAPIList(path, token string) ([]interface{}, error) {
-	req, _ := http.NewRequest("GET", "https://api.app.shortcut.com/api/v3/"+path, nil)
+	return shortcutAPIListWithBase("https://api.app.shortcut.com", path, token)
+}
+
+func shortcutAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
+	req, _ := http.NewRequest("GET", baseURL+"/api/v3/"+path, nil)
 	req.Header.Set("Shortcut-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)

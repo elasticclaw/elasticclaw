@@ -401,7 +401,7 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		case "shortcut":
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token != "" {
-				if err := commentShortcutIssue(token, issueID, "Agent stopped: issue left trigger status"); err != nil {
+				if err := commentShortcutIssueWithBase(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: issue left trigger status"); err != nil {
 					log.Printf("[factory] failed to comment Shortcut story %s: %v", issueID, err)
 				} else {
 					log.Printf("[factory] commented Shortcut story %s", issueID)
@@ -941,7 +941,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			// Shortcut story
 			scToken := s.resolveShortcutToken(factory.Workspace)
 			if scToken != "" {
-				if err := moveShortcutStory(scToken, issueID, targetStatus); err != nil {
+				if err := moveShortcutStoryWithBase(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus); err != nil {
 					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
 				} else {
 					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
