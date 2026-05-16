@@ -37,8 +37,6 @@ jobs:
           #   .depot/           — CI/workflows
           #   hack/             — internal scripts
           #   scripts/          — internal scripts
-          # Use --full-history so merges that touch both internal and product
-          # files are still considered (we then filter by touched paths).
           git log --pretty=format:'%h %s (%an)' \
             "$PREV..${GITHUB_REF_NAME}" \
             -- . \
@@ -47,6 +45,11 @@ jobs:
             ':(exclude)hack' \
             ':(exclude)scripts' \
             > /tmp/changelog.txt
+          # Guard: if every commit touched excluded paths, the changelog is empty.
+          # Write a placeholder so the Groq step doesn't hallucinate or fail on empty input.
+          if [ ! -s /tmp/changelog.txt ]; then
+            echo "No user-facing changes in this release." > /tmp/changelog.txt
+          fi
 
       - name: Generate release notes with Groq
         id: groq
