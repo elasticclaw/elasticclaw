@@ -357,7 +357,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 
 		// Pre-fetch workflow states once per workspace so the poller loop does
 		// not repeat the full /workflows API call for every story.
-		stateNameMap := buildShortcutStateMapWithBase(s.resolveShortcutBaseURL(), sc.Token)
+		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), sc.Token)
 		if len(stateNameMap) == 0 {
 			log.Printf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
 			continue
@@ -433,7 +433,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 	}
 	if needsAssignee && len(story.OwnerIDs) > 0 {
 		// Fetch first owner's name for assignee matching
-		data, err := shortcutAPIWithBase(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
+		data, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
 		if err == nil {
 			if name, ok := data["mention_name"].(string); ok && name != "" {
 				currentAssignee = name

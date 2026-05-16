@@ -1094,7 +1094,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			case "shortcut":
 				token := s.resolveShortcutToken(factory.Workspace)
 				if token != "" {
-					if err := commentShortcutIssueWithBase(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
+					if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
 						log.Printf("[kill] failed to comment Shortcut story %s: %v", issueID, err)
 					} else {
 						log.Printf("[kill] commented Shortcut story %s", issueID)

@@ -230,12 +230,12 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			// Wait for first claw
-			var clawID1 string
+			// Wait for first claw (created by webhook). We don't need the ID
+			// for the dedup assertion — we count all claws for this issue.
 			if td.name == "shortcut" {
-				clawID1 = ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
+				ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
 			} else {
-				clawID1 = ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
+				ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
 			}
 
 			// Trigger integration poll
@@ -279,7 +279,8 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("expected exactly 1 claw ever created, got %d (OQ-3 dedup bug)", count)
 			}
-			_ = clawID1
+			// clawID1 is the claw created by the webhook; we verify no second claw
+			// was ever created for the same issue (the dedup invariant).
 		},
 	})
 }

@@ -259,7 +259,7 @@ func (m *MockShortcut) StateIDForName(name string) int64 {
 				}
 			}
 		default:
-			fmt.Printf("[DEBUG] StateIDForName: unknown states type %T\n", v)
+			// unknown states type — ignore
 		}
 		for _, state := range stateList {
 			stateName, _ := state["name"].(string)
