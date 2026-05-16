@@ -469,10 +469,15 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
-	// Find provider: template config > hub default
-	provider := s.defaultProvider()
-	if tmplCfg != nil && tmplCfg.Provider != "" {
-		provider = tmplCfg.Provider
+	// Find provider: factory override > template config > hub default
+	provider := factory.Provider
+	if provider == "" {
+		if tmplCfg != nil && tmplCfg.Provider != "" {
+			provider = tmplCfg.Provider
+		}
+	}
+	if provider == "" {
+		provider = s.defaultProvider()
 	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")

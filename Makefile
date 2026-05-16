@@ -49,6 +49,9 @@ test:
 test-factory: ## Run factory integration tests
 	go test -v -tags integration -timeout 60s ./pkg/hub/... -run TestFactory
 
+test-parity: ## Run parity matrix integration tests (all trackers)
+	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
+
 # Run only bootstrap unit tests (fast, no infra needed)
 test-bootstrap:
 	go test -v ./pkg/hub/ -run TestBootstrap

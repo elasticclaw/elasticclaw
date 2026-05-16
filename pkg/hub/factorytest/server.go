@@ -2,7 +2,9 @@ package factorytest
 
 import (
 	"database/sql"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,11 +13,12 @@ import (
 )
 
 type TestServer struct {
-	Server  *hub.Server
-	HTTPSrv *httptest.Server
-	GitHub  *MockGitHub
-	Linear  *MockLinear
-	DB      *sql.DB
+	Server   *hub.Server
+	HTTPSrv  *httptest.Server
+	GitHub   *MockGitHub
+	Linear   *MockLinear
+	Shortcut *MockShortcut
+	DB       *sql.DB
 }
 
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
@@ -34,6 +37,21 @@ func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("WaitForClawWithIssue: no claw for issue %s after %v", issueID, timeout)
+	return ""
+}
+
+func (ts *TestServer) WaitForClawWithStory(t *testing.T, storyID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var clawID string
+		ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=?`, storyID).Scan(&clawID)
+		if clawID != "" {
+			return clawID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("WaitForClawWithStory: no claw for story %s after %v", storyID, timeout)
 	return ""
 }
 
@@ -107,4 +125,86 @@ func NewTestServer(t *testing.T) *TestServer {
 		Linear:  li,
 		DB:      db,
 	}
+}
+
+// NewTestServerWithShortcut creates a TestServer that includes Shortcut integration.
+func NewTestServerWithShortcut(t *testing.T) *TestServer {
+	t.Helper()
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	gh := NewMockGitHub(t)
+	li := NewMockLinear(t)
+	sc := NewMockShortcut(t)
+
+	// Override HTTP transport to route Shortcut API calls to the mock server
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = &shortcutTestTransport{
+		mockURL:   sc.URL,
+		fallback:  origTransport,
+	}
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "test-factory",
+				Integration:   "shortcut",
+				Workspace:     "test-workspace",
+				TriggerStatus: "In Progress",
+				DoneStatus:    "Done",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				WebhookSecret: "test-webhook-secret",
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			Shortcut: []*types.ShortcutIntegrationConfig{
+				{
+					Workspace: "test-workspace",
+					Token:     "test-shortcut-token",
+				},
+			},
+		},
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL)
+	s.StartPRWatcherForTest()
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	return &TestServer{
+		Server:   s,
+		HTTPSrv:  httpSrv,
+		GitHub:   gh,
+		Linear:   li,
+		Shortcut: sc,
+		DB:       db,
+	}
+}
+
+// shortcutTestTransport intercepts Shortcut API calls and routes them to the mock server.
+type shortcutTestTransport struct {
+	mockURL  string
+	fallback http.RoundTripper
+}
+
+func (t *shortcutTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Host, "shortcut.com") {
+		// Rewrite URL to point to mock server
+		req.URL.Scheme = "http"
+		req.URL.Host = strings.TrimPrefix(t.mockURL, "http://")
+	}
+	return t.fallback.RoundTrip(req)
 }

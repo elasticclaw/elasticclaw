@@ -1,0 +1,26 @@
+name: Post-merge tests
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  lane-b:
+    name: Lane B — broader test suite
+    runs-on: depot-ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache: true
+
+      - name: Run all integration tests
+        run: go test -v -tags integration -timeout 120s ./pkg/hub/... -run 'TestFactory|TestParity'
+
+      # TODO(Phase 2): Add L5 protocol tests
+      # TODO(Phase 3): Add L3 contract tests (re-record cassettes)
+      # TODO(Phase 4): Add L4 provider conformance + L6 E2E + L7 MCP smoke
