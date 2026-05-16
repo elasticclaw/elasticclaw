@@ -118,21 +118,19 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 		for id, story := range m.Stories {
 			// Respect updated_at_start filter: if since is set, only include stories
 			// whose updated_at is >= since. Stories store updated_at as a string.
-			if since != "" {
-				storyUpdatedAt := story.UpdatedAt
-				if storyUpdatedAt == "" {
-					storyUpdatedAt = "2026-05-10T00:00:00Z" // fallback for pre-existing stories
-				}
-				if storyUpdatedAt < since {
-					continue
-				}
+			storyUpdatedAt := story.UpdatedAt
+			if storyUpdatedAt == "" {
+				storyUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+			if since != "" && storyUpdatedAt < since {
+				continue
 			}
 			results = append(results, map[string]interface{}{
 				"id":                id,
 				"name":              story.Name,
 				"description":       story.Description,
 				"app_url":           fmt.Sprintf("https://app.shortcut.com/test/story/%d", id),
-				"updated_at":        story.UpdatedAt,
+				"updated_at":        storyUpdatedAt,
 				"workflow_state_id": story.WorkflowStateID,
 				"labels":            labelsToMaps(story.Labels),
 				"owner_ids":         story.OwnerIDs,
