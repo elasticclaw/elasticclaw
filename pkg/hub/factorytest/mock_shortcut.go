@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type StoryState struct {
@@ -21,6 +22,7 @@ type StoryState struct {
 	Description     string
 	Labels          []string
 	OwnerIDs        []string
+	UpdatedAt       string
 }
 
 type MockShortcut struct {
@@ -67,6 +69,7 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 				"name":              story.Name,
 				"description":       story.Description,
 				"app_url":           fmt.Sprintf("https://app.shortcut.com/test/story/%d", id),
+				"updated_at":        story.UpdatedAt,
 				"workflow_state_id": story.WorkflowStateID,
 				"labels":            labelsToMaps(story.Labels),
 				"owner_ids":         story.OwnerIDs,
@@ -81,6 +84,7 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 				if wfID, ok := update["workflow_state_id"].(float64); ok {
 					story.WorkflowStateID = int64(wfID)
 					story.Name = m.stateNameForID(story.WorkflowStateID)
+					story.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				}
 				m.Stories[id] = story
 			}
@@ -115,7 +119,10 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 			// Respect updated_at_start filter: if since is set, only include stories
 			// whose updated_at is >= since. Stories store updated_at as a string.
 			if since != "" {
-				storyUpdatedAt := "2026-05-10T00:00:00Z" // default; would be per-story in full impl
+				storyUpdatedAt := story.UpdatedAt
+				if storyUpdatedAt == "" {
+					storyUpdatedAt = "2026-05-10T00:00:00Z" // fallback for pre-existing stories
+				}
 				if storyUpdatedAt < since {
 					continue
 				}
@@ -125,7 +132,7 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 				"name":              story.Name,
 				"description":       story.Description,
 				"app_url":           fmt.Sprintf("https://app.shortcut.com/test/story/%d", id),
-				"updated_at":        "2026-05-10T00:00:00Z",
+				"updated_at":        story.UpdatedAt,
 				"workflow_state_id": story.WorkflowStateID,
 				"labels":            labelsToMaps(story.Labels),
 				"owner_ids":         story.OwnerIDs,
@@ -188,17 +195,35 @@ func (m *MockShortcut) SetStoryState(id int64, workflowStateID int64) {
 	if story, ok := m.Stories[id]; ok {
 		story.WorkflowStateID = workflowStateID
 		story.Name = m.stateNameForID(workflowStateID)
+		story.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		m.Stories[id] = story
 	}
 }
 
 func (m *MockShortcut) stateNameForID(id int64) string {
 	for _, wf := range m.Workflows {
-		states, _ := wf["states"].([]interface{})
-		for _, st := range states {
-			state, _ := st.(map[string]interface{})
-			sid, _ := state["id"].(float64)
-			if int64(sid) == id {
+		var stateList []map[string]interface{}
+		switch v := wf["states"].(type) {
+		case []map[string]interface{}:
+			stateList = v
+		case []interface{}:
+			for _, st := range v {
+				if s, ok := st.(map[string]interface{}); ok {
+					stateList = append(stateList, s)
+				}
+			}
+		}
+		for _, state := range stateList {
+			var sid int64
+			switch v := state["id"].(type) {
+			case float64:
+				sid = int64(v)
+			case int:
+				sid = int64(v)
+			case int64:
+				sid = v
+			}
+			if sid == id {
 				name, _ := state["name"].(string)
 				return name
 			}
@@ -220,11 +245,41 @@ func (m *MockShortcut) SawPollCall() bool {
 	return false
 }
 
-// ResetCalls clears the call log.
-func (m *MockShortcut) ResetCalls() {
+// StateIDForName looks up a workflow state ID by name from the mock workflows.
+func (m *MockShortcut) StateIDForName(name string) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = nil
+	for _, wf := range m.Workflows {
+		var stateList []map[string]interface{}
+		switch v := wf["states"].(type) {
+		case []map[string]interface{}:
+			stateList = v
+		case []interface{}:
+			for _, st := range v {
+				if s, ok := st.(map[string]interface{}); ok {
+					stateList = append(stateList, s)
+				}
+			}
+		default:
+			fmt.Printf("[DEBUG] StateIDForName: unknown states type %T\n", v)
+		}
+		for _, state := range stateList {
+			stateName, _ := state["name"].(string)
+			if strings.EqualFold(stateName, name) {
+				var id int64
+				switch v := state["id"].(type) {
+				case float64:
+					id = int64(v)
+				case int:
+					id = int64(v)
+				case int64:
+					id = v
+				}
+				return id
+			}
+		}
+	}
+	return 0
 }
 
 func (m *MockShortcut) BuildWebhookPayload(storyID int64, prevStateID, newStateID int64, secret string) ([]byte, string) {

@@ -45,34 +45,14 @@ var trackers = []trackerDispatcher{
 	{
 		name: "shortcut",
 		setIssue: func(ts *factorytest.TestServer, id string, status string) {
-			// Map status name to workflow state ID
-			var stateID int64
-			switch status {
-			case "Backlog":
-				stateID = 5001
-			case "In Progress":
-				stateID = 5002
-			case "Done":
-				stateID = 5003
-			}
+			stateID := ts.Shortcut.StateIDForName(status)
 			storyNum := parseStoryNum(id)
 			ts.Shortcut.SetStoryState(storyNum, stateID)
 		},
 		webhook: func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response {
 			storyNum := parseStoryNum(id)
-			var prevID, newID int64
-			switch prevStatus {
-			case "Backlog":
-				prevID = 5001
-			case "In Progress":
-				prevID = 5002
-			}
-			switch newStatus {
-			case "In Progress":
-				newID = 5002
-			case "Done":
-				newID = 5003
-			}
+			prevID := ts.Shortcut.StateIDForName(prevStatus)
+			newID := ts.Shortcut.StateIDForName(newStatus)
 			payload, sig := ts.Shortcut.BuildWebhookPayload(storyNum, prevID, newID, "test-webhook-secret")
 			req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/shortcut/webhook", strings.NewReader(string(payload)))
 			if err != nil {
@@ -273,27 +253,31 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 					sawPoll = ts.Linear.SawPollCall()
 				}
 				if sawPoll {
+					// The call log is updated before the DB write, so give a
+					// small window for the duplicate insert to complete.
+					time.Sleep(100 * time.Millisecond)
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
 			}
 
-			// Count claws for this issue — should be exactly 1
+			// Count all claws ever created for this issue (including deleted).
+			// If dedup creates then deletes a duplicate, we still want to catch it.
 			var count int
 			if td.name == "shortcut" {
-				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=? AND status NOT IN ('deleted')`, td.issueID).Scan(&count)
+				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=?`, td.issueID).Scan(&count)
 				if err != nil {
 					t.Fatalf("count query failed: %v", err)
 				}
 			} else {
-				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=? AND status NOT IN ('deleted')`, td.issueID).Scan(&count)
+				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, td.issueID).Scan(&count)
 				if err != nil {
 					t.Fatalf("count query failed: %v", err)
 				}
 			}
 
 			if count != 1 {
-				t.Fatalf("expected exactly 1 claw, got %d (OQ-3 dedup bug)", count)
+				t.Fatalf("expected exactly 1 claw ever created, got %d (OQ-3 dedup bug)", count)
 			}
 			_ = clawID1
 		},
