@@ -154,3 +154,33 @@ func (m *MockLinear) ResetCalls() {
 	defer m.mu.Unlock()
 	m.GraphQLCalls = nil
 }
+
+// BuildWebhookPayload returns a JSON webhook payload and the HMAC-SHA256
+// signature for the given issue state transition.
+func (m *MockLinear) BuildWebhookPayload(issueID, prevStatus, newStatus string) ([]byte, string) {
+	payload := map[string]interface{}{
+		"type":   "Issue",
+		"action": "update",
+		"data": map[string]interface{}{
+			"id":          "issue-uuid-123",
+			"identifier":  issueID,
+			"title":       "Add hello world to README",
+			"description": "Add a Hello World section to README.md",
+			"url":         "https://linear.app/test/issue/" + issueID,
+			"team": map[string]interface{}{
+				"key":  "ELA",
+				"name": "Engineering",
+			},
+			"state": map[string]interface{}{
+				"name": newStatus,
+			},
+		},
+		"updatedFrom": map[string]interface{}{
+			"state": map[string]interface{}{
+				"name": prevStatus,
+			},
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return b, ""
+}

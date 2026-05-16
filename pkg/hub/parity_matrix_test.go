@@ -30,7 +30,7 @@ var trackers = []trackerDispatcher{
 			ts.Linear.SetIssueStateName(id, status)
 		},
 		webhook: func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response {
-			payload := buildLinearWebhookPayload(id, prevStatus, newStatus)
+			payload, _ := ts.Linear.BuildWebhookPayload(id, prevStatus, newStatus)
 			resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
 				strings.NewReader(string(payload)))
 			if err != nil {
@@ -168,16 +168,11 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 	})
 }
 
-// S3: move_issue resolves correct tracker from factory integration
-func TestParity_MoveIssueResolvesTracker(t *testing.T) {
+// S3: claw created via factory webhook carries correct tracker metadata
+func TestParity_FactoryTrackerMetadata(t *testing.T) {
 	runParityMatrix(t, scenario{
-		name: "move_issue resolves correct tracker from factory integration",
+		name: "claw carries correct tracker metadata from factory integration",
 		fn: func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer) {
-			// This scenario verifies that when a factory specifies an integration,
-			// the pipeline's move_issue action targets the correct tracker.
-			// For now, we verify the factory config is wired correctly by checking
-			// the claw is created with the right tracker metadata.
-
 			td.setIssue(ts, td.issueID, td.trigger)
 			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
 			if resp == nil {
@@ -194,7 +189,6 @@ func TestParity_MoveIssueResolvesTracker(t *testing.T) {
 				clawID = ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
 			}
 
-			// Verify the claw has the correct tracker field set
 			var trackerField string
 			if td.name == "shortcut" {
 				trackerField = "shortcut_story_id"
@@ -253,9 +247,22 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 					sawPoll = ts.Linear.SawPollCall()
 				}
 				if sawPoll {
-					// The call log is updated before the DB write, so give a
-					// small window for the duplicate insert to complete.
-					time.Sleep(100 * time.Millisecond)
+					// Poll call is logged before DB write. Wait for the claw
+					// count to stabilise rather than a blind sleep.
+					var lastCount int
+					for i := 0; i < 20; i++ {
+						var count int
+						if td.name == "shortcut" {
+							ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=?`, td.issueID).Scan(&count)
+						} else {
+							ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, td.issueID).Scan(&count)
+						}
+						if i > 0 && count == lastCount {
+							break
+						}
+						lastCount = count
+						time.Sleep(50 * time.Millisecond)
+					}
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
