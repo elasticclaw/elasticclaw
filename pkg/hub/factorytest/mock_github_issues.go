@@ -170,11 +170,11 @@ func (m *MockGitHubIssues) SawAPICall() bool {
 
 // BuildWebhookPayload returns a JSON webhook payload and the X-Hub-Signature-256
 // for the given issue state transition.
-// The action field is computed from the state transition:
-//   prev="" + new="open" → "opened"
-//   prev="open" + new="closed" → "closed"
-//   prev="closed" + new="open" → "reopened"
-//   otherwise → "edited"
+//
+// The action field is computed from the prev/new state pair. This mock
+// intentionally only covers state transitions (opened/closed/reopened/edited);
+// labeled/assigned/commented events are not yet needed by the parity matrix
+// and would require additional payload fields.
 func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevState, newState string) ([]byte, string) {
 	m.mu.Lock()
 	issue, ok := m.Issues[fmt.Sprintf("%s#%d", repo, number)]

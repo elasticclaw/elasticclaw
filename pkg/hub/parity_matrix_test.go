@@ -145,7 +145,7 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			// not a "delete first, keep second" replacement.
 			clawIDNow := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 			if clawIDNow != clawID1 {
-				t.Fatalf("dedup replaced claw: original %s, now %s", clawID1[:8], clawIDNow[:8])
+				t.Fatalf("dedup replaced claw: original %s, now %s", clawID1, clawIDNow)
 			}
 		},
 	})

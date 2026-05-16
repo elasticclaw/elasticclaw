@@ -16,7 +16,7 @@ import (
 func TestMain(m *testing.M) {
 	// All integration tests need the noop provider. Set once for the test binary
 	// lifetime — no cleanup, no per-test race.
-	os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	_ = os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	os.Exit(m.Run())
 }
 
