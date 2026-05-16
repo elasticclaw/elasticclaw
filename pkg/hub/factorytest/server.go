@@ -135,13 +135,19 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 	li := NewMockLinear(t)
 	sc := NewMockShortcut(t)
 
-	// Override HTTP transport to route Shortcut API calls to the mock server
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = &shortcutTestTransport{
-		mockURL:   sc.URL,
-		fallback:  origTransport,
+	// Override HTTP client for Shortcut API calls to route to the mock server.
+	// NOTE: This replaces the global http.DefaultClient for the duration of the test.
+	// Tests using this helper must not run in parallel. A future refactor should
+	// inject an *http.Client into the Server struct (like githubBaseURL/linearBaseURL)
+	// instead of relying on global state.
+	origClient := http.DefaultClient
+	http.DefaultClient = &http.Client{
+		Transport: &shortcutTestTransport{
+			mockURL:  sc.URL,
+			fallback: http.DefaultTransport,
+		},
 	}
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
+	t.Cleanup(func() { http.DefaultClient = origClient })
 
 	cfg := &types.HubConfig{
 		ClawToken: "test-claw-token",
@@ -202,9 +208,12 @@ type shortcutTestTransport struct {
 
 func (t *shortcutTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if strings.Contains(req.URL.Host, "shortcut.com") {
-		// Rewrite URL to point to mock server
-		req.URL.Scheme = "http"
-		req.URL.Host = strings.TrimPrefix(t.mockURL, "http://")
+		// Clone the request before mutating its URL to satisfy the RoundTripper contract.
+		newURL := *req.URL
+		newURL.Scheme = "http"
+		newURL.Host = strings.TrimPrefix(t.mockURL, "http://")
+		req = req.Clone(req.Context())
+		req.URL = &newURL
 	}
 	return t.fallback.RoundTrip(req)
 }

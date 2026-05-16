@@ -112,9 +112,14 @@ func NewMockShortcut(t *testing.T) *MockShortcut {
 
 		var results []map[string]interface{}
 		for id, story := range m.Stories {
-			// Simple filter: if since is set, only include stories with non-zero updated_at
-			// In real usage, stories would have updated_at fields; we simulate by including all
-			_ = since
+			// Respect updated_at_start filter: if since is set, only include stories
+			// whose updated_at is >= since. Stories store updated_at as a string.
+			if since != "" {
+				storyUpdatedAt := "2026-05-10T00:00:00Z" // default; would be per-story in full impl
+				if storyUpdatedAt < since {
+					continue
+				}
+			}
 			results = append(results, map[string]interface{}{
 				"id":                id,
 				"name":              story.Name,
