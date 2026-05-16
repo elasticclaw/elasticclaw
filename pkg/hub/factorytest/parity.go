@@ -129,6 +129,7 @@ type Scenario struct {
 func RunParityMatrix(t *testing.T, sc Scenario) {
 	for _, td := range Trackers {
 		t.Run(td.Name+"/"+sc.Name, func(t *testing.T) {
+			t.Parallel()
 			t.Helper()
 			var ts *TestServer
 			switch td.Name {

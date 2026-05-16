@@ -72,8 +72,6 @@ func (ts *TestServer) WaitForClawStatus(t *testing.T, clawID, status string, tim
 
 func NewTestServer(t *testing.T) *TestServer {
 	t.Helper()
-	// Enable noop provider for tests
-	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	gh := NewMockGitHub(t)
 	li := NewMockLinear(t)
 
@@ -129,7 +127,6 @@ func NewTestServer(t *testing.T) *TestServer {
 // NewTestServerWithShortcut creates a TestServer that includes Shortcut integration.
 func NewTestServerWithShortcut(t *testing.T) *TestServer {
 	t.Helper()
-	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	gh := NewMockGitHub(t)
 	li := NewMockLinear(t)
 	sc := NewMockShortcut(t)
@@ -188,7 +185,6 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 // NewTestServerWithGitHubIssues creates a TestServer that includes GitHub Issues integration.
 func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 	t.Helper()
-	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	gh := NewMockGitHub(t)
 	ghi := NewMockGitHubIssues(t)
 	ghi.WebhookSecret = "test-webhook-secret"

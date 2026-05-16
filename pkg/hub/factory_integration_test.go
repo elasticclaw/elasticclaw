@@ -5,12 +5,26 @@ package hub_test
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 )
+
+func setNoopProvider(t *testing.T) {
+	t.Helper()
+	old := os.Getenv("ELASTICCLAW_NOOP_PROVIDER")
+	os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	t.Cleanup(func() {
+		if old == "" {
+			os.Unsetenv("ELASTICCLAW_NOOP_PROVIDER")
+		} else {
+			os.Setenv("ELASTICCLAW_NOOP_PROVIDER", old)
+		}
+	})
+}
 
 func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
 	payload := map[string]interface{}{
@@ -41,6 +55,7 @@ func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
 }
 
 func TestFactoryFlow_HappyPath(t *testing.T) {
+	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-123"
@@ -91,6 +106,7 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 }
 
 func TestFactoryFlow_WebhookCreatesClawInDB(t *testing.T) {
+	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-999"
@@ -124,6 +140,7 @@ func TestFactoryFlow_WebhookCreatesClawInDB(t *testing.T) {
 }
 
 func TestFactoryFlow_FakeBridgeConnect(t *testing.T) {
+	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-777"
@@ -146,6 +163,7 @@ func TestFactoryFlow_FakeBridgeConnect(t *testing.T) {
 }
 
 func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
+	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-555"
@@ -167,6 +185,7 @@ func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
 }
 
 func TestFactoryFlow_PollingDetectsMissedWebhook(t *testing.T) {
+	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-123"

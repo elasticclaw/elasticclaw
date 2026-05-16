@@ -11,6 +11,7 @@ import (
 
 // S1: webhook spawns claw with correct factory match
 func TestParity_WebhookSpawnsClaw(t *testing.T) {
+	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "webhook spawns claw with correct factory match",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -34,6 +35,7 @@ func TestParity_WebhookSpawnsClaw(t *testing.T) {
 
 // S2: issue status change triggers pipeline stage transition
 func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
+	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "issue status change triggers pipeline stage transition",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -56,6 +58,7 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 
 // S3: claw created via factory webhook carries correct tracker metadata
 func TestParity_FactoryTrackerMetadata(t *testing.T) {
+	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "claw carries correct tracker metadata from factory integration",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -93,6 +96,7 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 
 // S4: webhook + poll see the same event → exactly one claw spawned (OQ-3)
 func TestParity_WebhookPollDedup(t *testing.T) {
+	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "webhook and poll deduplicate",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -106,7 +110,7 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
+			clawID1 := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 
 			ts.Server.PollIntegrationsForTest()
 
@@ -122,10 +126,10 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 					sawPoll = ts.Linear.SawPollCall()
 				}
 				if sawPoll {
-					var lastCount int
+					lastCount := -1
 					for i := 0; i < 20; i++ {
 						count := factorytest.CountClawsForTracker(t, ts, td)
-						if i > 0 && count == lastCount {
+						if count == lastCount {
 							break
 						}
 						lastCount = count
@@ -139,6 +143,13 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			count := factorytest.CountClawsForTracker(t, ts, td)
 			if count != 1 {
 				t.Fatalf("expected exactly 1 claw ever created, got %d (OQ-3 dedup bug)", count)
+			}
+
+			// Strengthening: assert the surviving claw is the original one,
+			// not a "delete first, keep second" replacement.
+			clawIDNow := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
+			if clawIDNow != clawID1 {
+				t.Fatalf("dedup replaced claw: original %s, now %s", clawID1[:8], clawIDNow[:8])
 			}
 		},
 	})

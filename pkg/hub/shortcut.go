@@ -470,17 +470,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	// Find provider: factory override > template config > hub default
-	provider := factory.Provider
-	if provider == "" {
-		if tmplCfg != nil && tmplCfg.Provider != "" {
-			provider = tmplCfg.Provider
-		}
-	}
-	if provider == "" {
-		provider = s.defaultProvider()
-	}
-	if provider == "" {
-		return fmt.Errorf("no provider configured")
+	provider, err := resolveProvider(factory, tmplCfg, s.defaultProvider())
+	if err != nil {
+		return err
 	}
 
 	s.mu.RLock()

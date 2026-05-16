@@ -29,22 +29,16 @@ func TestResolveProviderPrecedence(t *testing.T) {
 				tmplCfg = &types.TemplateConfig{Provider: tc.tmpl}
 			}
 
-			// Inline the precedence logic from createClawFromFactory
-			provider := factory.Provider
-			if provider == "" {
-				if tmplCfg != nil && tmplCfg.Provider != "" {
-					provider = tmplCfg.Provider
-				}
-			}
-			if provider == "" {
-				provider = tc.hubDefault
-			}
+			provider, err := resolveProvider(factory, tmplCfg, tc.hubDefault)
 
 			if tc.wantErr {
-				if provider != "" {
-					t.Fatalf("expected error (empty provider), got %q", provider)
+				if err == nil {
+					t.Fatalf("expected error, got provider %q", provider)
 				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 			if provider != tc.wantProvider {
 				t.Fatalf("provider: want %q, got %q", tc.wantProvider, provider)

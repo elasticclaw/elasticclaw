@@ -14,6 +14,24 @@ import (
 	"github.com/google/uuid"
 )
 
+// resolveProvider resolves the provider for a claw using the precedence:
+// factory.Provider > template.Provider > hubDefault.
+func resolveProvider(factory *types.FactoryConfig, tmplCfg *types.TemplateConfig, hubDefault string) (string, error) {
+	provider := factory.Provider
+	if provider == "" {
+		if tmplCfg != nil && tmplCfg.Provider != "" {
+			provider = tmplCfg.Provider
+		}
+	}
+	if provider == "" {
+		provider = hubDefault
+	}
+	if provider == "" {
+		return "", fmt.Errorf("no provider configured")
+	}
+	return provider, nil
+}
+
 // createClawFromFactory creates a claw from a factory configuration.
 // issueID is empty for manual triggers (not tied to a Linear/GitHub issue).
 // inputs is the validated map of user inputs for manual triggers; nil for webhooks.
@@ -95,17 +113,9 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	// Find provider: factory override > template config > hub default
-	provider := factory.Provider
-	if provider == "" {
-		if tmplCfg != nil && tmplCfg.Provider != "" {
-			provider = tmplCfg.Provider
-		}
-	}
-	if provider == "" {
-		provider = s.defaultProvider()
-	}
-	if provider == "" {
-		return "", false, fmt.Errorf("no provider configured")
+	provider, err := resolveProvider(factory, tmplCfg, s.defaultProvider())
+	if err != nil {
+		return "", false, err
 	}
 
 	// Build env vars

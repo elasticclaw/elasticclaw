@@ -25,11 +25,12 @@ type IssueState struct {
 }
 
 // MockGitHubIssues is a REST-style mock for the GitHub Issues API and webhook
-// delivery. It handles:
+// delivery. It currently handles:
 //   - GET /repos/{owner}/{repo}/issues?since=...&state=all&sort=updated&direction=desc
-//   - GET /repos/{owner}/{repo}/issues/{number}/events
-//   - POST /repos/{owner}/{repo}/issues/{number}/comments (for move_issue)
-//   - POST /repos/{owner}/{repo}/issues/{number}/labels (for move_issue)
+//   - GET /repos/{owner}/{repo}/issues/{number}
+//
+// POST endpoints for comments/labels are not yet implemented (needed for
+// move_issue parity tests in a future phase).
 type MockGitHubIssues struct {
 	*httptest.Server
 	mu      sync.Mutex
@@ -66,8 +67,6 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 
 		// issues endpoint
 		if strings.HasPrefix(rest, "issues") {
-			m.mu.Lock()
-			m.mu.Unlock()
 			// Single issue fetch: /repos/{owner}/{repo}/issues/{number}
 			parts2 := strings.Split(rest, "/")
 			if len(parts2) == 2 && parts2[0] == "issues" {
@@ -135,13 +134,18 @@ func (m *MockGitHubIssues) SetIssueState(repo string, number int, state string) 
 	}
 }
 
-// SawPollCall returns true if the mock has received an issues list call
+// SawPollCall returns true if the mock has received an issues list GET call
 // (the polling endpoint) since the last reset.
 func (m *MockGitHubIssues) SawPollCall() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, c := range m.Calls {
-		if strings.Contains(c, "/issues?") {
+		// A list call looks like "GET /repos/owner/repo/issues?since=...".
+		// A single-issue fetch looks like "GET /repos/owner/repo/issues/42".
+		// We only want to match list calls: path ends with /issues (possibly
+		// followed by ?query).  Match "GET .../issues?" or "GET .../issues "
+		// (the latter shouldn't happen, but be defensive).
+		if strings.Contains(c, "/issues?") || strings.HasSuffix(c, "/issues") {
 			return true
 		}
 	}
@@ -157,6 +161,11 @@ func (m *MockGitHubIssues) ResetCalls() {
 
 // BuildWebhookPayload returns a JSON webhook payload and the X-Hub-Signature-256
 // for the given issue state transition.
+// The action field is computed from the state transition:
+//   prev="" + new="open" → "opened"
+//   prev="open" + new="closed" → "closed"
+//   prev="closed" + new="open" → "reopened"
+//   otherwise → "edited"
 func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevState, newState string) ([]byte, string) {
 	m.mu.Lock()
 	issue, ok := m.Issues[fmt.Sprintf("%s#%d", repo, number)]
@@ -165,8 +174,18 @@ func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevStat
 		issue = IssueState{Title: "Test Issue", Body: "Test body", State: newState}
 	}
 
+	action := "edited"
+	switch {
+	case prevState == "" && newState == "open":
+		action = "opened"
+	case prevState == "open" && newState == "closed":
+		action = "closed"
+	case prevState == "closed" && newState == "open":
+		action = "reopened"
+	}
+
 	payload := map[string]interface{}{
-		"action": "opened",
+		"action": action,
 		"issue": map[string]interface{}{
 			"id":         number,
 			"number":     number,
