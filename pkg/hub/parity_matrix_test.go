@@ -3,119 +3,20 @@
 package hub_test
 
 import (
-	"fmt"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 )
 
-// trackerDispatcher abstracts the differences between Linear, Shortcut, and GitHub Issues
-// so the same scenario can run against all three.
-type trackerDispatcher struct {
-	name      string
-	setIssue  func(ts *factorytest.TestServer, id string, status string)
-	webhook   func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response
-	issueID   string // the test issue/story ID
-	trigger   string // the status that triggers the factory
-	done      string // the status that marks done
-}
-
-var trackers = []trackerDispatcher{
-	{
-		name: "linear",
-		setIssue: func(ts *factorytest.TestServer, id string, status string) {
-			ts.Linear.SetIssueStateName(id, status)
-		},
-		webhook: func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response {
-			payload, _ := ts.Linear.BuildWebhookPayload(id, prevStatus, newStatus)
-			resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
-				strings.NewReader(string(payload)))
-			if err != nil {
-				panic(fmt.Sprintf("linear webhook post failed: %v", err))
-			}
-			return resp
-		},
-		issueID: "ELA-123",
-		trigger: "In Progress",
-		done:    "Done",
-	},
-	{
-		name: "shortcut",
-		setIssue: func(ts *factorytest.TestServer, id string, status string) {
-			stateID := ts.Shortcut.StateIDForName(status)
-			storyNum := parseStoryNum(id)
-			ts.Shortcut.SetStoryState(storyNum, stateID)
-		},
-		webhook: func(ts *factorytest.TestServer, id string, prevStatus, newStatus string) *http.Response {
-			storyNum := parseStoryNum(id)
-			prevID := ts.Shortcut.StateIDForName(prevStatus)
-			newID := ts.Shortcut.StateIDForName(newStatus)
-			payload, sig := ts.Shortcut.BuildWebhookPayload(storyNum, prevID, newID, "test-webhook-secret")
-			req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/shortcut/webhook", strings.NewReader(string(payload)))
-			if err != nil {
-				panic(fmt.Sprintf("shortcut webhook request build failed: %v", err))
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Payload-Signature", sig)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				panic(fmt.Sprintf("shortcut webhook post failed: %v", err))
-			}
-			return resp
-		},
-		issueID: "sc-123",
-		trigger: "In Progress",
-		done:    "Done",
-	},
-}
-
-func parseStoryNum(id string) int64 {
-	// sc-123 → 123
-	var n int64
-	fmt.Sscanf(id, "sc-%d", &n)
-	return n
-}
-
-// scenario defines a test scenario that runs against all trackers.
-type scenario struct {
-	name string
-	fn   func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer)
-}
-
-func runParityMatrix(t *testing.T, sc scenario) {
-	for _, td := range trackers {
-		t.Run(td.name+"/"+sc.name, func(t *testing.T) {
-			t.Helper()
-			var ts *factorytest.TestServer
-			if td.name == "shortcut" {
-				ts = factorytest.NewTestServerWithShortcut(t)
-				// Pre-populate the story in the mock
-				ts.Shortcut.SetStory(123, factorytest.StoryState{
-					Name:            "Test Story",
-					WorkflowStateID: 5001, // Backlog
-					Description:     "Test description",
-				})
-			} else {
-				ts = factorytest.NewTestServer(t)
-			}
-			sc.fn(t, td, ts)
-		})
-	}
-}
-
 // S1: webhook spawns claw with correct factory match
 func TestParity_WebhookSpawnsClaw(t *testing.T) {
-	runParityMatrix(t, scenario{
-		name: "webhook spawns claw with correct factory match",
-		fn: func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer) {
-			// Set issue to trigger status
-			td.setIssue(ts, td.issueID, td.trigger)
+	factorytest.RunParityMatrix(t, factorytest.Scenario{
+		Name: "webhook spawns claw with correct factory match",
+		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
+			td.SetIssue(ts, td.IssueID, td.Trigger)
 
-			// Fire webhook
-			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			resp := td.Webhook(t, ts, td.IssueID, "Backlog", td.Trigger)
 			if resp == nil {
 				t.Fatal("webhook returned nil response")
 			}
@@ -123,13 +24,7 @@ func TestParity_WebhookSpawnsClaw(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			// Wait for claw
-			var clawID string
-			if td.name == "shortcut" {
-				clawID = ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
-			} else {
-				clawID = ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
-			}
+			clawID := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 			if clawID == "" {
 				t.Fatal("expected claw to be created")
 			}
@@ -139,12 +34,11 @@ func TestParity_WebhookSpawnsClaw(t *testing.T) {
 
 // S2: issue status change triggers pipeline stage transition
 func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
-	runParityMatrix(t, scenario{
-		name: "issue status change triggers pipeline stage transition",
-		fn: func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer) {
-			// Spawn claw via webhook
-			td.setIssue(ts, td.issueID, td.trigger)
-			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+	factorytest.RunParityMatrix(t, factorytest.Scenario{
+		Name: "issue status change triggers pipeline stage transition",
+		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
+			td.SetIssue(ts, td.IssueID, td.Trigger)
+			resp := td.Webhook(t, ts, td.IssueID, "Backlog", td.Trigger)
 			if resp == nil {
 				t.Fatal("webhook returned nil response")
 			}
@@ -152,17 +46,9 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			var clawID string
-			if td.name == "shortcut" {
-				clawID = ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
-			} else {
-				clawID = ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
-			}
+			clawID := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 
-			// Connect fake bridge
-			bridge := factorytest.ConnectFakeBridge(t, ts.URL(), clawID, td.issueID, ts.ClawToken())
-
-			// Wait for entry stage inject
+			bridge := factorytest.ConnectFakeBridge(t, ts.URL(), clawID, td.IssueID, ts.ClawToken())
 			bridge.WaitForMessage(t, "CONTEXT.md", 5*time.Second)
 		},
 	})
@@ -170,11 +56,11 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 
 // S3: claw created via factory webhook carries correct tracker metadata
 func TestParity_FactoryTrackerMetadata(t *testing.T) {
-	runParityMatrix(t, scenario{
-		name: "claw carries correct tracker metadata from factory integration",
-		fn: func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer) {
-			td.setIssue(ts, td.issueID, td.trigger)
-			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+	factorytest.RunParityMatrix(t, factorytest.Scenario{
+		Name: "claw carries correct tracker metadata from factory integration",
+		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
+			td.SetIssue(ts, td.IssueID, td.Trigger)
+			resp := td.Webhook(t, ts, td.IssueID, "Backlog", td.Trigger)
 			if resp == nil {
 				t.Fatal("webhook returned nil response")
 			}
@@ -182,15 +68,10 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			var clawID string
-			if td.name == "shortcut" {
-				clawID = ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
-			} else {
-				clawID = ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
-			}
+			clawID := factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 
 			var trackerField string
-			if td.name == "shortcut" {
+			if td.Name == "shortcut" {
 				trackerField = "shortcut_story_id"
 			} else {
 				trackerField = "linear_issue_id"
@@ -200,8 +81,8 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatalf("claw missing %s: %v", trackerField, err)
 			}
-			if dbID != td.issueID {
-				t.Fatalf("claw %s: want %q got %q", trackerField, td.issueID, dbID)
+			if dbID != td.IssueID {
+				t.Fatalf("claw %s: want %q got %q", trackerField, td.IssueID, dbID)
 			}
 		},
 	})
@@ -209,14 +90,12 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 
 // S4: webhook + poll see the same event → exactly one claw spawned (OQ-3)
 func TestParity_WebhookPollDedup(t *testing.T) {
-	runParityMatrix(t, scenario{
-		name: "webhook and poll deduplicate",
-		fn: func(t *testing.T, td trackerDispatcher, ts *factorytest.TestServer) {
-			// Set issue to trigger status
-			td.setIssue(ts, td.issueID, td.trigger)
+	factorytest.RunParityMatrix(t, factorytest.Scenario{
+		Name: "webhook and poll deduplicate",
+		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
+			td.SetIssue(ts, td.IssueID, td.Trigger)
 
-			// Fire webhook
-			resp := td.webhook(ts, td.issueID, "Backlog", td.trigger)
+			resp := td.Webhook(t, ts, td.IssueID, "Backlog", td.Trigger)
 			if resp == nil {
 				t.Fatal("webhook returned nil response")
 			}
@@ -224,39 +103,22 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 				t.Fatalf("webhook returned status %d", resp.StatusCode)
 			}
 
-			// Wait for first claw (created by webhook). We don't need the ID
-			// for the dedup assertion — we count all claws for this issue.
-			if td.name == "shortcut" {
-				ts.WaitForClawWithStory(t, td.issueID, 5*time.Second)
-			} else {
-				ts.WaitForClawWithIssue(t, td.issueID, 5*time.Second)
-			}
+			factorytest.WaitForClawWithTracker(t, ts, td, 5*time.Second)
 
-			// Trigger integration poll
 			ts.Server.PollIntegrationsForTest()
 
-			// Wait for poll to fully process by checking the mock's call log
-			// rather than a fixed sleep. The poll calls the tracker API; once
-			// we see that call, the poll goroutine has finished its work.
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				var sawPoll bool
-				if td.name == "shortcut" {
+				if td.Name == "shortcut" {
 					sawPoll = ts.Shortcut.SawPollCall()
 				} else {
 					sawPoll = ts.Linear.SawPollCall()
 				}
 				if sawPoll {
-					// Poll call is logged before DB write. Wait for the claw
-					// count to stabilise rather than a blind sleep.
 					var lastCount int
 					for i := 0; i < 20; i++ {
-						var count int
-						if td.name == "shortcut" {
-							ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=?`, td.issueID).Scan(&count)
-						} else {
-							ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, td.issueID).Scan(&count)
-						}
+						count := factorytest.CountClawsForTracker(t, ts, td)
 						if i > 0 && count == lastCount {
 							break
 						}
@@ -268,26 +130,10 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 
-			// Count all claws ever created for this issue (including deleted).
-			// If dedup creates then deletes a duplicate, we still want to catch it.
-			var count int
-			if td.name == "shortcut" {
-				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE shortcut_story_id=?`, td.issueID).Scan(&count)
-				if err != nil {
-					t.Fatalf("count query failed: %v", err)
-				}
-			} else {
-				err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, td.issueID).Scan(&count)
-				if err != nil {
-					t.Fatalf("count query failed: %v", err)
-				}
-			}
-
+			count := factorytest.CountClawsForTracker(t, ts, td)
 			if count != 1 {
 				t.Fatalf("expected exactly 1 claw ever created, got %d (OQ-3 dedup bug)", count)
 			}
-			// clawID1 is the claw created by the webhook; we verify no second claw
-			// was ever created for the same issue (the dedup invariant).
 		},
 	})
 }
