@@ -32,7 +32,21 @@ jobs:
         id: changelog
         run: |
           PREV="${{ steps.prev.outputs.tag }}"
-          git log --pretty=format:'%h %s (%an)' "$PREV..${GITHUB_REF_NAME}" > /tmp/changelog.txt
+          # Exclude commits that only touch internal paths:
+          #   .elasticclaw/      — our own factory configs
+          #   .depot/           — CI/workflows
+          #   hack/             — internal scripts
+          #   scripts/          — internal scripts
+          # Use --full-history so merges that touch both internal and product
+          # files are still considered (we then filter by touched paths).
+          git log --pretty=format:'%h %s (%an)' \
+            "$PREV..${GITHUB_REF_NAME}" \
+            -- . \
+            ':(exclude).elasticclaw' \
+            ':(exclude).depot' \
+            ':(exclude)hack' \
+            ':(exclude)scripts' \
+            > /tmp/changelog.txt
 
       - name: Generate release notes with Groq
         id: groq
