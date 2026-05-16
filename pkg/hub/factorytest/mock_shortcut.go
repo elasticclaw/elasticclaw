@@ -243,6 +243,15 @@ func (m *MockShortcut) SawPollCall() bool {
 	return false
 }
 
+// SawAPICall returns true if the mock has recorded at least one HTTP request.
+// Used as a smoke check that the test server's integration logic actually
+// hit the mock (not just the webhook endpoint on the test server itself).
+func (m *MockShortcut) SawAPICall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Calls) > 0
+}
+
 // StateIDForName looks up a workflow state ID by name from the mock workflows.
 func (m *MockShortcut) StateIDForName(name string) int64 {
 	m.mu.Lock()

@@ -125,7 +125,9 @@ type Scenario struct {
 }
 
 // RunParityMatrix runs sc against every tracker in Trackers, creating the
-// appropriate TestServer for each.
+// appropriate TestServer for each.  After the scenario completes, it asserts
+// that the mock recorded at least one webhook call — a smoke check that
+// catches broken dispatcher plumbing before it silently skips work.
 func RunParityMatrix(t *testing.T, sc Scenario) {
 	for _, td := range Trackers {
 		t.Run(td.Name+"/"+sc.Name, func(t *testing.T) {
@@ -154,12 +156,33 @@ func RunParityMatrix(t *testing.T, sc Scenario) {
 				ts = NewTestServer(t)
 			}
 			sc.Fn(t, td, ts)
+
+			// Smoke check: the mock must have recorded at least one API call.
+			// If a dispatcher's wiring is broken (e.g. SawPollCall always false,
+			// or the mock URL is misconfigured), this fails everywhere instead of
+			// subtly skipping work in one scenario.
+			switch td.Name {
+			case "shortcut":
+				if !ts.Shortcut.SawAPICall() {
+					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)
+				}
+			case "github-issues":
+				if !ts.GitHubIssues.SawAPICall() {
+					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)
+				}
+			default:
+				if !ts.Linear.SawAPICall() {
+					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)
+				}
+			}
 		})
 	}
 }
 
-// WaitForClawWithTracker waits for a claw to appear for the given tracker and
-// issue ID, using the appropriate DB column.
+// WaitForClawWithTracker waits for the earliest-created claw to appear for the
+// given tracker and issue ID, using the appropriate DB column.  Returns the
+// claw with the oldest created_at (ORDER BY created_at ASC LIMIT 1) so callers
+// comparing IDs across time are deterministic even if rows are re-inserted.
 func WaitForClawWithTracker(t *testing.T, ts *TestServer, td TrackerDispatcher, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -168,11 +191,11 @@ func WaitForClawWithTracker(t *testing.T, ts *TestServer, td TrackerDispatcher, 
 		var err error
 		switch td.Name {
 		case "shortcut":
-			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=?`, td.IssueID).Scan(&clawID)
+			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? ORDER BY created_at ASC LIMIT 1`, td.IssueID).Scan(&clawID)
 		case "github-issues":
-			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE github_issue_id=?`, td.IssueID).Scan(&clawID)
+			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at ASC LIMIT 1`, td.IssueID).Scan(&clawID)
 		default:
-			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=?`, td.IssueID).Scan(&clawID)
+			err = ts.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at ASC LIMIT 1`, td.IssueID).Scan(&clawID)
 		}
 		if err == nil && clawID != "" {
 			return clawID

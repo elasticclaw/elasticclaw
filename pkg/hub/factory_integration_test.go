@@ -13,17 +13,11 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 )
 
-func setNoopProvider(t *testing.T) {
-	t.Helper()
-	old := os.Getenv("ELASTICCLAW_NOOP_PROVIDER")
+func TestMain(m *testing.M) {
+	// All integration tests need the noop provider. Set once for the test binary
+	// lifetime — no cleanup, no per-test race.
 	os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
-	t.Cleanup(func() {
-		if old == "" {
-			os.Unsetenv("ELASTICCLAW_NOOP_PROVIDER")
-		} else {
-			os.Setenv("ELASTICCLAW_NOOP_PROVIDER", old)
-		}
-	})
+	os.Exit(m.Run())
 }
 
 func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
@@ -55,13 +49,9 @@ func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {
 }
 
 func TestFactoryFlow_HappyPath(t *testing.T) {
-	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-123"
-	ts.GitHub.SetPR("testorg", "testrepo", 1, factorytest.PRState{State: "open", Merged: false})
-
-	// Fire Linear webhook
 	payload := buildLinearWebhookPayload(issueID, "Backlog", "In Progress")
 	resp, err := http.Post(ts.URL()+"/api/integrations/linear/webhook", "application/json",
 		strings.NewReader(string(payload)))
@@ -97,6 +87,7 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 
 	// Wait for claw to be deleted — but since no GH token, pollAllPRs returns early.
 	// Just verify idle status persists.
+
 	time.Sleep(200 * time.Millisecond)
 	var status string
 	ts.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status)
@@ -106,7 +97,6 @@ func TestFactoryFlow_HappyPath(t *testing.T) {
 }
 
 func TestFactoryFlow_WebhookCreatesClawInDB(t *testing.T) {
-	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-999"
@@ -140,7 +130,6 @@ func TestFactoryFlow_WebhookCreatesClawInDB(t *testing.T) {
 }
 
 func TestFactoryFlow_FakeBridgeConnect(t *testing.T) {
-	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-777"
@@ -163,7 +152,6 @@ func TestFactoryFlow_FakeBridgeConnect(t *testing.T) {
 }
 
 func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
-	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-555"
@@ -185,7 +173,6 @@ func TestFactoryFlow_DoneSignalSetsIdle(t *testing.T) {
 }
 
 func TestFactoryFlow_PollingDetectsMissedWebhook(t *testing.T) {
-	setNoopProvider(t)
 	ts := factorytest.NewTestServer(t)
 
 	issueID := "ELA-123"
@@ -224,6 +211,6 @@ func TestFactoryFlow_PollingDetectsMissedWebhook(t *testing.T) {
 		"connected":    true,
 	}
 	if !validStatuses[dbStatus] {
-		t.Fatalf("unexpected claw status after polling: %s", dbStatus)
+		t.Fatalf("unexpected claw status after poll: %s", dbStatus)
 	}
 }

@@ -11,7 +11,6 @@ import (
 
 // S1: webhook spawns claw with correct factory match
 func TestParity_WebhookSpawnsClaw(t *testing.T) {
-	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "webhook spawns claw with correct factory match",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -35,7 +34,6 @@ func TestParity_WebhookSpawnsClaw(t *testing.T) {
 
 // S2: issue status change triggers pipeline stage transition
 func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
-	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "issue status change triggers pipeline stage transition",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -58,7 +56,6 @@ func TestParity_StatusChangeTriggersPipeline(t *testing.T) {
 
 // S3: claw created via factory webhook carries correct tracker metadata
 func TestParity_FactoryTrackerMetadata(t *testing.T) {
-	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "claw carries correct tracker metadata from factory integration",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {
@@ -96,7 +93,6 @@ func TestParity_FactoryTrackerMetadata(t *testing.T) {
 
 // S4: webhook + poll see the same event → exactly one claw spawned (OQ-3)
 func TestParity_WebhookPollDedup(t *testing.T) {
-	setNoopProvider(t)
 	factorytest.RunParityMatrix(t, factorytest.Scenario{
 		Name: "webhook and poll deduplicate",
 		Fn: func(t *testing.T, td factorytest.TrackerDispatcher, ts *factorytest.TestServer) {

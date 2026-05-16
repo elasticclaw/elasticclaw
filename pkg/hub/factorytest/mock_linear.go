@@ -155,6 +155,15 @@ func (m *MockLinear) ResetCalls() {
 	m.GraphQLCalls = nil
 }
 
+// SawAPICall returns true if the mock has recorded at least one HTTP request.
+// Used as a smoke check that the test server's integration logic actually
+// hit the mock (not just the webhook endpoint on the test server itself).
+func (m *MockLinear) SawAPICall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.GraphQLCalls) > 0
+}
+
 // BuildWebhookPayload returns a JSON webhook payload and the HMAC-SHA256
 // signature for the given issue state transition.
 func (m *MockLinear) BuildWebhookPayload(issueID, prevStatus, newStatus string) ([]byte, string) {

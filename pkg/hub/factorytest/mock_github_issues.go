@@ -159,6 +159,15 @@ func (m *MockGitHubIssues) ResetCalls() {
 	m.Calls = nil
 }
 
+// SawAPICall returns true if the mock has recorded at least one HTTP request.
+// Used as a smoke check that the test server's integration logic actually
+// hit the mock (not just the webhook endpoint on the test server itself).
+func (m *MockGitHubIssues) SawAPICall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Calls) > 0
+}
+
 // BuildWebhookPayload returns a JSON webhook payload and the X-Hub-Signature-256
 // for the given issue state transition.
 // The action field is computed from the state transition:
