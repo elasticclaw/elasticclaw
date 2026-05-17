@@ -1712,6 +1712,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
+					// Clear typing indicator first — always clear even if no queued messages
+					s.broadcastToUsers(tenantID, types.WSMessage{
+						Type: "agent_typing",
+						Payload: map[string]string{
+							"claw_id": clawID,
+							"status":  "idle",
+						},
+					})
 					// Still need to check for queued messages even if content is empty
 					s.mu.RLock()
 					cc = s.claws[clawID]
