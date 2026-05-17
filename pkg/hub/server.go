@@ -1627,16 +1627,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					// Check for streaming turn timeout (12 minutes)
-					s.mu.Lock()
-					if cc, ok := s.claws[clawID]; ok &&
-						!cc.streamingStartedAt.IsZero() &&
-						!cc.streamingTimeoutSent &&
-						time.Since(cc.streamingStartedAt) > 12*time.Minute {
-						cc.streamingTimeoutSent = true
-						s.mu.Unlock()
-						go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
-					} else {
-						s.mu.Unlock()
+					s.mu.RLock()
+					cc, ok := s.claws[clawID]
+					s.mu.RUnlock()
+					if ok {
+						cc.mu.Lock()
+						if !cc.streamingStartedAt.IsZero() &&
+							!cc.streamingTimeoutSent &&
+							time.Since(cc.streamingStartedAt) > 12*time.Minute {
+							cc.streamingTimeoutSent = true
+							cc.mu.Unlock()
+							go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+						} else {
+							cc.mu.Unlock()
+						}
 					}
 				}
 			} else if msg.Type == "chunk" {
