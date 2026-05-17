@@ -380,6 +380,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [showModal, setShowModal] = useState(false)
   const [modalMode, setModalMode] = useState<"add" | "edit">("add")
   const [editName, setEditName] = useState<string | null>(null)
+  const [copiedKey, setCopiedKey] = useState(false)
 
   // Form state
   const [formProvider, setFormProvider] = useState("replicated")
@@ -656,10 +657,11 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                         className="h-7 px-2"
                         onClick={() => {
                           navigator.clipboard.writeText(providers.exedev.sshPublicKey || "")
-                          alert("Public key copied to clipboard")
+                          setCopiedKey(true)
+                          setTimeout(() => setCopiedKey(false), 2000)
                         }}
                       >
-                        <Copy className="size-3" />
+                        {copiedKey ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
                       </Button>
                     </div>
                   ) : (
