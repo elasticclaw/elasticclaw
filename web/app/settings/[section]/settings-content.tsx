@@ -656,8 +656,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                         className="h-7 px-2"
                         onClick={() => {
                           navigator.clipboard.writeText(providers.exedev.sshPublicKey || "")
-                          setSuccess("Public key copied")
-                          setTimeout(() => setSuccess(""), 2000)
+                          alert("Public key copied to clipboard")
                         }}
                       >
                         <Copy className="size-3" />
