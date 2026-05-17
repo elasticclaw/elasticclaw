@@ -4154,7 +4154,21 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+	err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+
+	if err != nil {
+		// Write failed - re-enqueue the message at the front so it can be retried
+		log.Printf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
+		s.mu.RLock()
+		if currentCC, ok := s.claws[clawID]; ok {
+			currentCC.mu.Lock()
+			// Prepend the message back to the front of the queue
+			currentCC.messageQueue = append([]types.HubMessage{msg}, currentCC.messageQueue...)
+			currentCC.mu.Unlock()
+		}
+		s.mu.RUnlock()
+		return
+	}
 
 	// Signal to UI that agent is working
 	s.broadcastToUsers(tenantID, types.WSMessage{
