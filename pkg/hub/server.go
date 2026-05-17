@@ -2643,7 +2643,79 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
 	}
 
-	// Write template files — use ~/workspace so it works regardless of the VM's default user
+	// Load claw configuration from DB
+	var clawName string
+	_ = s.db.QueryRow(`SELECT COALESCE(name,'') FROM claws WHERE id=?`, clawID).Scan(&clawName)
+
+	var githubReposJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&githubReposJSON)
+	var githubRepos []types.GitHubRepoAccess
+	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
+
+	var linearWorkspace string
+	_ = s.db.QueryRow(`SELECT COALESCE(linear_workspace,'') FROM claws WHERE id=?`, clawID).Scan(&linearWorkspace)
+	linearToken := resolveLinearToken(s.hubCfg, linearWorkspace)
+
+	var templateDefaultModel string
+	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
+	defaultModel := templateDefaultModel
+	if defaultModel == "" {
+		defaultModel = s.hubCfg.DefaultModel
+	}
+
+	var nixEnabled int
+	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
+		log.Printf("[exedev bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
+	}
+	var dockerEnabled int
+	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
+		log.Printf("[exedev bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
+	}
+	log.Printf("[exedev bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
+
+	var llmKeyName string
+	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
+
+	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
+	}
+
+	// Generate a random gateway password for this VM
+	gatewayPassword := randomHex(16)
+
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
+
+	// Build bootstrap script using same pattern as replicated
+	script := GenerateReplicatedBootstrapScript(BootstrapParams{
+		ClawID:          clawID,
+		ClawName:        clawName,
+		ClawToken:       clawToken,
+		HubURL:          s.clawHubURL(),
+		DefaultModel:    defaultModel,
+		GatewayPassword: gatewayPassword,
+		BridgeURL:       bridgeURL,
+		Nix:             nixEnabled != 0,
+		Docker:          dockerEnabled != 0,
+		HubCfg:          hubCfg,
+		GitHubRepos:     githubRepos,
+		LLMKeyEnv:       llmKeyEnv,
+		LinearEnv:       buildLinearEnv(linearToken),
+		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
+	})
+
+	// Run bootstrap script — this installs Node.js, OpenClaw, and starts claw-bridge
+	if err := p.SetupScript(ctx, vmName, script); err != nil {
+		return fmt.Errorf("exedev bootstrap script failed: %w", err)
+	}
+	log.Printf("[exedev] bootstrap script completed on %s", vmName)
+
+	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
 	workdir := "~/workspace"
 	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir}); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
@@ -2659,61 +2731,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
 	}
 
-	// Generate a random fallback token in case reading from disk fails
-	fallbackTokenStr := randomHex(16)
-
-	// Install OpenClaw
-	installScript := fmt.Sprintf(`set -e
-set -o pipefail
-npm install -g openclaw@2026.5.12 --ignore-scripts 2>&1 | tail -5
-openclaw onboard --non-interactive --accept-risk --skip-daemon 2>&1 || true
-TOKEN=$(cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["gateway"]["auth"]["token"])' 2>/dev/null || echo %q)
-openclaw gateway run --port 18789 --auth password --password "$TOKEN" &
-for i in $(seq 1 30); do
-  if nc -z localhost 18789 2>/dev/null; then
-    echo "OpenClaw ready"
-    exit 0
-  fi
-  sleep 1
-done
-echo "gateway not ready" >&2
-exit 1`, fallbackTokenStr)
-	if err := p.SetupScript(ctx, vmName, installScript); err != nil {
-		return fmt.Errorf("openclaw install failed: %w", err)
-	}
-	log.Printf("[exedev] OpenClaw installed on %s", vmName)
-
-	// Install and start claw-bridge
-	bridgeURL := s.bridgeDownloadURL()
-	if bridgeURL == "" {
-		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
-	}
-	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	bridgeScript := fmt.Sprintf(`set -e
-set -o pipefail
-curl -fsSL "%s" -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 &
-BRIDGE_PID=$!
-for i in $(seq 1 10); do
-  if grep -q "registered with hub" /tmp/claw-bridge.log 2>/dev/null; then
-    echo "claw-bridge started"
-    exit 0
-  fi
-  if ! kill -0 $BRIDGE_PID 2>/dev/null; then
-    echo "claw-bridge exited early" >&2
-    cat /tmp/claw-bridge.log >&2
-    exit 1
-  fi
-  sleep 1
-done
-echo "claw-bridge startup timeout" >&2
-exit 1`, bridgeURL, s.clawHubURL(), clawID, clawToken)
-	if err := p.SetupScript(ctx, vmName, bridgeScript); err != nil {
-		return fmt.Errorf("claw-bridge install failed: %w", err)
-	}
-	log.Printf("[exedev] claw-bridge started on %s", vmName)
+	log.Printf("[exedev] bootstrap complete for claw %s on %s", clawID[:8], vmName)
 	return nil
 }
 
@@ -3847,9 +3865,34 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateReplicatedVM(vmID)
 	case "daytona":
 		s.terminateDaytonaVM(vmID)
+	case "exedev":
+		s.terminateExedevVM(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
+}
+
+// terminateExedevVM destroys an exedev VM by ID.
+func (s *Server) terminateExedevVM(vmID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["exedev"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateExedevVM: no exedev provider configured")
+		return
+	}
+
+	log.Printf("terminateExedevVM: destroying VM %s (ssh_key_path=%q)", vmID, cfg.SSHKeyPath)
+	p, err := newExedevProvider(cfg)
+	if err != nil {
+		log.Printf("terminateExedevVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+		log.Printf("terminateExedevVM: failed to destroy VM %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Exedev VM %s terminated", vmID)
 }
 
 // terminateDaytonaVM destroys a Daytona workspace by ID.

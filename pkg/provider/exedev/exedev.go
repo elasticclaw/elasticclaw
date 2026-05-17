@@ -59,7 +59,7 @@ func (p *Provider) sshArgs() []string {
 	if p.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
-	args = append(args, "exe.dev")
+	args = append(args, "-o", "StrictHostKeyChecking=no", "exe.dev")
 	return args
 }
 
@@ -232,7 +232,7 @@ func (p *Provider) Start(ctx context.Context, instanceID string) error {
 
 // Destroy deletes the VM.
 func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState bool) error {
-	_, err := p.run(ctx, "delete", instanceID)
+	_, err := p.run(ctx, "rm", instanceID)
 	if err != nil {
 		// If the VM is already gone, treat as success
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "No such") {
@@ -242,6 +242,8 @@ func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState boo
 	}
 	return nil
 }
+
+
 
 // List returns all VMs managed by this account.
 func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {

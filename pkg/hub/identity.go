@@ -73,7 +73,7 @@ func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
 	privPath = filepath.Join(dir, "exedev-key")
 	pubPath := filepath.Join(dir, "exedev-key.pub")
 
-	// If both exist, just return the public key
+	// Check which files exist
 	privExists := false
 	if _, err := os.Stat(privPath); err == nil {
 		privExists = true
@@ -82,6 +82,8 @@ func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
 	if _, err := os.Stat(pubPath); err == nil {
 		pubExists = true
 	}
+
+	// If both exist, just return the public key
 	if privExists && pubExists {
 		pubBytes, err := os.ReadFile(pubPath)
 		if err != nil {
@@ -89,7 +91,10 @@ func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
 		}
 		return string(pubBytes), privPath, nil
 	}
-	// If only one exists, clean up the orphaned file before regenerating
+
+	// If only one exists, we have an orphaned keypair. Clean up the orphaned
+	// file(s) and regenerate both. This handles cases where the public key was
+	// accidentally deleted or a volume wipe left only the private key.
 	if privExists {
 		os.Remove(privPath)
 	}
