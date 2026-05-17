@@ -358,7 +358,10 @@ func matchGlob(pattern, s string) bool {
 			}
 			pos = len(part)
 		} else if i == len(parts)-1 && part != "" {
-			// Last part must match at end
+			// Last part must match at end, but not overlap with consumed prefix
+			if len(s)-len(part) < pos {
+				return false
+			}
 			if !strings.HasSuffix(s, part) {
 				return false
 			}
