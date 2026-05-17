@@ -18,7 +18,7 @@ ElasticClaw runs a **hub** — a single Go binary with an embedded web UI — th
 **→ [elasticclaw.ai/docs](https://elasticclaw.ai/docs)**
 
 - [Installation](https://elasticclaw.ai/docs/installation)
-- [Quick start](https://elasticclaw.ai/docs/quick-start)
+- [Getting started](https://elasticclaw.ai/docs/installation)
 - [Hub configuration](https://elasticclaw.ai/docs/hub)
 - [GitHub integration](https://elasticclaw.ai/docs/github-integration)
 
