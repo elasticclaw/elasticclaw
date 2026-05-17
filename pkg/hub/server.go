@@ -1235,8 +1235,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			if isBusy {
 				// Queue the message for later delivery
 				cc.messageQueue = append(cc.messageQueue, msg)
+				queueLen := len(cc.messageQueue)
 				cc.mu.Unlock()
-				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], len(cc.messageQueue))
+				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], queueLen)
 			} else {
 				cc.mu.Unlock()
 				// Send immediately
