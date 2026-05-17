@@ -1459,6 +1459,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		}
 		old.mu.RUnlock()
 	}
+	// Capture whether we have queued messages before unlocking
+	hasQueuedMessages := len(cc.messageQueue) > 0
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
@@ -1473,7 +1475,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Drain any queued messages that were copied from the old connection.
 	// This must happen after the connection is live but before the read loop starts.
 	// We call it synchronously (not in a goroutine) to avoid racing with new user messages.
-	if len(cc.messageQueue) > 0 {
+	if hasQueuedMessages {
 		s.sendNextQueuedMessage(cc)
 	}
 
