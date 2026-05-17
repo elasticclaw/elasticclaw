@@ -1693,14 +1693,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				s.mu.RLock()
 				cc, ok := s.claws[clawID]
 				s.mu.RUnlock()
-				if ok && cc.streamingMsgID != "" {
+				if ok {
 					cc.mu.Lock()
-					hm.ID = cc.streamingMsgID
-					cc.streamingMsgID = ""
-					cc.streamingBuf.Reset()
-					cc.streamingStartedAt = time.Time{}
-					cc.streamingTimeoutSent = false
-					cc.contextWarningSent = false
+					if cc.streamingMsgID != "" {
+						hm.ID = cc.streamingMsgID
+						cc.streamingMsgID = ""
+						cc.streamingBuf.Reset()
+						cc.streamingStartedAt = time.Time{}
+						cc.streamingTimeoutSent = false
+						cc.contextWarningSent = false
+					} else {
+						hm.ID = uuid.New().String()
+					}
 					cc.mu.Unlock()
 				} else {
 					hm.ID = uuid.New().String()
@@ -1740,7 +1744,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				// Check for queued messages and send the next one
 				s.mu.RLock()
-				cc := s.claws[clawID]
+				cc = s.claws[clawID]
 				s.mu.RUnlock()
 				if cc != nil {
 					s.sendNextQueuedMessage(cc)
