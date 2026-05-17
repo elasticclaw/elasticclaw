@@ -809,15 +809,14 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	nixEnabled := 0
-	if req.Nix || req.Flake != "" {
-		// Auto-enable Nix if a flake is specified
+	if req.Nix {
 		nixEnabled = 1
 	}
 	dockerEnabled := 0
 	if req.Docker {
 		dockerEnabled = 1
 	}
-	log.Printf("[create] claw %s: nix=%d docker=%d flake=%q", req.Name, nixEnabled, dockerEnabled, req.Flake)
+	log.Printf("[create] claw %s: nix=%d docker=%d", req.Name, nixEnabled, dockerEnabled)
 
 	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
@@ -853,9 +852,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, flake, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, req.Flake, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -2930,15 +2929,17 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, flake string
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(flake,'') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &flake,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
 	var githubRepos []types.GitHubRepoAccess
 	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
+	var templateFiles map[string]string
+	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 
 	s.mu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
@@ -2971,8 +2972,8 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
-		Flake:           flake,
 		Docker:          dockerEnabled != 0,
+		TemplateFiles:   templateFiles,
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
@@ -3494,10 +3495,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
 		log.Printf("[bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
 	}
-	// Read flake
-	var flake string
-	_ = s.db.QueryRow(`SELECT COALESCE(flake,'') FROM claws WHERE id=?`, clawID).Scan(&flake)
-	log.Printf("[bootstrap] claw %s nix=%d docker=%d flake=%q", clawID[:8], nixEnabled, dockerEnabled, flake)
+	log.Printf("[bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
@@ -3551,8 +3549,8 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
-		Flake:           flake,
 		Docker:          dockerEnabled != 0,
+		TemplateFiles:   files,
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,

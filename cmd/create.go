@@ -120,9 +120,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if tmplCfg.Nix {
 		fmt.Println("  Nix: enabled (Determinate Systems)")
 	}
-	if tmplCfg.Flake != "" {
-		fmt.Printf("  Flake: %s\n", tmplCfg.Flake)
-	}
 	if tmplCfg.GitHub != nil && len(tmplCfg.GitHub.Repos) > 0 {
 		fmt.Printf("  GitHub repos: %d\n", len(tmplCfg.GitHub.Repos))
 	}

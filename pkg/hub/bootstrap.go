@@ -27,8 +27,10 @@ type BootstrapParams struct {
 
 	// Features
 	Nix    bool
-	Flake  string // Nix flake reference for dev environment
 	Docker bool
+
+	// TemplateFiles includes all template files (may contain flake.nix)
+	TemplateFiles map[string]string
 
 	// GitHub credential helper
 	HubCfg      *types.HubConfig
@@ -268,12 +270,6 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		linearEnvLine = "# Linear not configured"
 	}
 
-	// Encode flake reference for env var
-	flakeLine := "# No flake"
-	if p.Flake != "" {
-		flakeLine = fmt.Sprintf("export ELASTICCLAW_FLAKE=%s", shellQuote(p.Flake))
-	}
-
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
@@ -290,7 +286,6 @@ export ELASTICCLAW_DOCKER="%s"
 %s
 %s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
-%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
 BRIDGE_SRC="%s"
@@ -378,7 +373,6 @@ exit 1
 		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
 		p.DefaultModel, nixFlag, dockerFlag,
 		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
-		flakeLine,
 		p.BridgeURL,
 	)
 }
