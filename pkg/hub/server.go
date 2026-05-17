@@ -1700,25 +1700,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.Role = "claw"
 				hm.CreatedAt = now()
 				// Always clean up streaming state first, even for empty messages.
-				s.mu.RLock()
-				cc, ok := s.claws[clawID]
-				s.mu.RUnlock()
-				if ok {
-					cc.mu.Lock()
-					if cc.streamingMsgID != "" {
-						hm.ID = cc.streamingMsgID
-						cc.streamingMsgID = ""
-						cc.streamingBuf.Reset()
-						cc.streamingStartedAt = time.Time{}
-						cc.streamingTimeoutSent = false
-						cc.contextWarningSent = false
-					} else {
-						hm.ID = uuid.New().String()
-					}
-					cc.mu.Unlock()
+				// Use the outer cc (this goroutine's connection), not a fresh lookup.
+				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+				cc.mu.Lock()
+				if cc.streamingMsgID != "" {
+					hm.ID = cc.streamingMsgID
+					cc.streamingMsgID = ""
+					cc.streamingBuf.Reset()
+					cc.streamingStartedAt = time.Time{}
+					cc.streamingTimeoutSent = false
+					cc.contextWarningSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
+				cc.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
 					// Clear typing indicator first — always clear even if no queued messages
@@ -1729,12 +1724,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							"status":  "idle",
 						},
 					})
-					// Use the cc captured at the top of this handler, not a fresh lookup.
-					// If the claw reconnected during this turn, the new connection's drain
-					// at line 1479 will handle any queued messages; we must not race with it.
-					if cc != nil {
-						s.sendNextQueuedMessage(cc)
-					}
+					// Drain queue using this goroutine's cc (the outer cc from line 1449).
+					// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+					s.sendNextQueuedMessage(cc)
 					continue
 				}
 				_, _ = s.db.Exec(
@@ -1767,12 +1759,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				// Check for queued messages and send the next one.
-				// Use the cc captured at the top of this handler, not a fresh lookup.
-				// If the claw reconnected during this turn, the new connection's drain
-				// at line 1479 will handle any queued messages; we must not race with it.
-				if cc != nil {
-					s.sendNextQueuedMessage(cc)
-				}
+				// Use this goroutine's cc (the outer cc from line 1449).
+				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+				s.sendNextQueuedMessage(cc)
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
 				var ack types.FileAck
