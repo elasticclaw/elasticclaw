@@ -374,6 +374,13 @@ type IntegrationsConfig struct {
 	GitHubIssues []*GitHubIssuesIntegrationConfig `yaml:"github_issues,omitempty"`
 }
 
+// ExternalTriggerConfig holds config for external webhook triggers.
+// Unlike other integrations, this doesn't need API tokens - just webhook secrets.
+type ExternalTriggerConfig struct {
+	Name          string `yaml:"name" json:"name"`                           // unique identifier for this trigger source
+	WebhookSecret string `yaml:"webhook_secret,omitempty" json:"webhookSecret,omitempty"` // HMAC secret for validating webhooks
+}
+
 // ShortcutIntegrationConfig holds credentials for one Shortcut workspace.
 type ShortcutIntegrationConfig struct {
 	Workspace string `yaml:"workspace"`       // human label
@@ -457,6 +464,10 @@ type FactoryConfig struct {
 	// GitHub factory fields (integration: github)
 	Repos   []string       `yaml:"repos,omitempty" json:"repos,omitempty"`   // e.g. ["can-io/canio", "can-io/*"]
 	Trigger *GitHubTrigger `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+
+	// External trigger fields (integration: external)
+	// ExternalTrigger defines what external event triggers this factory.
+	ExternalTrigger *ExternalTrigger `yaml:"external_trigger,omitempty" json:"external_trigger,omitempty"`
 }
 
 // GitHubTrigger defines what GitHub event triggers this factory.
@@ -470,6 +481,25 @@ type GitHubTrigger struct {
 type GitHubTriggerFilter struct {
 	Author     string `yaml:"author,omitempty" json:"author,omitempty"`      // e.g. "dependabot[bot]"
 	BaseBranch string `yaml:"base_branch,omitempty" json:"base_branch,omitempty"` // e.g. "main"
+}
+
+// ExternalTrigger defines what external event triggers this factory.
+// This is used for generic webhooks and external service notifications.
+type ExternalTrigger struct {
+	// Source is the external source type: "github-release", "generic-webhook", etc.
+	Source string `yaml:"source" json:"source"`
+	// Filter defines matching criteria for the external event.
+	Filter *ExternalTriggerFilter `yaml:"filter,omitempty" json:"filter,omitempty"`
+}
+
+// ExternalTriggerFilter defines matching criteria for external triggers.
+type ExternalTriggerFilter struct {
+	// Repository matches against the source repository (e.g., "postgres/postgres")
+	Repository string `yaml:"repository,omitempty" json:"repository,omitempty"`
+	// EventType matches the event type (e.g., "released", "published")
+	EventType string `yaml:"event_type,omitempty" json:"event_type,omitempty"`
+	// TagPattern is a glob pattern for matching release tags (e.g., "v*.*.*")
+	TagPattern string `yaml:"tag_pattern,omitempty" json:"tag_pattern,omitempty"`
 }
 
 type ProviderConfig struct {

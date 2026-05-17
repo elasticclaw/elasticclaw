@@ -207,6 +207,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
+	mux.HandleFunc("/api/integrations/external/webhook", s.handleExternalWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger)) // POST manual trigger
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
