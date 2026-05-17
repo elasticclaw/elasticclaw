@@ -643,8 +643,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 <div className="bg-muted/50 rounded-lg p-3 space-y-2">
                   <p className="text-xs font-medium">SSH Key Setup</p>
                   <p className="text-xs text-muted-foreground">
-                    A key pair has been generated for exe.dev. Add this public key to your{" "}
-                    <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.
+                    {modalMode === "edit"
+                      ? <>A key pair has been generated for exe.dev. Add this public key to your{" "}<a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.</>
+                      : <>An SSH key pair will be generated automatically when you save. You can copy the public key from the edit view and add it to your{" "}<a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.</>}
                   </p>
                   {modalMode === "edit" && providers.exedev?.sshPublicKey ? (
                     <div className="flex items-center gap-2">
