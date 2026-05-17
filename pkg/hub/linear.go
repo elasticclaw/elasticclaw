@@ -1022,7 +1022,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
-	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
 		log.Printf("[terminate] claw %s not found in DB: %v", clawID[:8], err)
 		return
 	}
