@@ -3189,8 +3189,10 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
 
-	// Check if there are any queued messages to send (user sent messages while claw was busy)
-	s.sendNextQueuedMessage(cc)
+	// Note: We don't call sendNextQueuedMessage here because sendWakeMessage is launched
+	// with 'go' (asynchronously). The normal end-of-turn path in handleClawWS read loop
+	// will drain the queue once the claw finishes the wake response. This prevents race
+	// conditions where both goroutines try to dequeue messages concurrently.
 }
 
 // clawHasMessages returns true if the claw already has message history.
