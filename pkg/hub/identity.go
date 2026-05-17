@@ -63,6 +63,54 @@ func LoadOrCreateIdentity(dir string) (*HubIdentity, error) {
 	return loadIdentity(privPath, pubPath)
 }
 
+// GenerateExedevKey creates or loads an SSH keypair specifically for exe.dev.
+// Returns the public key (authorized_keys format) and the private key path.
+func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", "", fmt.Errorf("create identity dir: %w", err)
+	}
+
+	privPath = filepath.Join(dir, "exedev-key")
+	pubPath := filepath.Join(dir, "exedev-key.pub")
+
+	// If both exist, just return the public key
+	if _, err := os.Stat(privPath); err == nil {
+		pubBytes, err := os.ReadFile(pubPath)
+		if err != nil {
+			return "", "", fmt.Errorf("read exedev public key: %w", err)
+		}
+		return string(pubBytes), privPath, nil
+	}
+
+	// Generate new ed25519 keypair
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("generate exedev keypair: %w", err)
+	}
+
+	// Marshal private key as PEM
+	privPEM, err := ssh.MarshalPrivateKey(priv, "elasticclaw exe.dev key")
+	if err != nil {
+		return "", "", fmt.Errorf("marshal exedev private key: %w", err)
+	}
+	privBytes := pem.EncodeToMemory(privPEM)
+	if err := os.WriteFile(privPath, privBytes, 0600); err != nil {
+		return "", "", fmt.Errorf("write exedev private key: %w", err)
+	}
+
+	// Marshal public key in authorized_keys format
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal exedev public key: %w", err)
+	}
+	pubLine := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(sshPub)), "\n") + " elasticclaw@exedev\n"
+	if err := os.WriteFile(pubPath, []byte(pubLine), 0644); err != nil {
+		return "", "", fmt.Errorf("write exedev public key: %w", err)
+	}
+
+	return pubLine, privPath, nil
+}
+
 func loadIdentity(privPath, pubPath string) (*HubIdentity, error) {
 	privBytes, err := os.ReadFile(privPath)
 	if err != nil {

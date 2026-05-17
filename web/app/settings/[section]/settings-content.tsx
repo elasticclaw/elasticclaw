@@ -56,6 +56,8 @@ interface SettingsData {
     defaultCpu?: number
     defaultMemory?: string
     defaultDisk?: string
+    sshKeySet?: boolean
+    sshPublicKey?: string
   }>
   github: GitHubAppView[]
   sshPublicKeys: string[]
@@ -637,9 +639,36 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 
             {formProvider === "exedev" && (
               <>
-                <p className="text-xs text-muted-foreground">
-                  exe.dev uses SSH key authentication. Ensure your SSH key is registered at <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev</a>.
-                </p>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                  <p className="text-xs font-medium">SSH Key Setup</p>
+                  <p className="text-xs text-muted-foreground">
+                    A key pair has been generated for exe.dev. Add this public key to your{" "}
+                    <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.
+                  </p>
+                  {modalMode === "edit" && providers.exedev?.sshPublicKey ? (
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs font-mono bg-background px-2 py-1 rounded flex-1 truncate">
+                        {providers.exedev.sshPublicKey}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2"
+                        onClick={() => {
+                          navigator.clipboard.writeText(providers.exedev.sshPublicKey || "")
+                          setSuccess("Public key copied")
+                          setTimeout(() => setSuccess(""), 2000)
+                        }}
+                      >
+                        <Copy className="size-3" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      Public key will be shown after saving.
+                    </p>
+                  )}
+                </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Default CPUs</label>
                   <Input value={formDefaultCpu} onChange={e => setFormDefaultCpu(e.target.value)} className="h-8 text-sm" placeholder="2" />

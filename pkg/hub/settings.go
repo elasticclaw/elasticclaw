@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -149,6 +152,12 @@ type ProviderView struct {
 	TokenSet            bool   `json:"tokenSet,omitempty"`
 	DefaultTTL          string `json:"defaultTtl,omitempty"`
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
+	// exe.dev
+	SSHKeySet       bool   `json:"sshKeySet,omitempty"`
+	SSHPublicKey    string `json:"sshPublicKey,omitempty"`
+	DefaultCPU      int    `json:"defaultCpu,omitempty"`
+	DefaultMemory   string `json:"defaultMemory,omitempty"`
+	DefaultDisk     string `json:"defaultDisk,omitempty"`
 }
 
 // GitHubAppPermission is a single permission check result for a GitHub App.
@@ -305,6 +314,10 @@ type ProviderPatch struct {
 	Token               string `json:"token,omitempty"`
 	DefaultTTL          string `json:"defaultTtl,omitempty"`
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
+	// exe.dev
+	DefaultCPU    int    `json:"defaultCpu,omitempty"`
+	DefaultMemory string `json:"defaultMemory,omitempty"`
+	DefaultDisk   string `json:"defaultDisk,omitempty"`
 	// Delete removes this provider when true.
 	Delete bool `json:"delete,omitempty"`
 }
@@ -377,6 +390,17 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			pv.TokenSet = p.Token != ""
 			pv.DefaultTTL = p.DefaultTTL
 			pv.DefaultInstanceType = p.DefaultInstanceType
+		case "exedev":
+			pv.SSHKeySet = p.SSHKeyPath != ""
+			pv.DefaultCPU = p.DefaultCPU
+			pv.DefaultMemory = p.DefaultMemory
+			pv.DefaultDisk = p.DefaultDisk
+			// Generate and return public key if key exists
+			if p.SSHKeyPath != "" {
+				if pubBytes, err := os.ReadFile(p.SSHKeyPath + ".pub"); err == nil {
+					pv.SSHPublicKey = string(pubBytes)
+				}
+			}
 		}
 		view.Providers[name] = pv
 	}
@@ -767,6 +791,25 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				if pp.DefaultInstanceType != "" {
 					existing.DefaultInstanceType = pp.DefaultInstanceType
+				}
+			case "exedev":
+				// Auto-generate SSH key if not already present
+				if existing.SSHKeyPath == "" {
+					_, privPath, err := GenerateExedevKey(filepath.Join(hubConfigDir(), "keys"))
+					if err != nil {
+						log.Printf("failed to generate exedev key: %v", err)
+					} else {
+						existing.SSHKeyPath = privPath
+					}
+				}
+				if pp.DefaultCPU > 0 {
+					existing.DefaultCPU = pp.DefaultCPU
+				}
+				if pp.DefaultMemory != "" {
+					existing.DefaultMemory = pp.DefaultMemory
+				}
+				if pp.DefaultDisk != "" {
+					existing.DefaultDisk = pp.DefaultDisk
 				}
 			}
 			updatedCfg.Providers[name] = existing
