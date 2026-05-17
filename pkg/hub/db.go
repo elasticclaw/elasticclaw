@@ -48,7 +48,6 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN external_trigger_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN flake TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
@@ -108,8 +107,7 @@ func migrate(db *sql.DB) error {
 		bootstrap_ok     INTEGER NOT NULL DEFAULT 0,
 		factory_name     TEXT NOT NULL DEFAULT '',
 		concurrency_group TEXT NOT NULL DEFAULT '',
-		external_trigger_id TEXT NOT NULL DEFAULT '',
-		flake            TEXT NOT NULL DEFAULT ''
+		external_trigger_id TEXT NOT NULL DEFAULT ''
 	);
 
 

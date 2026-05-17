@@ -252,6 +252,7 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
 		"USER.md", "MEMORY.md", "BOOTSTRAP.md", "HEARTBEAT.md",
 		"elasticclaw-config.yaml",
+		"flake.nix", "flake.lock", // Nix flake for custom environment
 	}
 	files := make(map[string]string)
 	for _, name := range known {
