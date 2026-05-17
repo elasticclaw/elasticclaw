@@ -39,7 +39,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -89,87 +88,7 @@ func (q *msgQueue) drain() []string {
 	return out
 }
 
-// ─── Outbound message tracking ───────────────────────────────────────────────
-// Tracks messages sent to the hub that are awaiting acknowledgment.
-// Ensures critical messages (like [DONE] signals) are not lost.
 
-const msgAckTimeout = 30 * time.Second
-const msgAckRetries = 3
-
-type pendingMsg struct {
-	id       string
-	content  string
-	sentAt   time.Time
-	retryCount int
-}
-
-type msgTracker struct {
-	mu       sync.Mutex
-	pending  map[string]*pendingMsg
-}
-
-func newMsgTracker() *msgTracker {
-	return &msgTracker{
-		pending: make(map[string]*pendingMsg),
-	}
-}
-
-func (t *msgTracker) track(id, content string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pending[id] = &pendingMsg{
-		id:       id,
-		content:  content,
-		sentAt:   time.Now(),
-		retryCount: 0,
-	}
-}
-
-func (t *msgTracker) ack(id string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if _, ok := t.pending[id]; ok {
-		delete(t.pending, id)
-		return true
-	}
-	return false
-}
-
-func (t *msgTracker) checkTimeouts() []pendingMsg {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var expired []pendingMsg
-	now := time.Now()
-	for id, pm := range t.pending {
-		if now.Sub(pm.sentAt) > msgAckTimeout {
-			// Increment retry count before deciding what to do
-			pm.retryCount++
-			if pm.retryCount >= msgAckRetries {
-				// Max retries reached, give up on this message
-				log.Printf("[bridge] message %s not acknowledged after %d retries, giving up", id[:8], msgAckRetries)
-				delete(t.pending, id)
-			} else {
-				// Will retry - update the pending entry with incremented count
-				t.pending[id] = pm
-				expired = append(expired, *pm)
-			}
-		}
-	}
-	return expired
-}
-
-func (t *msgTracker) shouldRequireAck(content string) bool {
-	// Require acknowledgment for messages containing [DONE] or PR URLs
-	// These are critical messages that must not be lost
-	if strings.Contains(content, "[DONE]") {
-		return true
-	}
-	// Check for GitHub PR URLs
-	if strings.Contains(content, "github.com") && strings.Contains(content, "/pull/") {
-		return true
-	}
-	return false
-}
 
 // ─── openclaw gateway wire types ────────────────────────────────────────────
 
@@ -1688,9 +1607,6 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
-	// Initialize message tracker for reliable delivery
-	tracker := newMsgTracker()
-
 	// Replay any queued messages that arrived while we were disconnected
 	if queued := queue.drain(); len(queued) > 0 {
 		log.Printf("[bridge] replaying %d queued message(s)", len(queued))
@@ -1708,25 +1624,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				if agentErr != nil {
 					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
 				}
-				msgID := uuid.New().String()
-				requireAck := tracker.shouldRequireAck(reply)
-				if requireAck {
-					tracker.track(msgID, reply)
-				}
 				if writeErr := wsjson.Write(connCtx, conn, hubMsg{
-					Type: "message",
-					Payload: mustJSON(map[string]interface{}{
-						"role":    "claw",
-						"content": reply,
-						"id":      msgID,
-					}),
+					Type:    "message",
+					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
 				}); writeErr != nil {
 					// Hub connection dropped — queue content for replay on reconnect
 					log.Printf("[bridge] hub write failed, queuing response for replay: %v", writeErr)
 					queue.push(reply)
-					if requireAck {
-						tracker.ack(msgID) // Remove from tracker since we're queueing it
-					}
 				}
 			}(content)
 		}
@@ -1761,25 +1665,6 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 						"context_usage":   cu,
 					}),
 				})
-			}
-		}
-	}()
-
-	// Message acknowledgment timeout checker
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				expired := tracker.checkTimeouts()
-				for _, pm := range expired {
-					// These are messages that haven't exceeded max retries yet
-					log.Printf("[bridge] message %s not acknowledged, retrying (%d/%d)", pm.id[:8], pm.retryCount, msgAckRetries)
-					queue.push(pm.content)
-				}
 			}
 		}
 	}()
@@ -1831,39 +1716,15 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
 
-				msgID := uuid.New().String()
-				requireAck := tracker.shouldRequireAck(reply)
-				if requireAck {
-					tracker.track(msgID, reply)
-				}
-
 				if writeErr := wsjson.Write(connCtx, conn, hubMsg{
-					Type: "message",
-					Payload: mustJSON(map[string]interface{}{
-						"role":    "claw",
-						"content": reply,
-						"id":      msgID,
-					}),
+					Type:    "message",
+					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
 				}); writeErr != nil {
 					// Hub connection dropped — queue content for replay on reconnect
 					log.Printf("[bridge] hub write failed, queuing response for replay: %v", writeErr)
 					queue.push(reply)
-					if requireAck {
-						tracker.ack(msgID) // Remove from tracker since we're queueing it
-					}
 				}
 			}(ctx, msg.Payload)
-
-		case "message_ack":
-			// Hub acknowledged receipt of a message
-			var ack struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(msg.Payload, &ack); err == nil && ack.ID != "" {
-				if tracker.ack(ack.ID) {
-					log.Printf("[bridge] message acknowledged: %s", ack.ID[:8])
-				}
-			}
 
 		case "http_proxy_res":
 			var res httpProxyRes

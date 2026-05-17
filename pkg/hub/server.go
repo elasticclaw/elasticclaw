@@ -1715,18 +1715,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						"status":  "idle",
 					},
 				})
-				// Send acknowledgment back to the claw for reliable delivery
-				// Check if the message has an ID field (newer bridge versions)
-				var msgWithID struct {
-					ID string `json:"id"`
-				}
-				_ = json.Unmarshal(payload, &msgWithID)
-				if msgWithID.ID != "" {
-					_ = wsjson.Write(ctx, conn, types.WSMessage{
-						Type:    "message_ack",
-						Payload: map[string]string{"id": msgWithID.ID},
-					})
-				}
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
 					go s.handleClawDoneSignal(clawID, hm.Content)
