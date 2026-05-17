@@ -92,6 +92,15 @@ type TemplateConfig struct {
 	// Nix installs the Determinate Systems variant of Nix during bootstrap.
 	// Adds ~2-3 min to bootstrap time. Opt-in only.
 	Nix bool `yaml:"nix,omitempty"`
+	// Flake is a Nix flake reference that defines the development environment.
+	// When specified, the flake will be used to install tools/packages instead
+	// of the default environment setup. The flake can be:
+	//   - A GitHub repo: "github:owner/repo"
+	//   - A GitHub repo with path: "github:owner/repo/path#package"
+	//   - A local path (relative to template): "./flake"
+	//   - A URL: "https://..."
+	// If Nix is not enabled but Flake is set, Nix will be auto-enabled.
+	Flake string `yaml:"flake,omitempty"`
 	// Docker installs Docker Engine (via the official Docker apt repo) during
 	// bootstrap. Useful for projects that need docker build/run but can't
 	// include Docker in a Nix flake for portability. Opt-in only.
@@ -568,6 +577,7 @@ type CreateClawRequest struct {
 	GitHub       *GitHubTemplateConfig `json:"github,omitempty"`
 	Linear       *LinearTemplateConfig `json:"linear,omitempty"`
 	Nix          bool                  `json:"nix,omitempty"`
+	Flake        string                `json:"flake,omitempty"`
 	Docker       bool                  `json:"docker,omitempty"`
 	Tags         []string              `json:"tags,omitempty"`
 	Color        string                `json:"color,omitempty"`

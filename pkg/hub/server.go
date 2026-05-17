@@ -784,14 +784,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	nixEnabled := 0
-	if req.Nix {
+	if req.Nix || req.Flake != "" {
+		// Auto-enable Nix if a flake is specified
 		nixEnabled = 1
 	}
 	dockerEnabled := 0
 	if req.Docker {
 		dockerEnabled = 1
 	}
-	log.Printf("[create] claw %s: req.Nix=%v nixEnabled=%d docker=%d", req.Name, req.Nix, nixEnabled, dockerEnabled)
+	log.Printf("[create] claw %s: nix=%d docker=%d flake=%q", req.Name, nixEnabled, dockerEnabled, req.Flake)
 
 	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
@@ -827,9 +828,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, flake, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, req.Flake, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -2694,10 +2695,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	}
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, flake string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(flake,'') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &flake,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -2735,6 +2736,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
+		Flake:           flake,
 		Docker:          dockerEnabled != 0,
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
@@ -3254,7 +3256,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
 		log.Printf("[bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
 	}
-	log.Printf("[bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
+	// Read flake
+	var flake string
+	_ = s.db.QueryRow(`SELECT COALESCE(flake,'') FROM claws WHERE id=?`, clawID).Scan(&flake)
+	log.Printf("[bootstrap] claw %s nix=%d docker=%d flake=%q", clawID[:8], nixEnabled, dockerEnabled, flake)
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
@@ -3307,6 +3312,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
+		Flake:           flake,
 		Docker:          dockerEnabled != 0,
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
