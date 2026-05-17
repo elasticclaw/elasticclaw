@@ -158,6 +158,7 @@ type ProviderView struct {
 	DefaultCPU      int    `json:"defaultCpu,omitempty"`
 	DefaultMemory   string `json:"defaultMemory,omitempty"`
 	DefaultDisk     string `json:"defaultDisk,omitempty"`
+	_sshKeyPath     string `json:"-"` // internal: path for file I/O outside lock
 }
 
 // GitHubAppPermission is a single permission check result for a GitHub App.
@@ -395,11 +396,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			pv.DefaultCPU = p.DefaultCPU
 			pv.DefaultMemory = p.DefaultMemory
 			pv.DefaultDisk = p.DefaultDisk
-			// Generate and return public key if key exists
+			// Record SSHKeyPath for file I/O outside the lock
 			if p.SSHKeyPath != "" {
-				if pubBytes, err := os.ReadFile(p.SSHKeyPath + ".pub"); err == nil {
-					pv.SSHPublicKey = string(pubBytes)
-				}
+				pv._sshKeyPath = p.SSHKeyPath
 			}
 		}
 		view.Providers[name] = pv
@@ -463,6 +462,17 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Name:  "global",
 			Limit: s.hubCfg.MaxConcurrentClaws,
 		})
+	}
+	s.mu.RUnlock()
+
+	// Read SSH public keys outside the lock (file I/O)
+	for name, pv := range view.Providers {
+		if pv._sshKeyPath != "" {
+			if pubBytes, err := os.ReadFile(pv._sshKeyPath + ".pub"); err == nil {
+				pv.SSHPublicKey = string(pubBytes)
+				view.Providers[name] = pv
+			}
+		}
 	}
 
 	// Factories — load only from external storage (single source of truth)
@@ -554,7 +564,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.mu.RUnlock()
 
 	// Check GitHub App permissions outside the lock (network call)
 	for _, app := range ghAppCfgs {
