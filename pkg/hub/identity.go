@@ -74,12 +74,27 @@ func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
 	pubPath := filepath.Join(dir, "exedev-key.pub")
 
 	// If both exist, just return the public key
+	privExists := false
 	if _, err := os.Stat(privPath); err == nil {
+		privExists = true
+	}
+	pubExists := false
+	if _, err := os.Stat(pubPath); err == nil {
+		pubExists = true
+	}
+	if privExists && pubExists {
 		pubBytes, err := os.ReadFile(pubPath)
 		if err != nil {
 			return "", "", fmt.Errorf("read exedev public key: %w", err)
 		}
 		return string(pubBytes), privPath, nil
+	}
+	// If only one exists, clean up the orphaned file before regenerating
+	if privExists {
+		os.Remove(privPath)
+	}
+	if pubExists {
+		os.Remove(pubPath)
 	}
 
 	// Generate new ed25519 keypair
