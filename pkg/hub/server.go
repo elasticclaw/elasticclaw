@@ -2589,21 +2589,7 @@ echo started`,
 	return nil
 }
 
-func (s *Server) provisionLocal(ctx context.Context, clawID string, req types.CreateClawRequest, files map[string][]byte, env map[string]string) error {
-	p := newLocalProvider()
-	createReq := types.CreateRequest{
-		Name:          req.Name,
-		TemplateFiles: files,
-		Env:           env,
-	}
-	instance, err := p.Create(ctx, createReq)
-	if err != nil {
-		return fmt.Errorf("local create: %w", err)
-	}
-	log.Printf("local instance created: %s (claw %s)", instance.ID, clawID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='starting' WHERE id=?`, clawID)
-	return nil
-}
+
 
 func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	p, err := newExedevProvider(cfg)
