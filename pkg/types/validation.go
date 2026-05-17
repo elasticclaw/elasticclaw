@@ -21,7 +21,7 @@ var validIntegrations = map[string]bool{
 
 // Valid provider types
 var validProviders = map[string]bool{
-	"replicated": true, "daytona": true, "vercel": true, "local": true, "noop": true,
+	"replicated": true, "daytona": true, "vercel": true, "local": true, "noop": true, "exedev": true,
 }
 
 // Valid MCP sources

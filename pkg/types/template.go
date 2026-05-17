@@ -501,6 +501,10 @@ type ProviderConfig struct {
 
 	// exe.dev
 	SSHKeyPath string `yaml:"ssh_key_path,omitempty"` // optional SSH private key path
+	// Default resources for new VMs
+	DefaultCPU    int    `yaml:"default_cpu,omitempty"`
+	DefaultMemory string `yaml:"default_memory,omitempty"` // e.g. "4GB"
+	DefaultDisk   string `yaml:"default_disk,omitempty"`   // e.g. "20GB"
 
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`

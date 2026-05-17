@@ -18,18 +18,22 @@ import (
 
 // Provider implements the exe.dev provider using the SSH CLI.
 type Provider struct {
-	sshKeyPath string // path to SSH private key for exe.dev authentication
+	cfg Config // provider config including SSH key path and default resources
 }
 
 // Config holds exe.dev provider config (from hub.yaml).
 type Config struct {
 	SSHKeyPath string `yaml:"ssh_key_path,omitempty"` // path to SSH private key; if empty, uses default SSH agent
+	// Default resource settings for new VMs
+	DefaultCPU    int    `yaml:"default_cpu,omitempty"`
+	DefaultMemory string `yaml:"default_memory,omitempty"` // e.g. "4GB"
+	DefaultDisk   string `yaml:"default_disk,omitempty"`   // e.g. "20GB"
 }
 
 // New creates a new exe.dev provider.
 func New(cfg Config) (*Provider, error) {
 	return &Provider{
-		sshKeyPath: cfg.SSHKeyPath,
+		cfg: cfg,
 	}, nil
 }
 
@@ -52,8 +56,8 @@ type exeVMList struct {
 // including identity file if configured.
 func (p *Provider) sshArgs() []string {
 	var args []string
-	if p.sshKeyPath != "" {
-		args = append(args, "-i", p.sshKeyPath)
+	if p.cfg.SSHKeyPath != "" {
+		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
 	args = append(args, "exe.dev")
 	return args
@@ -63,8 +67,8 @@ func (p *Provider) sshArgs() []string {
 // including identity file and common options if configured.
 func (p *Provider) sshVMArgs(host string) []string {
 	var args []string
-	if p.sshKeyPath != "" {
-		args = append(args, "-i", p.sshKeyPath)
+	if p.cfg.SSHKeyPath != "" {
+		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
 	args = append(args, "-o", "StrictHostKeyChecking=no", host)
 	return args
@@ -99,6 +103,16 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	args := []string{"new", "--json"}
 	if req.Name != "" {
 		args = append(args, "--name="+req.Name)
+	}
+	// Apply default resource settings from provider config
+	if p.cfg.DefaultCPU > 0 {
+		args = append(args, fmt.Sprintf("--cpu=%d", p.cfg.DefaultCPU))
+	}
+	if p.cfg.DefaultMemory != "" {
+		args = append(args, "--memory="+p.cfg.DefaultMemory)
+	}
+	if p.cfg.DefaultDisk != "" {
+		args = append(args, "--disk="+p.cfg.DefaultDisk)
 	}
 	// NOTE: env vars are intentionally NOT passed as --env flags to avoid
 	// exposing secrets in process listings (ps aux). Env vars are injected
@@ -292,7 +306,7 @@ func (p *Provider) vmHost(instanceID string) string {
 
 // SSHKeyPath returns the configured SSH private key path (may be empty).
 func (p *Provider) SSHKeyPath() string {
-	return p.sshKeyPath
+	return p.cfg.SSHKeyPath
 }
 
 // extractVMName tries to extract a vm name from plain text output.

@@ -53,6 +53,9 @@ interface SettingsData {
     tokenSet?: boolean
     defaultTtl?: string
     defaultInstanceType?: string
+    defaultCpu?: number
+    defaultMemory?: string
+    defaultDisk?: string
   }>
   github: GitHubAppView[]
   sshPublicKeys: string[]
@@ -365,6 +368,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
         tokenSet: p.tokenSet,
         defaultTtl: p.defaultTtl,
         defaultInstanceType: p.defaultInstanceType,
+        defaultCpu: p.defaultCpu,
+        defaultMemory: p.defaultMemory,
+        defaultDisk: p.defaultDisk,
       }
     })
 
@@ -381,6 +387,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formDefaultTtl, setFormDefaultTtl] = useState("")
   const [formDefaultInstanceType, setFormDefaultInstanceType] = useState("")
   const [formDefaultSnapshot, setFormDefaultSnapshot] = useState("")
+  const [formDefaultCpu, setFormDefaultCpu] = useState("")
+  const [formDefaultMemory, setFormDefaultMemory] = useState("")
+  const [formDefaultDisk, setFormDefaultDisk] = useState("")
 
   const resetForm = () => {
     setFormProvider("replicated")
@@ -390,6 +399,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultTtl("")
     setFormDefaultInstanceType("")
     setFormDefaultSnapshot("")
+    setFormDefaultCpu("")
+    setFormDefaultMemory("")
+    setFormDefaultDisk("")
     setEditName(null)
   }
 
@@ -404,6 +416,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultTtl(p?.defaultTtl || "")
     setFormDefaultInstanceType(p?.defaultInstanceType || "")
     setFormDefaultSnapshot(p?.defaultSnapshot || "")
+    setFormDefaultCpu(p?.defaultCpu?.toString() || "")
+    setFormDefaultMemory(p?.defaultMemory || "")
+    setFormDefaultDisk(p?.defaultDisk || "")
     setEditName(name)
     setModalMode("edit")
     setShowModal(true)
@@ -424,6 +439,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     } else if (formProvider === "exedev") {
       // exe.dev uses SSH key authentication; no API key needed in config
       patch.enabled = true
+      if (formDefaultCpu) patch.defaultCpu = parseInt(formDefaultCpu, 10)
+      if (formDefaultMemory) patch.defaultMemory = formDefaultMemory
+      if (formDefaultDisk) patch.defaultDisk = formDefaultDisk
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -608,6 +626,18 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 <p className="text-xs text-muted-foreground">
                   exe.dev uses SSH key authentication. Ensure your SSH key is registered at <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev</a>.
                 </p>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Default CPUs</label>
+                  <Input value={formDefaultCpu} onChange={e => setFormDefaultCpu(e.target.value)} className="h-8 text-sm" placeholder="2" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Memory</label>
+                  <Input value={formDefaultMemory} onChange={e => setFormDefaultMemory(e.target.value)} className="h-8 text-sm" placeholder="4GB" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Disk</label>
+                  <Input value={formDefaultDisk} onChange={e => setFormDefaultDisk(e.target.value)} className="h-8 text-sm" placeholder="20GB" />
+                </div>
               </>
             )}
           </div>
