@@ -439,7 +439,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     } else if (formProvider === "exedev") {
       // exe.dev uses SSH key authentication; no API key needed in config
       patch.enabled = true
-      if (formDefaultCpu) patch.defaultCpu = parseInt(formDefaultCpu, 10)
+      const parsedCpu = parseInt(formDefaultCpu, 10)
+      if (formDefaultCpu && !isNaN(parsedCpu)) patch.defaultCpu = parsedCpu
       if (formDefaultMemory) patch.defaultMemory = formDefaultMemory
       if (formDefaultDisk) patch.defaultDisk = formDefaultDisk
     }
