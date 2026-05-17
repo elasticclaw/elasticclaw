@@ -87,7 +87,7 @@ func (f *FactoryConfig) Validate() error {
 
 	// Validate provider if provided
 	if f.Provider != "" && !validProviders[f.Provider] {
-		return fmt.Errorf("factory %q: invalid provider %q (must be one of: replicated, daytona, vercel, local, noop)", f.Name, f.Provider)
+		return fmt.Errorf("factory %q: invalid provider %q (must be one of: replicated, daytona, exedev, vercel, local, noop)", f.Name, f.Provider)
 	}
 
 	// Validate inputs
@@ -185,7 +185,7 @@ func (t *TemplateConfig) Validate() error {
 		return fmt.Errorf("template provider is required")
 	}
 	if !validProviders[t.Provider] {
-		return fmt.Errorf("invalid provider %q (must be one of: replicated, daytona, vercel, local, noop)", t.Provider)
+		return fmt.Errorf("invalid provider %q (must be one of: replicated, daytona, exedev, vercel, local, noop)", t.Provider)
 	}
 
 	// Validate color if provided
@@ -296,7 +296,7 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 	}
 
 	if !validProviders[providerType] {
-		return fmt.Errorf("invalid provider type %q (must be one of: replicated, daytona, vercel, local, noop)", providerType)
+		return fmt.Errorf("invalid provider type %q (must be one of: replicated, daytona, exedev, vercel, local, noop)", providerType)
 	}
 
 	return nil
