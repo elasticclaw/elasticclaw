@@ -86,6 +86,21 @@ func runTemplateCreate(cmd *cobra.Command, args []string) error {
 provider: %s
 instance_type: %s
 ttl: %s
+
+# Nix flake for custom tools/environment (optional)
+# Set this to use a custom Nix flake instead of the default environment.
+# The flake can be:
+#   - A GitHub repo: "github:owner/repo" or "github:owner/repo#package"
+#   - A local path: "./flake" (relative to this template directory)
+#   - A URL: "https://example.com/flake.tar.gz"
+# When set, Nix will be auto-enabled and packages from the flake will be installed.
+# flake: "github:owner/repo"
+
+# Enable Nix (Determinate Systems installer)
+# nix: true
+
+# Enable Docker
+# docker: true
 `, templateCreateProvider, templateCreateInstanceType, templateCreateTTL),
 
 		"AGENTS.md": fmt.Sprintf(`# AGENTS.md - Your Workspace

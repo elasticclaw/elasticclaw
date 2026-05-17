@@ -121,6 +121,7 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 		Linear:       tmplCfg.Linear,
 		Snapshot:     tmplCfg.Snapshot,
 		Nix:          tmplCfg.Nix,
+		Flake:        tmplCfg.Flake,
 		Tags:         tmplCfg.Tags,
 		Color:        tmplCfg.Color,
 	}

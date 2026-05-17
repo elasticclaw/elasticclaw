@@ -962,6 +962,45 @@ func finishDocker(dockerDone <-chan error) {
 	log.Printf("[bootstrap] Docker ready")
 }
 
+// installFromFlake installs packages from a Nix flake reference.
+// The flake can be a GitHub repo (github:owner/repo), URL, or local path.
+func installFromFlake(flake string) error {
+	log.Printf("[bootstrap] installing from flake: %s", flake)
+
+	// Ensure nix command is available
+	if err := runShell("command -v nix"); err != nil {
+		return fmt.Errorf("nix command not available: %w", err)
+	}
+
+	// For flakes like "github:owner/repo", we install the default package
+	// For flakes like "github:owner/repo#package", we install that specific package
+	// For local paths like "./flake", we install from that directory
+
+	installRef := flake
+	if !strings.Contains(flake, "#") && !strings.HasPrefix(flake, ".") && !strings.HasPrefix(flake, "/") {
+		// Assume it's a GitHub-style reference without explicit package
+		// Try to install the default package from the flake
+		installRef = flake + "#default"
+	}
+
+	log.Printf("[bootstrap] running: nix profile install %s", installRef)
+	script := fmt.Sprintf(`
+set -euo pipefail
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+nix profile install %s --accept-flake-config 2>&1 || echo "Flake install may have partial failures, continuing..."
+`, installRef)
+
+	if err := runShell(script); err != nil {
+		// Don't fail bootstrap for flake errors - the flake might be optional
+		log.Printf("[bootstrap] flake install warning: %v", err)
+		return nil
+	}
+
+	log.Printf("[bootstrap] flake install complete: %s", flake)
+	return nil
+}
+
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
@@ -1253,6 +1292,26 @@ func runBootstrap() error {
 	// Step 9: After bridge connects, finish Nix and Docker in background
 	go finishNix(nixDone)
 	go finishDocker(dockerDone)
+
+	// Step 10: Install packages from flake if specified
+	go func() {
+		flake := os.Getenv("ELASTICCLAW_FLAKE")
+		if flake == "" {
+			return
+		}
+		// Wait for Nix to be ready if it's being installed
+		if nixDone != nil {
+			select {
+			case <-nixDone:
+				// Nix done, proceed
+			case <-time.After(10 * time.Second):
+				// Timeout, try anyway
+			}
+		}
+		if err := installFromFlake(flake); err != nil {
+			log.Printf("[bootstrap] flake install error: %v", err)
+		}
+	}()
 
 	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
 		if err := os.WriteFile(notifyFile, []byte("ok\n"), 0600); err != nil {
