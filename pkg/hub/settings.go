@@ -135,6 +135,7 @@ type FactoryView struct {
 	ConcurrencyGroup    string   `json:"concurrencyGroup,omitempty"`
 	EnableManualTrigger bool     `json:"enable_manual_trigger,omitempty"`
 	SecretRefs          map[string]string `json:"secret_refs,omitempty"`
+	ExternalTrigger     *types.ExternalTrigger `json:"externalTrigger,omitempty"`
 }
 
 type ProviderView struct {
@@ -292,6 +293,7 @@ type FactoryPatch struct {
 	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
 	Repos               []string            `json:"repos,omitempty"`
 	Trigger             *types.GitHubTrigger `json:"trigger,omitempty"`
+	ExternalTrigger     *types.ExternalTrigger `json:"externalTrigger,omitempty"`
 }
 
 type ProviderPatch struct {
@@ -483,6 +485,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			ConcurrencyGroup:    f.ConcurrencyGroup,
 			EnableManualTrigger: f.EnableManualTrigger,
 			SecretRefs:          f.SecretRefs,
+			ExternalTrigger:     f.ExternalTrigger,
 		})
 	}
 	// Auth config
@@ -1043,6 +1046,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if fp.Trigger != nil {
 				disk.Trigger = fp.Trigger
+			}
+			if fp.ExternalTrigger != nil {
+				disk.ExternalTrigger = fp.ExternalTrigger
 			}
 
 			if err := saveExternalFactory(disk); err != nil {

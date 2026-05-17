@@ -16,7 +16,7 @@ var validColors = map[string]bool{
 
 // Valid integration types
 var validIntegrations = map[string]bool{
-	"linear": true, "shortcut": true, "github-issues": true, "github": true,
+	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true,
 }
 
 // Valid provider types
@@ -42,6 +42,11 @@ var validGitHubTriggerActions = map[string]bool{
 // Valid GitHub trigger types
 var validGitHubTriggerTypes = map[string]bool{
 	"pull_request": true, "issue": true,
+}
+
+// Valid external trigger sources
+var validExternalTriggerSources = map[string]bool{
+	"github-release": true, "generic-webhook": true,
 }
 
 // repoRegex validates owner/repo format
@@ -103,6 +108,16 @@ func (f *FactoryConfig) Validate() error {
 			return fmt.Errorf("factory %q: trigger is required for github integration", f.Name)
 		}
 		if err := validateGitHubTrigger(f.Name, f.Trigger); err != nil {
+			return err
+		}
+	}
+
+	// Validate external trigger fields for external integration
+	if f.Integration == "external" {
+		if f.ExternalTrigger == nil {
+			return fmt.Errorf("factory %q: external_trigger is required for external integration", f.Name)
+		}
+		if err := validateExternalTrigger(f.Name, f.ExternalTrigger); err != nil {
 			return err
 		}
 	}
@@ -169,6 +184,30 @@ func validateGitHubTrigger(factoryName string, trigger *GitHubTrigger) error {
 	}
 	if !validGitHubTriggerActions[trigger.Action] {
 		return fmt.Errorf("factory %q: invalid trigger.action %q (must be one of: opened, synchronize, reopened, closed)", factoryName, trigger.Action)
+	}
+
+	return nil
+}
+
+func validateExternalTrigger(factoryName string, trigger *ExternalTrigger) error {
+	if trigger.Source == "" {
+		return fmt.Errorf("factory %q: external_trigger.source is required", factoryName)
+	}
+	if !validExternalTriggerSources[trigger.Source] {
+		return fmt.Errorf("factory %q: invalid external_trigger.source %q (must be one of: github-release, generic-webhook)", factoryName, trigger.Source)
+	}
+
+	// Validate filter if provided
+	if trigger.Filter != nil {
+		if trigger.Filter.Repository != "" && !repoRegex.MatchString(trigger.Filter.Repository) {
+			return fmt.Errorf("factory %q: invalid external_trigger.filter.repository %q (expected owner/repo)", factoryName, trigger.Filter.Repository)
+		}
+		if trigger.Filter.TagPattern != "" {
+			// Simple validation: tag pattern should be non-empty and contain valid characters
+			if strings.ContainsAny(trigger.Filter.TagPattern, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f") {
+				return fmt.Errorf("factory %q: invalid external_trigger.filter.tag_pattern (contains control characters)", factoryName)
+			}
+		}
 	}
 
 	return nil
