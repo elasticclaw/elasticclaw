@@ -463,17 +463,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Limit: s.hubCfg.MaxConcurrentClaws,
 		})
 	}
-	s.mu.RUnlock()
-
-	// Read SSH public keys outside the lock (file I/O)
-	for name, pv := range view.Providers {
-		if pv._sshKeyPath != "" {
-			if pubBytes, err := os.ReadFile(pv._sshKeyPath + ".pub"); err == nil {
-				pv.SSHPublicKey = string(pubBytes)
-				view.Providers[name] = pv
-			}
-		}
-	}
 
 	// Factories — load only from external storage (single source of truth)
 	view.Factories = []FactoryView{}
@@ -522,45 +511,42 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			ExternalTrigger:     f.ExternalTrigger,
 		})
 	}
-	// Auth config
+	// Auth config — copy under lock before RUnlock
+	var authView *AuthView
 	if s.hubCfg.Auth != nil {
-		view.Auth = &AuthView{
+		authView = &AuthView{
 			DisablePasswordAuth: s.hubCfg.Auth.DisablePasswordAuth,
 		}
 		if s.hubCfg.Auth.GitHubOAuth != nil {
 			gh := s.hubCfg.Auth.GitHubOAuth
-			view.Auth.GitHubOAuth = &GitHubOAuthView{
+			authView.GitHubOAuth = &GitHubOAuthView{
 				ClientID:        gh.ClientID,
 				ClientSecretSet: gh.ClientSecret != "",
-				AllowedUsers:    gh.AllowedUsers,
-				AllowedOrgs:     gh.AllowedOrgs,
-				AllowedTeams:    gh.AllowedTeams,
-			}
-			if view.Auth.GitHubOAuth.AllowedUsers == nil {
-				view.Auth.GitHubOAuth.AllowedUsers = []string{}
-			}
-			if view.Auth.GitHubOAuth.AllowedOrgs == nil {
-				view.Auth.GitHubOAuth.AllowedOrgs = []string{}
-			}
-			if view.Auth.GitHubOAuth.AllowedTeams == nil {
-				view.Auth.GitHubOAuth.AllowedTeams = []string{}
+				AllowedUsers:    append([]string(nil), gh.AllowedUsers...),
+				AllowedOrgs:     append([]string(nil), gh.AllowedOrgs...),
+				AllowedTeams:    append([]string(nil), gh.AllowedTeams...),
 			}
 		}
 		if s.hubCfg.Auth.Access != nil {
 			acc := s.hubCfg.Auth.Access
-			view.Auth.Access = &AccessView{
-				Admins:               acc.Admins,
-				ViewRequiresTags:     acc.ViewRequiresTags,
-				InteractRequiresTags: acc.InteractRequiresTags,
+			authView.Access = &AccessView{
+				Admins:               append([]string(nil), acc.Admins...),
+				ViewRequiresTags:     append([]string(nil), acc.ViewRequiresTags...),
+				InteractRequiresTags: append([]string(nil), acc.InteractRequiresTags...),
 			}
-			if view.Auth.Access.Admins == nil {
-				view.Auth.Access.Admins = []string{}
-			}
-			if view.Auth.Access.ViewRequiresTags == nil {
-				view.Auth.Access.ViewRequiresTags = []string{}
-			}
-			if view.Auth.Access.InteractRequiresTags == nil {
-				view.Auth.Access.InteractRequiresTags = []string{}
+		}
+	}
+
+	s.mu.RUnlock()
+
+	view.Auth = authView
+
+	// Read SSH public keys outside the lock (file I/O)
+	for name, pv := range view.Providers {
+		if pv._sshKeyPath != "" {
+			if pubBytes, err := os.ReadFile(pv._sshKeyPath + ".pub"); err == nil {
+				pv.SSHPublicKey = string(pubBytes)
+				view.Providers[name] = pv
 			}
 		}
 	}
