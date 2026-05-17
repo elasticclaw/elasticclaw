@@ -1447,10 +1447,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
 	s.mu.Lock()
-	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
+	if old, ok := s.claws[clawID]; ok {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		// Copy message queue from old connection to preserve queued messages
+		if len(old.messageQueue) > 0 {
+			cc.messageQueue = make([]types.HubMessage, len(old.messageQueue))
+			copy(cc.messageQueue, old.messageQueue)
+		}
 		old.mu.RUnlock()
 	}
 	s.claws[clawID] = cc
@@ -3164,7 +3169,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
 
-	// Check if there are any queued messages to send (user sent messages while claw was busy/offline)
+	// Check if there are any queued messages to send (user sent messages while claw was busy)
 	s.sendNextQueuedMessage(cc)
 }
 
@@ -4104,6 +4109,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	conn := cc.conn
 	tenantID := cc.tenantID
 	clawID := cc.id
+	cc.lastUserMessageAt = time.Now()
 	cc.mu.Unlock()
 
 	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
