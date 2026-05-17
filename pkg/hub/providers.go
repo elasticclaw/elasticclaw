@@ -22,7 +22,10 @@ func newLocalProvider() *local.Provider {
 
 func newExedevProvider(cfg types.ProviderConfig) (*exedev.Provider, error) {
 	return exedev.New(exedev.Config{
-		SSHKeyPath: cfg.SSHKeyPath,
+		SSHKeyPath:  cfg.SSHKeyPath,
+		DefaultCPU:    cfg.DefaultCPU,
+		DefaultMemory: cfg.DefaultMemory,
+		DefaultDisk:   cfg.DefaultDisk,
 	})
 }
 
