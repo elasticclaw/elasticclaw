@@ -71,11 +71,14 @@ func (k *LLMKeyConfig) EnvVarName() string {
 
 // TemplateConfig is the elasticclaw-config.yaml inside a template directory.
 type TemplateConfig struct {
-	Provider     string            `yaml:"provider"`
-	Resources    TemplateResources `yaml:"resources,omitempty"`
-	InstanceType string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
-	Image        string            `yaml:"image,omitempty"`
-	TTL          string            `yaml:"ttl,omitempty"`
+	// ElasticClawVersion is the schema version of this config file.
+	// Defaults to "v1" if not specified for backward compatibility.
+	ElasticClawVersion string            `yaml:"elasticclaw_version,omitempty"`
+	Provider           string            `yaml:"provider"`
+	Resources          TemplateResources `yaml:"resources,omitempty"`
+	InstanceType       string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
+	Image              string            `yaml:"image,omitempty"`
+	TTL                string            `yaml:"ttl,omitempty"`
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string                `yaml:"default_model,omitempty"`
@@ -118,6 +121,15 @@ type TemplateConfig struct {
 	// in this template's claws. Each claw will start these MCP servers as
 	// subprocesses and register their tools with the gateway.
 	MCPs []MCPRef `yaml:"mcps,omitempty"`
+}
+
+// GetVersion returns the effective schema version for this template config.
+// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+func (c *TemplateConfig) GetVersion() string {
+	if c.ElasticClawVersion != "" {
+		return c.ElasticClawVersion
+	}
+	return "v1"
 }
 
 type TemplateResources struct {
@@ -298,6 +310,10 @@ type AccessConfig struct {
 }
 
 type HubConfig struct {
+	// ElasticClawVersion is the schema version of this hub config file.
+	// Defaults to "v1" if not specified for backward compatibility.
+	ElasticClawVersion string `yaml:"elasticclaw_version,omitempty"`
+
 	// CLI connection fields
 	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
@@ -422,9 +438,12 @@ type ConcurrencyGroup struct {
 
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
-	Name              string `yaml:"name" json:"name"`
-	Enabled           *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`  // nil = true (default on); set false to pause
-	Integration       string `yaml:"integration" json:"integration"`        // "linear", "shortcut", "github-issues", or "github"
+	// ElasticClawVersion is the schema version of this config file.
+	// Defaults to "v1" if not specified for backward compatibility.
+	ElasticClawVersion string `yaml:"elasticclaw_version,omitempty" json:"elasticclawVersion,omitempty"`
+	Name               string `yaml:"name" json:"name"`
+	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`  // nil = true (default on); set false to pause
+	Integration        string `yaml:"integration" json:"integration"`        // "linear", "shortcut", "github-issues", or "github"
 	Workspace         string `yaml:"workspace,omitempty" json:"workspace,omitempty"` // matches integrations.<type>[].workspace
 	Team              string `yaml:"team,omitempty" json:"team,omitempty"`     // Linear team key (e.g. "ELA")
 	TriggerStatus     string `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"` // entering this status → create claw
@@ -468,6 +487,15 @@ type FactoryConfig struct {
 	// External trigger fields (integration: external)
 	// ExternalTrigger defines what external event triggers this factory.
 	ExternalTrigger *ExternalTrigger `yaml:"external_trigger,omitempty" json:"external_trigger,omitempty"`
+}
+
+// GetVersion returns the effective schema version for this factory config.
+// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+func (c *FactoryConfig) GetVersion() string {
+	if c.ElasticClawVersion != "" {
+		return c.ElasticClawVersion
+	}
+	return "v1"
 }
 
 // GitHubTrigger defines what GitHub event triggers this factory.
@@ -576,5 +604,14 @@ type CreateClawRequest struct {
 	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).
 	// Never set by the CLI; Name is the display name.
 	ProviderName string                `json:"provider_name,omitempty"`
+}
+
+// GetVersion returns the effective schema version for this hub config.
+// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+func (c *HubConfig) GetVersion() string {
+	if c.ElasticClawVersion != "" {
+		return c.ElasticClawVersion
+	}
+	return "v1"
 }
 
