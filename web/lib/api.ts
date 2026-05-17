@@ -226,17 +226,6 @@ export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
   return apiFetch<ClawPR[]>(`/api/claws/${clawId}/prs`)
 }
 
-export async function fetchClawAutoSettings(clawId: string): Promise<{ autoFixCI: boolean; autoFixBugbot: boolean }> {
-  return apiFetch(`/api/claws/${clawId}/settings`)
-}
-
-export async function patchClawAutoSettings(clawId: string, patch: { autoFixCI?: boolean; autoFixBugbot?: boolean }): Promise<void> {
-  await apiFetch(`/api/claws/${clawId}/settings`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  })
-}
-
 // Factory types for manual trigger
 export interface FactoryInput {
   name: string

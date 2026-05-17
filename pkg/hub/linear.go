@@ -682,14 +682,14 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	var (
 		name, template, provider, defaultModel, templateFilesJSON string
 		githubReposJSON, linearWorkspace, llmKey string
-		nixEnabled, dockerEnabled, autoFixCI, autoFixBugbot int
+		nixEnabled, dockerEnabled int
 		tagsJSON, color, issueID string
 		tenantID string
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &autoFixCI, &autoFixBugbot, &issueID)
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &issueID)
 	if err != nil {
 		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
