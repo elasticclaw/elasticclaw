@@ -1711,6 +1711,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
+					// Still need to check for queued messages even if content is empty
+					s.mu.RLock()
+					cc = s.claws[clawID]
+					s.mu.RUnlock()
+					if cc != nil {
+						s.sendNextQueuedMessage(cc)
+					}
 					continue
 				}
 				_, _ = s.db.Exec(
