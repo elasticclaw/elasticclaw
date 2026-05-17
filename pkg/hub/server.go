@@ -1470,6 +1470,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
+	// Drain any queued messages that were copied from the old connection.
+	// This must happen after the connection is live but before the read loop starts.
+	// We call it synchronously (not in a goroutine) to avoid racing with new user messages.
+	if len(cc.messageQueue) > 0 {
+		s.sendNextQueuedMessage(cc)
+	}
+
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
 	usedPipelineEntryInject := false
