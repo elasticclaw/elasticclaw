@@ -408,7 +408,14 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const openAdd = () => {
     resetForm()
     const firstAvailable = SANDBOX_PROVIDER_OPTIONS.find(o => !providers[o.value])
-    if (firstAvailable) setFormProvider(firstAvailable.value)
+    if (firstAvailable) {
+      setFormProvider(firstAvailable.value)
+      if (firstAvailable.value === "exedev") {
+        setFormDefaultCpu("2")
+        setFormDefaultMemory("4GB")
+        setFormDefaultDisk("10GB")
+      }
+    }
     setModalMode("add")
     setShowModal(true)
   }
@@ -659,7 +666,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
               <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev" && !formDefaultCpu)}
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev" && (!formDefaultCpu || !formDefaultMemory || !formDefaultDisk))}
                 onClick={doSave}
               >
                 {modalMode === "add" ? "Add Provider" : "Save changes"}
