@@ -843,8 +843,9 @@ func runShell(script string) error {
 
 // nixInstallBg starts the Nix installer in background and returns a done channel.
 // The channel receives an error (or nil) when the install finishes.
+// Capacity 2 so both setupFlakeEnvironmentSync and finishNix can receive.
 func nixInstallBg() <-chan error {
-	ch := make(chan error, 1)
+	ch := make(chan error, 2)
 	go func() {
 		log.Printf("[bootstrap] starting Nix (Determinate Systems) in background...")
 		script := `
@@ -862,6 +863,7 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			log.Printf("[bootstrap] Nix install complete")
 		}
 		ch <- err
+		ch <- err // Send twice so both receivers can read
 	}()
 	return ch
 }
@@ -949,7 +951,7 @@ func setupFlakeEnvironment(nixDone <-chan error) error {
 				log.Printf("[bootstrap] Nix install failed, skipping flake setup: %v", err)
 				return nil
 			}
-		case <-time.After(30 * time.Second):
+		case <-time.After(180 * time.Second):
 			log.Printf("[bootstrap] timeout waiting for Nix, trying flake setup anyway...")
 		}
 	}
