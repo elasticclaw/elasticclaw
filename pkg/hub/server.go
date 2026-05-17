@@ -1651,8 +1651,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
 					})
 					// Buffer chunk and upsert partial message to DB so refreshes don't lose it
-					s.mu.Lock()
-					if cc, ok := s.claws[clawID]; ok {
+					s.mu.RLock()
+					cc, ok := s.claws[clawID]
+					s.mu.RUnlock()
+					if ok {
+						cc.mu.Lock()
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
 							cc.streamingStartedAt = time.Now()
@@ -1662,15 +1665,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
 						bufContent := cc.streamingBuf.String()
-						s.mu.Unlock()
+						cc.mu.Unlock()
 						// Upsert — insert on first chunk, update content on subsequent
 						_, _ = s.db.Exec(
 							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 							 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
 							msgID, clawID, tenantID, "claw", bufContent, now(),
 						)
-					} else {
-						s.mu.Unlock()
 					}
 				}
 			} else if msg.Type == "message" {
@@ -1685,18 +1686,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.Role = "claw"
 				hm.CreatedAt = now()
 				// Always clean up streaming state first, even for empty messages.
-				s.mu.Lock()
-				if cc, ok := s.claws[clawID]; ok && cc.streamingMsgID != "" {
+				s.mu.RLock()
+				cc, ok := s.claws[clawID]
+				s.mu.RUnlock()
+				if ok && cc.streamingMsgID != "" {
+					cc.mu.Lock()
 					hm.ID = cc.streamingMsgID
 					cc.streamingMsgID = ""
 					cc.streamingBuf.Reset()
 					cc.streamingStartedAt = time.Time{}
 					cc.streamingTimeoutSent = false
 					cc.contextWarningSent = false
+					cc.mu.Unlock()
 				} else {
 					hm.ID = uuid.New().String()
 				}
-				s.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
 					continue
