@@ -251,8 +251,6 @@ func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
 		body   string
 	}{
 		{name: "prs", method: http.MethodGet, path: "/api/claws/claw-1/prs"},
-		{name: "settings get", method: http.MethodGet, path: "/api/claws/claw-1/settings"},
-		{name: "settings patch", method: http.MethodPatch, path: "/api/claws/claw-1/settings", body: `{"autoFixCI":false}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
@@ -293,7 +291,6 @@ func TestGitHubWritesRequireViewAndInteractAccess(t *testing.T) {
 	}{
 		{name: "patch claw", method: http.MethodPatch, path: "/api/claws/claw-1", body: `{"name":"new"}`},
 		{name: "delete claw", method: http.MethodDelete, path: "/api/claws/claw-1"},
-		{name: "patch settings", method: http.MethodPatch, path: "/api/claws/claw-1/settings", body: `{"autoFixCI":false}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))

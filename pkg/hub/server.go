@@ -823,24 +823,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
-	// Template can opt out of auto-watching; default is on (1)
-	autoFixCI := 1
-	if req.AutoWatchCI != nil && !*req.AutoWatchCI {
-		autoFixCI = 0
-	}
-	autoFixBugbot := 1
-	if req.AutoWatchBugbot != nil && !*req.AutoWatchBugbot {
-		autoFixBugbot = 0
-	}
-	autoFixGreptile := 0
-	if req.AutoWatchGreptile != nil && *req.AutoWatchGreptile {
-		autoFixGreptile = 1
-	}
-
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, auto_fix_ci, auto_fix_bugbot, auto_fix_greptile, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, autoFixCI, autoFixBugbot, autoFixGreptile, now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)

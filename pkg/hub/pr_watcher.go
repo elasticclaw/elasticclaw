@@ -145,7 +145,7 @@ func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
 		       cp.last_comment_at, cp.last_review_comment_id, cp.pr_conditions_fired, cp.created_at,
-		       cl.auto_fix_ci, cl.auto_fix_bugbot, cl.auto_fix_greptile, cl.status
+		       cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -161,24 +161,18 @@ func (s *Server) pollAllPRs() {
 
 	type row struct {
 		pr               clawPR
-		autoFixCI        bool
-		autoFixBugbot    bool
-		autoFixGreptile  bool
 		clawStatus       string
 	}
 	var prs []row
 	for rows.Next() {
 		var r row
-		var ciInt, bugbotInt, greptileInt, prConditionsFiredInt int
+		var prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
 			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &prConditionsFiredInt, &r.pr.createdAt,
-			&ciInt, &bugbotInt, &greptileInt, &r.clawStatus); err != nil {
+			&r.clawStatus); err != nil {
 			continue
 		}
 		r.pr.prConditionsFired = prConditionsFiredInt == 1
-		r.autoFixCI = ciInt == 1
-		r.autoFixBugbot = bugbotInt == 1
-		r.autoFixGreptile = greptileInt == 1
 		prs = append(prs, r)
 	}
 	rows.Close()
@@ -210,48 +204,36 @@ func (s *Server) pollAllPRs() {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
-		if r.autoFixCI {
-			s.checkCIFailures(r.pr, token)
+		// Always check CI failures
+		s.checkCIFailures(r.pr, token)
+
+		repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
+		if repoToken == "" {
+			repoToken = token
 		}
-		if r.autoFixBugbot || r.autoFixGreptile || isPipelineDriven {
-			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
-			if repoToken == "" {
-				repoToken = token
-			}
-			commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
-			if err != nil {
-				log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
-				continue
-			}
-			if r.autoFixBugbot {
-				s.checkBugbotComments(r.pr, commentsData)
-			}
-			if r.autoFixGreptile {
-				s.checkGreptileComments(r.pr, commentsData)
-			}
-			// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
-			if isPipelineDriven {
-				log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
-				// When auto-fix bugbot/greptile is enabled, suppress those comments here
-				// so the same comment is not injected twice with different templates.
-				s.checkPRComments(r.pr, commentsData, r.autoFixBugbot, r.autoFixGreptile)
-			}
-			s.updatePRCommentWatermark(r.pr, commentsData)
+		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
+			continue
 		}
+		// Always check bugbot and greptile comments
+		s.checkBugbotComments(r.pr, commentsData)
+		s.checkGreptileComments(r.pr, commentsData)
+		// For pipeline-driven claws, forward all new PR comments (from any human reviewer)
+		if isPipelineDriven {
+			log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID)
+			s.checkPRComments(r.pr, commentsData, true, true)
+		}
+		s.updatePRCommentWatermark(r.pr, commentsData)
+
 		// Greptile posts inline review comments via the pulls/{n}/comments API.
 		// Fetch and track them separately from issue comments.
-		if r.autoFixGreptile {
-			repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
-			if repoToken == "" {
-				repoToken = token
-			}
-			reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
-			if err != nil {
-				log.Printf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
-			} else {
-				s.checkGreptileReviewComments(r.pr, reviewCommentsData)
-				s.updateReviewCommentWatermark(r.pr, reviewCommentsData)
-			}
+		reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
+		} else {
+			s.checkGreptileReviewComments(r.pr, reviewCommentsData)
+			s.updateReviewCommentWatermark(r.pr, reviewCommentsData)
 		}
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
@@ -744,7 +726,7 @@ func githubAPIList(path, token string) ([]interface{}, error) {
 	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
-// handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/settings
+// handleClawSubresource routes /api/claws/:id/prs
 func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) < 2 {
@@ -754,7 +736,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	clawID := parts[0]
 	sub := parts[1]
 
-	if sub != "prs" && sub != "settings" {
+	if sub != "prs" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -775,22 +757,14 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 		}
 		var clawTags []string
 		_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-		if sub == "settings" && r.Method != http.MethodGet {
-			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		} else if !canViewClaw(accessCfg, ghLogin, clawTags) {
+		if !canViewClaw(accessCfg, ghLogin, clawTags) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 	}
 
-	switch sub {
-	case "prs":
+	if sub == "prs" {
 		s.handleClawPRs(w, r, clawID)
-	case "settings":
-		s.handleClawSettings(w, r, clawID)
 	}
 }
 
@@ -837,57 +811,6 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		prs = []PR{}
 	}
 	jsonOK(w, prs)
-}
-
-// handleClawSettings reads/writes per-claw settings (auto_fix_ci, auto_fix_bugbot, auto_fix_greptile).
-func (s *Server) handleClawSettings(w http.ResponseWriter, r *http.Request, clawID string) {
-	tenantID := tenantFromCtx(r)
-
-	if r.Method == http.MethodGet {
-		var autoCI, autoBugbot, autoGreptile int
-		if err := s.db.QueryRow(`SELECT auto_fix_ci, auto_fix_bugbot, auto_fix_greptile FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).
-			Scan(&autoCI, &autoBugbot, &autoGreptile); err != nil {
-			http.Error(w, "claw not found", http.StatusNotFound)
-			return
-		}
-		jsonOK(w, map[string]bool{"autoFixCI": autoCI == 1, "autoFixBugbot": autoBugbot == 1, "autoFixGreptile": autoGreptile == 1})
-		return
-	}
-	if r.Method == http.MethodPatch {
-		var body struct {
-			AutoFixCI       *bool `json:"autoFixCI"`
-			AutoFixBugbot   *bool `json:"autoFixBugbot"`
-			AutoFixGreptile *bool `json:"autoFixGreptile"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		if body.AutoFixCI != nil {
-			v := 0
-			if *body.AutoFixCI {
-				v = 1
-			}
-			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_ci=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
-		}
-		if body.AutoFixBugbot != nil {
-			v := 0
-			if *body.AutoFixBugbot {
-				v = 1
-			}
-			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_bugbot=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
-		}
-		if body.AutoFixGreptile != nil {
-			v := 0
-			if *body.AutoFixGreptile {
-				v = 1
-			}
-			_, _ = s.db.Exec(`UPDATE claws SET auto_fix_greptile=? WHERE id=? AND tenant_id=?`, v, clawID, tenantID)
-		}
-		jsonOK(w, map[string]bool{"ok": true})
-		return
-	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.

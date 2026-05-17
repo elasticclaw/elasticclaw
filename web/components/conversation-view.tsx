@@ -29,7 +29,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, fetchClawAutoSettings, patchClawAutoSettings, type ClawPR } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -183,19 +183,10 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
 
 function ClawCardBack({ claw }: { claw: Claw }) {
   const [prs, setPrs] = useState<ClawPR[]>([])
-  const [autoFixCI, setAutoFixCI] = useState(true)
-  const [autoFixBugbot, setAutoFixBugbot] = useState(true)
 
   useEffect(() => {
     fetchClawPRs(claw.id).then(setPrs).catch(() => {})
-    fetchClawAutoSettings(claw.id).then(s => { setAutoFixCI(s.autoFixCI); setAutoFixBugbot(s.autoFixBugbot) }).catch(() => {})
   }, [claw.id])
-
-  const toggle = async (key: "autoFixCI" | "autoFixBugbot", value: boolean) => {
-    if (key === "autoFixCI") setAutoFixCI(value)
-    else setAutoFixBugbot(value)
-    await patchClawAutoSettings(claw.id, { [key]: value }).catch(() => {})
-  }
 
   return (
     <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-4">
@@ -284,22 +275,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
         </div>
       )}
 
-      <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Auto Actions</h3>
-        <div className="space-y-2">
-          <label className="flex items-center justify-between gap-2 cursor-pointer">
-            <span className="text-xs text-foreground">Fix CI failures automatically</span>
-            <input type="checkbox" checked={autoFixCI} onChange={e => toggle("autoFixCI", e.target.checked)}
-              className="size-3.5 accent-primary" />
-          </label>
-          <label className="flex items-center justify-between gap-2 cursor-pointer">
-            <span className="text-xs text-foreground">Resolve bugbot comments automatically</span>
-            <input type="checkbox" checked={autoFixBugbot} onChange={e => toggle("autoFixBugbot", e.target.checked)}
-              className="size-3.5 accent-primary" />
-          </label>
-        </div>
-        <p className="text-[10px] text-muted-foreground mt-2">When on, the hub injects a message when CI fails or bugbot comments appear on a PR.</p>
-      </div>
+
     </div>
   )
 }
