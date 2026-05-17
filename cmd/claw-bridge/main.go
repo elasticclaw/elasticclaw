@@ -1036,7 +1036,7 @@ func setupFlakeEnvironment(nixDone <-chan error) error {
 set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %s
+cd %q
 # Install the default package from the flake
 nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
 # Also try to install common development tools if they exist in the flake
@@ -1053,7 +1053,7 @@ nix profile install .#devShells.default --accept-flake-config 2>&1 || true
 # Flake environment wrapper - runs commands in the flake's dev shell
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %s
+cd %q
 exec nix develop --accept-flake-config -c "$@"
 `, flakeDir)
 	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
@@ -1147,11 +1147,12 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 	logFile := filepath.Join(home, "openclaw-gateway.log")
 
 	// Build the nix develop command that runs openclaw gateway
+	// Properly escape the flakeDir to prevent shell injection
 	script := fmt.Sprintf(`
 set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %s
+cd %q
 exec nix develop --accept-flake-config -c openclaw gateway run
 `, flakeDir)
 
