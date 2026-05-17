@@ -2643,38 +2643,29 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
 	}
 
-	// Load claw configuration from DB
-	var clawName string
-	_ = s.db.QueryRow(`SELECT COALESCE(name,'') FROM claws WHERE id=?`, clawID).Scan(&clawName)
-
-	var githubReposJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&githubReposJSON)
+	// Load claw configuration from DB in a single atomic query
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var nixEnabled, dockerEnabled int
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName,
+	); err != nil {
+		return fmt.Errorf("load claw config: %w", err)
+	}
 	var githubRepos []types.GitHubRepoAccess
 	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
 
-	var linearWorkspace string
-	_ = s.db.QueryRow(`SELECT COALESCE(linear_workspace,'') FROM claws WHERE id=?`, clawID).Scan(&linearWorkspace)
-	linearToken := resolveLinearToken(s.hubCfg, linearWorkspace)
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
 
-	var templateDefaultModel string
-	_ = s.db.QueryRow(`SELECT COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&templateDefaultModel)
+	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
 	defaultModel := templateDefaultModel
 	if defaultModel == "" {
-		defaultModel = s.hubCfg.DefaultModel
+		defaultModel = hubCfg.DefaultModel
 	}
-
-	var nixEnabled int
-	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
-		log.Printf("[exedev bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
-	}
-	var dockerEnabled int
-	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
-		log.Printf("[exedev bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
-	}
-	log.Printf("[exedev bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
-
-	var llmKeyName string
-	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
+	log.Printf("[exedev bootstrap] claw %.8s nix=%d docker=%d", clawID, nixEnabled, dockerEnabled)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
@@ -2683,12 +2674,6 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	// Generate a random gateway password for this VM
 	gatewayPassword := randomHex(16)
-
-	s.mu.RLock()
-	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
-	clawToken := s.hubCfg.ClawToken
-	hubCfg := s.hubCfg
-	s.mu.RUnlock()
 
 	// Build bootstrap script using same pattern as replicated
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
@@ -2731,7 +2716,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
 	}
 
-	log.Printf("[exedev] bootstrap complete for claw %s on %s", clawID[:8], vmName)
+	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
 }
 

@@ -96,10 +96,14 @@ func GenerateExedevKey(dir string) (pubKey string, privPath string, err error) {
 	// file(s) and regenerate both. This handles cases where the public key was
 	// accidentally deleted or a volume wipe left only the private key.
 	if privExists {
-		os.Remove(privPath)
+		if err := os.Remove(privPath); err != nil {
+			return "", "", fmt.Errorf("remove orphaned exedev private key: %w", err)
+		}
 	}
 	if pubExists {
-		os.Remove(pubPath)
+		if err := os.Remove(pubPath); err != nil {
+			return "", "", fmt.Errorf("remove orphaned exedev public key: %w", err)
+		}
 	}
 
 	// Generate new ed25519 keypair
