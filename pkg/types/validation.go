@@ -72,7 +72,7 @@ func (f *FactoryConfig) Validate() error {
 		return fmt.Errorf("factory %q: integration is required", f.Name)
 	}
 	if !validIntegrations[f.Integration] {
-		return fmt.Errorf("factory %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github)", f.Name, f.Integration)
+		return fmt.Errorf("factory %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", f.Name, f.Integration)
 	}
 
 	// Template is required

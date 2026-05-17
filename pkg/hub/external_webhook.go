@@ -184,6 +184,11 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) validateExternalSignature(body []byte, sig string) bool {
 	// Strip sha256= prefix if present
 	sig = strings.TrimPrefix(sig, "sha256=")
+
+	s.mu.RLock()
+	secrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+
 	if sig == "" {
 		// If no signature provided, check if any factory has a secret configured
 		// If secrets are configured, reject; otherwise allow (dev mode)
@@ -194,8 +199,8 @@ func (s *Server) validateExternalSignature(body []byte, sig string) bool {
 				continue
 			}
 			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && s.hubCfg.Secrets != nil {
-				secret = s.hubCfg.Secrets[factory.WebhookSecretRef]
+			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+				secret = secrets[factory.WebhookSecretRef]
 			}
 			if secret != "" {
 				hasSecret = true
@@ -204,10 +209,6 @@ func (s *Server) validateExternalSignature(body []byte, sig string) bool {
 		}
 		return !hasSecret // allow if no secrets configured
 	}
-
-	s.mu.RLock()
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
 
 	factories := s.resolveFactories()
 	for _, factory := range factories {
