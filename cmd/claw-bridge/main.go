@@ -1306,29 +1306,7 @@ func startGateway() (*exec.Cmd, error) {
 	home, _ := os.UserHomeDir()
 	logFile := filepath.Join(home, "openclaw-gateway.log")
 
-	var cmd *exec.Cmd
-
-	// Check if we have a flake environment - if so, run gateway inside nix develop
-	if hasFlakeEnvironment() {
-		flakeDir := getFlakeDirectory()
-		log.Printf("[bootstrap] starting gateway inside nix develop from %s...", flakeDir)
-
-		// Build the nix develop command that runs openclaw gateway
-		// We need to source the nix environment and then run the gateway
-		script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %s
-exec nix develop --accept-flake-config -c openclaw gateway run
-`, flakeDir)
-
-		cmd = exec.Command("bash", "-c", script)
-	} else {
-		// No flake, run gateway normally
-		cmd = exec.Command("openclaw", "gateway", "run")
-	}
-
+	cmd := exec.Command("openclaw", "gateway", "run")
 	cmd.Env = os.Environ()
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
