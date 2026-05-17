@@ -677,8 +677,8 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = s.provisionReplicated(context.Background(), clawID, req, provCfg, env)
 		case "daytona":
 			provErr = s.provisionDaytona(context.Background(), clawID, req, provCfg, fileBytes, env)
-		case "vercel":
-			provErr = s.provisionVercel(context.Background(), clawID, req, provCfg, fileBytes, env)
+		case "exedev":
+			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}

@@ -396,8 +396,6 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
 		case "daytona":
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "vercel":
-			provErr = s.provisionVercel(ctx, clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
 		case "noop":

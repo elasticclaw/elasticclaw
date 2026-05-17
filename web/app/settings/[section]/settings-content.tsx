@@ -405,7 +405,13 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setEditName(null)
   }
 
-  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  const openAdd = () => {
+    resetForm()
+    const firstAvailable = SANDBOX_PROVIDER_OPTIONS.find(o => !providers[o.value])
+    if (firstAvailable) setFormProvider(firstAvailable.value)
+    setModalMode("add")
+    setShowModal(true)
+  }
   const openEdit = (name: string) => {
     const p = providers[name]
     const opt = SANDBOX_PROVIDER_OPTIONS.find(o => o.value === name)
@@ -653,7 +659,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
               <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey)}
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev" && !formDefaultCpu)}
                 onClick={doSave}
               >
                 {modalMode === "add" ? "Add Provider" : "Save changes"}

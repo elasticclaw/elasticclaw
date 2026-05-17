@@ -3,7 +3,6 @@ package hub
 import (
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	"github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
-	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	replicated "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -14,10 +13,6 @@ func newDaytonaProvider(cfg types.ProviderConfig) (*daytona.Provider, error) {
 		"api_url": cfg.APIURL,
 		"target":  cfg.Target,
 	})
-}
-
-func newLocalProvider() *local.Provider {
-	return local.New()
 }
 
 func newExedevProvider(cfg types.ProviderConfig) (*exedev.Provider, error) {
