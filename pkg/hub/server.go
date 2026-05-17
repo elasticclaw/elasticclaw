@@ -80,6 +80,9 @@ type clawConn struct {
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 
+	// Message queue for when claw is busy processing
+	messageQueue []types.HubMessage // queued messages waiting to be sent
+
 	// Status channel for watchdog / progress reporting (second session on bridge)
 	statusConn             *websocket.Conn // separate WS for lightweight status queries
 	lastStatusAt           time.Time       // when we last got a status response
@@ -1220,23 +1223,34 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		// Forward to claw if connected
+		// Forward to claw if connected (or queue if busy)
 		s.mu.RLock()
 		cc := s.claws[clawID]
 		s.mu.RUnlock()
 		if cc != nil {
 			cc.mu.Lock()
-		cc.lastUserMessageAt = time.Now()
-		cc.mu.Unlock()
-			_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
-			// Immediately signal to UI that agent is working, before first chunk arrives
-			s.broadcastToUsers(tenantID, types.WSMessage{
-				Type: "agent_typing",
-				Payload: map[string]string{
-					"claw_id": clawID,
-					"status":  "typing",
-				},
-			})
+			cc.lastUserMessageAt = time.Now()
+			// Check if claw is currently streaming/processing
+			isBusy := !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
+			if isBusy {
+				// Queue the message for later delivery
+				cc.messageQueue = append(cc.messageQueue, msg)
+				queueLen := len(cc.messageQueue)
+				cc.mu.Unlock()
+				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], queueLen)
+			} else {
+				cc.mu.Unlock()
+				// Send immediately
+				_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+				// Immediately signal to UI that agent is working, before first chunk arrives
+				s.broadcastToUsers(tenantID, types.WSMessage{
+					Type: "agent_typing",
+					Payload: map[string]string{
+						"claw_id": clawID,
+						"status":  "typing",
+					},
+				})
+			}
 		}
 		jsonOK(w, msg)
 		return
@@ -1434,12 +1448,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
 	s.mu.Lock()
-	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
+	if old, ok := s.claws[clawID]; ok {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		// Copy message queue from old connection to preserve queued messages
+		if len(old.messageQueue) > 0 {
+			cc.messageQueue = make([]types.HubMessage, len(old.messageQueue))
+			copy(cc.messageQueue, old.messageQueue)
+		}
 		old.mu.RUnlock()
 	}
+	// Capture whether we have queued messages before unlocking
+	hasQueuedMessages := len(cc.messageQueue) > 0
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
@@ -1450,6 +1471,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
+
+	// Drain any queued messages that were copied from the old connection.
+	// This must happen after the connection is live but before the read loop starts.
+	// We call it synchronously (not in a goroutine) to avoid racing with new user messages.
+	if hasQueuedMessages {
+		s.sendNextQueuedMessage(cc)
+	}
 
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
@@ -1609,16 +1637,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					// Check for streaming turn timeout (12 minutes)
-					s.mu.Lock()
-					if cc, ok := s.claws[clawID]; ok &&
-						!cc.streamingStartedAt.IsZero() &&
-						!cc.streamingTimeoutSent &&
-						time.Since(cc.streamingStartedAt) > 12*time.Minute {
-						cc.streamingTimeoutSent = true
-						s.mu.Unlock()
-						go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
-					} else {
-						s.mu.Unlock()
+					s.mu.RLock()
+					cc, ok := s.claws[clawID]
+					s.mu.RUnlock()
+					if ok {
+						cc.mu.Lock()
+						if !cc.streamingStartedAt.IsZero() &&
+							!cc.streamingTimeoutSent &&
+							time.Since(cc.streamingStartedAt) > 12*time.Minute {
+							cc.streamingTimeoutSent = true
+							cc.mu.Unlock()
+							go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+						} else {
+							cc.mu.Unlock()
+						}
 					}
 				}
 			} else if msg.Type == "chunk" {
@@ -1633,8 +1665,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
 					})
 					// Buffer chunk and upsert partial message to DB so refreshes don't lose it
-					s.mu.Lock()
-					if cc, ok := s.claws[clawID]; ok {
+					s.mu.RLock()
+					cc, ok := s.claws[clawID]
+					s.mu.RUnlock()
+					if ok {
+						cc.mu.Lock()
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
 							cc.streamingStartedAt = time.Now()
@@ -1644,15 +1679,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
 						bufContent := cc.streamingBuf.String()
-						s.mu.Unlock()
+						cc.mu.Unlock()
 						// Upsert — insert on first chunk, update content on subsequent
 						_, _ = s.db.Exec(
 							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
 							 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
 							msgID, clawID, tenantID, "claw", bufContent, now(),
 						)
-					} else {
-						s.mu.Unlock()
 					}
 				}
 			} else if msg.Type == "message" {
@@ -1667,8 +1700,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.Role = "claw"
 				hm.CreatedAt = now()
 				// Always clean up streaming state first, even for empty messages.
-				s.mu.Lock()
-				if cc, ok := s.claws[clawID]; ok && cc.streamingMsgID != "" {
+				// Use the outer cc (this goroutine's connection), not a fresh lookup.
+				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+				cc.mu.Lock()
+				if cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
 					cc.streamingMsgID = ""
 					cc.streamingBuf.Reset()
@@ -1678,9 +1713,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				} else {
 					hm.ID = uuid.New().String()
 				}
-				s.mu.Unlock()
+				cc.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
+					// Clear typing indicator first — always clear even if no queued messages
+					s.broadcastToUsers(tenantID, types.WSMessage{
+						Type: "agent_typing",
+						Payload: map[string]string{
+							"claw_id": clawID,
+							"status":  "idle",
+						},
+					})
+					// Drain queue using this goroutine's cc (the outer cc from line 1449).
+					// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+					s.sendNextQueuedMessage(cc)
 					continue
 				}
 				_, _ = s.db.Exec(
@@ -1712,6 +1758,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
 					}
 				}
+				// Check for queued messages and send the next one.
+				// Use this goroutine's cc (the outer cc from line 1449).
+				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+				s.sendNextQueuedMessage(cc)
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
 				var ack types.FileAck
@@ -3143,6 +3193,11 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	)
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+
+	// Note: We don't call sendNextQueuedMessage here because sendWakeMessage is launched
+	// with 'go' (asynchronously). The normal end-of-turn path in handleClawWS read loop
+	// will drain the queue once the claw finishes the wake response. This prevents race
+	// conditions where both goroutines try to dequeue messages concurrently.
 }
 
 // clawHasMessages returns true if the claw already has message history.
@@ -4055,4 +4110,62 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
+}
+
+// sendNextQueuedMessage checks if there are queued messages for a claw and sends
+// the next one if the claw is not currently busy. Must be called with s.mu unlocked.
+func (s *Server) sendNextQueuedMessage(cc *clawConn) {
+	cc.mu.Lock()
+
+	// Check if there's anything to send
+	if len(cc.messageQueue) == 0 {
+		cc.mu.Unlock()
+		return
+	}
+
+	// Check if claw is still busy
+	if !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" {
+		cc.mu.Unlock()
+		return
+	}
+
+	// Send the next queued message - copy fields needed for sending
+	msg := cc.messageQueue[0]
+	cc.messageQueue = cc.messageQueue[1:]
+	remainingCount := len(cc.messageQueue)
+	conn := cc.conn
+	tenantID := cc.tenantID
+	clawID := cc.id
+	cc.lastUserMessageAt = time.Now()
+	cc.mu.Unlock()
+
+	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+
+	if err != nil {
+		// Write failed - re-enqueue the message at the front so it can be retried
+		log.Printf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
+		s.mu.RLock()
+		if currentCC, ok := s.claws[clawID]; ok {
+			currentCC.mu.Lock()
+			// Prepend the message back to the front of the queue
+			currentCC.messageQueue = append([]types.HubMessage{msg}, currentCC.messageQueue...)
+			currentCC.mu.Unlock()
+		}
+		s.mu.RUnlock()
+		return
+	}
+
+	// Signal to UI that agent is working
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "agent_typing",
+		Payload: map[string]string{
+			"claw_id": clawID,
+			"status":  "typing",
+		},
+	})
+
+	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", clawID[:8], remainingCount)
 }
