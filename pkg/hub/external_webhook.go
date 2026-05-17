@@ -459,10 +459,19 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		return fmt.Errorf("no provider configured")
 	}
 
+	// Read all hub config values under lock to avoid data races
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	secrets := s.hubCfg.Secrets
+	providers := s.hubCfg.Providers
+	llmKeys := s.hubCfg.LLMKeys
+	defaultModelHub := s.hubCfg.DefaultModel
+	s.mu.RUnlock()
+
 	// Build env vars
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 		"EXTERNAL_EVENT_TYPE":    eventType,
 		"EXTERNAL_REPOSITORY":    repoFullName,
 		"EXTERNAL_TRIGGER_ID":    triggerID,
@@ -490,7 +499,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	// Resolve and inject template-level secret_refs
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := secrets[secretRef]; ok {
 				env[envName] = val
 				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env",
 					factory.Name, secretRef, envName)
@@ -501,7 +510,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	// Resolve and inject factory-level secret_refs
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := secrets[secretRef]; ok {
 				env[envName] = val
 				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env",
 					factory.Name, secretRef, envName)
@@ -539,19 +548,15 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {
-		s.mu.RLock()
-		for _, k := range s.hubCfg.LLMKeys {
+		for _, k := range llmKeys {
 			if k.Name == llmKey {
 				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
 				break
 			}
 		}
-		s.mu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
-		s.mu.RUnlock()
+		defaultModel = defaultModelHub
 	}
 
 	// Build tags
@@ -627,7 +632,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	}
 
 	// Provision asynchronously
-	provCfg, _ := s.hubCfg.Providers[provider]
+	provCfg, _ := providers[provider]
 	go func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
