@@ -269,8 +269,10 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload) {
 		if trigger.Source != "" {
 			switch trigger.Source {
 			case "github-release":
-				if eventType != "released" && eventType != "published" && eventType != "created" {
-					log.Printf("[external-webhook] factory %q: skipped (event type %q not a release)",
+				// Only trigger on actual releases, not drafts
+				// "created" fires when a draft is saved - exclude it to avoid premature triggers
+				if eventType != "released" && eventType != "published" {
+					log.Printf("[external-webhook] factory %q: skipped (event type %q not a published release)",
 						factory.Name, eventType)
 					continue
 				}
@@ -454,6 +456,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	providers := s.hubCfg.Providers
 	llmKeys := s.hubCfg.LLMKeys
 	defaultModelHub := s.hubCfg.DefaultModel
+	integrations := s.hubCfg.Integrations
 
 	// Resolve provider (must be done under lock as it accesses s.hubCfg.Providers)
 	provider := factory.Provider
@@ -494,7 +497,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map",
 			factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
-			val, envName, ok := s.resolveSecretRef(ref, factory)
+			val, envName, ok := resolveSecretRefLocal(integrations, ref, factory)
 			if ok {
 				env[envName] = val
 				log.Printf("[factory:%s] injected template secret %s as %s into claw env",
@@ -783,5 +786,66 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 		return "moonshot/moonshot-v1-8k"
 	default:
 		return hubDefaultModel
+	}
+}
+
+// resolveSecretRefLocal resolves a typed SecretRef to its value and env var name.
+// This is a lock-free version that takes integrations as a parameter.
+func resolveSecretRefLocal(integrations *types.IntegrationsConfig, ref types.SecretRef, factory *types.FactoryConfig) (string, string, bool) {
+	envName := ref.EnvVarName()
+	if envName == "" {
+		return "", "", false
+	}
+	switch ref.Type {
+	case "linear":
+		if integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, li := range integrations.Linear {
+			if ws == "" || strings.EqualFold(li.Workspace, ws) {
+				return li.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "shortcut":
+		if integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, si := range integrations.Shortcut {
+			if ws == "" || strings.EqualFold(si.Workspace, ws) {
+				return si.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "github-issues":
+		if integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, gi := range integrations.GitHubIssues {
+			if ws == "" || strings.EqualFold(gi.Workspace, ws) {
+				return gi.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "github":
+		// GitHub tokens are handled via GitHub App, not integrations
+		return "", envName, false
+	case "custom":
+		// Custom secrets are resolved from the secrets map, not here
+		return "", envName, false
+	default:
+		return "", envName, false
 	}
 }
