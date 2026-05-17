@@ -1628,9 +1628,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					Type:    "message",
 					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
 				}); writeErr != nil {
-					// Hub connection dropped — queue content for replay on reconnect
-					log.Printf("[bridge] hub write failed, queuing response for replay: %v", writeErr)
-					queue.push(reply)
+					// Hub connection dropped — queue original content for replay on reconnect
+					log.Printf("[bridge] hub write failed, queuing original message for replay: %v", writeErr)
+					queue.push(c)
 				}
 			}(content)
 		}
@@ -1720,9 +1720,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					Type:    "message",
 					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
 				}); writeErr != nil {
-					// Hub connection dropped — queue content for replay on reconnect
-					log.Printf("[bridge] hub write failed, queuing response for replay: %v", writeErr)
-					queue.push(reply)
+					// Hub connection dropped — queue original content for replay on reconnect
+					log.Printf("[bridge] hub write failed, queuing original message for replay: %v", writeErr)
+					queue.push(content)
 				}
 			}(ctx, msg.Payload)
 
