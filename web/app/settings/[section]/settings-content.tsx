@@ -56,6 +56,8 @@ interface SettingsData {
     defaultCpu?: number
     defaultMemory?: string
     defaultDisk?: string
+    sshKeySet?: boolean
+    sshPublicKey?: string
   }>
   github: GitHubAppView[]
   sshPublicKeys: string[]
@@ -378,6 +380,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [showModal, setShowModal] = useState(false)
   const [modalMode, setModalMode] = useState<"add" | "edit">("add")
   const [editName, setEditName] = useState<string | null>(null)
+  const [copiedKey, setCopiedKey] = useState(false)
 
   // Form state
   const [formProvider, setFormProvider] = useState("replicated")
@@ -412,8 +415,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       setFormProvider(firstAvailable.value)
       if (firstAvailable.value === "exedev") {
         setFormDefaultCpu("2")
-        setFormDefaultMemory("4GB")
-        setFormDefaultDisk("10GB")
+        setFormDefaultMemory("4")
+        setFormDefaultDisk("10")
       }
     }
     setModalMode("add")
@@ -430,8 +433,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultInstanceType(p?.defaultInstanceType || "")
     setFormDefaultSnapshot(p?.defaultSnapshot || "")
     setFormDefaultCpu(p?.defaultCpu?.toString() || "")
-    setFormDefaultMemory(p?.defaultMemory || "")
-    setFormDefaultDisk(p?.defaultDisk || "")
+    setFormDefaultMemory(p?.defaultMemory ? p.defaultMemory.replace(/GB$/, "") : "")
+    setFormDefaultDisk(p?.defaultDisk ? p.defaultDisk.replace(/GB$/, "") : "")
     setEditName(name)
     setModalMode("edit")
     setShowModal(true)
@@ -454,8 +457,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       patch.enabled = true
       const parsedCpu = parseInt(formDefaultCpu, 10)
       if (formDefaultCpu && !isNaN(parsedCpu)) patch.defaultCpu = parsedCpu
-      if (formDefaultMemory) patch.defaultMemory = formDefaultMemory
-      if (formDefaultDisk) patch.defaultDisk = formDefaultDisk
+      if (formDefaultMemory) patch.defaultMemory = formDefaultMemory + "GB"
+      if (formDefaultDisk) patch.defaultDisk = formDefaultDisk + "GB"
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -637,20 +640,72 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 
             {formProvider === "exedev" && (
               <>
-                <p className="text-xs text-muted-foreground">
-                  exe.dev uses SSH key authentication. Ensure your SSH key is registered at <a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev</a>.
-                </p>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                  <p className="text-xs font-medium">SSH Key Setup</p>
+                  <p className="text-xs text-muted-foreground">
+                    {modalMode === "edit"
+                      ? <>A key pair has been generated for exe.dev. Add this public key to your{" "}<a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.</>
+                      : <>An SSH key pair will be generated automatically when you save. You can copy the public key from the edit view and add it to your{" "}<a href="https://exe.dev" target="_blank" rel="noopener noreferrer" className="underline">exe.dev account</a>.</>}
+                  </p>
+                  {modalMode === "edit" && providers.exedev?.sshPublicKey ? (
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs font-mono bg-background px-2 py-1 rounded flex-1 truncate">
+                        {providers.exedev.sshPublicKey}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2"
+                        onClick={() => {
+                          navigator.clipboard.writeText(providers.exedev.sshPublicKey || "")
+                          setCopiedKey(true)
+                          setTimeout(() => setCopiedKey(false), 2000)
+                        }}
+                      >
+                        {copiedKey ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      Public key will be shown after saving.
+                    </p>
+                  )}
+                </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Default CPUs</label>
-                  <Input value={formDefaultCpu} onChange={e => setFormDefaultCpu(e.target.value)} className="h-8 text-sm" placeholder="2" />
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    value={formDefaultCpu}
+                    onChange={e => setFormDefaultCpu(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="2"
+                  />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Default Memory</label>
-                  <Input value={formDefaultMemory} onChange={e => setFormDefaultMemory(e.target.value)} className="h-8 text-sm" placeholder="4GB" />
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Memory (GB)</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={128}
+                    value={formDefaultMemory}
+                    onChange={e => setFormDefaultMemory(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="4"
+                  />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Default Disk</label>
-                  <Input value={formDefaultDisk} onChange={e => setFormDefaultDisk(e.target.value)} className="h-8 text-sm" placeholder="20GB" />
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Disk (GB)</label>
+                  <Input
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={formDefaultDisk}
+                    onChange={e => setFormDefaultDisk(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="10"
+                  />
                 </div>
               </>
             )}
