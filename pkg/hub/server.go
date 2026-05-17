@@ -1729,10 +1729,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							"status":  "idle",
 						},
 					})
-					// Still need to check for queued messages even if content is empty
-					s.mu.RLock()
-					cc = s.claws[clawID]
-					s.mu.RUnlock()
+					// Use the cc captured at the top of this handler, not a fresh lookup.
+					// If the claw reconnected during this turn, the new connection's drain
+					// at line 1479 will handle any queued messages; we must not race with it.
 					if cc != nil {
 						s.sendNextQueuedMessage(cc)
 					}
@@ -1767,10 +1766,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
 					}
 				}
-				// Check for queued messages and send the next one
-				s.mu.RLock()
-				cc = s.claws[clawID]
-				s.mu.RUnlock()
+				// Check for queued messages and send the next one.
+				// Use the cc captured at the top of this handler, not a fresh lookup.
+				// If the claw reconnected during this turn, the new connection's drain
+				// at line 1479 will handle any queued messages; we must not race with it.
 				if cc != nil {
 					s.sendNextQueuedMessage(cc)
 				}
