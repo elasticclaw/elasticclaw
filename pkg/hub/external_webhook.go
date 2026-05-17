@@ -312,12 +312,12 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload) {
 			}
 		}
 
-		// Check if a claw already exists for this release
-		triggerID := fmt.Sprintf("%s@%s", repoFullName, eventType)
+		// Check if a claw already exists for this release (scoped per factory)
+		triggerID := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
 		if payload.Release != nil {
-			triggerID = fmt.Sprintf("%s@%s", repoFullName, payload.Release.TagName)
+			triggerID = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
 		}
-		existingClawID := s.findClawForExternalTrigger(triggerID)
+		existingClawID := s.findClawForExternalTrigger(factory.Name, triggerID)
 		if existingClawID != "" {
 			log.Printf("[external-webhook] factory %q: claw %s already exists for %s",
 				factory.Name, existingClawID[:8], triggerID)
@@ -374,12 +374,12 @@ func matchGlob(pattern, s string) bool {
 	return true
 }
 
-// findClawForExternalTrigger returns the claw ID that is already tracking this external trigger, or "".
-func (s *Server) findClawForExternalTrigger(triggerID string) string {
+// findClawForExternalTrigger returns the claw ID that is already tracking this external trigger for the given factory, or "".
+func (s *Server) findClawForExternalTrigger(factoryName, triggerID string) string {
 	var clawID string
 	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE external_trigger_id = ? AND status NOT IN ('deleted','error','offline') LIMIT 1`,
-		triggerID,
+		`SELECT id FROM claws WHERE external_trigger_id = ? AND factory_name = ? AND status NOT IN ('deleted','error','offline') LIMIT 1`,
+		triggerID, factoryName,
 	).Scan(&clawID)
 	return clawID
 }
