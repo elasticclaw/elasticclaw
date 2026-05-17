@@ -81,8 +81,7 @@ type clawConn struct {
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 
 	// Message queue for when claw is busy processing
-	messageQueue     []types.HubMessage // queued messages waiting to be sent
-	messageQueueCond *sync.Cond          // signaled when queue changes or streaming ends
+	messageQueue []types.HubMessage // queued messages waiting to be sent
 
 	// Status channel for watchdog / progress reporting (second session on bridge)
 	statusConn             *websocket.Conn // separate WS for lightweight status queries
@@ -1447,7 +1446,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
-	cc.messageQueueCond = sync.NewCond(&cc.mu)
 	s.mu.Lock()
 	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
 		old.mu.RLock()
@@ -4086,35 +4084,41 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 // the next one if the claw is not currently busy. Must be called with s.mu unlocked.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
-	defer cc.mu.Unlock()
 
 	// Check if there's anything to send
 	if len(cc.messageQueue) == 0 {
+		cc.mu.Unlock()
 		return
 	}
 
 	// Check if claw is still busy
 	if !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" {
+		cc.mu.Unlock()
 		return
 	}
 
-	// Send the next queued message
+	// Send the next queued message - copy fields needed for sending
 	msg := cc.messageQueue[0]
 	cc.messageQueue = cc.messageQueue[1:]
+	remainingCount := len(cc.messageQueue)
+	conn := cc.conn
+	tenantID := cc.tenantID
+	clawID := cc.id
+	cc.mu.Unlock()
 
-	// Send via WebSocket
+	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
+	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 
 	// Signal to UI that agent is working
-	s.broadcastToUsers(cc.tenantID, types.WSMessage{
+	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type: "agent_typing",
 		Payload: map[string]string{
-			"claw_id": cc.id,
+			"claw_id": clawID,
 			"status":  "typing",
 		},
 	})
 
-	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", cc.id[:8], len(cc.messageQueue))
+	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", clawID[:8], remainingCount)
 }
