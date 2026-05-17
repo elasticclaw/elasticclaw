@@ -414,8 +414,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       setFormProvider(firstAvailable.value)
       if (firstAvailable.value === "exedev") {
         setFormDefaultCpu("2")
-        setFormDefaultMemory("4GB")
-        setFormDefaultDisk("10GB")
+        setFormDefaultMemory("4")
+        setFormDefaultDisk("10")
       }
     }
     setModalMode("add")
@@ -432,8 +432,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultInstanceType(p?.defaultInstanceType || "")
     setFormDefaultSnapshot(p?.defaultSnapshot || "")
     setFormDefaultCpu(p?.defaultCpu?.toString() || "")
-    setFormDefaultMemory(p?.defaultMemory || "")
-    setFormDefaultDisk(p?.defaultDisk || "")
+    setFormDefaultMemory(p?.defaultMemory ? p.defaultMemory.replace(/GB$/, "") : "")
+    setFormDefaultDisk(p?.defaultDisk ? p.defaultDisk.replace(/GB$/, "") : "")
     setEditName(name)
     setModalMode("edit")
     setShowModal(true)
@@ -456,8 +456,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       patch.enabled = true
       const parsedCpu = parseInt(formDefaultCpu, 10)
       if (formDefaultCpu && !isNaN(parsedCpu)) patch.defaultCpu = parsedCpu
-      if (formDefaultMemory) patch.defaultMemory = formDefaultMemory
-      if (formDefaultDisk) patch.defaultDisk = formDefaultDisk
+      if (formDefaultMemory) patch.defaultMemory = formDefaultMemory + "GB"
+      if (formDefaultDisk) patch.defaultDisk = formDefaultDisk + "GB"
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -671,15 +671,39 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Default CPUs</label>
-                  <Input value={formDefaultCpu} onChange={e => setFormDefaultCpu(e.target.value)} className="h-8 text-sm" placeholder="2" />
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    value={formDefaultCpu}
+                    onChange={e => setFormDefaultCpu(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="2"
+                  />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Default Memory</label>
-                  <Input value={formDefaultMemory} onChange={e => setFormDefaultMemory(e.target.value)} className="h-8 text-sm" placeholder="4GB" />
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Memory (GB)</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={128}
+                    value={formDefaultMemory}
+                    onChange={e => setFormDefaultMemory(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="4"
+                  />
                 </div>
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Default Disk</label>
-                  <Input value={formDefaultDisk} onChange={e => setFormDefaultDisk(e.target.value)} className="h-8 text-sm" placeholder="20GB" />
+                  <label className="text-xs text-muted-foreground mb-1 block">Default Disk (GB)</label>
+                  <Input
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={formDefaultDisk}
+                    onChange={e => setFormDefaultDisk(e.target.value)}
+                    className="h-8 text-sm"
+                    placeholder="10"
+                  />
                 </div>
               </>
             )}
