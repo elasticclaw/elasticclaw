@@ -447,18 +447,6 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
-	// Resolve provider
-	provider := factory.Provider
-	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
-		provider = tmplCfg.Provider
-	}
-	if provider == "" {
-		provider = s.defaultProvider()
-	}
-	if provider == "" {
-		return fmt.Errorf("no provider configured")
-	}
-
 	// Read all hub config values under lock to avoid data races
 	s.mu.RLock()
 	clawToken := s.hubCfg.ClawToken
@@ -466,7 +454,26 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	providers := s.hubCfg.Providers
 	llmKeys := s.hubCfg.LLMKeys
 	defaultModelHub := s.hubCfg.DefaultModel
+
+	// Resolve provider (must be done under lock as it accesses s.hubCfg.Providers)
+	provider := factory.Provider
+	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
+		provider = tmplCfg.Provider
+	}
+	if provider == "" {
+		// Inline defaultProvider logic to avoid calling method outside lock
+		for name, p := range providers {
+			if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
+				provider = name
+				break
+			}
+		}
+	}
 	s.mu.RUnlock()
+
+	if provider == "" {
+		return fmt.Errorf("no provider configured")
+	}
 
 	// Build env vars
 	env := map[string]string{
@@ -550,7 +557,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	if defaultModel == "" && llmKey != "" {
 		for _, k := range llmKeys {
 			if k.Name == llmKey {
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				defaultModel = resolveDefaultModelForKeyLocal(defaultModelHub, k)
 				break
 			}
 		}
@@ -743,4 +750,38 @@ func buildExternalEventContext(payload externalWebhookPayload, factory *types.Fa
 	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
 
 	return b.String()
+}
+
+// resolveDefaultModelForKeyLocal returns the effective model for a given LLM key.
+// This is a lock-free version that takes the hub's default model as a parameter.
+func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyConfig) string {
+	if key == nil {
+		return hubDefaultModel
+	}
+
+	// Use per-key default model if set; normalize to include provider prefix
+	if key.DefaultModel != "" {
+		prefix := key.Provider + "/"
+		if !strings.HasPrefix(key.DefaultModel, prefix) {
+			return prefix + key.DefaultModel
+		}
+		return key.DefaultModel
+	}
+
+	// Check if hub's DefaultModel matches this key's provider
+	if hubDefaultModel != "" && strings.HasPrefix(hubDefaultModel, key.Provider+"/") {
+		return hubDefaultModel
+	}
+
+	// Construct a provider-specific default model
+	switch key.Provider {
+	case "anthropic":
+		return "anthropic/claude-sonnet-4-6"
+	case "fireworks":
+		return "fireworks/accounts/fireworks/models/kimi-k2p5-turbo"
+	case "moonshot":
+		return "moonshot/moonshot-v1-8k"
+	default:
+		return hubDefaultModel
+	}
 }
