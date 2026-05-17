@@ -106,8 +106,6 @@ type pendingMsg struct {
 type msgTracker struct {
 	mu       sync.Mutex
 	pending  map[string]*pendingMsg
-	onAck    func(string) // callback when message is acked
-	onRetry  func(string, string) // callback when message needs retry (id, content)
 }
 
 func newMsgTracker() *msgTracker {
@@ -144,8 +142,17 @@ func (t *msgTracker) checkTimeouts() []pendingMsg {
 	now := time.Now()
 	for id, pm := range t.pending {
 		if now.Sub(pm.sentAt) > msgAckTimeout {
-			expired = append(expired, *pm)
-			delete(t.pending, id)
+			// Increment retry count before deciding what to do
+			pm.retryCount++
+			if pm.retryCount >= msgAckRetries {
+				// Max retries reached, give up on this message
+				log.Printf("[bridge] message %s not acknowledged after %d retries, giving up", id[:8], msgAckRetries)
+				delete(t.pending, id)
+			} else {
+				// Will retry - update the pending entry with incremented count
+				t.pending[id] = pm
+				expired = append(expired, *pm)
+			}
 		}
 	}
 	return expired
@@ -1683,10 +1690,6 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 	// Initialize message tracker for reliable delivery
 	tracker := newMsgTracker()
-	tracker.onRetry = func(id, content string) {
-		log.Printf("[bridge] retrying unacknowledged message: %s", id[:8])
-		queue.push(content)
-	}
 
 	// Replay any queued messages that arrived while we were disconnected
 	if queued := queue.drain(); len(queued) > 0 {
@@ -1773,12 +1776,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			case <-ticker.C:
 				expired := tracker.checkTimeouts()
 				for _, pm := range expired {
-					if pm.retryCount < msgAckRetries {
-						log.Printf("[bridge] message %s not acknowledged, retrying (%d/%d)", pm.id[:8], pm.retryCount+1, msgAckRetries)
-						queue.push(pm.content)
-					} else {
-						log.Printf("[bridge] message %s not acknowledged after %d retries, giving up", pm.id[:8], msgAckRetries)
-					}
+					// These are messages that haven't exceeded max retries yet
+					log.Printf("[bridge] message %s not acknowledged, retrying (%d/%d)", pm.id[:8], pm.retryCount, msgAckRetries)
+					queue.push(pm.content)
 				}
 			}
 		}
