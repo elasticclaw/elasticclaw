@@ -80,6 +80,10 @@ type clawConn struct {
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 
+	// Message queue for when claw is busy processing
+	messageQueue     []types.HubMessage // queued messages waiting to be sent
+	messageQueueCond *sync.Cond          // signaled when queue changes or streaming ends
+
 	// Status channel for watchdog / progress reporting (second session on bridge)
 	statusConn             *websocket.Conn // separate WS for lightweight status queries
 	lastStatusAt           time.Time       // when we last got a status response
@@ -1220,23 +1224,33 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		// Forward to claw if connected
+		// Forward to claw if connected (or queue if busy)
 		s.mu.RLock()
 		cc := s.claws[clawID]
 		s.mu.RUnlock()
 		if cc != nil {
 			cc.mu.Lock()
-		cc.lastUserMessageAt = time.Now()
-		cc.mu.Unlock()
-			_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
-			// Immediately signal to UI that agent is working, before first chunk arrives
-			s.broadcastToUsers(tenantID, types.WSMessage{
-				Type: "agent_typing",
-				Payload: map[string]string{
-					"claw_id": clawID,
-					"status":  "typing",
-				},
-			})
+			cc.lastUserMessageAt = time.Now()
+			// Check if claw is currently streaming/processing
+			isBusy := !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
+			if isBusy {
+				// Queue the message for later delivery
+				cc.messageQueue = append(cc.messageQueue, msg)
+				cc.mu.Unlock()
+				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], len(cc.messageQueue))
+			} else {
+				cc.mu.Unlock()
+				// Send immediately
+				_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+				// Immediately signal to UI that agent is working, before first chunk arrives
+				s.broadcastToUsers(tenantID, types.WSMessage{
+					Type: "agent_typing",
+					Payload: map[string]string{
+						"claw_id": clawID,
+						"status":  "typing",
+					},
+				})
+			}
 		}
 		jsonOK(w, msg)
 		return
@@ -1433,6 +1447,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
+	cc.messageQueueCond = sync.NewCond(&cc.mu)
 	s.mu.Lock()
 	if old, ok := s.claws[clawID]; ok && old.statusConn != nil {
 		old.mu.RLock()
@@ -1711,6 +1726,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if loopCC != nil {
 						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
 					}
+				}
+				// Check for queued messages and send the next one
+				s.mu.RLock()
+				cc := s.claws[clawID]
+				s.mu.RUnlock()
+				if cc != nil {
+					s.sendNextQueuedMessage(cc)
 				}
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
@@ -3143,6 +3165,9 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	)
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+
+	// Check if there are any queued messages to send (user sent messages while claw was busy/offline)
+	s.sendNextQueuedMessage(cc)
 }
 
 // clawHasMessages returns true if the claw already has message history.
@@ -4055,4 +4080,41 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
+}
+
+// sendNextQueuedMessage checks if there are queued messages for a claw and sends
+// the next one if the claw is not currently busy. Must be called with s.mu unlocked.
+func (s *Server) sendNextQueuedMessage(cc *clawConn) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+
+	// Check if there's anything to send
+	if len(cc.messageQueue) == 0 {
+		return
+	}
+
+	// Check if claw is still busy
+	if !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" {
+		return
+	}
+
+	// Send the next queued message
+	msg := cc.messageQueue[0]
+	cc.messageQueue = cc.messageQueue[1:]
+
+	// Send via WebSocket
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
+
+	// Signal to UI that agent is working
+	s.broadcastToUsers(cc.tenantID, types.WSMessage{
+		Type: "agent_typing",
+		Payload: map[string]string{
+			"claw_id": cc.id,
+			"status":  "typing",
+		},
+	})
+
+	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", cc.id[:8], len(cc.messageQueue))
 }
