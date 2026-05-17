@@ -189,8 +189,6 @@ func runHub(cmd *cobra.Command, args []string) error {
 					apiURL = "app.daytona.io (default)"
 				}
 				fmt.Printf("    daytona     api=%s\n", apiURL)
-			case "local":
-				fmt.Printf("    local\n")
 			default:
 				fmt.Printf("    %s\n", name)
 			}

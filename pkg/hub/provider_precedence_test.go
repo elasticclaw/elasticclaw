@@ -15,9 +15,9 @@ func TestResolveProviderPrecedence(t *testing.T) {
 		wantProvider string
 		wantErr      bool
 	}{
-		{"factory wins over template and default", "replicated", "daytona", "vercel", "replicated", false},
-		{"template wins when factory empty", "", "daytona", "vercel", "daytona", false},
-		{"default wins when factory and template empty", "", "", "vercel", "vercel", false},
+		{"factory wins over template and default", "replicated", "daytona", "exedev", "replicated", false},
+		{"template wins when factory empty", "", "daytona", "exedev", "daytona", false},
+		{"default wins when factory and template empty", "", "", "exedev", "exedev", false},
 		{"error when all empty", "", "", "", "", true},
 	}
 

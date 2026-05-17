@@ -334,7 +334,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "sandboxes",
 			Severity:    "critical",
 			Title:       "No sandbox providers configured",
-			Description: "At least one sandbox provider (daytona, vercel, replicated, local) must be configured.",
+			Description: "At least one sandbox provider (daytona, replicated, exedev) must be configured.",
 			OK:          false,
 			FixAction: &FixAction{
 				Type:   "navigate",
@@ -346,7 +346,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	validProviders := map[string]bool{
-		"daytona": true, "vercel": true, "replicated": true, "local": true, "exedev": true,
+		"daytona": true, "replicated": true, "exedev": true,
 	}
 
 	allProvidersValid := true
@@ -357,7 +357,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 				Category:    "sandboxes",
 				Severity:    "warning",
 				Title:       fmt.Sprintf("Unknown sandbox provider: %q", name),
-				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, vercel, replicated, local, exedev).", name),
+				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, replicated, exedev).", name),
 				OK:          false,
 				FixAction: &FixAction{
 					Type:   "navigate",
@@ -400,24 +400,6 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 					},
 				})
 			}
-		case "vercel":
-			if p.AccessToken == "" {
-				allProvidersValid = false
-				checks = append(checks, DoctorCheck{
-					Category:    "sandboxes",
-					Severity:    "critical",
-					Title:       "Vercel provider missing access token",
-					Description: "The Vercel sandbox provider is configured but the access token is empty.",
-					OK:          false,
-					FixAction: &FixAction{
-						Type:   "navigate",
-						Target: "/settings/runtimes",
-						Label:  "Configure Vercel",
-					},
-				})
-			}
-		case "local":
-			// Local provider doesn't need credentials
 		case "exedev":
 			// exe.dev uses SSH key authentication; no explicit API key needed in config
 		}
