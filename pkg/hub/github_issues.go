@@ -22,14 +22,14 @@ import (
 type githubIssuesWebhookPayload struct {
 	Action string `json:"action"` // "opened", "edited", "closed", "reopened", "labeled", "unlabeled", "assigned", "unassigned"
 	Issue  struct {
-		ID        int64  `json:"id"`
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		HTMLURL   string `json:"html_url"`
-		State     string `json:"state"` // "open", "closed"
+		ID          int64  `json:"id"`
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Body        string `json:"body"`
+		HTMLURL     string `json:"html_url"`
+		State       string `json:"state"`                  // "open", "closed"
 		StateReason string `json:"state_reason,omitempty"` // "completed", "not_planned", "reopened"
-		Labels    []struct {
+		Labels      []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		Assignee *struct {
@@ -418,11 +418,14 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 				factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
 			if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
+				if isFactoryTriggerAlreadyClaimed(err) {
+					continue
+				}
 				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
 				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
-				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, issueID, factory.Name).Scan(&clawID)
 				if clawID != "" {
 					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
 				} else {
@@ -472,8 +475,29 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
+	triggerKey := factoryTriggerKey("github-issues", issueID)
 
-	// Verify we can read the issue before spending money on a sandbox
+	claimed, err := s.claimFactoryTrigger(factory.Name, "github-issues", triggerKey, reason, map[string]string{
+		"issue_id": issueID,
+		"source":   reason,
+	})
+	if err != nil {
+		return fmt.Errorf("claim factory trigger: %w", err)
+	}
+	if !claimed {
+		if reason != "poll" {
+			log.Printf("[factory:%s] GitHub issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
+		}
+		return errFactoryTriggerAlreadyClaimed
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "github-issues", triggerKey)
+		}
+	}()
+
+	// Verify we can read the issue before spending money on a sandbox.
 	ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 	if ghToken != "" {
 		// Quick pre-flight: can we fetch the issue?
@@ -484,26 +508,6 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		_, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", payload.Repository.FullName, payload.Issue.Number), ghToken)
 		if err != nil {
 			return fmt.Errorf("cannot read issue: %w", err)
-		}
-	}
-
-	// Enforce 1:1 — check if a claw already exists for this issue.
-	// Skip if actively starting, running, connected, provisioning, or pending —
-	// the claw is being created and we must not race another webhook or trigger.
-	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
-	var existingID, existingStatus string
-	_ = s.db.QueryRow(
-		`SELECT id, status FROM claws WHERE github_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		issueID,
-	).Scan(&existingID, &existingStatus)
-	if existingID != "" {
-		switch existingStatus {
-		case "starting", "connected", "running", "provisioning", "pending":
-			log.Printf("[factory:%s] claw %s already exists for issue %s (status=%s) — treating as idempotent success", factory.Name, existingID[:8], issueID, existingStatus)
-			return nil
-		default:
-			log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
-			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
 		}
 	}
 
@@ -736,6 +740,11 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
+	if err := s.completeFactoryTrigger(factory.Name, "github-issues", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete factory trigger: %w", err)
+	}
+	claimOpen = false
 
 	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears

@@ -54,6 +54,38 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_triggers (
+		id             TEXT PRIMARY KEY,
+		factory_name   TEXT NOT NULL,
+		integration    TEXT NOT NULL,
+		trigger_key    TEXT NOT NULL,
+		trigger_source TEXT NOT NULL DEFAULT '',
+		trigger_payload TEXT NOT NULL DEFAULT '{}',
+		claw_id        TEXT NOT NULL DEFAULT '',
+		status         TEXT NOT NULL DEFAULT 'claimed',
+		first_seen_at  DATETIME NOT NULL,
+		last_seen_at   DATETIME NOT NULL,
+		created_at     DATETIME NOT NULL,
+		updated_at     DATETIME NOT NULL
+	)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id)`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
+		SELECT lower(hex(randomblob(16))), factory_name, 'linear', 'linear:' || linear_issue_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
+		  FROM claws
+		 WHERE factory_name != '' AND linear_issue_id != '' AND status != 'deleted'`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
+		SELECT lower(hex(randomblob(16))), factory_name, 'github-issues', 'github-issues:' || github_issue_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
+		  FROM claws
+		 WHERE factory_name != '' AND github_issue_id != '' AND status != 'deleted'`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
+		SELECT lower(hex(randomblob(16))), factory_name, 'shortcut', 'shortcut:' || shortcut_story_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
+		  FROM claws
+		 WHERE factory_name != '' AND shortcut_story_id != '' AND status != 'deleted'`)
+
 	// Factory analytics — persistent metrics table
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_analytics (
 		id           TEXT PRIMARY KEY,
@@ -123,6 +155,23 @@ func migrate(db *sql.DB) error {
 		format     TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS factory_triggers (
+		id             TEXT PRIMARY KEY,
+		factory_name   TEXT NOT NULL,
+		integration    TEXT NOT NULL,
+		trigger_key    TEXT NOT NULL,
+		trigger_source TEXT NOT NULL DEFAULT '',
+		trigger_payload TEXT NOT NULL DEFAULT '{}',
+		claw_id        TEXT NOT NULL DEFAULT '',
+		status         TEXT NOT NULL DEFAULT 'claimed',
+		first_seen_at  DATETIME NOT NULL,
+		last_seen_at   DATETIME NOT NULL,
+		created_at     DATETIME NOT NULL,
+		updated_at     DATETIME NOT NULL
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key);
+	CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
