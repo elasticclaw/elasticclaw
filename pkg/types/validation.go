@@ -103,9 +103,10 @@ func (f *FactoryConfig) Validate() error {
 	}
 
 	// Validate GitHub-specific fields for github integration
-	if f.Integration == "github" {
+	// Trigger is only required if manual triggering is not enabled
+	if f.Integration == "github" && !f.EnableManualTrigger {
 		if f.Trigger == nil {
-			return fmt.Errorf("factory %q: trigger is required for github integration", f.Name)
+			return fmt.Errorf("factory %q: trigger is required for github integration (or set enable_manual_trigger)", f.Name)
 		}
 		if err := validateGitHubTrigger(f.Name, f.Trigger); err != nil {
 			return err

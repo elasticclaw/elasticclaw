@@ -183,6 +183,16 @@ func TestFactoryConfigValidate(t *testing.T) {
 			errMsg:  "trigger is required",
 		},
 		{
+			name: "github factory manual trigger only",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "github",
+				Template:            "base",
+				EnableManualTrigger: true,
+			},
+			wantErr: false,
+		},
+		{
 			name: "github factory invalid trigger on",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
