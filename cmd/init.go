@@ -118,7 +118,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Version: manifest.Version,
 		},
 		LockedAt:       time.Now().UTC().Format(time.RFC3339),
-		ElasticClawVer: Version,
+		SchemaVersion: "v1",
+		ToolVersion:   Version,
 	}
 
 	if err := config.SaveLockFile(lock); err != nil {
