@@ -2787,9 +2787,10 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
-	// Store vm_id in the claw record — skip if already deleted (factory terminated mid-provision)
+	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
+	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	_, _ = s.db.Exec(
-		`UPDATE claws SET status='starting', provider='replicated', provider_id=? WHERE id=? AND status != 'deleted'`, vmID, clawID,
+		`UPDATE claws SET provider='replicated', provider_id=? WHERE id=? AND status NOT IN ('deleted','starting','connected','idle')`, vmID, clawID,
 	)
 	// If deleted, clean up the VM and bail
 	var currentStatus string
