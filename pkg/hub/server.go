@@ -2693,10 +2693,17 @@ func (s *Server) setBootstrapStatus(clawID, status string) {
 	if clawID == "" {
 		return
 	}
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_status=? WHERE id=? AND status != 'deleted'`, status, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET bootstrap_status=? WHERE id=? AND status != 'deleted'`, status, clawID)
+	if err != nil {
+		return
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return
+	}
 
 	var tenantID string
-	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID)
+	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=? AND status != 'deleted'`, clawID).Scan(&tenantID)
 	if tenantID == "" {
 		return
 	}
