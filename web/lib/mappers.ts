@@ -107,6 +107,7 @@ export function mapApiClaw(
     contextUsage: overrides.contextUsage ?? apiClaw.context_usage ?? 0,
     description: overrides.description,
     reason: overrides.reason,
+    bootstrap_status: overrides.bootstrap_status ?? apiClaw.bootstrap_status,
     ssh_host: apiClaw.ssh_host,
     ssh_port: apiClaw.ssh_port,
     ssh_user: apiClaw.ssh_user,

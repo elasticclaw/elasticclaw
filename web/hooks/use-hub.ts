@@ -309,6 +309,7 @@ export function useHub(selectedClawId: string | null): HubState {
                       status: mapApiStatus(status),
                       isStreaming: status !== "connected" ? false : c.isStreaming,
                       reason: status === "error" ? payload.reason : undefined,
+                      bootstrap_status: status === "connected" || status === "error" ? undefined : payload.bootstrap_status ?? c.bootstrap_status,
                     }
                   : c
               )

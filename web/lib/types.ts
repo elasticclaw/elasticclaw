@@ -14,6 +14,7 @@ export interface Claw {
   contextUsage: number // 0-100 percentage, hardcoded 0 for now
   description?: string
   reason?: string // stop reason when status is error
+  bootstrap_status?: string
   // SSH / terminal access
   ssh_host?: string
   ssh_port?: number
@@ -50,6 +51,7 @@ export interface ApiClaw {
   ssh_host?: string
   ssh_port?: number
   ssh_user?: string
+  bootstrap_status?: string
 }
 
 export interface ApiMessage {

@@ -567,11 +567,11 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
 
 	// 1. Set terminal status
-	_, _ = s.db.Exec(`UPDATE claws SET status='error' WHERE id=? AND status != 'deleted'`, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='' WHERE id=? AND status != 'deleted'`, clawID)
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{
-		Type: "claw_status",
+		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "error", "reason": reason},
 	})
 
