@@ -2768,7 +2768,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %v", err), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
 
@@ -2777,6 +2777,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 
 func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte) error {
 	log.Printf("[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
+	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
 	// Wait for VM to be reachable
 	host := vmName + ".exe.xyz"
@@ -2797,6 +2798,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if !reachable {
 		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
 	}
+	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
 	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
@@ -2851,9 +2853,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	// Run bootstrap script — this installs Node.js, OpenClaw, and starts claw-bridge
 	if err := p.SetupScript(ctx, vmName, script); err != nil {
-		return fmt.Errorf("exedev bootstrap script failed: %w", err)
+		return fmt.Errorf("exedev bootstrap script failed: %s", sanitizeBootstrapError(err))
 	}
 	log.Printf("[exedev] bootstrap script completed on %s", vmName)
+	s.setBootstrapStatus(clawID, "Writing workspace files")
 
 	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
 	workdir := "~/workspace"
@@ -3317,6 +3320,7 @@ func (s *Server) clawHasMessages(clawID string) bool {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&checkStatus)
@@ -3371,6 +3375,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
+	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
 	cp, err := newReplicatedProvider(cfg)
@@ -3458,19 +3463,22 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	var sshErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
+			s.setBootstrapStatus(clawID, "Retrying sandbox bootstrap in 10s")
 			log.Printf("Bootstrap retry %d/5 for claw %s in 10s...", attempt, clawName)
 			time.Sleep(10 * time.Second)
 		}
+		s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 		if sshErr = s.sshRun(sshUser, sshHost, script); sshErr == nil {
 			break
 		}
-		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sshErr)
+		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sanitizeBootstrapError(sshErr))
 	}
 	if sshErr != nil {
-		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sshErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %v", sshErr), false)
+		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sanitizeBootstrapError(sshErr))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %s", sanitizeBootstrapError(sshErr)), false)
 		return
 	}
+	s.setBootstrapStatus(clawID, "Writing workspace files")
 
 	// Write template files AFTER bootstrap — openclaw onboard initializes the workspace
 	// and would overwrite BOOTSTRAP.md if we wrote it before the script ran.

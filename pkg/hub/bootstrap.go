@@ -245,31 +245,50 @@ export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
 BRIDGE_SRC="%s"
-echo "Downloading claw-bridge from $BRIDGE_SRC..."
-if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
-  curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
-else
-  # OCI ref — use oras
-  if ! command -v oras &>/dev/null; then
-    echo "Installing oras..."
-    curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
-    sudo mv /tmp/oras /usr/local/bin/oras
+download_connector_once() {
+  rm -f /tmp/claw-bridge
+  if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
+    curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
+  else
+    # OCI ref — use oras
+    if ! command -v oras &>/dev/null; then
+      echo "Installing oras..."
+      curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
+      sudo mv /tmp/oras /usr/local/bin/oras
+    fi
+    sudo apt-get install -y curl ca-certificates 2>/dev/null || true
+    rm -rf /tmp/claw-bridge-dl
+    mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
+    oras pull "$BRIDGE_SRC"
+    BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
+    if [ -z "$BINARY" ]; then
+      echo "ERROR: ElasticClaw connector binary not found after oras pull"
+      ls -la /tmp/claw-bridge-dl/
+      return 1
+    fi
+    cp "$BINARY" /tmp/claw-bridge
+    cd -
   fi
-  sudo apt-get install -y curl ca-certificates 2>/dev/null || true
-  mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
-  oras pull "$BRIDGE_SRC"
-  BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
-  if [ -z "$BINARY" ]; then
-    echo "ERROR: claw-bridge binary not found after oras pull"
-    ls -la /tmp/claw-bridge-dl/
+}
+
+CONNECTOR_DELAYS=(5 10 20 40 60)
+CONNECTOR_ATTEMPTS=6
+for attempt in $(seq 1 "$CONNECTOR_ATTEMPTS"); do
+  echo "Downloading ElasticClaw connector (attempt $attempt/$CONNECTOR_ATTEMPTS)..."
+  if download_connector_once; then
+    break
+  fi
+  if [ "$attempt" -eq "$CONNECTOR_ATTEMPTS" ]; then
+    echo "ERROR: could not download ElasticClaw connector after $CONNECTOR_ATTEMPTS attempts"
     exit 1
   fi
-  cp "$BINARY" /tmp/claw-bridge
-  cd -
-fi
+  delay="${CONNECTOR_DELAYS[$((attempt-1))]}"
+  echo "Retrying connector download in ${delay}s..."
+  sleep "$delay"
+done
 chmod +x /tmp/claw-bridge
 sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
-echo "claw-bridge installed"
+echo "ElasticClaw connector installed"
 
 # ── Bootstrap + run ───────────────────────────────────────────────────────────
 # claw-bridge --bootstrap installs Node.js, OpenClaw, configures the gateway,
