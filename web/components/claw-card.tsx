@@ -199,9 +199,9 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         <span className="text-xs text-muted-foreground truncate">
           {claw.template}
         </span>
-        <span className="text-xs font-mono">
+        <span className="text-xs font-mono max-w-[11rem] truncate text-right" title={claw.bootstrap_status}>
           {claw.status === "provisioning" ? (
-            <span className="text-blue-400">starting...</span>
+            <span className="text-blue-400">{claw.bootstrap_status || "starting..."}</span>
           ) : claw.status === "error" ? (
             <span className="text-red-500">error</span>
           ) : (

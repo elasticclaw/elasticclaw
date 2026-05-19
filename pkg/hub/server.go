@@ -84,10 +84,10 @@ type clawConn struct {
 	messageQueue []types.HubMessage // queued messages waiting to be sent
 
 	// Status channel for watchdog / progress reporting (second session on bridge)
-	statusConn             *websocket.Conn // separate WS for lightweight status queries
-	lastStatusAt           time.Time       // when we last got a status response
-	lastUserMessageAt      time.Time       // when the user last sent a message (for idle detection)
-	lastStatusBroadcastAt  time.Time       // when we last broadcast status to user
+	statusConn            *websocket.Conn // separate WS for lightweight status queries
+	lastStatusAt          time.Time       // when we last got a status response
+	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
+	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -210,13 +210,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/integrations/external/webhook", s.handleExternalWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))    // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger)) // POST manual trigger
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                    // GET /api/factories/:name/events
+	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))     // POST manual trigger
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))     // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics)) // GET all factories analytics
-	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
-	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))       // MCP server CRUD (GET list, PUT upsert, DELETE)
+	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
+	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD))                 // secrets CRUD (GET names, PUT upsert, DELETE)
+	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))                         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
@@ -686,7 +686,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -710,7 +710,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus); err != nil {
 			continue
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
@@ -1134,9 +1134,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,'') FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1579,7 +1579,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
 							cc.gatewayReady = true
-							res, execErr := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
+							res, execErr := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
@@ -1907,14 +1907,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	type dbClaw struct {
-		id, name, status, tagsJSON string
+		id, name, status, tagsJSON, bootstrapStatus string
 	}
 	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
 	if rows != nil {
 		for rows.Next() {
 			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON)
+			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus)
 			dbClaws = append(dbClaws, c)
 		}
 		_ = rows.Close()
@@ -1960,9 +1960,10 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
 			Payload: map[string]interface{}{
-				"claw_id": c.id,
-				"name":    c.name,
-				"status":  c.status, // provisioning / starting / error
+				"claw_id":          c.id,
+				"name":             c.name,
+				"status":           c.status, // provisioning / starting / error
+				"bootstrap_status": c.bootstrapStatus,
 			},
 		})
 	}
@@ -2173,6 +2174,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
+	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
 		const maxAttempts = 3
@@ -2195,7 +2197,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				continue
 			}
 			if result.ExitCode != 0 {
-				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, result.Stdout)
+				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
 				continue
 			}
 			log.Printf("[daytona] %s done", label)
@@ -2393,7 +2395,7 @@ mkdir -p /tmp/bridge-dl && cd /tmp/bridge-dl && oras pull %q
 BIN=$(find /tmp/bridge-dl -name 'claw-bridge*' -type f | head -1)
 cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
 	}
-	if err := exec("download claw-bridge", 3*time.Minute, downloadCmd); err != nil {
+	if err := s.downloadDaytonaConnector(ctx, clawID, instanceID, p, downloadCmd); err != nil {
 		return err
 	}
 
@@ -2639,7 +2641,117 @@ echo started`,
 	return nil
 }
 
+func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {
+	delays := []time.Duration{
+		5 * time.Second,
+		10 * time.Second,
+		20 * time.Second,
+		40 * time.Second,
+		60 * time.Second,
+	}
+	const maxAttempts = 6
+	var lastErr error
 
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt == 1 {
+			s.setBootstrapStatus(clawID, "Downloading ElasticClaw connector")
+			log.Printf("[daytona] download claw-bridge...")
+		} else {
+			delay := delays[attempt-2]
+			s.setBootstrapStatus(clawID, fmt.Sprintf("Retrying connector download in %s", formatRetryDelay(delay)))
+			log.Printf("[daytona] download claw-bridge retry %d/%d in %s...", attempt, maxAttempts, delay)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("could not download ElasticClaw connector after %d attempts: %w", attempt-1, ctx.Err())
+			case <-time.After(delay):
+			}
+			s.setBootstrapStatus(clawID, "Downloading ElasticClaw connector")
+		}
+
+		nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + downloadCmd}, 3*time.Minute)
+		if err != nil {
+			lastErr = err
+			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			continue
+		}
+		if result.ExitCode != 0 {
+			lastErr = fmt.Errorf("exit %d: %s", result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
+			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, lastErr)
+			continue
+		}
+
+		s.setBootstrapStatus(clawID, "Starting ElasticClaw connector")
+		log.Printf("[daytona] download claw-bridge done")
+		return nil
+	}
+
+	return fmt.Errorf("could not download ElasticClaw connector after %d attempts. Last error: %s", maxAttempts, sanitizeBootstrapError(lastErr))
+}
+
+func (s *Server) setBootstrapStatus(clawID, status string) {
+	if clawID == "" {
+		return
+	}
+	res, err := s.db.Exec(`UPDATE claws SET bootstrap_status=? WHERE id=? AND status != 'deleted'`, status, clawID)
+	if err != nil {
+		return
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return
+	}
+
+	var tenantID string
+	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=? AND status != 'deleted'`, clawID).Scan(&tenantID)
+	if tenantID == "" {
+		return
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "claw_status",
+		Payload: map[string]string{
+			"claw_id":          clawID,
+			"status":           "starting",
+			"bootstrap_status": status,
+		},
+	})
+}
+
+func formatRetryDelay(d time.Duration) string {
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	return fmt.Sprintf("%ds", int(d/time.Second))
+}
+
+func sanitizeBootstrapOutput(out string) string {
+	out = strings.ReplaceAll(out, "\r\n", "\n")
+	lines := strings.Split(out, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "declare -x ") {
+			continue
+		}
+		cleaned = append(cleaned, trimmed)
+	}
+	result := strings.TrimSpace(strings.Join(cleaned, "\n"))
+	if result == "" {
+		return "no command output"
+	}
+	const maxLen = 1200
+	if len(result) <= maxLen {
+		return result
+	}
+	return result[len(result)-maxLen:]
+}
+
+func sanitizeBootstrapError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return sanitizeBootstrapOutput(err.Error())
+}
 
 func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	p, err := newExedevProvider(cfg)
@@ -2663,7 +2775,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %v", err), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
 
@@ -2672,6 +2784,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 
 func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte) error {
 	log.Printf("[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
+	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
 	// Wait for VM to be reachable
 	host := vmName + ".exe.xyz"
@@ -2692,6 +2805,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if !reachable {
 		return fmt.Errorf("exedev VM %s was not reachable via SSH after 150s", vmName)
 	}
+	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
 	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
@@ -2746,9 +2860,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	// Run bootstrap script — this installs Node.js, OpenClaw, and starts claw-bridge
 	if err := p.SetupScript(ctx, vmName, script); err != nil {
-		return fmt.Errorf("exedev bootstrap script failed: %w", err)
+		return fmt.Errorf("exedev bootstrap script failed: %s", sanitizeBootstrapError(err))
 	}
 	log.Printf("[exedev] bootstrap script completed on %s", vmName)
+	s.setBootstrapStatus(clawID, "Writing workspace files")
 
 	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
 	workdir := "~/workspace"
@@ -3212,6 +3327,7 @@ func (s *Server) clawHasMessages(clawID string) bool {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&checkStatus)
@@ -3266,6 +3382,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
+	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
 	cp, err := newReplicatedProvider(cfg)
@@ -3353,19 +3470,22 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	var sshErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
+			s.setBootstrapStatus(clawID, "Retrying sandbox bootstrap in 10s")
 			log.Printf("Bootstrap retry %d/5 for claw %s in 10s...", attempt, clawName)
 			time.Sleep(10 * time.Second)
 		}
+		s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 		if sshErr = s.sshRun(sshUser, sshHost, script); sshErr == nil {
 			break
 		}
-		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sshErr)
+		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sanitizeBootstrapError(sshErr))
 	}
 	if sshErr != nil {
-		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sshErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %v", sshErr), false)
+		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sanitizeBootstrapError(sshErr))
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %s", sanitizeBootstrapError(sshErr)), false)
 		return
 	}
+	s.setBootstrapStatus(clawID, "Writing workspace files")
 
 	// Write template files AFTER bootstrap — openclaw onboard initializes the workspace
 	// and would overwrite BOOTSTRAP.md if we wrote it before the script ran.

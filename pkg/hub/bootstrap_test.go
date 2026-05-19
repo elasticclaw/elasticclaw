@@ -50,6 +50,16 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 	assertContains(t, script, p.BridgeURL, "bridge URL in script")
 }
 
+func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
+	script := GenerateReplicatedBootstrapScript(baseParams())
+	assertContains(t, script, "CONNECTOR_ATTEMPTS=6", "connector retry count")
+	assertContains(t, script, "CONNECTOR_DELAYS=(5 10 20 40 60)", "connector retry backoff")
+	assertContains(t, script, "Downloading ElasticClaw connector", "user-facing connector label")
+	assertContains(t, script, "Retrying connector download in", "retry status")
+	assertContains(t, script, "could not download ElasticClaw connector", "user-facing failure")
+	assertNotContains(t, script, "Downloading claw-bridge from", "implementation name hidden from remote output")
+}
+
 func TestBootstrapScript_OCIBridgeSrc(t *testing.T) {
 	p := baseParams()
 	p.BridgeURL = "ttl.sh/marc/claw-bridge:1w"

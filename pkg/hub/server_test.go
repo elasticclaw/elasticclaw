@@ -11,6 +11,27 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+func TestSanitizeBootstrapOutputDropsExportedEnvironment(t *testing.T) {
+	raw := `declare -x DAYTONA_ORGANIZATION_ID="86d60eef-1b4a-4543-85a6-f402a4eeb1e4"
+declare -x DAYTONA_SANDBOX_ID="f1526fda-fe90-4895-8492-2e4a67bd1359"
+curl: (23) Failure writing output to destination
+`
+	got := sanitizeBootstrapOutput(raw)
+	if strings.Contains(got, "declare -x") || strings.Contains(got, "DAYTONA_SANDBOX_ID") {
+		t.Fatalf("expected environment lines to be removed, got %q", got)
+	}
+	if !strings.Contains(got, "curl: (23)") {
+		t.Fatalf("expected useful curl error to remain, got %q", got)
+	}
+}
+
+func TestSanitizeBootstrapOutputTruncatesLongOutput(t *testing.T) {
+	got := sanitizeBootstrapOutput(strings.Repeat("x", 1400))
+	if len(got) != 1200 {
+		t.Fatalf("expected output to be truncated to 1200 bytes, got %d", len(got))
+	}
+}
+
 func TestResolveDefaultModelForKey(t *testing.T) {
 	tests := []struct {
 		name          string
