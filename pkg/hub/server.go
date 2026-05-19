@@ -2671,7 +2671,7 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 		nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
 		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + downloadCmd}, 3*time.Minute)
 		if err != nil {
-			lastErr = fmt.Errorf("%w", err)
+			lastErr = err
 			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
 			continue
 		}
