@@ -2822,7 +2822,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	log.Printf("  Instance type: %s", instanceType)
 	log.Printf("  TTL:           %s", ttl)
 	log.Printf("  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
-	log.Printf("  Status:        starting (waiting for claw to register)")
+	log.Printf("  Status:        provisioning (waiting for VM to start)")
 	return nil
 }
 
