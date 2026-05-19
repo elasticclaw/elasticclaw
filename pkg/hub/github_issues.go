@@ -740,7 +740,10 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
-	s.completeFactoryTrigger(factory.Name, "github-issues", triggerKey, clawID)
+	if err := s.completeFactoryTrigger(factory.Name, "github-issues", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete factory trigger: %w", err)
+	}
 	claimOpen = false
 
 	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)

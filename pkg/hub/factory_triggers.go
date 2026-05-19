@@ -38,7 +38,7 @@ func triggerPayloadJSON(payload any) string {
 	}
 	const maxTriggerPayload = 16 * 1024
 	if len(b) > maxTriggerPayload {
-		return string(b[:maxTriggerPayload])
+		return "{}"
 	}
 	return string(b)
 }
@@ -84,21 +84,27 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 	}
 
 	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
-		_, _ = tx.Exec(`
+		_, err = tx.Exec(`
 			UPDATE factory_triggers
 			   SET trigger_source=?, trigger_payload=?, last_seen_at=?, updated_at=?
 			 WHERE factory_name=? AND integration=? AND trigger_key=?`,
 			source, payloadJSON, now, now, factoryName, integration, triggerKey,
 		)
+		if err != nil {
+			return false, err
+		}
 		return false, tx.Commit()
 	}
 	if clawID == "" && activeTriggerStatus(triggerStatus) {
-		_, _ = tx.Exec(`
+		_, err = tx.Exec(`
 			UPDATE factory_triggers
 			   SET trigger_source=?, trigger_payload=?, last_seen_at=?, updated_at=?
 			 WHERE factory_name=? AND integration=? AND trigger_key=?`,
 			source, payloadJSON, now, now, factoryName, integration, triggerKey,
 		)
+		if err != nil {
+			return false, err
+		}
 		return false, tx.Commit()
 	}
 
@@ -117,16 +123,24 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 	return true, tx.Commit()
 }
 
-func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, clawID string) {
+func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, clawID string) error {
 	if clawID == "" {
-		return
+		return fmt.Errorf("complete factory trigger: missing claw id")
 	}
-	_, _ = s.db.Exec(`
+	res, err := s.db.Exec(`
 		UPDATE factory_triggers
 		   SET claw_id=?, status='active', updated_at=?
 		 WHERE factory_name=? AND integration=? AND trigger_key=?`,
 		clawID, now(), factoryName, integration, triggerKey,
 	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("factory trigger claim not found")
+	}
+	return nil
 }
 
 func (s *Server) failFactoryTrigger(factoryName, integration, triggerKey string) {

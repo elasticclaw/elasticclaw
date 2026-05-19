@@ -1,6 +1,10 @@
 package hub
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func newFactoryTriggerTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -26,7 +30,9 @@ func TestClaimFactoryTriggerScopesByFactoryName(t *testing.T) {
 	if !claimed {
 		t.Fatal("expected design claim")
 	}
-	s.completeFactoryTrigger("design", "github-issues", triggerKey, "claw-design")
+	if err := s.completeFactoryTrigger("design", "github-issues", triggerKey, "claw-design"); err != nil {
+		t.Fatalf("complete design: %v", err)
+	}
 
 	claimed, err = s.claimFactoryTrigger("code", "github-issues", triggerKey, "poll", nil)
 	if err != nil {
@@ -50,7 +56,9 @@ func TestClaimFactoryTriggerSkipsActiveSameFactory(t *testing.T) {
 	if !claimed {
 		t.Fatal("expected initial claim")
 	}
-	s.completeFactoryTrigger("code", "linear", triggerKey, "claw-active")
+	if err := s.completeFactoryTrigger("code", "linear", triggerKey, "claw-active"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
 
 	claimed, err = s.claimFactoryTrigger("code", "linear", triggerKey, "poll", nil)
 	if err != nil {
@@ -74,7 +82,9 @@ func TestClaimFactoryTriggerSkipsErroredSameFactoryClaw(t *testing.T) {
 	if !claimed {
 		t.Fatal("expected initial claim")
 	}
-	s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-error")
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-error"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
 
 	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
 	if err != nil {
@@ -98,7 +108,9 @@ func TestClaimFactoryTriggerReclaimsDeletedClaw(t *testing.T) {
 	if !claimed {
 		t.Fatal("expected initial claim")
 	}
-	s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-deleted")
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-deleted"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
 
 	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
 	if err != nil {
@@ -106,5 +118,23 @@ func TestClaimFactoryTriggerReclaimsDeletedClaw(t *testing.T) {
 	}
 	if !claimed {
 		t.Fatal("expected deleted claw to be reclaimable")
+	}
+}
+
+func TestTriggerPayloadJSONDropsOversizedPayload(t *testing.T) {
+	got := triggerPayloadJSON(map[string]string{"large": strings.Repeat("x", 20*1024)})
+	if got != "{}" {
+		t.Fatalf("expected oversized payload to be dropped, got %d bytes", len(got))
+	}
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("expected valid JSON, got %q", got)
+	}
+}
+
+func TestCompleteFactoryTriggerReturnsMissingClaimError(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	err := s.completeFactoryTrigger("missing", "linear", "linear:ELA-123", "claw-1")
+	if err == nil {
+		t.Fatal("expected missing claim error")
 	}
 }

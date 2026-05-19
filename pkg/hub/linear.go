@@ -360,7 +360,10 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	if err != nil {
 		return err
 	}
-	s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID)
+	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete factory trigger: %w", err)
+	}
 	claimOpen = false
 	log.Printf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
 
