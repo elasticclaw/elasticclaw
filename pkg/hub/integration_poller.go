@@ -17,7 +17,7 @@ import (
 // startIntegrationPoller launches the background polling goroutine that queries
 // each configured integration's API every 30 seconds to detect missed webhook
 // events. It evaluates factory filters against current state and creates claws
-// when no existing claw is found for the entity.
+// when the matching factory has not already claimed that external trigger.
 func (s *Server) startIntegrationPoller() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -223,7 +223,9 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 			Assignee:    n.Assignee,
 		}
 		for _, l := range n.Labels.Nodes {
-			label := struct{ Name string `json:"name"` }{Name: l.Name}
+			label := struct {
+				Name string `json:"name"`
+			}{Name: l.Name}
 			li.Labels = append(li.Labels, label)
 		}
 		issues = append(issues, li)
@@ -245,11 +247,6 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 	currentAssignee := ""
 	if issue.Assignee != nil {
 		currentAssignee = issue.Assignee.Name
-	}
-
-	// If a non-deleted claw already exists, skip regardless of state
-	if s.clawExistsForLinearIssue(entityID) {
-		return
 	}
 
 	// Evaluate factories against current state (no transition gating)
@@ -274,13 +271,16 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 		// Build synthetic webhook payload and create claw
 		payload := s.buildLinearPollPayload(issue)
 		if err := s.createClawForIssue(factory, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[poll-linear] failed to create claw for %s: %v", entityID, err)
 			s.trackFactoryCreationFailure(factory.Name, entityID, err.Error())
 		} else {
 			log.Printf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
 			s.logFactoryEvent(factory.Name, entityID, issue.Title, "", currentStatus, "claw_created", "", "poll")
 			var clawID string
-			_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, entityID).Scan(&clawID)
+			_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, entityID, factory.Name).Scan(&clawID)
 			if clawID != "" {
 				s.trackFactoryCreationSuccess(factory.Name, entityID, clawID)
 			}
@@ -301,21 +301,17 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 	payload.Data.Team.Key = issue.Team.Key
 	payload.Data.Team.Name = issue.Team.Name
 	for _, l := range issue.Labels {
-		label := struct{ Name string `json:"name"` }{Name: l.Name}
+		label := struct {
+			Name string `json:"name"`
+		}{Name: l.Name}
 		payload.Data.Labels = append(payload.Data.Labels, label)
 	}
 	if issue.Assignee != nil {
-		payload.Data.Assignee = &struct{ Name string `json:"name"` }{Name: issue.Assignee.Name}
+		payload.Data.Assignee = &struct {
+			Name string `json:"name"`
+		}{Name: issue.Assignee.Name}
 	}
 	return payload
-}
-
-func (s *Server) clawExistsForLinearIssue(issueID string) bool {
-	var existingID string
-	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		issueID).Scan(&existingID)
-	return existingID != ""
 }
 
 // ── SHORTCUT POLLER ─────────────────────────────────────────────────────────
@@ -443,11 +439,6 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 		}
 	}
 
-	// If a non-deleted claw already exists, skip regardless of state
-	if s.clawExistsForShortcutStory(storyID) {
-		return
-	}
-
 	// Evaluate factories against current state (no transition gating)
 	for _, factory := range factories {
 		if !s.factoryMatchesWorkspace(factory, workspace, "", "shortcut") {
@@ -476,20 +467,15 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			Description: story.Description,
 		}
 		if err := s.createClawForShortcutStory(factory, action, storyID, token, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
 		} else {
 			log.Printf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
 			s.logFactoryEvent(factory.Name, storyID, story.Name, "", currentStateName, "claw_created", "", "poll")
 		}
 	}
-}
-
-func (s *Server) clawExistsForShortcutStory(storyID string) bool {
-	var existingID string
-	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		storyID).Scan(&existingID)
-	return existingID != ""
 }
 
 // ── GITHUB ISSUES POLLER ────────────────────────────────────────────────────
@@ -638,12 +624,6 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 		currentAssignee = issue.Assignee.Login
 	}
 
-	// If a non-deleted claw already exists, skip regardless of state
-	if s.clawExistsForGitHubIssue(issueID) {
-		log.Printf("[poll-github-issues] %s: claw already exists — skipping", issueID)
-		return
-	}
-
 	// Fetch per-issue events only if any factory requires AllowedLabelers.
 	// The repo-level events endpoint does not support since filtering, so
 	// querying per-issue avoids missing events in repos with >100 total events.
@@ -721,6 +701,9 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 
 		payload := s.buildGitHubIssuesPollPayload(issue, repo)
 		if err := s.createClawForGitHubIssue(factory, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
 		} else {
 			log.Printf("[poll-github-issues] created claw for %s via factory %s", issueID, factory.Name)
@@ -739,22 +722,18 @@ func (s *Server) buildGitHubIssuesPollPayload(issue githubIssuesPollItem, repo s
 	payload.Issue.State = issue.State
 	payload.Issue.User.Login = issue.User.Login
 	for _, l := range issue.Labels {
-		label := struct{ Name string `json:"name"` }{Name: l.Name}
+		label := struct {
+			Name string `json:"name"`
+		}{Name: l.Name}
 		payload.Issue.Labels = append(payload.Issue.Labels, label)
 	}
 	if issue.Assignee != nil {
-		payload.Issue.Assignee = &struct{ Login string `json:"login"` }{Login: issue.Assignee.Login}
+		payload.Issue.Assignee = &struct {
+			Login string `json:"login"`
+		}{Login: issue.Assignee.Login}
 	}
 	payload.Repository.FullName = repo
 	return payload
-}
-
-func (s *Server) clawExistsForGitHubIssue(issueID string) bool {
-	var existingID string
-	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		issueID).Scan(&existingID)
-	return existingID != ""
 }
 
 // ── GITHUB PRs POLLER ─────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ type linearWebhookPayload struct {
 	Action    string `json:"action"`    // "create", "update", "remove"
 	Type      string `json:"type"`      // "Issue", "IssueLabel", etc.
 	CreatedAt string `json:"createdAt"` // ISO 8601 timestamp of the webhook event
-	Data   struct {
+	Data      struct {
 		ID          string `json:"id"`
 		Identifier  string `json:"identifier"` // e.g. "ELA-123"
 		Title       string `json:"title"`
@@ -267,12 +267,15 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
 			if err := s.createClawForIssue(factory, payload, "linear webhook"); err != nil {
+				if isFactoryTriggerAlreadyClaimed(err) {
+					continue
+				}
 				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
 				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
 				// Look up the newly created claw ID
-				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, issueID, factory.Name).Scan(&clawID)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_created", clawID, "")
 				if clawID != "" {
 					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
@@ -310,6 +313,27 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 
 func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload, reason string) error {
 	issueID := payload.Data.Identifier
+	triggerKey := factoryTriggerKey("linear", issueID)
+
+	claimed, err := s.claimFactoryTrigger(factory.Name, "linear", triggerKey, reason, map[string]string{
+		"issue_id": issueID,
+		"source":   reason,
+	})
+	if err != nil {
+		return fmt.Errorf("claim factory trigger: %w", err)
+	}
+	if !claimed {
+		if reason != "poll" {
+			log.Printf("[factory:%s] Linear issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
+		}
+		return errFactoryTriggerAlreadyClaimed
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "linear", triggerKey)
+		}
+	}()
 
 	// Verify we can read the issue before spending money on a sandbox.
 	// Non-negotiable: if the issue is unreadable, we can't do any work.
@@ -321,27 +345,6 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	} else {
 		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
-	}
-
-	// Enforce 1:1 — check if a claw already exists for this issue.
-	// Skip if actively starting, running, or connected (idempotent).
-	// Also skip if provisioning or pending — the claw is being created and
-	// we must not race another webhook or trigger.
-	var existingID, existingStatus string
-	_ = s.db.QueryRow(
-		`SELECT id, status FROM claws WHERE linear_issue_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		issueID,
-	).Scan(&existingID, &existingStatus)
-	if existingID != "" {
-		switch existingStatus {
-		case "starting", "connected", "running", "provisioning", "pending":
-			log.Printf("[factory:%s] claw %s already exists for issue %s (status=%s) — treating as idempotent success", factory.Name, existingID[:8], issueID, existingStatus)
-			return nil
-		default:
-			// offline, error, stopped: sandbox is gone, safe to recreate
-			log.Printf("[factory:%s] claw %s exists for issue %s but status=%s, deleting and recreating", factory.Name, existingID[:8], issueID, existingStatus)
-			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
-		}
 	}
 
 	// Build Linear-specific context and inject into template files
@@ -357,6 +360,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	if err != nil {
 		return err
 	}
+	s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID)
+	claimOpen = false
 	log.Printf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
 
 	// Move the issue to WorkingStatus if configured (only if not pending —
@@ -552,7 +557,7 @@ func (s *Server) countActiveClaws() int {
 // countActiveClawsInGroup returns the number of active claws belonging to the
 // given concurrency group. This is the scoped count used for per-group limit
 // enforcement. The concurrency_group column is populated at insert time.
-// Legacy rows (created before the migration) have concurrency_group = '' and
+// Legacy rows (created before the migration) have concurrency_group = ” and
 // are treated as belonging to the "global" group.
 func (s *Server) countActiveClawsInGroup(groupName string) int {
 	var count int
@@ -681,10 +686,10 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	// Re-fetch the claw record
 	var (
 		name, template, provider, defaultModel, templateFilesJSON string
-		githubReposJSON, linearWorkspace, llmKey string
-		nixEnabled, dockerEnabled int
-		tagsJSON, color, issueID string
-		tenantID string
+		githubReposJSON, linearWorkspace, llmKey                  string
+		nixEnabled, dockerEnabled                                 int
+		tagsJSON, color, issueID                                  string
+		tenantID                                                  string
 	)
 	err := s.db.QueryRow(
 		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
@@ -957,11 +962,11 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 					issueNumStr := rest[lastSlash+1:]
 					var issueNum int
 					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
-							base := s.githubBaseURL
-							if base == "" {
-								base = "https://api.github.com"
-							}
-							if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
 							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
 						} else {
 							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
@@ -1232,7 +1237,7 @@ func (s *Server) commentLinearIssue(token, issueIdentifier, body string) error {
 func commentLinearIssueWithBase(baseURL, token, issueIdentifier, body string) error {
 	// Resolve issue ID from identifier
 	queryBody := map[string]interface{}{
-		"query": "query($id: String!) { issue(id: $id) { id } }",
+		"query":     "query($id: String!) { issue(id: $id) { id } }",
 		"variables": map[string]string{"id": issueIdentifier},
 	}
 	queryJSON, _ := json.Marshal(queryBody)

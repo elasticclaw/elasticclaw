@@ -242,10 +242,10 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				stateMap = buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
 				if len(stateMap) > 0 {
 					stateNameCache[token] = stateMap
-			} else {
-				log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
-				continue
-			}
+				} else {
+					log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
+					continue
+				}
 			}
 			newStateName := stateMap[newStateID]
 			oldStateName := stateMap[oldStateID] // only fetched when needed for logging
@@ -254,12 +254,15 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
 				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
 				if err := s.createClawForShortcutStory(factory, action, storyID, token, "shortcut webhook"); err != nil {
+					if isFactoryTriggerAlreadyClaimed(err) {
+						continue
+					}
 					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
 					s.trackFactoryCreationFailure(factory.Name, storyID, err.Error())
 				} else {
 					var clawID string
-					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? ORDER BY created_at DESC LIMIT 1`, storyID).Scan(&clawID)
+					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, storyID, factory.Name).Scan(&clawID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
 					if clawID != "" {
 						s.trackFactoryCreationSuccess(factory.Name, storyID, clawID)
@@ -410,31 +413,34 @@ func buildShortcutStateMap(baseURL, token string) map[int64]string {
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
 func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string, reason string) error {
+	triggerKey := factoryTriggerKey("shortcut", storyID)
+
+	claimed, err := s.claimFactoryTrigger(factory.Name, "shortcut", triggerKey, reason, map[string]string{
+		"story_id": storyID,
+		"source":   reason,
+	})
+	if err != nil {
+		return fmt.Errorf("claim factory trigger: %w", err)
+	}
+	if !claimed {
+		if reason != "poll" {
+			log.Printf("[factory:%s] Shortcut story %s already has an active trigger claim — treating as idempotent success", factory.Name, storyID)
+		}
+		return errFactoryTriggerAlreadyClaimed
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "shortcut", triggerKey)
+		}
+	}()
+
 	// Verify we can read the story before spending money on a sandbox.
 	// Non-negotiable: if the story is unreadable, we can't do any work.
 	if _, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%s", storyID), token); err != nil {
 		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
 	}
 	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
-
-	// Enforce 1:1 — check if a claw already exists for this story.
-	// Skip if actively starting, running, connected, provisioning, or pending —
-	// the claw is being created and we must not race another webhook or trigger.
-	// Only delete+recreate if offline, error, or stopped (sandbox is gone).
-	var existingID, existingStatus string
-	_ = s.db.QueryRow(
-		`SELECT id, status FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('deleted') LIMIT 1`,
-		storyID,
-	).Scan(&existingID, &existingStatus)
-	if existingID != "" {
-		switch existingStatus {
-		case "starting", "connected", "running", "provisioning", "pending":
-			return fmt.Errorf("claw %s already exists for story %s (status=%s)", existingID[:8], storyID, existingStatus)
-		default:
-			log.Printf("[factory:%s] claw %s exists for story %s but status=%s, deleting and recreating", factory.Name, existingID[:8], storyID, existingStatus)
-			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, existingID)
-		}
-	}
 
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
 	if err != nil {
@@ -631,6 +637,8 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
+	s.completeFactoryTrigger(factory.Name, "shortcut", triggerKey, clawID)
+	claimOpen = false
 
 	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
