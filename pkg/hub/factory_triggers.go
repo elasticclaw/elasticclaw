@@ -19,15 +19,6 @@ func factoryTriggerKey(integration, externalID string) string {
 	return integration + ":" + externalID
 }
 
-func activeClawStatus(status string) bool {
-	switch status {
-	case "starting", "connected", "running", "provisioning", "pending", "idle":
-		return true
-	default:
-		return false
-	}
-}
-
 func activeTriggerStatus(status string) bool {
 	switch status {
 	case "claimed", "creating", "active":
@@ -92,7 +83,7 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		return false, err
 	}
 
-	if clawID != "" && activeClawStatus(clawStatus) {
+	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
 		_, _ = tx.Exec(`
 			UPDATE factory_triggers
 			   SET trigger_source=?, trigger_payload=?, last_seen_at=?, updated_at=?

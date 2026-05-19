@@ -61,7 +61,7 @@ func TestClaimFactoryTriggerSkipsActiveSameFactory(t *testing.T) {
 	}
 }
 
-func TestClaimFactoryTriggerReclaimsTerminalClaw(t *testing.T) {
+func TestClaimFactoryTriggerSkipsErroredSameFactoryClaw(t *testing.T) {
 	s := newFactoryTriggerTestServer(t)
 	triggerKey := factoryTriggerKey("shortcut", "sc-123")
 	_, _ = s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
@@ -78,15 +78,33 @@ func TestClaimFactoryTriggerReclaimsTerminalClaw(t *testing.T) {
 
 	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
 	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("expected errored same-factory claw to remain idempotent")
+	}
+}
+
+func TestClaimFactoryTriggerReclaimsDeletedClaw(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-123")
+	_, _ = s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-deleted", "tenant", "claw", "template", "deleted", now())
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "webhook", nil)
+	if err != nil {
+		t.Fatalf("initial claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected initial claim")
+	}
+	s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-deleted")
+
+	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
 		t.Fatalf("reclaim: %v", err)
 	}
 	if !claimed {
-		t.Fatal("expected terminal claw to be reclaimable")
-	}
-
-	var status string
-	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id='claw-error'`).Scan(&status)
-	if status != "deleted" {
-		t.Fatalf("expected terminal claw to be marked deleted, got %q", status)
+		t.Fatal("expected deleted claw to be reclaimable")
 	}
 }
