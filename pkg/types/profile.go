@@ -34,6 +34,7 @@ type LockFile struct {
 	Images        []ImageLock  `yaml:"images,omitempty"`
 	LockedAt      string       `yaml:"locked_at"`
 	SchemaVersion string      `yaml:"schema_version"`
+	ToolVersion   string      `yaml:"tool_version,omitempty"`
 }
 
 type TemplateLock struct {
