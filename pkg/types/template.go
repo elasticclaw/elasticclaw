@@ -71,9 +71,9 @@ func (k *LLMKeyConfig) EnvVarName() string {
 
 // TemplateConfig is the elasticclaw-config.yaml inside a template directory.
 type TemplateConfig struct {
-	// ElasticClawVersion is the schema version of this config file.
+	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	ElasticClawVersion string            `yaml:"elasticclaw_version,omitempty"`
+	SchemaVersion string            `yaml:"schema_version,omitempty"`
 	Provider           string            `yaml:"provider"`
 	Resources          TemplateResources `yaml:"resources,omitempty"`
 	InstanceType       string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
@@ -124,10 +124,10 @@ type TemplateConfig struct {
 }
 
 // GetVersion returns the effective schema version for this template config.
-// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+// Returns "v1" if SchemaVersion is not specified for backward compatibility.
 func (c *TemplateConfig) GetVersion() string {
-	if c.ElasticClawVersion != "" {
-		return c.ElasticClawVersion
+	if c.SchemaVersion != "" {
+		return c.SchemaVersion
 	}
 	return "v1"
 }
@@ -310,9 +310,9 @@ type AccessConfig struct {
 }
 
 type HubConfig struct {
-	// ElasticClawVersion is the schema version of this hub config file.
+	// SchemaVersion is the schema version of this hub config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	ElasticClawVersion string `yaml:"elasticclaw_version,omitempty"`
+	SchemaVersion string `yaml:"schema_version,omitempty"`
 
 	// CLI connection fields
 	URL   string `yaml:"url"`
@@ -438,9 +438,9 @@ type ConcurrencyGroup struct {
 
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
-	// ElasticClawVersion is the schema version of this config file.
+	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	ElasticClawVersion string `yaml:"elasticclaw_version,omitempty" json:"elasticclawVersion,omitempty"`
+	SchemaVersion string `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
 	Name               string `yaml:"name" json:"name"`
 	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`  // nil = true (default on); set false to pause
 	Integration        string `yaml:"integration" json:"integration"`        // "linear", "shortcut", "github-issues", or "github"
@@ -490,10 +490,10 @@ type FactoryConfig struct {
 }
 
 // GetVersion returns the effective schema version for this factory config.
-// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+// Returns "v1" if SchemaVersion is not specified for backward compatibility.
 func (c *FactoryConfig) GetVersion() string {
-	if c.ElasticClawVersion != "" {
-		return c.ElasticClawVersion
+	if c.SchemaVersion != "" {
+		return c.SchemaVersion
 	}
 	return "v1"
 }
@@ -607,10 +607,10 @@ type CreateClawRequest struct {
 }
 
 // GetVersion returns the effective schema version for this hub config.
-// Returns "v1" if ElasticClawVersion is not specified for backward compatibility.
+// Returns "v1" if SchemaVersion is not specified for backward compatibility.
 func (c *HubConfig) GetVersion() string {
-	if c.ElasticClawVersion != "" {
-		return c.ElasticClawVersion
+	if c.SchemaVersion != "" {
+		return c.SchemaVersion
 	}
 	return "v1"
 }

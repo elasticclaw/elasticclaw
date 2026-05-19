@@ -1,5 +1,5 @@
 # ElasticClaw template configuration
-elasticclaw_version: v1
+schema_version: v1
 provider: daytona
 github:
   repos:
