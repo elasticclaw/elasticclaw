@@ -531,6 +531,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			}
 		}
 	}
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
 	// Factory-level overrides (color, tags) take precedence over template config.

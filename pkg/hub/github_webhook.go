@@ -575,6 +575,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			}
 		}
 	}
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields
 	var (

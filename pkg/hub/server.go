@@ -768,6 +768,30 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 
 	// Pre-register claw row so it exists before the workspace boots
 	clawID := uuid.New().String()
+
+	// Build env to inject: hub connection info so the claw can register back
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	hubSecrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
+		"ELASTICCLAW_CLAW_ID":    clawID,
+		"ELASTICCLAW_CLAW_TOKEN": clawToken,
+	}
+	for k, v := range req.Env {
+		env[k] = v
+	}
+	for envName, secretRef := range req.SecretRefs {
+		if val, ok := hubSecrets[secretRef]; ok {
+			env[envName] = val
+			log.Printf("[create] injected secret_ref %s as %s into claw env", secretRef, envName)
+		} else {
+			log.Printf("[create] WARNING: secret_ref %q not found in hub secrets", secretRef)
+		}
+	}
+	req.Env = env
+	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
 
 	// Store GitHub repos config from template if present
@@ -834,19 +858,6 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
-	}
-
-	// Build env to inject: hub connection info so the claw can register back
-	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_ID":    clawID,
-		"ELASTICCLAW_CLAW_TOKEN": clawToken,
-	}
-	for k, v := range req.Env {
-		env[k] = v
 	}
 
 	// Convert string files to bytes for the provider
