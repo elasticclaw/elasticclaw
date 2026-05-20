@@ -31,6 +31,17 @@ func TestInjectFigmaAPIDocsAddsGuideAndToolsNote(t *testing.T) {
 	}
 }
 
+func TestInjectFigmaAPIDocsNilFiles(t *testing.T) {
+	got := injectFigmaAPIDocs(nil, map[string]string{figmaAPIEnvVar: "token"})
+
+	if got == nil {
+		t.Fatal("expected non-nil files map")
+	}
+	if !strings.Contains(got["FIGMA_API.md"], "X-Figma-Token") {
+		t.Fatal("FIGMA_API.md not injected into nil files map")
+	}
+}
+
 func TestInjectFigmaAPIDocsDoesNotDuplicateToolsNote(t *testing.T) {
 	files := map[string]string{"TOOLS.md": "# Tools\n"}
 
