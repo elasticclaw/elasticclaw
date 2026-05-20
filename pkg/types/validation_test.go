@@ -241,6 +241,35 @@ func TestFactoryConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "github factory with enable_manual_trigger and invalid trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "github",
+				Template:            "base",
+				EnableManualTrigger: true,
+				Trigger: &GitHubTrigger{
+					On:     "invalid",
+					Action: "opened",
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid trigger.on",
+		},
+		{
+			name: "external factory with enable_manual_trigger and invalid external_trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "external",
+				Template:            "base",
+				EnableManualTrigger: true,
+				ExternalTrigger: &ExternalTrigger{
+					Source: "invalid-source",
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid external_trigger.source",
+		},
+		{
 			name: "valid repos with wildcard",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
