@@ -602,6 +602,15 @@ func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T)
 	assertContains(t, script, "git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null", "git helper verification")
 	assertContains(t, script, "git config --show-origin --global --get-all credential.helper", "git helper origin log")
 	assertNotContains(t, script, "sudo apt-get install -y git 2>/dev/null || true", "git install must not be silently optional")
+
+	gitConfigIdx := strings.Index(script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials")
+	ghInstallIdx := strings.Index(script, "Installing gh CLI")
+	if gitConfigIdx == -1 || ghInstallIdx == -1 {
+		t.Fatalf("expected git config and gh install markers in helper script")
+	}
+	if gitConfigIdx > ghInstallIdx {
+		t.Fatalf("mandatory git credential helper registration must happen before optional gh install")
+	}
 }
 
 // ── Container integration test ────────────────────────────────────────────────
