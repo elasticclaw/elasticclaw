@@ -2298,6 +2298,7 @@ docker --version`); err != nil {
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	s.mu.RUnlock()
+	gatewayPassword := randomHex(16)
 	onboardCmd := fmt.Sprintf(
 		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
@@ -2322,7 +2323,7 @@ docker --version`); err != nil {
 	}
 
 	if providerConfigScript != "" {
-		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; ", defaultModelDaytona) + llmKeyEnvDaytona + providerConfigScript
+		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
 		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 			return err
 		}

@@ -227,6 +227,7 @@ config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
     config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
+    config['gateway']['remote'] = {'password': gw_password}
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')

@@ -324,6 +324,7 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
 	assertContains(t, snippet, "auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')", "writes Anthropic agent auth profile")
 	assertContains(t, snippet, "profiles['anthropic:default']", "adds Anthropic default auth profile")
+	assertContains(t, snippet, "config['gateway']['remote'] = {'password': gw_password}", "sets gateway remote password for local clients")
 	assertNotContains(t, snippet, "'anthropic': {", "does not replace OpenClaw's bundled Anthropic provider config")
 	assertNotContains(t, snippet, "config['models'] =", "does not replace the models section")
 	assertNotContains(t, snippet, "providers.update", "does not add an empty providers patch for Anthropic-only config")
@@ -382,6 +383,7 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"ANTHROPIC_API_KEY=sk-ant-test",
+		"ELASTICCLAW_GATEWAY_PASSWORD=test-gw-password",
 		"OPENCLAW_DEFAULT_MODEL=anthropic/claude-sonnet-4-6",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -406,6 +408,11 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	}
 	if _, ok := anthropic["apiKey"]; ok {
 		t.Fatalf("anthropic provider config should not store apiKey: %#v", anthropic)
+	}
+	gateway := patched["gateway"].(map[string]interface{})
+	remote := gateway["remote"].(map[string]interface{})
+	if remote["password"] != "test-gw-password" {
+		t.Fatalf("gateway remote password not set: %#v", remote)
 	}
 
 	authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
