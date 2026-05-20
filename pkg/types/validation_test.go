@@ -183,6 +183,16 @@ func TestFactoryConfigValidate(t *testing.T) {
 			errMsg:  "trigger is required",
 		},
 		{
+			name: "github factory with enable_manual_trigger and no trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "github",
+				Template:            "base",
+				EnableManualTrigger: true,
+			},
+			wantErr: false,
+		},
+		{
 			name: "github factory invalid trigger on",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
@@ -209,6 +219,55 @@ func TestFactoryConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "invalid trigger.action",
+		},
+		{
+			name: "external factory missing external_trigger",
+			factory: &FactoryConfig{
+				Name:        "test-factory",
+				Integration: "external",
+				Template:    "base",
+			},
+			wantErr: true,
+			errMsg:  "external_trigger is required",
+		},
+		{
+			name: "external factory with enable_manual_trigger and no external_trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "external",
+				Template:            "base",
+				EnableManualTrigger: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "github factory with enable_manual_trigger and invalid trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "github",
+				Template:            "base",
+				EnableManualTrigger: true,
+				Trigger: &GitHubTrigger{
+					On:     "invalid",
+					Action: "opened",
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid trigger.on",
+		},
+		{
+			name: "external factory with enable_manual_trigger and invalid external_trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "external",
+				Template:            "base",
+				EnableManualTrigger: true,
+				ExternalTrigger: &ExternalTrigger{
+					Source: "invalid-source",
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid external_trigger.source",
 		},
 		{
 			name: "valid repos with wildcard",
