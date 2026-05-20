@@ -91,19 +91,19 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		if len(content) == 0 {
 			continue
 		}
-		
+
 		// Use absolute paths
 		absPath := path
 		if !strings.HasPrefix(path, "/") {
 			absPath = "/home/daytona/" + path
 		}
-		
+
 		// Ensure directory exists
 		dir := getDir(absPath)
 		if dir != "" && dir != "." {
 			sandbox.FileSystem.CreateFolder(ctx, dir)
 		}
-		
+
 		// UploadFile accepts []byte or string (path) as source
 		err := sandbox.FileSystem.UploadFile(ctx, content, absPath)
 		if err != nil {
@@ -191,6 +191,35 @@ func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdAr
 		ExitCode: response.ExitCode,
 		Stdout:   response.Result,
 	}, nil
+}
+
+func (p *Provider) EnsureSession(ctx context.Context, instanceID, sessionID string) error {
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to find sandbox: %w", err)
+	}
+	if _, err := sandbox.Process.GetSession(ctx, sessionID); err == nil {
+		return nil
+	}
+	if err := sandbox.Process.CreateSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	return nil
+}
+
+func (p *Provider) ExecSessionAsync(ctx context.Context, instanceID, sessionID, command string) (string, error) {
+	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to find sandbox: %w", err)
+	}
+	result, err := sandbox.Process.ExecuteSessionCommand(ctx, sessionID, command, true, true)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute async session command: %w", err)
+	}
+	if id, ok := result["id"].(string); ok {
+		return id, nil
+	}
+	return "", nil
 }
 
 // Connect returns connection info
@@ -289,7 +318,7 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 			envLines = append(envLines, fmt.Sprintf("export %s='%s'", k, escapedV))
 		}
 		envContent := strings.Join(envLines, "\n")
-		
+
 		// Write env file
 		err = sandbox.FileSystem.UploadFile(ctx, []byte(envContent), "/home/daytona/.openclaw/env")
 		if err != nil {
@@ -297,7 +326,7 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 		}
 
 		// Source it from bashrc
-		response, err = sandbox.Process.ExecuteCommand(ctx, 
+		response, err = sandbox.Process.ExecuteCommand(ctx,
 			"bash -c 'grep -q openclaw/env ~/.bashrc || echo \"source ~/.openclaw/env\" >> ~/.bashrc'")
 		if err != nil || response.ExitCode != 0 {
 			// Non-fatal
