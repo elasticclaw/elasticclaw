@@ -53,6 +53,7 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	prep := daytonaPrepareBridgeCommand()
 	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "NEXT-156")
+	running := daytonaBridgeRunningCommand()
 
 	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
 	assertContains(t, prep, "set -e", "prep fails fast instead of masking install errors")
@@ -65,6 +66,9 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID="claw-123"`, "passes claw id to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
 	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
+
+	assertContains(t, running, "claw-bridge.pid", "retry guard checks bridge pid file")
+	assertContains(t, running, "pgrep -x claw-bridge", "retry guard detects already running bridge")
 }
 
 func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
@@ -316,6 +320,9 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
 	assertContains(t, snippet, "config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model", "still sets default model")
+	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
+	assertContains(t, snippet, "anthropic = providers.setdefault('anthropic', {})", "preserves bundled Anthropic provider metadata")
+	assertContains(t, snippet, "anthropic['apiKey'] = anthropic_key", "adds Anthropic API key")
 	assertNotContains(t, snippet, "'anthropic': {", "does not replace OpenClaw's bundled Anthropic provider config")
 	assertNotContains(t, snippet, "config['models'] =", "does not replace the models section")
 	assertNotContains(t, snippet, "providers.update", "does not add an empty providers patch for Anthropic-only config")
@@ -334,6 +341,7 @@ func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
 	assertContains(t, snippet, "providers.update({", "merges custom provider config")
 	assertContains(t, snippet, "'groq': {", "adds custom provider")
 	assertNotContains(t, snippet, "'anthropic': {", "does not add Anthropic custom provider")
+	assertContains(t, snippet, "anthropic['apiKey'] = anthropic_key", "still configures Anthropic auth")
 }
 
 // ── Shellcheck test ───────────────────────────────────────────────────────────
