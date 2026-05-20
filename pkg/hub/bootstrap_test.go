@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,8 +322,8 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 
 	assertContains(t, snippet, "config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model", "still sets default model")
 	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
-	assertContains(t, snippet, "anthropic = providers.setdefault('anthropic', {})", "preserves bundled Anthropic provider metadata")
-	assertContains(t, snippet, "anthropic['apiKey'] = anthropic_key", "adds Anthropic API key")
+	assertContains(t, snippet, "auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')", "writes Anthropic agent auth profile")
+	assertContains(t, snippet, "profiles['anthropic:default']", "adds Anthropic default auth profile")
 	assertNotContains(t, snippet, "'anthropic': {", "does not replace OpenClaw's bundled Anthropic provider config")
 	assertNotContains(t, snippet, "config['models'] =", "does not replace the models section")
 	assertNotContains(t, snippet, "providers.update", "does not add an empty providers patch for Anthropic-only config")
@@ -341,7 +342,86 @@ func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
 	assertContains(t, snippet, "providers.update({", "merges custom provider config")
 	assertContains(t, snippet, "'groq': {", "adds custom provider")
 	assertNotContains(t, snippet, "'anthropic': {", "does not add Anthropic custom provider")
-	assertContains(t, snippet, "anthropic['apiKey'] = anthropic_key", "still configures Anthropic auth")
+	assertContains(t, snippet, "profiles['anthropic:default']", "still configures Anthropic auth")
+}
+
+func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingProviderCatalog(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".openclaw")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "openclaw.json")
+	initialConfig := map[string]interface{}{
+		"models": map[string]interface{}{
+			"providers": map[string]interface{}{
+				"anthropic": map[string]interface{}{
+					"baseUrl": "https://api.anthropic.com",
+					"models": []interface{}{
+						map[string]interface{}{"id": "claude-sonnet-4-6", "maxTokens": float64(64000)},
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.Marshal(initialConfig)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	keys := []*types.LLMKeyConfig{{Name: "anthropic-main", Provider: "anthropic", Default: true}}
+	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"ANTHROPIC_API_KEY=sk-ant-test",
+		"OPENCLAW_DEFAULT_MODEL=anthropic/claude-sonnet-4-6",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, string(out))
+	}
+
+	var patched map[string]interface{}
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	if err := json.Unmarshal(configData, &patched); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	providers := patched["models"].(map[string]interface{})["providers"].(map[string]interface{})
+	anthropic := providers["anthropic"].(map[string]interface{})
+	if _, ok := anthropic["baseUrl"].(string); !ok {
+		t.Fatalf("anthropic baseUrl missing after patch: %#v", anthropic)
+	}
+	if _, ok := anthropic["models"].([]interface{}); !ok {
+		t.Fatalf("anthropic models missing after patch: %#v", anthropic)
+	}
+	if _, ok := anthropic["apiKey"]; ok {
+		t.Fatalf("anthropic provider config should not store apiKey: %#v", anthropic)
+	}
+
+	authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+	authData, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read auth profiles: %v", err)
+	}
+	var auth map[string]interface{}
+	if err := json.Unmarshal(authData, &auth); err != nil {
+		t.Fatalf("parse auth profiles: %v", err)
+	}
+	profiles := auth["profiles"].(map[string]interface{})
+	profile := profiles["anthropic:default"].(map[string]interface{})
+	if profile["key"] != "sk-ant-test" || profile["provider"] != "anthropic" {
+		t.Fatalf("bad anthropic profile: %#v", profile)
+	}
 }
 
 // ── Shellcheck test ───────────────────────────────────────────────────────────
