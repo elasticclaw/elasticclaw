@@ -76,6 +76,17 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	// otherwise the first occurrence.
 	seen := map[string]bool{}
 	var providerLines []string
+	anthropicEnvVar := ""
+	if activeKey.Provider == "anthropic" {
+		anthropicEnvVar = activeKey.EnvVarName()
+	} else {
+		for _, k := range keys {
+			if k.Provider == "anthropic" {
+				anthropicEnvVar = k.EnvVarName()
+				break
+			}
+		}
+	}
 
 	// Helper: build a single provider dict as a python literal.
 	buildEntry := func(k *types.LLMKeyConfig) string {
@@ -164,6 +175,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 
 	providersDict := strings.Join(providerLines, ",\n        ")
 	modelsPatch := ""
+	anthropicPatch := ""
 	if providersDict != "" {
 		modelsPatch = fmt.Sprintf(`models = config.setdefault('models', {})
 providers = models.setdefault('providers', {})
@@ -171,6 +183,15 @@ providers.update({
         %s
 })
 `, providersDict)
+	}
+	if anthropicEnvVar != "" {
+		anthropicPatch = fmt.Sprintf(`anthropic_key = os.environ.get('%s', '')
+if anthropic_key:
+    models = config.setdefault('models', {})
+    providers = models.setdefault('providers', {})
+    anthropic = providers.setdefault('anthropic', {})
+    anthropic['apiKey'] = anthropic_key
+`, anthropicEnvVar)
 	}
 
 	return fmt.Sprintf(`python3 << 'PYEOF'
@@ -186,7 +207,7 @@ except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
 config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
-%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
+%s%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
@@ -194,7 +215,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, modelsPatch)
+PYEOF`, modelsPatch, anthropicPatch)
 }
 
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads

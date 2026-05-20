@@ -2174,6 +2174,10 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			if lastErr == nil {
 				return
 			}
+			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
+				log.Printf("[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
+				return
+			}
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
@@ -2668,19 +2672,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	}
 	log.Printf("[daytona] claw-bridge async command started session=%s command=%s", sessionID, cmdID)
 
-	verifyCmd := `export HOME=/home/daytona
-PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
-if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  echo "claw-bridge running pid=$(cat "$PIDFILE")"
-  exit 0
-fi
-if pgrep -x claw-bridge >/dev/null 2>&1; then
-  echo "claw-bridge running"
-  exit 0
-fi
-echo "claw-bridge is not running yet"
-tail -n 80 /home/daytona/claw-bridge.log 2>/dev/null || true
-exit 1`
+	verifyCmd := daytonaBridgeRunningCommand()
 	var lastVerify string
 	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
@@ -2697,7 +2689,33 @@ exit 1`
 		}
 		lastVerify = result.Stdout
 	}
+	if result, err := p.ExecWithTimeout(ctx, instanceID, []string{`tail -n 80 /home/daytona/claw-bridge.log 2>/dev/null || true`}, 5*time.Second); err == nil && strings.TrimSpace(result.Stdout) != "" {
+		lastVerify = strings.TrimSpace(lastVerify) + "\n" + result.Stdout
+	}
 	return fmt.Errorf("start claw-bridge verification failed: %s", sanitizeBootstrapOutput(lastVerify))
+}
+
+func (s *Server) daytonaBridgeRunning(ctx context.Context, instanceID string, p *daytona.Provider) bool {
+	result, err := p.ExecWithTimeout(ctx, instanceID, []string{daytonaBridgeRunningCommand()}, 5*time.Second)
+	if err != nil {
+		return false
+	}
+	return result.ExitCode == 0
+}
+
+func daytonaBridgeRunningCommand() string {
+	return `export HOME=/home/daytona
+PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
+if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "claw-bridge running pid=$(cat "$PIDFILE")"
+  exit 0
+fi
+if pgrep -x claw-bridge >/dev/null 2>&1; then
+  echo "claw-bridge running"
+  exit 0
+fi
+echo "claw-bridge not running"
+exit 1`
 }
 
 func daytonaPrepareBridgeCommand() string {
