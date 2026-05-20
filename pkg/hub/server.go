@@ -2189,10 +2189,6 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
-	if s.daytonaBridgeRunning(ctx, instanceID, p) {
-		log.Printf("[daytona] claw-bridge already running for claw %s; skipping bootstrap retry", clawID)
-		return nil
-	}
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
@@ -2676,19 +2672,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	}
 	log.Printf("[daytona] claw-bridge async command started session=%s command=%s", sessionID, cmdID)
 
-	verifyCmd := `export HOME=/home/daytona
-PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
-if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  echo "claw-bridge running pid=$(cat "$PIDFILE")"
-  exit 0
-fi
-if pgrep -x claw-bridge >/dev/null 2>&1; then
-  echo "claw-bridge running"
-  exit 0
-fi
-echo "claw-bridge is not running yet"
-tail -n 80 /home/daytona/claw-bridge.log 2>/dev/null || true
-exit 1`
+	verifyCmd := daytonaBridgeRunningCommand()
 	var lastVerify string
 	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
@@ -2704,6 +2688,9 @@ exit 1`
 			return nil
 		}
 		lastVerify = result.Stdout
+	}
+	if result, err := p.ExecWithTimeout(ctx, instanceID, []string{`tail -n 80 /home/daytona/claw-bridge.log 2>/dev/null || true`}, 5*time.Second); err == nil && strings.TrimSpace(result.Stdout) != "" {
+		lastVerify = strings.TrimSpace(lastVerify) + "\n" + result.Stdout
 	}
 	return fmt.Errorf("start claw-bridge verification failed: %s", sanitizeBootstrapOutput(lastVerify))
 }
