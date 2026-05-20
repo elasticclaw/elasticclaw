@@ -2719,7 +2719,7 @@ if [ ! -s /tmp/claw-bridge ]; then
   exit 1
 fi
 sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge
-test -x /usr/local/bin/claw-bridge
+test -x /usr/local/bin/claw-bridge || { echo "claw-bridge installed at /usr/local/bin/claw-bridge is not executable"; exit 1; }
 rm -f "$PIDFILE"`
 }
 
