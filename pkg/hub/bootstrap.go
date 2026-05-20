@@ -69,7 +69,6 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
-	_ = activeKey // used implicitly via the provider list
 
 	// Build per-provider config entries.
 	// We emit an entry for every unique provider across all configured keys.
