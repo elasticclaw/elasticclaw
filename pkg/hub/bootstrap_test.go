@@ -308,6 +308,22 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	assertContains(t, snippet, "'codex': {\n            'apiKey': os.environ.get('CODEX_API_KEY', ''),", "codex apiKey with correct env var")
 }
 
+func TestBuildOpenClawProviderConfig_AnthropicModelsIncludeMaxTokens(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "anthropic-main", Provider: "anthropic", Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
+
+	assertContains(t, snippet, "'api': 'anthropic-messages'", "anthropic messages transport")
+	assertContains(t, snippet, "{'id': 'claude-sonnet-4-7', 'name': 'Claude Sonnet 4.7', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.7 maxTokens")
+	assertContains(t, snippet, "{'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.6 maxTokens")
+	assertContains(t, snippet, "{'id': 'claude-opus-4-7',   'name': 'Claude Opus 4.7',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.7 maxTokens")
+	assertContains(t, snippet, "{'id': 'claude-opus-4-6',   'name': 'Claude Opus 4.6',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.6 maxTokens")
+	assertContains(t, snippet, "{'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.5 maxTokens")
+	assertContains(t, snippet, "{'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.5 maxTokens")
+}
+
 // ── Shellcheck test ───────────────────────────────────────────────────────────
 
 func TestBootstrapScript_Shellcheck(t *testing.T) {
