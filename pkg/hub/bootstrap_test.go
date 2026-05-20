@@ -55,7 +55,10 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "NEXT-156")
 
 	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
+	assertContains(t, prep, "set -e", "prep fails fast instead of masking install errors")
+	assertContains(t, prep, "[ ! -s /tmp/claw-bridge ]", "reports missing downloaded bridge before install")
 	assertContains(t, prep, "sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge", "installs bridge outside tmp before execution")
+	assertContains(t, prep, "claw-bridge installed at /usr/local/bin/claw-bridge is not executable", "reports non-executable install")
 	assertContains(t, cmd, "exec /usr/local/bin/claw-bridge", "runs installed bridge from async session command")
 	assertContains(t, cmd, "claw-bridge.pid", "writes pid file for idempotent retries")
 	assertContains(t, cmd, "kill -0", "validates existing and newly started process")

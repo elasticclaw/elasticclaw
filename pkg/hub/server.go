@@ -2701,7 +2701,8 @@ exit 1`
 }
 
 func daytonaPrepareBridgeCommand() string {
-	return `export HOME=/home/daytona
+	return `set -e
+export HOME=/home/daytona
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
@@ -2713,7 +2714,12 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
   echo "claw-bridge already running"
   exit 0
 fi
+if [ ! -s /tmp/claw-bridge ]; then
+  echo "claw-bridge download missing at /tmp/claw-bridge"
+  exit 1
+fi
 sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge
+test -x /usr/local/bin/claw-bridge || { echo "claw-bridge installed at /usr/local/bin/claw-bridge is not executable"; exit 1; }
 rm -f "$PIDFILE"`
 }
 
