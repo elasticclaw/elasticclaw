@@ -88,9 +88,12 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
             'baseUrl': 'https://api.anthropic.com',
             'api': 'anthropic-messages',
             'models': [
-                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages'},
-                {'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages'},
-                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages'}
+                {'id': 'claude-sonnet-4-7', 'name': 'Claude Sonnet 4.7', 'api': 'anthropic-messages', 'maxTokens': 64000},
+                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages', 'maxTokens': 64000},
+                {'id': 'claude-opus-4-7',   'name': 'Claude Opus 4.7',   'api': 'anthropic-messages', 'maxTokens': 64000},
+                {'id': 'claude-opus-4-6',   'name': 'Claude Opus 4.6',   'api': 'anthropic-messages', 'maxTokens': 64000},
+                {'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages', 'maxTokens': 64000},
+                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages', 'maxTokens': 64000}
             ]
         }`, envVar)
 		case "fireworks":
