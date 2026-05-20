@@ -77,13 +77,22 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	seen := map[string]bool{}
 	var providerLines []string
 	anthropicEnvVar := ""
+	if activeKey.Provider == "anthropic" {
+		anthropicEnvVar = activeKey.EnvVarName()
+	} else {
+		for _, k := range keys {
+			if k.Provider == "anthropic" {
+				anthropicEnvVar = k.EnvVarName()
+				break
+			}
+		}
+	}
 
 	// Helper: build a single provider dict as a python literal.
 	buildEntry := func(k *types.LLMKeyConfig) string {
 		envVar := k.EnvVarName()
 		switch k.Provider {
 		case "anthropic":
-			anthropicEnvVar = envVar
 			return ""
 		case "fireworks":
 			return fmt.Sprintf(`'fireworks': {
