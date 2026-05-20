@@ -187,10 +187,25 @@ providers.update({
 	if anthropicEnvVar != "" {
 		anthropicPatch = fmt.Sprintf(`anthropic_key = os.environ.get('%s', '')
 if anthropic_key:
-    models = config.setdefault('models', {})
-    providers = models.setdefault('providers', {})
-    anthropic = providers.setdefault('anthropic', {})
-    anthropic['apiKey'] = anthropic_key
+    auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')
+    os.makedirs(os.path.dirname(auth_path), exist_ok=True)
+    try:
+        with open(auth_path) as f:
+            auth = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        auth = {}
+    profiles = auth.setdefault('profiles', {})
+    order = auth.setdefault('order', {})
+    profiles['anthropic:default'] = {
+        'provider': 'anthropic',
+        'mode': 'api_key',
+        'type': 'api_key',
+        'key': anthropic_key
+    }
+    anthropic_order = [p for p in order.get('anthropic', []) if p != 'anthropic:default']
+    order['anthropic'] = ['anthropic:default'] + anthropic_order
+    with open(auth_path, 'w') as f:
+        json.dump(auth, f, indent=2)
 `, anthropicEnvVar)
 	}
 
@@ -212,6 +227,7 @@ config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
     config['gateway']['auth'] = {'mode': 'password', 'password': gw_password}
+    config['gateway']['remote'] = {'password': gw_password}
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
