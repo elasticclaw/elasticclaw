@@ -90,7 +90,13 @@ func injectFigmaAPIDocs(files map[string]string, env map[string]string) map[stri
 		files["FIGMA_API.md"] = figmaAPIMarkdown
 	}
 	if !strings.Contains(files["TOOLS.md"], "FIGMA_API.md") {
-		files["TOOLS.md"] = strings.TrimRight(files["TOOLS.md"], "\n") + figmaToolsNote
+		existing := strings.TrimRight(files["TOOLS.md"], "\n")
+		note := strings.TrimLeft(figmaToolsNote, "\n")
+		if existing == "" {
+			files["TOOLS.md"] = note
+		} else {
+			files["TOOLS.md"] = existing + "\n\n" + note
+		}
 	}
 	return files
 }
