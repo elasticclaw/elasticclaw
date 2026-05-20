@@ -69,7 +69,6 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
-	_ = activeKey // used implicitly via the provider list
 
 	// Build per-provider config entries.
 	// We emit an entry for every unique provider across all configured keys.
@@ -83,19 +82,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 		envVar := k.EnvVarName()
 		switch k.Provider {
 		case "anthropic":
-			return fmt.Sprintf(`'anthropic': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.anthropic.com',
-            'api': 'anthropic-messages',
-            'models': [
-                {'id': 'claude-sonnet-4-7', 'name': 'Claude Sonnet 4.7', 'api': 'anthropic-messages', 'maxTokens': 64000},
-                {'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages', 'maxTokens': 64000},
-                {'id': 'claude-opus-4-7',   'name': 'Claude Opus 4.7',   'api': 'anthropic-messages', 'maxTokens': 64000},
-                {'id': 'claude-opus-4-6',   'name': 'Claude Opus 4.6',   'api': 'anthropic-messages', 'maxTokens': 64000},
-                {'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages', 'maxTokens': 64000},
-                {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages', 'maxTokens': 64000}
-            ]
-        }`, envVar)
+			return ""
 		case "fireworks":
 			return fmt.Sprintf(`'fireworks': {
             'apiKey': os.environ.get('%s', ''),
@@ -152,21 +139,39 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 		}
 	}
 
-	// Prioritize the active key's provider first
-	entry := buildEntry(activeKey)
-	seen[activeKey.Provider] = true
-	providerLines = append(providerLines, entry)
+	// Prioritize the active key's provider first. Anthropic is intentionally
+	// omitted so OpenClaw's bundled Anthropic provider owns model metadata.
+	if activeKey.Provider != "anthropic" {
+		entry := buildEntry(activeKey)
+		if entry != "" {
+			seen[activeKey.Provider] = true
+			providerLines = append(providerLines, entry)
+		}
+	}
 
 	// Then remaining keys
 	for _, k := range keys {
-		if seen[k.Provider] {
+		if k.Provider == "anthropic" || seen[k.Provider] {
+			continue
+		}
+		entry := buildEntry(k)
+		if entry == "" {
 			continue
 		}
 		seen[k.Provider] = true
-		providerLines = append(providerLines, buildEntry(k))
+		providerLines = append(providerLines, entry)
 	}
 
 	providersDict := strings.Join(providerLines, ",\n        ")
+	modelsPatch := ""
+	if providersDict != "" {
+		modelsPatch = fmt.Sprintf(`models = config.setdefault('models', {})
+providers = models.setdefault('providers', {})
+providers.update({
+        %s
+})
+`, providersDict)
+	}
 
 	return fmt.Sprintf(`python3 << 'PYEOF'
 import json, os
@@ -181,12 +186,7 @@ except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
 config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
-config['models'] = {
-    'providers': {
-        %s
-    }
-}
-config.setdefault('gateway', {})['bind'] = 'loopback'
+%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
@@ -194,7 +194,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, providersDict)
+PYEOF`, modelsPatch)
 }
 
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads

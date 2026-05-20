@@ -308,20 +308,32 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	assertContains(t, snippet, "'codex': {\n            'apiKey': os.environ.get('CODEX_API_KEY', ''),", "codex apiKey with correct env var")
 }
 
-func TestBuildOpenClawProviderConfig_AnthropicModelsIncludeMaxTokens(t *testing.T) {
+func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "anthropic-main", Provider: "anthropic", Default: true},
 	}
 
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
-	assertContains(t, snippet, "'api': 'anthropic-messages'", "anthropic messages transport")
-	assertContains(t, snippet, "{'id': 'claude-sonnet-4-7', 'name': 'Claude Sonnet 4.7', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.7 maxTokens")
-	assertContains(t, snippet, "{'id': 'claude-sonnet-4-6', 'name': 'Claude Sonnet 4.6', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.6 maxTokens")
-	assertContains(t, snippet, "{'id': 'claude-opus-4-7',   'name': 'Claude Opus 4.7',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.7 maxTokens")
-	assertContains(t, snippet, "{'id': 'claude-opus-4-6',   'name': 'Claude Opus 4.6',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.6 maxTokens")
-	assertContains(t, snippet, "{'id': 'claude-opus-4-5',   'name': 'Claude Opus 4.5',   'api': 'anthropic-messages', 'maxTokens': 64000}", "opus 4.5 maxTokens")
-	assertContains(t, snippet, "{'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'api': 'anthropic-messages', 'maxTokens': 64000}", "sonnet 4.5 maxTokens")
+	assertContains(t, snippet, "config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model", "still sets default model")
+	assertNotContains(t, snippet, "'anthropic': {", "does not replace OpenClaw's bundled Anthropic provider config")
+	assertNotContains(t, snippet, "config['models'] =", "does not replace the models section")
+	assertNotContains(t, snippet, "providers.update", "does not add an empty providers patch for Anthropic-only config")
+}
+
+func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "anthropic-main", Provider: "anthropic", Default: true},
+		{Name: "groq-main", Provider: "groq"},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
+
+	assertContains(t, snippet, "models = config.setdefault('models', {})", "preserves existing models section")
+	assertContains(t, snippet, "providers = models.setdefault('providers', {})", "preserves existing providers")
+	assertContains(t, snippet, "providers.update({", "merges custom provider config")
+	assertContains(t, snippet, "'groq': {", "adds custom provider")
+	assertNotContains(t, snippet, "'anthropic': {", "does not add Anthropic custom provider")
 }
 
 // ── Shellcheck test ───────────────────────────────────────────────────────────
