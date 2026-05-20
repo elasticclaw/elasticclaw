@@ -398,8 +398,18 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	if err := json.Unmarshal(configData, &patched); err != nil {
 		t.Fatalf("parse patched config: %v", err)
 	}
-	providers := patched["models"].(map[string]interface{})["providers"].(map[string]interface{})
-	anthropic := providers["anthropic"].(map[string]interface{})
+	models, ok := patched["models"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models missing or wrong type: %#v", patched["models"])
+	}
+	providers, ok := models["providers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models.providers missing or wrong type: %#v", models["providers"])
+	}
+	anthropic, ok := providers["anthropic"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models.providers.anthropic missing or wrong type: %#v", providers["anthropic"])
+	}
 	if _, ok := anthropic["baseUrl"].(string); !ok {
 		t.Fatalf("anthropic baseUrl missing after patch: %#v", anthropic)
 	}
@@ -409,8 +419,14 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	if _, ok := anthropic["apiKey"]; ok {
 		t.Fatalf("anthropic provider config should not store apiKey: %#v", anthropic)
 	}
-	gateway := patched["gateway"].(map[string]interface{})
-	remote := gateway["remote"].(map[string]interface{})
+	gateway, ok := patched["gateway"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("gateway missing or wrong type: %#v", patched["gateway"])
+	}
+	remote, ok := gateway["remote"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("gateway.remote missing or wrong type: %#v", gateway["remote"])
+	}
 	if remote["password"] != "test-gw-password" {
 		t.Fatalf("gateway remote password not set: %#v", remote)
 	}
@@ -424,8 +440,14 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	if err := json.Unmarshal(authData, &auth); err != nil {
 		t.Fatalf("parse auth profiles: %v", err)
 	}
-	profiles := auth["profiles"].(map[string]interface{})
-	profile := profiles["anthropic:default"].(map[string]interface{})
+	profiles, ok := auth["profiles"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("auth profiles missing or wrong type: %#v", auth["profiles"])
+	}
+	profile, ok := profiles["anthropic:default"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("anthropic default profile missing or wrong type: %#v", profiles["anthropic:default"])
+	}
 	if profile["key"] != "sk-ant-test" || profile["provider"] != "anthropic" {
 		t.Fatalf("bad anthropic profile: %#v", profile)
 	}

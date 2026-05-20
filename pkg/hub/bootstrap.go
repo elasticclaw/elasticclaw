@@ -192,7 +192,7 @@ if anthropic_key:
     try:
         with open(auth_path) as f:
             auth = json.load(f)
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError):
         auth = {}
     profiles = auth.setdefault('profiles', {})
     order = auth.setdefault('order', {})
