@@ -116,11 +116,13 @@ func (f *FactoryConfig) Validate() error {
 
 	// Validate external trigger fields for external integration
 	if f.Integration == "external" {
-		if f.ExternalTrigger == nil {
-			return fmt.Errorf("factory %q: external_trigger is required for external integration", f.Name)
+		if f.ExternalTrigger == nil && !f.EnableManualTrigger {
+			return fmt.Errorf("factory %q: external_trigger is required for external integration (or set enable_manual_trigger: true)", f.Name)
 		}
-		if err := validateExternalTrigger(f.Name, f.ExternalTrigger); err != nil {
-			return err
+		if f.ExternalTrigger != nil {
+			if err := validateExternalTrigger(f.Name, f.ExternalTrigger); err != nil {
+				return err
+			}
 		}
 	}
 

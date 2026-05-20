@@ -221,6 +221,26 @@ func TestFactoryConfigValidate(t *testing.T) {
 			errMsg:  "invalid trigger.action",
 		},
 		{
+			name: "external factory missing external_trigger",
+			factory: &FactoryConfig{
+				Name:        "test-factory",
+				Integration: "external",
+				Template:    "base",
+			},
+			wantErr: true,
+			errMsg:  "external_trigger is required",
+		},
+		{
+			name: "external factory with enable_manual_trigger and no external_trigger",
+			factory: &FactoryConfig{
+				Name:                "test-factory",
+				Integration:         "external",
+				Template:            "base",
+				EnableManualTrigger: true,
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid repos with wildcard",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
