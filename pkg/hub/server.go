@@ -2395,7 +2395,7 @@ exit 1`
 	}
 	var downloadCmd string
 	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
-		downloadCmd = fmt.Sprintf(`curl -fsSL %q -o /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
+		downloadCmd = fmt.Sprintf(`rm -f /tmp/claw-bridge.download && curl -fsSL %q -o /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
 	} else {
 		// OCI ref (ttl.sh or ghcr) — use oras
 		downloadCmd = fmt.Sprintf(`
@@ -2404,7 +2404,7 @@ if ! command -v oras &>/dev/null; then
 fi
 mkdir -p /tmp/bridge-dl && cd /tmp/bridge-dl && oras pull %q
 BIN=$(find /tmp/bridge-dl -name 'claw-bridge*' -type f | head -1)
-cp "$BIN" /tmp/claw-bridge && chmod +x /tmp/claw-bridge && echo downloaded`, bridgeURL)
+cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
 	}
 	if err := s.downloadDaytonaConnector(ctx, clawID, instanceID, p, downloadCmd); err != nil {
 		return err
@@ -2636,20 +2636,104 @@ gh auth status`
 	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
 	// The bridge (and therefore the agent) must run inside the workspace
 	// directory so that repo-relative paths resolve correctly.
-	startCmd := fmt.Sprintf(
-		`export HOME=/home/daytona; \
-mkdir -p /home/daytona/.openclaw/workspace && \
-cd /home/daytona/.openclaw/workspace && \
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-setsid nohup /tmp/claw-bridge >> /tmp/claw-bridge.log 2>&1 </dev/null &
-echo started`,
-		s.clawHubURL(), clawID, clawToken, clawName)
-	if err := exec("start claw-bridge", 30*time.Second, startCmd); err != nil {
+	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, clawName); err != nil {
 		return err
 	}
 
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
+}
+
+func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName string) error {
+	prepCmd := daytonaPrepareBridgeCommand()
+	result, err := p.ExecWithTimeout(ctx, instanceID, []string{prepCmd}, 15*time.Second)
+	if err != nil {
+		return fmt.Errorf("start claw-bridge prep: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("start claw-bridge prep failed (exit %d): %s", result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
+	}
+	if strings.Contains(result.Stdout, "claw-bridge already running") {
+		log.Printf("[daytona] claw-bridge already running")
+		return nil
+	}
+
+	const sessionID = "elasticclaw-bridge"
+	if err := p.EnsureSession(ctx, instanceID, sessionID); err != nil {
+		return fmt.Errorf("start claw-bridge session: %w", err)
+	}
+	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName))
+	if err != nil {
+		return fmt.Errorf("start claw-bridge async: %w", err)
+	}
+	log.Printf("[daytona] claw-bridge async command started session=%s command=%s", sessionID, cmdID)
+
+	verifyCmd := `export HOME=/home/daytona
+PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
+if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "claw-bridge running pid=$(cat "$PIDFILE")"
+  exit 0
+fi
+if pgrep -x claw-bridge >/dev/null 2>&1; then
+  echo "claw-bridge running"
+  exit 0
+fi
+echo "claw-bridge is not running yet"
+tail -n 80 /home/daytona/claw-bridge.log 2>/dev/null || true
+exit 1`
+	var lastVerify string
+	for attempt := 1; attempt <= 5; attempt++ {
+		if attempt > 1 {
+			time.Sleep(1 * time.Second)
+		}
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{verifyCmd}, 5*time.Second)
+		if err != nil {
+			lastVerify = err.Error()
+			continue
+		}
+		if result.ExitCode == 0 {
+			log.Printf("[daytona] start claw-bridge done: %s", strings.TrimSpace(result.Stdout))
+			return nil
+		}
+		lastVerify = result.Stdout
+	}
+	return fmt.Errorf("start claw-bridge verification failed: %s", sanitizeBootstrapOutput(lastVerify))
+}
+
+func daytonaPrepareBridgeCommand() string {
+	return `export HOME=/home/daytona
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+cd /home/daytona/.openclaw/workspace
+PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
+if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "claw-bridge already running pid=$(cat "$PIDFILE")"
+  exit 0
+fi
+if pgrep -x claw-bridge >/dev/null 2>&1; then
+  echo "claw-bridge already running"
+  exit 0
+fi
+sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge
+rm -f "$PIDFILE"`
+}
+
+func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+cd /home/daytona/.openclaw/workspace
+PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
+LOG=/home/daytona/claw-bridge.log
+if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "claw-bridge already running pid=$(cat "$PIDFILE")"
+  exit 0
+fi
+if pgrep -x claw-bridge >/dev/null 2>&1; then
+  echo "claw-bridge already running"
+  exit 0
+fi
+rm -f "$PIDFILE"
+ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
+sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`, hubURL, clawID, clawToken, clawName)
 }
 
 func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {

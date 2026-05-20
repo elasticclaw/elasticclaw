@@ -50,6 +50,20 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 	assertContains(t, script, p.BridgeURL, "bridge URL in script")
 }
 
+func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
+	prep := daytonaPrepareBridgeCommand()
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "NEXT-156")
+
+	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
+	assertContains(t, prep, "sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge", "installs bridge outside tmp before execution")
+	assertContains(t, cmd, "exec /usr/local/bin/claw-bridge", "runs installed bridge from async session command")
+	assertContains(t, cmd, "claw-bridge.pid", "writes pid file for idempotent retries")
+	assertContains(t, cmd, "kill -0", "validates existing and newly started process")
+	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID="claw-123"`, "passes claw id to bridge")
+	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
+	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
+}
+
 func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "CONNECTOR_ATTEMPTS=6", "connector retry count")
