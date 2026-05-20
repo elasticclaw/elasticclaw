@@ -586,6 +586,33 @@ openclaw() {
 	}
 }
 
+func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T) {
+	cfg := &types.HubConfig{
+		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
+		ClawToken:  "test-claw-token",
+	}
+	script := buildGitHubCredentialHelper(cfg, "https://hub.example.com", "claw-123", nil)
+
+	assertContains(t, script, "set -euo pipefail", "strict shell mode")
+	assertContains(t, script, `if [ -z "${HOME:-}" ]; then`, "HOME fallback")
+	assertContains(t, script, "cannot configure git credential helper", "HOME validation error")
+	assertContains(t, script, "Configuring GitHub credential helper for user=$(whoami) home=$HOME", "user and HOME log")
+	assertContains(t, script, "sudo apt-get install -y git", "mandatory git install")
+	assertContains(t, script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials", "git helper registration")
+	assertContains(t, script, "git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null", "git helper verification")
+	assertContains(t, script, "git config --show-origin --global --get-all credential.helper", "git helper origin log")
+	assertNotContains(t, script, "sudo apt-get install -y git 2>/dev/null || true", "git install must not be silently optional")
+
+	gitConfigIdx := strings.Index(script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials")
+	ghInstallIdx := strings.Index(script, "Installing gh CLI")
+	if gitConfigIdx == -1 || ghInstallIdx == -1 {
+		t.Fatalf("expected git config and gh install markers in helper script")
+	}
+	if gitConfigIdx > ghInstallIdx {
+		t.Fatalf("mandatory git credential helper registration must happen before optional gh install")
+	}
+}
+
 // ── Container integration test ────────────────────────────────────────────────
 
 func TestBootstrapScript_ContainerRun(t *testing.T) {

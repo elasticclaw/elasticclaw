@@ -3849,6 +3849,17 @@ func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, re
 	clawToken := cfg.ClawToken
 	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
 	return fmt.Sprintf(`# Install GitHub credential helper
+set -euo pipefail
+if [ -z "${HOME:-}" ]; then
+  HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  export HOME
+fi
+if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
+  echo "ERROR: HOME is not set to a valid directory; cannot configure git credential helper" >&2
+  exit 1
+fi
+echo "Configuring GitHub credential helper for user=$(whoami) home=$HOME"
+
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
 # Git credential helper — fetches a fresh GitHub App installation token from the hub.
@@ -3865,28 +3876,40 @@ CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 
 # Install git + gh CLI
-if ! command -v git &>/dev/null || ! command -v gh &>/dev/null; then
-  echo "Installing git and gh CLI..."
+if ! command -v git &>/dev/null; then
+  echo "Installing git..."
   sudo apt-get update -qq
-  sudo apt-get install -y git 2>/dev/null || true
-  if ! command -v gh &>/dev/null; then
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-    sudo apt-get update -qq && sudo apt-get install -y gh 2>/dev/null || echo "gh install failed, continuing"
-  fi
+  sudo apt-get install -y git
 fi
 
 # Configure git to use the credential helper
-if command -v git &>/dev/null; then
-  git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
+git config --show-origin --global --get-all credential.helper
+
+# Install gh CLI if possible. gh is useful, but git credential registration above is mandatory.
+if ! command -v gh &>/dev/null; then
+  (
+    set +e
+    echo "Installing gh CLI..."
+    if curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null; then
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+      sudo apt-get update -qq && sudo apt-get install -y gh 2>/dev/null || echo "gh install failed, continuing"
+    else
+      echo "gh keyring install failed, continuing"
+    fi
+  ) || true
 fi
 
 # Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
 if command -v gh &>/dev/null; then
   # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
-  printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
-  sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-  echo "GitHub profile.d configured"
+  if printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null; then
+    sudo chmod +x /etc/profile.d/elasticclaw-github.sh || echo "GitHub profile.d chmod failed, continuing"
+    echo "GitHub profile.d configured"
+  else
+    echo "GitHub profile.d setup failed, continuing"
+  fi
 fi
 echo "GitHub credential helper installed"
 
