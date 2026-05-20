@@ -263,6 +263,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	templateFiles["SECRETS.md"] = secretsContent
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {

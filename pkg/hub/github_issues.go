@@ -676,6 +676,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	if len(secretList) > 0 {
 		templateFiles["SECRETS.md"] = "# Available Secrets\n\n" + strings.Join(secretList, "\n") + "\n\n> Do not write these values to files. They are injected as environment variables.\n"
 	}
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	// Build tags
 	tags := mergeTags(factory.Template, factory.Tags, nil)

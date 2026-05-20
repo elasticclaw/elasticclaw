@@ -116,6 +116,7 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 		LLMKey:       tmplCfg.LLMKey,
 		Files:        files,
 		Env:          env,
+		SecretRefs:   tmplCfg.SecretRefs,
 		GitHub:       tmplCfg.GitHub,
 		Linear:       tmplCfg.Linear,
 		Snapshot:     tmplCfg.Snapshot,

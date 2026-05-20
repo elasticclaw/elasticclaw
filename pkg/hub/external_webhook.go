@@ -24,7 +24,7 @@ import (
 type externalWebhookPayload struct {
 	// Common fields
 	EventType string `json:"event_type,omitempty"` // e.g., "released", "published"
-	Action    string `json:"action,omitempty"`       // e.g., "released", "created"
+	Action    string `json:"action,omitempty"`     // e.g., "released", "created"
 
 	// GitHub release fields
 	Release *struct {
@@ -43,12 +43,12 @@ type externalWebhookPayload struct {
 
 	// Repository info (GitHub-style)
 	Repository struct {
-		FullName    string `json:"full_name"`
-		Name        string `json:"name"`
-		Owner       struct {
+		FullName string `json:"full_name"`
+		Name     string `json:"name"`
+		Owner    struct {
 			Login string `json:"login"`
 		} `json:"owner"`
-		HTMLURL     string `json:"html_url"`
+		HTMLURL string `json:"html_url"`
 	} `json:"repository,omitempty"`
 
 	// Sender info
@@ -100,8 +100,8 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	switch event {
 	case "release":
 		var ghReleasePayload struct {
-			Action     string `json:"action"`
-			Release    struct {
+			Action  string `json:"action"`
+			Release struct {
 				TagName     string `json:"tag_name"`
 				Name        string `json:"name"`
 				Body        string `json:"body"`
@@ -120,7 +120,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 				Owner    struct {
 					Login string `json:"login"`
 				} `json:"owner"`
-				HTMLURL  string `json:"html_url"`
+				HTMLURL string `json:"html_url"`
 			} `json:"repository"`
 			Sender struct {
 				Login string `json:"login"`
@@ -417,9 +417,9 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 
 	// Store trigger inputs as JSON
 	inputs := map[string]string{
-		"event_type":    eventType,
-		"repository":    repoFullName,
-		"trigger_id":    triggerID,
+		"event_type": eventType,
+		"repository": repoFullName,
+		"trigger_id": triggerID,
 	}
 	if payload.Release != nil {
 		inputs["release_tag"] = payload.Release.TagName
@@ -527,6 +527,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			}
 		}
 	}
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields
 	var (
@@ -658,8 +659,8 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			Provider:     provider,
 			Files:        templateFiles,
 			Env:          env,
-			InstanceType:   instanceType,
-			ProviderName:   "ec-" + clawID[:8],
+			InstanceType: instanceType,
+			ProviderName: "ec-" + clawID[:8],
 		}
 		fileBytes := make(map[string][]byte, len(templateFiles))
 		for k, v := range templateFiles {

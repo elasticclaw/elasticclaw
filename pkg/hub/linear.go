@@ -800,6 +800,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 			}
 		}
 	}
+	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
 	ctx := context.Background()
 	req := types.CreateClawRequest{
