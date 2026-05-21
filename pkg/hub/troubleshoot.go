@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -20,6 +22,8 @@ type troubleshootRequest struct {
 	TimeRange      string `json:"time_range"`
 	StillHappening *bool  `json:"still_happening,omitempty"`
 }
+
+const maxProblemLen = 4000
 
 func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -35,19 +39,15 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 		http.Error(w, "problem required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Problem) > maxProblemLen {
+		req.Problem = req.Problem[:maxProblemLen]
+	}
 	if req.TimeRange == "" {
 		req.TimeRange = "1hour"
 	}
 
-	logs := gatherJournalLogs(req.TimeRange)
-
-	var sanitizedCfg string
-	if diskCfg, err := config.LoadHubConfig(); err == nil {
-		sanitizedCfg, _ = sanitizeHubConfig(diskCfg)
-	}
-
-	sources := fetchGitHubSources(Commit)
-
+	// Flush SSE headers immediately so the client isn't waiting in silence
+	// while context is gathered.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -58,12 +58,35 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
+	flusher.Flush()
 
-	sendEvent := func(v interface{}) {
+	sendEvent := func(v any) {
 		b, _ := json.Marshal(v)
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+
+	// Gather logs, config, and GitHub sources concurrently.
+	var logs, sanitizedCfg string
+	var sources map[string]string
+	var wg sync.WaitGroup
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		logs = gatherJournalLogs(req.TimeRange)
+	}()
+	go func() {
+		defer wg.Done()
+		if diskCfg, err := config.LoadHubConfig(); err == nil {
+			sanitizedCfg, _ = sanitizeHubConfig(diskCfg)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		sources = fetchGitHubSources(r.Context(), Commit)
+	}()
+	wg.Wait()
 
 	s.mu.RLock()
 	llmKeys := s.hubCfg.LLMKeys
@@ -134,7 +157,7 @@ type githubContentsResponse struct {
 	Encoding string `json:"encoding"`
 }
 
-func fetchGitHubSources(commit string) map[string]string {
+func fetchGitHubSources(ctx context.Context, commit string) map[string]string {
 	ref := commit
 	if ref == "" || ref == "none" || ref == "dev" {
 		ref = "main"
@@ -142,54 +165,64 @@ func fetchGitHubSources(commit string) map[string]string {
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	result := make(map[string]string, len(troubleshootSourceFiles))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, path := range troubleshootSourceFiles {
-		url := fmt.Sprintf("https://api.github.com/repos/elasticclaw/elasticclaw/contents/%s?ref=%s", path, ref)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			result[path] = fmt.Sprintf("(request error: %s)", err)
-			continue
-		}
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			result[path] = fmt.Sprintf("(fetch error: %s)", err)
-			continue
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusOK {
-			result[path] = fmt.Sprintf("(unavailable: HTTP %d)", resp.StatusCode)
-			continue
-		}
-
-		var ghResp githubContentsResponse
-		if err := json.Unmarshal(body, &ghResp); err != nil || ghResp.Encoding != "base64" {
-			result[path] = "(parse error)"
-			continue
-		}
-
-		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(ghResp.Content, "\n", ""))
-		if err != nil {
-			result[path] = "(decode error)"
-			continue
-		}
-
-		content := string(decoded)
-		if len(content) > 12000 {
-			content = content[:12000] + "\n... (truncated)"
-		}
-		result[path] = content
+		path := path
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			content := fetchOneGitHubFile(ctx, client, ref, path)
+			mu.Lock()
+			result[path] = content
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 	return result
+}
+
+func fetchOneGitHubFile(ctx context.Context, client *http.Client, ref, path string) string {
+	url := fmt.Sprintf("https://api.github.com/repos/elasticclaw/elasticclaw/contents/%s?ref=%s", path, ref)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Sprintf("(request error: %s)", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("(fetch error: %s)", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("(unavailable: HTTP %d)", resp.StatusCode)
+	}
+
+	var ghResp githubContentsResponse
+	if err := json.Unmarshal(body, &ghResp); err != nil || ghResp.Encoding != "base64" {
+		return "(parse error)"
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(ghResp.Content, "\n", ""))
+	if err != nil {
+		return "(decode error)"
+	}
+
+	content := string(decoded)
+	if len(content) > 12000 {
+		content = content[:12000] + "\n... (truncated)"
+	}
+	return content
 }
 
 func buildTroubleshootPrompt(sanitizedCfg, logs string, sources map[string]string) string {
 	var sb strings.Builder
 
 	sb.WriteString("You are a diagnostic assistant for ElasticClaw, an AI coding agent platform.\n\n")
-	sb.WriteString(fmt.Sprintf("Running version: %s (commit: %s)\n\n", Version, Commit))
+	fmt.Fprintf(&sb, "Running version: %s (commit: %s)\n\n", Version, Commit)
 
 	if sanitizedCfg != "" {
 		sb.WriteString("Current hub.yaml (secrets masked as ***):\n---\n")
@@ -212,7 +245,7 @@ func buildTroubleshootPrompt(sanitizedCfg, logs string, sources map[string]strin
 			if !ok {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("// %s\n```go\n%s\n```\n\n", path, content))
+			fmt.Fprintf(&sb, "// %s\n```go\n%s\n```\n\n", path, content)
 		}
 	}
 
