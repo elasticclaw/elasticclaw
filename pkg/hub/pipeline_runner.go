@@ -570,18 +570,26 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='' WHERE id=? AND status != 'deleted'`, clawID)
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
+	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "error", "reason": reason},
+		Payload: map[string]string{"claw_id": clawID, "status": "error", "reason": safeReason},
 	})
 
 	// 3. Write issue-tracker comment based on factory integration
 	if factory != nil && issueID != "" {
+		var commentBody string
+		getCommentBody := func() string {
+			if commentBody == "" {
+				commentBody = s.buildAgentStopComment(clawID, reason)
+			}
+			return commentBody
+		}
 		switch factory.Integration {
 		case "linear":
 			token := s.resolveLinearTokenForFactory(factory)
 			if token != "" {
-				if err := s.commentLinearIssue(token, issueID, fmt.Sprintf("Agent stopped: %s", reason)); err != nil {
+				if err := s.commentLinearIssue(token, issueID, getCommentBody()); err != nil {
 					log.Printf("[stopAgent] failed to comment Linear issue %s: %v", issueID, err)
 				} else {
 					log.Printf("[stopAgent] commented Linear issue %s", issueID)
@@ -590,7 +598,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 		case "shortcut":
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token != "" {
-				if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, fmt.Sprintf("Agent stopped: %s", reason)); err != nil {
+				if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, getCommentBody()); err != nil {
 					log.Printf("[stopAgent] failed to comment Shortcut story %s: %v", issueID, err)
 				} else {
 					log.Printf("[stopAgent] commented Shortcut story %s", issueID)
@@ -604,7 +612,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 					repo := parts[0] + "/" + parts[1]
 					var issueNum int
 					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
-						if err := commentGitHubIssue(token, repo, issueNum, fmt.Sprintf("Agent stopped: %s", reason)); err != nil {
+						if err := commentGitHubIssue(token, repo, issueNum, getCommentBody()); err != nil {
 							log.Printf("[stopAgent] failed to comment GitHub issue %s: %v", issueID, err)
 						} else {
 							log.Printf("[stopAgent] commented GitHub issue %s", issueID)
@@ -618,7 +626,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	// 4. Disconnect WebSocket if still connected
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, "Agent stopped: "+reason)
+		cc.conn.Close(1000, "Agent stopped: "+safeReason)
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
