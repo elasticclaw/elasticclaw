@@ -11,13 +11,13 @@ import (
 )
 
 type TestServer struct {
-	Server      *hub.Server
-	HTTPSrv     *httptest.Server
-	GitHub      *MockGitHub
+	Server       *hub.Server
+	HTTPSrv      *httptest.Server
+	GitHub       *MockGitHub
 	GitHubIssues *MockGitHubIssues
-	Linear      *MockLinear
-	Shortcut    *MockShortcut
-	DB          *sql.DB
+	Linear       *MockLinear
+	Shortcut     *MockShortcut
+	DB           *sql.DB
 }
 
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
@@ -173,12 +173,12 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 	t.Cleanup(httpSrv.Close)
 
 	return &TestServer{
-		Server:      s,
-		HTTPSrv:     httpSrv,
-		GitHub:      gh,
-		Linear:      li,
-		Shortcut:    sc,
-		DB:          db,
+		Server:   s,
+		HTTPSrv:  httpSrv,
+		GitHub:   gh,
+		Linear:   li,
+		Shortcut: sc,
+		DB:       db,
 	}
 }
 
@@ -201,7 +201,7 @@ func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 				DoneStatus:    "closed",
 				Template:      "elasticclaw",
 				Provider:      "noop",
-				Repos:         []string{"testorg/testrepo"},
+				TriggerRepos:  []string{"testorg/testrepo"},
 				WebhookSecret: "test-webhook-secret",
 				PipelineYAML: `stages:
   - id: working

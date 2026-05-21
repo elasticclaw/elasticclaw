@@ -482,8 +482,9 @@ type FactoryConfig struct {
 	// created by this factory. Resolved at claw creation time.
 	SecretRefs map[string]string `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
 	// GitHub factory fields (integration: github)
-	Repos   []string       `yaml:"repos,omitempty" json:"repos,omitempty"` // e.g. ["can-io/canio", "can-io/*"]
-	Trigger *GitHubTrigger `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	Repos        []string       `yaml:"repos,omitempty" json:"repos,omitempty"`                 // legacy trigger repos for GitHub factories
+	TriggerRepos []string       `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"` // repos/orgs allowed to trigger this factory, e.g. ["can-io/canio", "can-io/*"]
+	Trigger      *GitHubTrigger `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 
 	// External trigger fields (integration: external)
 	// ExternalTrigger defines what external event triggers this factory.

@@ -490,12 +490,17 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		if f.Enabled != nil && !*f.Enabled {
 			continue
 		}
-		if len(f.Repos) == 0 {
-			log.Printf("[poll-github-issues] factory %q: missing required 'repos' field — skipping", f.Name)
+		triggerRepos := githubIssuesPollingRepos(f)
+		if len(triggerRepos) == 0 {
+			log.Printf("[poll-github-issues] factory %q: missing required 'trigger_repos' field — skipping", f.Name)
 			continue
 		}
-		for _, repo := range f.Repos {
+		for _, repo := range triggerRepos {
 			if repo == "" {
+				continue
+			}
+			if strings.HasSuffix(repo, "/*") {
+				log.Printf("[poll-github-issues] factory %q: trigger_repos entry %q is an org wildcard; webhooks can match it, but polling requires exact owner/repo entries", f.Name, repo)
 				continue
 			}
 			repoFactories[repo] = append(repoFactories[repo], f)
@@ -530,6 +535,14 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 			s.processGitHubIssuesPollItem(issue, repoFactories, repo, token, base)
 		}
 	}
+}
+
+func githubIssuesPollingRepos(factory *types.FactoryConfig) []string {
+	if len(factory.TriggerRepos) > 0 {
+		return factory.TriggerRepos
+	}
+	// Backward compatibility for older GitHub Issues factory configs.
+	return factory.Repos
 }
 
 type githubIssuesPollItem struct {
