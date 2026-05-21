@@ -826,12 +826,6 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 			return
 		}
-
-		_, _ = s.db.Exec(`UPDATE claws SET status='online' WHERE id=?`, clawID)
-		s.broadcastToUsers(tenantID, types.WSMessage{
-			Type:    "claw_status",
-			Payload: map[string]string{"claw_id": clawID, "status": "online"},
-		})
 		log.Printf("[factory] claw %s provisioned successfully", clawID[:8])
 	}()
 
