@@ -529,6 +529,12 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
+	return streamLLMWithSystemPrompt(ctx, systemPrompt, msgs, llmKeys, defaultModel, onToken)
+}
+
+// streamLLMWithSystemPrompt selects a provider from llmKeys/defaultModel and streams tokens via onToken.
+// Callers supply a fully-built system prompt and message list.
+func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
 	var anthropicKey, openaiKey, codexKey string
 	var firstKey *types.LLMKeyConfig
 	for _, k := range llmKeys {
@@ -550,7 +556,6 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		return fmt.Errorf("no LLM keys configured")
 	}
 
-	// Try defaultModel provider first
 	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
 	switch defaultProvider {
 	case "anthropic":
@@ -567,7 +572,6 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		}
 	}
 
-	// Fall back to hard-coded priority
 	if anthropicKey != "" {
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
@@ -578,14 +582,11 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
 	}
 
-	// firstKey.Provider is neither "anthropic" nor "openai" nor "codex" (those paths already
-	// returned above). Fall back to blocking call for unsupported providers.
-	reply, err := callLLMForConfig(sanitizedYAML, message, history, llmKeys, defaultModel)
-	if err != nil {
-		return err
+	availableProviders := uniqueProviders(llmKeys)
+	if defaultProvider != "" {
+		return fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
 	}
-	onToken(reply)
-	return nil
+	return fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex; configured: %s)", strings.Join(availableProviders, ", "))
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
