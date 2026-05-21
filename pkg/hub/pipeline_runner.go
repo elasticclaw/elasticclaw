@@ -75,6 +75,10 @@ func isRetryableGitHubError(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	// Parse and request-construction errors are permanent — don't retry.
+	if strings.HasPrefix(msg, "parse github issue response") {
+		return false
+	}
 	if !strings.Contains(msg, "github API GET") {
 		// network-level error (no HTTP response at all)
 		return true
@@ -105,7 +109,7 @@ func (s *Server) fetchGitHubIssueDetailsWithRetry(clawID, token, repo string, is
 			break
 		}
 		log.Printf("[pipeline] fetchGitHubIssueDetails attempt %d/%d failed for %s/%d: %v — retrying in %s", attempt, maxAttempts, repo, issueNumber, err, backoff)
-		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] GitHub API temporarily unavailable — retrying (attempt %d/%d, waiting %s)…", attempt, maxAttempts-1, backoff))
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] GitHub API temporarily unavailable — retry %d/%d in %s…", attempt, maxAttempts-1, backoff))
 		time.Sleep(backoff)
 		backoff *= 2
 	}
