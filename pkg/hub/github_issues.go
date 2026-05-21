@@ -279,6 +279,11 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — disabled", factory.Name)
 			continue
 		}
+		if !githubRepoMatches(payload.Repository.FullName, githubIssuesTriggerRepos(factory)) {
+			log.Printf("[github-issues-webhook] factory %q: SKIP — repo %q not in trigger_repos %v",
+				factory.Name, payload.Repository.FullName, githubIssuesTriggerRepos(factory))
+			continue
+		}
 
 		// Workspace filter: for Linear/Shortcut, workspace selects the integration token.
 		// For GitHub Issues, workspace is just a human label — no token resolution needed.
@@ -471,6 +476,13 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			}
 		}
 	}
+}
+
+func githubIssuesTriggerRepos(factory *types.FactoryConfig) []string {
+	if len(factory.TriggerRepos) > 0 {
+		return factory.TriggerRepos
+	}
+	return nil
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {

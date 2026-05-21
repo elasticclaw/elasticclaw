@@ -136,6 +136,14 @@ func (f *FactoryConfig) Validate() error {
 			return fmt.Errorf("factory %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
+	for i, repo := range f.TriggerRepos {
+		if repo == "" {
+			return fmt.Errorf("factory %q: trigger_repos[%d] cannot be empty", f.Name, i)
+		}
+		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+			return fmt.Errorf("factory %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
+		}
+	}
 
 	return nil
 }
