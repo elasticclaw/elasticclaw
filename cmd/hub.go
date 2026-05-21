@@ -97,7 +97,8 @@ func runHub(cmd *cobra.Command, args []string) error {
 		hubCfg.UIPassword = hubUIPassword
 	}
 
-	hub.Version = Version // propagate build-time version for bridge download URL
+	hub.Version = Version
+	hub.Commit = Commit
 
 	// Ensure external storage directories exist (factories/, templates/)
 	if err := hub.EnsureExternalDirs(); err != nil {
