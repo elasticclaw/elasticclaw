@@ -279,9 +279,10 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — disabled", factory.Name)
 			continue
 		}
-		if !githubRepoMatches(payload.Repository.FullName, githubIssuesTriggerRepos(factory)) {
+		triggerRepos := githubIssuesTriggerRepos(factory)
+		if !githubRepoMatches(payload.Repository.FullName, triggerRepos) {
 			log.Printf("[github-issues-webhook] factory %q: SKIP — repo %q not in trigger_repos %v",
-				factory.Name, payload.Repository.FullName, githubIssuesTriggerRepos(factory))
+				factory.Name, payload.Repository.FullName, triggerRepos)
 			continue
 		}
 
@@ -482,7 +483,8 @@ func githubIssuesTriggerRepos(factory *types.FactoryConfig) []string {
 	if len(factory.TriggerRepos) > 0 {
 		return factory.TriggerRepos
 	}
-	return nil
+	// Backward compatibility for older GitHub Issues factory configs.
+	return factory.Repos
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
@@ -1083,17 +1085,9 @@ func (s *Server) resolveGitHubIssuesTokenForRepo(repoFullName string) string {
 		if factory.Integration != "github-issues" {
 			continue
 		}
-		if len(factory.Repos) > 0 {
-			matched := false
-			for _, r := range factory.Repos {
-				if r == repoFullName {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
+		triggerRepos := githubIssuesTriggerRepos(factory)
+		if len(triggerRepos) > 0 && !githubRepoMatches(repoFullName, triggerRepos) {
+			continue
 		}
 		token := s.resolveGitHubIssuesTokenForFactory(factory)
 		if token != "" {
