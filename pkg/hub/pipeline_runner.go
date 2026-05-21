@@ -68,6 +68,50 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 	}, nil
 }
 
+// isRetryableGitHubError returns true for transient errors worth retrying:
+// 5xx HTTP responses and network-level failures.
+func isRetryableGitHubError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "github API GET") {
+		// network-level error (no HTTP response at all)
+		return true
+	}
+	for _, code := range []string{": 429 ", ": 500 ", ": 502 ", ": 503 ", ": 504 "} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchGitHubIssueDetailsWithRetry wraps fetchGitHubIssueDetails with exponential
+// backoff for transient errors. It injects status messages into the claw so the
+// user can see retries in the UI. On permanent failure it returns the last error
+// without stopping or erroring the claw — the caller decides what to do.
+func (s *Server) fetchGitHubIssueDetailsWithRetry(clawID, token, repo string, issueNumber int, baseURL string) (*githubIssueDetails, error) {
+	const maxAttempts = 4
+	backoff := time.Second
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		details, err := s.fetchGitHubIssueDetails(token, repo, issueNumber, baseURL)
+		if err == nil {
+			return details, nil
+		}
+		lastErr = err
+		if attempt == maxAttempts || !isRetryableGitHubError(err) {
+			break
+		}
+		log.Printf("[pipeline] fetchGitHubIssueDetails attempt %d/%d failed for %s/%d: %v — retrying in %s", attempt, maxAttempts, repo, issueNumber, err, backoff)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] GitHub API temporarily unavailable — retrying (attempt %d/%d, waiting %s)…", attempt, maxAttempts-1, backoff))
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	return nil, lastErr
+}
+
 // githubAPIAddLabel adds a label to a GitHub issue. Unlike
 // githubAPIPostWithBase, this does not attempt to unmarshal the response body
 // (POST /labels returns a JSON array of label objects, not a JSON object).
@@ -226,16 +270,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			if base == "" {
 				base = "https://api.github.com"
 			}
-			details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
-			if err != nil {
-				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s: %v, putting claw in error state", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
-			}
-			if details == nil {
-				log.Printf("[pipeline] fetchGitHubIssueDetails returned nil for %s, putting claw in error state", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID), false)
-				return
+			details, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
+			if err != nil || details == nil {
+				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s after retries: %v — continuing without issue details", issueID, err)
+				s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Warning: could not fetch GitHub issue details for %s (GitHub API error). Continuing without issue context.", issueID))
+				details = &githubIssueDetails{Identifier: issueID}
 			}
 			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
 			tmpl, err := template.New("inject").Parse(injectMsg)
