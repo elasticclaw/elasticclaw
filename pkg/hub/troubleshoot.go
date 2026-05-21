@@ -74,7 +74,7 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		logs = gatherJournalLogs(req.TimeRange)
+		logs = gatherJournalLogs(r.Context(), req.TimeRange)
 	}()
 	go func() {
 		defer wg.Done()
@@ -106,18 +106,18 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 	sendEvent(map[string]string{"type": "done"})
 }
 
-func gatherJournalLogs(timeRange string) string {
+func gatherJournalLogs(ctx context.Context, timeRange string) string {
 	since := timeRangeToSince(timeRange)
 	var parts []string
 
-	statusOut, err := exec.Command("systemctl", "status", "elasticclaw", "--no-pager", "-l").CombinedOutput()
+	statusOut, err := exec.CommandContext(ctx, "systemctl", "status", "elasticclaw", "--no-pager", "-l").CombinedOutput()
 	if err == nil {
 		parts = append(parts, "=== systemctl status elasticclaw ===\n"+string(statusOut))
 	}
 
-	logOut, err := exec.Command("journalctl", "-u", "elasticclaw", "--since", since, "--no-pager", "-n", "500", "-o", "short-iso").CombinedOutput()
+	logOut, err := exec.CommandContext(ctx, "journalctl", "-u", "elasticclaw", "--since", since, "--no-pager", "-n", "500", "-o", "short-iso").CombinedOutput()
 	if err != nil {
-		logOut2, err2 := exec.Command("journalctl", "--since", since, "--no-pager", "-n", "200", "-o", "short-iso", "--grep", "elasticclaw").CombinedOutput()
+		logOut2, err2 := exec.CommandContext(ctx, "journalctl", "--since", since, "--no-pager", "-n", "200", "-o", "short-iso", "--grep", "elasticclaw").CombinedOutput()
 		if err2 != nil {
 			parts = append(parts, "(journalctl unavailable on this system)")
 		} else {
