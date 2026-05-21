@@ -9,10 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
-
-type Section = "runtimes" | "models" | "github" | "authentication" | "issue-trackers" | "factories" | "secrets" | "templates" | "ai-config" | "mcp-servers" | "webhooks" | "doctor" | "analytics" | "troubleshoot"
-
-const VALID_SECTIONS: Section[] = ["runtimes", "models", "github", "authentication", "issue-trackers", "factories", "secrets", "templates", "ai-config", "mcp-servers", "webhooks", "doctor", "analytics", "troubleshoot"]
+import { VALID_SECTIONS, type Section } from "./sections"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
