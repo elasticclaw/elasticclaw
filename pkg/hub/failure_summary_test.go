@@ -3,6 +3,7 @@ package hub
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -52,6 +53,32 @@ func TestFallbackFailureSummaryDoesNotDumpRawLogs(t *testing.T) {
 	}
 	if !strings.Contains(got, "sanitized fallback") || !strings.Contains(got, "useful: ssh timed out") {
 		t.Fatalf("fallback missing expected summary/detail:\n%s", got)
+	}
+}
+
+func TestClampFailureCommentPreservesUTF8(t *testing.T) {
+	got := clampFailureComment(strings.Repeat("é", failureCommentLimit+10))
+	if !utf8.ValidString(got) {
+		t.Fatalf("clamped comment is not valid UTF-8")
+	}
+	if !strings.Contains(got, "[truncated]") {
+		t.Fatalf("expected truncation marker in:\n%s", got)
+	}
+}
+
+func TestCloneLLMKeysCopiesStructValues(t *testing.T) {
+	original := types.LLMKeysList{
+		{Name: "openai-main", Provider: "openai", APIKey: "old-key", DefaultModel: "gpt-4o-mini"},
+	}
+	cloned := cloneLLMKeys(original)
+	original[0].APIKey = "new-key"
+	original[0].DefaultModel = "gpt-4o"
+
+	if cloned[0] == original[0] {
+		t.Fatal("clone reused original LLM key pointer")
+	}
+	if cloned[0].APIKey != "old-key" || cloned[0].DefaultModel != "gpt-4o-mini" {
+		t.Fatalf("clone changed after original mutation: %#v", cloned[0])
 	}
 }
 

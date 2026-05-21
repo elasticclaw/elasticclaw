@@ -34,7 +34,7 @@ func (s *Server) buildAgentStopComment(clawID, reason string) string {
 	sanitized := sanitizeFailureDetails(reason)
 
 	s.mu.RLock()
-	llmKeys := append(types.LLMKeysList(nil), s.hubCfg.LLMKeys...)
+	llmKeys := cloneLLMKeys(s.hubCfg.LLMKeys)
 	defaultModel := s.hubCfg.DefaultModel
 	s.mu.RUnlock()
 
@@ -89,8 +89,8 @@ func sanitizeFailureDetails(raw string) string {
 		}
 	}
 	s = strings.TrimSpace(strings.Join(out, "\n"))
-	if len(s) > failureSummaryInputLimit {
-		s = s[:failureSummaryInputLimit] + "\n[truncated]"
+	if runeLen(s) > failureSummaryInputLimit {
+		s = truncateRunes(s, failureSummaryInputLimit) + "\n[truncated]"
 	}
 	return s
 }
@@ -131,10 +131,37 @@ func firstUsefulFailureLines(s string, maxLines int) string {
 
 func clampFailureComment(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= failureCommentLimit {
+	if runeLen(s) <= failureCommentLimit {
 		return s
 	}
-	return strings.TrimSpace(s[:failureCommentLimit]) + "\n\n[truncated]"
+	return strings.TrimSpace(truncateRunes(s, failureCommentLimit)) + "\n\n[truncated]"
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
+}
+
+func truncateRunes(s string, limit int) string {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit])
+}
+
+func cloneLLMKeys(keys types.LLMKeysList) types.LLMKeysList {
+	if len(keys) == 0 {
+		return nil
+	}
+	cloned := make(types.LLMKeysList, 0, len(keys))
+	for _, key := range keys {
+		if key == nil {
+			continue
+		}
+		keyCopy := *key
+		cloned = append(cloned, &keyCopy)
+	}
+	return cloned
 }
 
 func summarizeFailureWithLLM(ctx context.Context, sanitizedReason string, llmKeys types.LLMKeysList, defaultModel string) (string, error) {
