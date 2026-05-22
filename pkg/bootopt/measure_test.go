@@ -1,6 +1,9 @@
 package bootopt
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +56,90 @@ func TestRunTiming_AllErrorsReturnsError(t *testing.T) {
 	}
 	if len(runs) != 2 {
 		t.Fatalf("len(runs) = %d, want 2", len(runs))
+	}
+}
+
+func TestRunVMBootTestReturnsCleanupError(t *testing.T) {
+	const clawID = "550e8400-e29b-41d4-a716-446655440000"
+	bin := filepath.Join(t.TempDir(), "elasticclaw")
+	script := `#!/bin/sh
+case "$1" in
+create)
+	echo "Created claw bootopt (id: 550e8400-e29b-41d4-a716-446655440000)"
+	;;
+list)
+	printf '[{"id":"550e8400-e29b-41d4-a716-446655440000","status":"online"}]\n'
+	;;
+kill)
+	echo "kill failed for $2" >&2
+	exit 17
+	;;
+*)
+	echo "unexpected command: $1" >&2
+	exit 2
+	;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+
+	runner := NewVMTestRunnerWithConfig(bin, "", "base")
+	result, err := runner.RunVMBootTest(t.Context())
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.ClawID != clawID {
+		t.Fatalf("claw ID = %q, want %q", result.ClawID, clawID)
+	}
+	if result.Error != "" {
+		t.Fatalf("result error = %q, want empty boot error", result.Error)
+	}
+	if !strings.Contains(result.CleanupError, "cleanup claw "+clawID) {
+		t.Fatalf("cleanup error %q missing claw cleanup context", result.CleanupError)
+	}
+	if !strings.Contains(err.Error(), "kill failed for "+clawID) {
+		t.Fatalf("error %q missing kill failure output", err.Error())
+	}
+}
+
+func TestAggregateVMBootResultsIncludesCleanupFailures(t *testing.T) {
+	results := []*VMBootResult{
+		{
+			TotalMs:      100,
+			Phases:       map[string]int64{"vm_create_api": 10, "vm_provisioning": 20, "bootstrap": 70},
+			CleanupError: "cleanup failed",
+		},
+		{
+			TotalMs: 300,
+			Phases:  map[string]int64{"vm_create_api": 30, "vm_provisioning": 60, "bootstrap": 210},
+		},
+		{
+			Error:  "wait online failed",
+			Phases: map[string]int64{"vm_create_api": 5},
+		},
+	}
+
+	mean, median, p95, phaseMeans := AggregateVMBootResults(results)
+	if mean != 200 {
+		t.Fatalf("mean = %d, want 200", mean)
+	}
+	if median != 200 {
+		t.Fatalf("median = %d, want 200", median)
+	}
+	if p95 != 300 {
+		t.Fatalf("p95 = %d, want 300", p95)
+	}
+	if phaseMeans["vm_create_api"] != 20 {
+		t.Fatalf("vm_create_api mean = %d, want 20", phaseMeans["vm_create_api"])
+	}
+	if phaseMeans["vm_provisioning"] != 40 {
+		t.Fatalf("vm_provisioning mean = %d, want 40", phaseMeans["vm_provisioning"])
+	}
+	if phaseMeans["bootstrap"] != 140 {
+		t.Fatalf("bootstrap mean = %d, want 140", phaseMeans["bootstrap"])
 	}
 }

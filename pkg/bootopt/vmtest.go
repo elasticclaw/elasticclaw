@@ -3,6 +3,7 @@ package bootopt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -122,7 +123,10 @@ func (vtr *VMTestRunner) RunVMBootTest(ctx context.Context) (*VMBootResult, erro
 	_, err = vtr.waitForStatus(ctx, clawID, "provisioning", 2*time.Minute)
 	if err != nil {
 		result.Error = fmt.Sprintf("wait provisioning: %v", err)
-		vtr.cleanupClaw(clawID)
+		if cleanupErr := vtr.cleanupClaw(clawID); cleanupErr != nil {
+			result.Error = fmt.Sprintf("%s; %v", result.Error, cleanupErr)
+			return result, errors.Join(err, cleanupErr)
+		}
 		return result, err
 	}
 	result.Phases["vm_provisioning"] = time.Since(phaseStart).Milliseconds()
@@ -132,14 +136,20 @@ func (vtr *VMTestRunner) RunVMBootTest(ctx context.Context) (*VMBootResult, erro
 	_, err = vtr.waitForStatus(ctx, clawID, "online", vtr.Timeout)
 	if err != nil {
 		result.Error = fmt.Sprintf("wait online: %v", err)
-		vtr.cleanupClaw(clawID)
+		if cleanupErr := vtr.cleanupClaw(clawID); cleanupErr != nil {
+			result.Error = fmt.Sprintf("%s; %v", result.Error, cleanupErr)
+			return result, errors.Join(err, cleanupErr)
+		}
 		return result, err
 	}
 	result.Phases["bootstrap"] = time.Since(phaseStart).Milliseconds()
 	result.TotalMs = time.Since(start).Milliseconds()
 
 	// Phase 4: Cleanup — destroy immediately, we only needed timing
-	vtr.cleanupClaw(clawID)
+	if err := vtr.cleanupClaw(clawID); err != nil {
+		result.CleanupError = err.Error()
+		return result, err
+	}
 
 	return result, nil
 }
@@ -151,6 +161,9 @@ type VMBootResult struct {
 	TotalMs int64            `json:"total_ms"`
 	Phases  map[string]int64 `json:"phases"`
 	Error   string           `json:"error,omitempty"`
+	// CleanupError records post-measurement cleanup failures without invalidating
+	// successful boot timing data.
+	CleanupError string `json:"cleanup_error,omitempty"`
 }
 
 // createClaw provisions a new claw via the elasticclaw CLI.
@@ -242,10 +255,13 @@ func (vtr *VMTestRunner) destroyClaw(ctx context.Context, clawID string) error {
 	return nil
 }
 
-func (vtr *VMTestRunner) cleanupClaw(clawID string) {
+func (vtr *VMTestRunner) cleanupClaw(clawID string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = vtr.destroyClaw(cleanupCtx, clawID)
+	if err := vtr.destroyClaw(cleanupCtx, clawID); err != nil {
+		return fmt.Errorf("cleanup claw %s: %w", clawID, err)
+	}
+	return nil
 }
 
 // parseClawStatus extracts a claw's status from JSON list output.
@@ -272,7 +288,7 @@ func parseClawStatus(jsonOutput, clawID string) (string, error) {
 func AggregateVMBootResults(results []*VMBootResult) (mean, median, p95 int64, phaseMeans map[string]int64) {
 	var valid []*VMBootResult
 	for _, r := range results {
-		if r.Error == "" {
+		if r.Error == "" && r.TotalMs > 0 {
 			valid = append(valid, r)
 		}
 	}
