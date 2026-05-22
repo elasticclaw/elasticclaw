@@ -69,3 +69,38 @@ type RegisterPayload struct {
 	GatewayReady *bool  `json:"gateway_ready,omitempty"` // true once openclaw gateway session is established; nil means unknown (old bridge, assume ready)
 	Channel      string `json:"channel,omitempty"`       // "status" for status channel, empty for main
 }
+
+// CheckpointCreatePayload asks a connected bridge to prepare a checkpoint.
+type CheckpointCreatePayload struct {
+	CheckpointID string `json:"checkpoint_id"`
+	Reason       string `json:"reason"`
+	HubURL       string `json:"hub_url"`
+	ClawToken    string `json:"claw_token"`
+}
+
+// CheckpointFile describes one content-addressed file in a bridge checkpoint.
+type CheckpointFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+	Mode   int64  `json:"mode"`
+}
+
+// CheckpointPlan is sent by the bridge before uploading checkpoint blobs.
+type CheckpointPlan struct {
+	CheckpointID string           `json:"checkpoint_id"`
+	RootSHA256   string           `json:"root_sha256"`
+	Files        []CheckpointFile `json:"files"`
+}
+
+// CheckpointPlanAck tells the bridge which content blobs the hub does not have yet.
+type CheckpointPlanAck struct {
+	Upload []string `json:"upload"`
+}
+
+// CheckpointComplete is sent after all missing blobs have been uploaded.
+type CheckpointComplete struct {
+	CheckpointID string `json:"checkpoint_id"`
+	RootSHA256   string `json:"root_sha256"`
+	Error        string `json:"error,omitempty"`
+}

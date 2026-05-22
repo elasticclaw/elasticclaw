@@ -88,8 +88,6 @@ func (q *msgQueue) drain() []string {
 	return out
 }
 
-
-
 // ─── openclaw gateway wire types ────────────────────────────────────────────
 
 type gwFrame struct {
@@ -1560,7 +1558,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
 			}
 		}
-		pingCancel()   // stop the ping goroutine before closing the connection
+		pingCancel() // stop the ping goroutine before closing the connection
 		conn.CloseNow()
 		select {
 		case <-ctx.Done():
@@ -1738,6 +1736,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 		case "file_read":
 			go handleFileReadMessage(ctx, conn, msg.Payload)
+
+		case "checkpoint_create":
+			go handleCheckpointCreate(ctx, msg.Payload)
 
 		default:
 			// ignore unknown message types

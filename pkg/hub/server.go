@@ -47,6 +47,9 @@ type Server struct {
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
 	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
 
+	checkpointMu      sync.Mutex
+	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
+
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
@@ -82,6 +85,11 @@ type clawConn struct {
 
 	// Message queue for when claw is busy processing
 	messageQueue []types.HubMessage // queued messages waiting to be sent
+
+	pendingCheckpointReason string // coalesced checkpoint request to run after current turn
+	pendingCheckpointID     string
+	pendingCheckpointBy     string
+	checkpointInProgress    bool
 
 	// Status channel for watchdog / progress reporting (second session on bridge)
 	statusConn            *websocket.Conn // separate WS for lightweight status queries
@@ -126,15 +134,16 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:              db,
-		addr:            addr,
-		hubCfg:          hubCfg,
-		identity:        id,
-		claws:           make(map[string]*clawConn),
-		users:           make(map[string]*userConn),
-		fileAckWaiters:  make(map[string]chan types.FileAck),
-		fileReadWaiters: make(map[string]chan types.FileReadResp),
-		webhookDedup:    make(map[string]time.Time),
+		db:                db,
+		addr:              addr,
+		hubCfg:            hubCfg,
+		identity:          id,
+		claws:             make(map[string]*clawConn),
+		users:             make(map[string]*userConn),
+		fileAckWaiters:    make(map[string]chan types.FileAck),
+		fileReadWaiters:   make(map[string]chan types.FileReadResp),
+		checkpointWaiters: make(map[string]chan error),
+		webhookDedup:      make(map[string]time.Time),
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -142,6 +151,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.keepAliveDaytonaSandboxes()
 	go srv.pruneAnalytics()
 	go srv.statusWatchdog()
+	go srv.checkpointScheduler()
 	srv.startPRWatcher()
 	srv.startIntegrationPoller()
 
@@ -219,6 +229,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))                         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
+	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
@@ -1116,6 +1128,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		s.checkpointBeforeTermination(clawID, "manual-kill")
+
 		// Delete messages first (FK constraint)
 		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
@@ -1504,6 +1518,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			go s.sendWakeMessage(cc, clawID)
 		}
 	}
+	if allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
+		go func() {
+			if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
+				log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
+			}
+		}()
+	}
 
 	// Read loop — claw sends messages back to users
 	defer func() {
@@ -1604,6 +1625,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
 								shouldWake = true
 								wakeConn = cc
+								go func() {
+									if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
+										log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
+									}
+								}()
 							}
 						} else if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
@@ -1739,6 +1765,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// Drain queue using this goroutine's cc (the outer cc from line 1449).
 					// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
 					s.sendNextQueuedMessage(cc)
+					s.drainPendingCheckpoint(clawID)
 					continue
 				}
 				_, _ = s.db.Exec(
@@ -1757,6 +1784,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
+					go func() {
+						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
+							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
+						}
+					}()
 					go s.handleClawDoneSignal(clawID, hm.Content)
 				}
 				// Detect and store any PR URLs mentioned by the agent
@@ -1774,6 +1806,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Use this goroutine's cc (the outer cc from line 1449).
 				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
 				s.sendNextQueuedMessage(cc)
+				s.drainPendingCheckpoint(clawID)
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
 				var ack types.FileAck
@@ -2635,6 +2668,10 @@ gh auth status`
 		}
 	}
 
+	if err := s.restoreCheckpointToDaytona(ctx, clawID, instanceID, p); err != nil {
+		return fmt.Errorf("restore checkpoint: %w", err)
+	}
+
 	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
 
@@ -3000,6 +3037,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	}
 	if len(writeErrs) > 0 {
 		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
+	}
+	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
+		return fmt.Errorf("restore checkpoint: %w", err)
 	}
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
@@ -3626,6 +3666,12 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 				time.Sleep(5 * time.Second)
 			}
 		}
+	}
+
+	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
+		log.Printf("[bootstrap] restore checkpoint failed: %v", err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
+		return
 	}
 
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,

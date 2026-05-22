@@ -434,6 +434,8 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		}
 	}
 
+	s.checkpointBeforeTermination(clawID, "issue-left-trigger")
+
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
 		cc.conn.Close(1000, "factory: issue left trigger status")
