@@ -1026,6 +1026,101 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 }
 
+// handleClawTerminateSignal is called when a claw sends a message containing [TERMINATE].
+// It immediately terminates the claw, allowing the claw to manage its own lifecycle.
+// Unlike [DONE] which moves issues and keeps the claw in idle mode, [TERMINATE] immediately
+// deletes the claw and its associated VM.
+func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
+	// Get the tenant ID and issue ID for this claw
+	var issueID, tenantID, factoryName string
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
+		log.Printf("[terminate] claw %s not found in DB: %v", clawID[:8], err)
+		return
+	}
+
+	log.Printf("[terminate] claw %s sent [TERMINATE] for issue %s", clawID[:8], issueID)
+
+	// Find the factory config for this issue (for commenting)
+	factory := s.findFactoryForIssue(issueID)
+	if factory != nil && issueID != "" {
+		// Post a comment that the claw terminated itself
+		switch factory.Integration {
+		case "linear":
+			token := s.resolveLinearTokenForFactory(factory)
+			if token != "" {
+				if err := s.commentLinearIssue(token, issueID, "Agent stopped: claw requested self-termination"); err != nil {
+					log.Printf("[terminate] failed to comment Linear issue %s: %v", issueID, err)
+				} else {
+					log.Printf("[terminate] commented Linear issue %s", issueID)
+				}
+			}
+		case "shortcut":
+			token := s.resolveShortcutToken(factory.Workspace)
+			if token != "" {
+				if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: claw requested self-termination"); err != nil {
+					log.Printf("[terminate] failed to comment Shortcut story %s: %v", issueID, err)
+				} else {
+					log.Printf("[terminate] commented Shortcut story %s", issueID)
+				}
+			}
+		case "github-issues":
+			parts := strings.Split(issueID, "/")
+			if len(parts) == 3 {
+				token := s.resolveGitHubIssuesTokenForFactory(factory)
+				if token != "" {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: claw requested self-termination"); err != nil {
+							log.Printf("[terminate] failed to comment GitHub issue %s: %v", issueID, err)
+						} else {
+							log.Printf("[terminate] commented GitHub issue %s", issueID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Look up provider info before deleting so we can terminate the VM
+	var provider, providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ?`, clawID).Scan(&provider, &providerID)
+
+	// Close WebSocket connection if online
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.conn.Close(1000, "claw requested self-termination")
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+
+	// Delete messages first (FK constraint)
+	_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
+	_, _ = s.db.Exec(`DELETE FROM claws WHERE id = ?`, clawID)
+
+	// Notify dashboards so the card disappears immediately
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
+
+	// Terminate the provider VM asynchronously
+	if providerID != "" {
+		go s.terminateVM(provider, providerID)
+	}
+
+	// Track analytics
+	if factoryName != "" {
+		s.trackFactoryTermination(factoryName, issueID, clawID, "claw self-termination")
+	}
+
+	// Promote any pending claws now that a slot is free
+	go s.promotePendingClaws()
+
+	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
+}
+
 // extractDonePRURLs parses PR URLs from a [DONE] message.
 // It finds the [DONE] token and returns all github.com PR URLs that follow it on the same line.
 func extractDonePRURLs(message string) []string {

@@ -1783,6 +1783,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}()
 					go s.handleClawDoneSignal(clawID, hm.Content)
 				}
+				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
+				if strings.Contains(hm.Content, "[TERMINATE]") {
+					go s.handleClawTerminateSignal(clawID, hm.Content)
+				}
 				// Detect and store any PR URLs mentioned by the agent
 				go s.scanMessageForPRs(clawID, hm.Content)
 				// Detect tool error loops and inject a corrective message
