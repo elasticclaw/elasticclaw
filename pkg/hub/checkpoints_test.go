@@ -2,12 +2,14 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket"
 )
 
 func newCheckpointCompletionTestServer(t *testing.T) *Server {
@@ -76,6 +78,53 @@ func TestCheckpointFinalizeErrorDrainsPendingCheckpoint(t *testing.T) {
 	}
 
 	assertPendingCheckpointDrained(t, s)
+}
+
+func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	if err := s.insertCheckpoint("write-fail", "tenant", "claw", "manual", "hub", "local", "provider-id"); err != nil {
+		t.Fatalf("insert checkpoint: %v", err)
+	}
+
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "test closing")
+	}))
+	t.Cleanup(wsServer.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http")
+	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "closed before dispatch")
+
+	cc := &clawConn{
+		id:                   "claw",
+		tenantID:             "tenant",
+		conn:                 conn,
+		checkpointInProgress: true,
+	}
+	s.claws["claw"] = cc
+
+	if _, err := s.dispatchCheckpoint(context.Background(), cc, "claw", "write-fail", "manual", false, checkpointRequestTimeout); err == nil {
+		t.Fatal("expected dispatch write failure")
+	}
+
+	s.checkpointMu.Lock()
+	_, ok := s.checkpointWaiters["write-fail"]
+	s.checkpointMu.Unlock()
+	if ok {
+		t.Fatal("expected failed dispatch waiter to be removed")
+	}
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	if cc.checkpointInProgress {
+		t.Fatal("expected failed dispatch to clear checkpoint in progress")
+	}
 }
 
 func assertPendingCheckpointDrained(t *testing.T, s *Server) {

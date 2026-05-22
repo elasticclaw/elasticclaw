@@ -504,6 +504,7 @@ func (s *Server) dispatchCheckpoint(ctx context.Context, cc *clawConn, clawID, c
 	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "checkpoint_create", Payload: payload}); err != nil {
 		s.finishCheckpointRequest(clawID, checkpointID)
 		_ = s.failCheckpoint(checkpointID, err.Error())
+		s.notifyCheckpointWaiter(checkpointID, err)
 		return checkpointID, err
 	}
 
