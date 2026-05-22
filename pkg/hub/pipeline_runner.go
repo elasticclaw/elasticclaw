@@ -547,6 +547,8 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 		var tenantID, providerID, provider string
 		_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
 
+		s.checkpointBeforeTermination(clawID, "pipeline-terminal")
+
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
@@ -599,6 +601,8 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // skipVMTerminate should be true when the caller already knows the VM is gone (e.g. Replicated
 // poll saw "terminated") to avoid redundant delete attempts that spam the logs with 404 errors.
 func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool) {
+	s.checkpointBeforeTermination(clawID, "stop-agent")
+
 	// Resolve factory + issueID
 	factory, issueID := s.findFactoryForClaw(clawID)
 	if factory == nil {

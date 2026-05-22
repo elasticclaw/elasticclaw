@@ -1787,6 +1787,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		case "file_read":
 			go handleFileReadMessage(ctx, conn, msg.Payload)
 
+		case "checkpoint_create":
+			go handleCheckpointCreate(ctx, msg.Payload)
+
 		default:
 			// ignore unknown message types
 		}

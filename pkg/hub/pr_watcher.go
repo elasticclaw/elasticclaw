@@ -128,17 +128,17 @@ func (s *Server) startPRWatcher() {
 }
 
 type clawPR struct {
-	id                   string
-	clawID               string
-	repo                 string
-	prNumber             int
-	prURL                string
-	lastCISHA            string
-	lastCommentID        int64
-	lastCommentAt        string
-	lastReviewCommentID  int64
-	prConditionsFired    bool
-	createdAt            string
+	id                  string
+	clawID              string
+	repo                string
+	prNumber            int
+	prURL               string
+	lastCISHA           string
+	lastCommentID       int64
+	lastCommentAt       string
+	lastReviewCommentID int64
+	prConditionsFired   bool
+	createdAt           string
 }
 
 func (s *Server) pollAllPRs() {
@@ -160,8 +160,8 @@ func (s *Server) pollAllPRs() {
 	defer rows.Close()
 
 	type row struct {
-		pr               clawPR
-		clawStatus       string
+		pr         clawPR
+		clawStatus string
 	}
 	var prs []row
 	for rows.Next() {
@@ -726,7 +726,7 @@ func githubAPIList(path, token string) ([]interface{}, error) {
 	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
-// handleClawSubresource routes /api/claws/:id/prs
+// handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/checkpoints.
 func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) < 2 {
@@ -736,7 +736,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	clawID := parts[0]
 	sub := parts[1]
 
-	if sub != "prs" {
+	if sub != "prs" && sub != "checkpoints" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -765,6 +765,11 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 
 	if sub == "prs" {
 		s.handleClawPRs(w, r, clawID)
+		return
+	}
+	if sub == "checkpoints" {
+		s.handleClawCheckpoints(w, r, clawID)
+		return
 	}
 }
 
@@ -950,6 +955,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	var providerID, provider string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&providerID, &provider)
+
+	s.checkpointBeforeTermination(clawID, "pr-merged")
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)

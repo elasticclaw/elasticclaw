@@ -49,10 +49,36 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN external_trigger_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restore_checkpoint_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
+
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
+		id                    TEXT PRIMARY KEY,
+		tenant_id             TEXT NOT NULL,
+		claw_id               TEXT NOT NULL,
+		status                TEXT NOT NULL DEFAULT 'creating',
+		reason                TEXT NOT NULL DEFAULT '',
+		created_by            TEXT NOT NULL DEFAULT 'hub',
+		provider              TEXT NOT NULL DEFAULT '',
+		provider_id_at_create TEXT NOT NULL DEFAULT '',
+		manifest_sha256       TEXT NOT NULL DEFAULT '',
+		manifest_path         TEXT NOT NULL DEFAULT '',
+		root_tree_sha256      TEXT NOT NULL DEFAULT '',
+		message_tree_sha256   TEXT NOT NULL DEFAULT '',
+		workspace_tree_sha256 TEXT NOT NULL DEFAULT '',
+		message_count         INTEGER NOT NULL DEFAULT 0,
+		pr_count              INTEGER NOT NULL DEFAULT 0,
+		repo_count            INTEGER NOT NULL DEFAULT 0,
+		error                 TEXT NOT NULL DEFAULT '',
+		created_at            DATETIME NOT NULL,
+		completed_at          DATETIME
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at)`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_triggers (
 		id             TEXT PRIMARY KEY,
@@ -141,7 +167,9 @@ func migrate(db *sql.DB) error {
 		bootstrap_status TEXT NOT NULL DEFAULT '',
 		factory_name     TEXT NOT NULL DEFAULT '',
 		concurrency_group TEXT NOT NULL DEFAULT '',
-		external_trigger_id TEXT NOT NULL DEFAULT ''
+		external_trigger_id TEXT NOT NULL DEFAULT '',
+		restore_checkpoint_id TEXT NOT NULL DEFAULT '',
+		restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''
 	);
 
 
@@ -197,6 +225,30 @@ func migrate(db *sql.DB) error {
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);
+
+	CREATE TABLE IF NOT EXISTS claw_checkpoints (
+		id                    TEXT PRIMARY KEY,
+		tenant_id             TEXT NOT NULL,
+		claw_id               TEXT NOT NULL,
+		status                TEXT NOT NULL DEFAULT 'creating',
+		reason                TEXT NOT NULL DEFAULT '',
+		created_by            TEXT NOT NULL DEFAULT 'hub',
+		provider              TEXT NOT NULL DEFAULT '',
+		provider_id_at_create TEXT NOT NULL DEFAULT '',
+		manifest_sha256       TEXT NOT NULL DEFAULT '',
+		manifest_path         TEXT NOT NULL DEFAULT '',
+		root_tree_sha256      TEXT NOT NULL DEFAULT '',
+		message_tree_sha256   TEXT NOT NULL DEFAULT '',
+		workspace_tree_sha256 TEXT NOT NULL DEFAULT '',
+		message_count         INTEGER NOT NULL DEFAULT 0,
+		pr_count              INTEGER NOT NULL DEFAULT 0,
+		repo_count            INTEGER NOT NULL DEFAULT 0,
+		error                 TEXT NOT NULL DEFAULT '',
+		created_at            DATETIME NOT NULL,
+		completed_at          DATETIME
+	);
+	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at);
 
 	CREATE TABLE IF NOT EXISTS factory_events (
 		id           TEXT PRIMARY KEY,
