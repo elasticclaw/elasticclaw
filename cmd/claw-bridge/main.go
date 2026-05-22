@@ -597,6 +597,24 @@ func (gs *gatewaySession) sendReq(ctx context.Context, method string, params int
 	}
 }
 
+func (gs *gatewaySession) failPendingRequests(err error) {
+	gs.pendMu.Lock()
+	pending := gs.pending
+	gs.pending = make(map[string]chan gwFrame)
+	gs.pendMu.Unlock()
+
+	for id, ch := range pending {
+		ch <- gwFrame{
+			Type: "res",
+			ID:   id,
+			Error: &gwError{
+				Code:    "gateway_disconnected",
+				Message: err.Error(),
+			},
+		}
+	}
+}
+
 // initSession resolves the persistent session key (loading from disk and
 // verifying, or creating a new one) and subscribes to it.
 func (gs *gatewaySession) initSession(ctx context.Context) error {
@@ -663,6 +681,8 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				return // shutting down
 			}
 			log.Printf("[gateway] read error: %v — reconnecting in 3s", err)
+
+			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 
 			// Fail any in-flight message
 			gs.infMu.RLock()
