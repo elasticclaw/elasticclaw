@@ -2982,6 +2982,17 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
 	})
 
+	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
+		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "~/workspace"}); err != nil {
+			return fmt.Errorf("create flake staging dir: %w", err)
+		}
+		for path, content := range flakeFiles {
+			if err := p.WriteFile(ctx, vmName, "~/workspace/"+path, []byte(content)); err != nil {
+				return fmt.Errorf("stage %s before bootstrap: %w", path, err)
+			}
+		}
+	}
+
 	// Run bootstrap script — this installs Node.js, OpenClaw, and starts claw-bridge
 	if err := p.SetupScript(ctx, vmName, script); err != nil {
 		return fmt.Errorf("exedev bootstrap script failed: %s", sanitizeBootstrapError(err))
@@ -3589,6 +3600,15 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 	}
 
+	if flakeFiles := templateFlakeFiles(files); len(flakeFiles) > 0 {
+		s.setBootstrapStatus(clawID, "Staging Nix flake")
+		if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/workspace", flakeFiles); err != nil {
+			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", sanitizeBootstrapError(err)), false)
+			return
+		}
+	}
+
 	// Run bootstrap script first — this installs OpenClaw and initializes the workspace.
 	// Template files must be written AFTER the script completes so openclaw onboard
 	// doesn't overwrite BOOTSTRAP.md and other workspace files.
@@ -3704,6 +3724,16 @@ func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
+}
+
+func templateFlakeFiles(files map[string]string) map[string]string {
+	flakeFiles := make(map[string]string, 2)
+	for _, name := range []string{"flake.nix", "flake.lock"} {
+		if content, ok := files[name]; ok {
+			flakeFiles[name] = content
+		}
+	}
+	return flakeFiles
 }
 
 // clawHubURL returns the URL claws should use to connect back.
