@@ -182,8 +182,10 @@ func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(p)
 	// Must appear at top as literal value
 	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="super-secret-pw"`, "gateway password set at top")
+	assertContains(t, script, `export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"`, "openclaw gateway password env set")
 	// Must appear in persist block (as variable reference, not literal)
 	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password in persist block")
+	assertContains(t, script, `printf 'export OPENCLAW_GATEWAY_PASSWORD=%q\n' "$OPENCLAW_GATEWAY_PASSWORD"`, "openclaw gateway password in persist block")
 }
 
 func TestBootstrapScript_BridgeEnvFileEscapesValues(t *testing.T) {
@@ -218,8 +220,9 @@ bash -c 'printf "%s\n" "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"'
 		t.Fatalf("source bridge env file: %v\n%s", err, string(out))
 	}
 	got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
-	if len(got) != 2 || got[0] != name || got[1] != password {
-		t.Fatalf("sourced values mismatch: got %q, want %q", got, []string{name, password})
+	want := []string{name, password}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("sourced values mismatch: got %q, want %q", got, want)
 	}
 }
 
