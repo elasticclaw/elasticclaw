@@ -90,6 +90,9 @@ func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing known_hosts file rejected host key: %v", err)
 	}
+	if err := callback("example.com:2222", addr, pub); err != nil {
+		t.Fatalf("repeated unknown host key rejected: %v", err)
+	}
 
 	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
 	contents, err := os.ReadFile(knownHosts)
@@ -98,6 +101,9 @@ func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "[example.com]:2222 "+pub.Type()) {
 		t.Fatalf("known_hosts missing trusted host key entry: %s", contents)
+	}
+	if got := strings.Count(string(contents), "[example.com]:2222 "+pub.Type()); got != 1 {
+		t.Fatalf("known_hosts has %d entries for the same trusted host key, want 1: %s", got, contents)
 	}
 
 	callback, err = knownHostsCallback()

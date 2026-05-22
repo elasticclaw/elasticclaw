@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/install"
@@ -20,6 +21,8 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+var knownHostsWriteMu sync.Mutex
 
 var installCmd = &cobra.Command{
 	Use:   "install",
@@ -407,7 +410,7 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
-				return trustUnknownHostKey(path, hostname, key)
+				return trustUnknownHostKey(path, hostname, remote, key)
 			}, nil
 		}
 		return nil, fmt.Errorf("could not load SSH known_hosts from %s: %w", path, err)
@@ -416,7 +419,7 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 		if err := callback(hostname, remote, key); err != nil {
 			var keyErr *knownhosts.KeyError
 			if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
-				return trustUnknownHostKey(path, hostname, key)
+				return trustUnknownHostKey(path, hostname, remote, key)
 			}
 			return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, path))
 		}
@@ -424,10 +427,27 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 	}, nil
 }
 
-func trustUnknownHostKey(knownHostsPath, hostname string, key gossh.PublicKey) error {
+func trustUnknownHostKey(knownHostsPath, hostname string, remote net.Addr, key gossh.PublicKey) error {
+	knownHostsWriteMu.Lock()
+	defer knownHostsWriteMu.Unlock()
+
 	if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0700); err != nil {
 		return fmt.Errorf("could not create SSH known_hosts directory: %w", err)
 	}
+
+	if callback, err := knownhosts.New(knownHostsPath); err == nil {
+		if err := callback(hostname, remote, key); err == nil {
+			return nil
+		} else {
+			var keyErr *knownhosts.KeyError
+			if !errors.As(err, &keyErr) || len(keyErr.Want) != 0 {
+				return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, knownHostsPath))
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("could not load SSH known_hosts from %s: %w", knownHostsPath, err)
+	}
+
 	file, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("could not open SSH known_hosts at %s: %w", knownHostsPath, err)
@@ -437,7 +457,7 @@ func trustUnknownHostKey(knownHostsPath, hostname string, key gossh.PublicKey) e
 	if _, err := file.WriteString(knownhosts.Line([]string{hostname}, key) + "\n"); err != nil {
 		return fmt.Errorf("could not add SSH host key for %s to %s: %w", hostname, knownHostsPath, err)
 	}
-	fmt.Fprintf(os.Stderr, "Trusted new SSH host key for %s (%s); added to %s\n", hostname, key.Type(), knownHostsPath)
+	fmt.Fprintf(os.Stderr, "Trusted new SSH host key for %s (%s %s); added to %s\n", hostname, key.Type(), gossh.FingerprintSHA256(key), knownHostsPath)
 	return nil
 }
 
