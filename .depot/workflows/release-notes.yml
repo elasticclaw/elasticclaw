@@ -143,10 +143,10 @@ jobs:
 
           fallback_templates = [
             "{topic}, Less Guesswork",
-            "A Cleaner {topic}",
+            "Cleaner {topic}",
             "{topic} That Stick",
-            "More Signal for {topic}",
-            "{topic} Gets Sharper",
+            "More from {topic}",
+            "{topic}, Sharper Now",
             "Smoother {topic}",
             "Tighter {topic}",
             "{topic}, Tuned Up",
