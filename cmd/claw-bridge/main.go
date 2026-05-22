@@ -88,8 +88,6 @@ func (q *msgQueue) drain() []string {
 	return out
 }
 
-
-
 // ─── openclaw gateway wire types ────────────────────────────────────────────
 
 type gwFrame struct {
@@ -118,6 +116,10 @@ type openclawConfig struct {
 			Token    string `json:"token"`
 			Password string `json:"password"`
 		} `json:"auth"`
+		Remote struct {
+			Token    string `json:"token"`
+			Password string `json:"password"`
+		} `json:"remote"`
 		Port int `json:"port"`
 	} `json:"gateway"`
 }
@@ -239,12 +241,24 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 	var token, password string
 	switch cfg.Gateway.Auth.Mode {
 	case "token":
-		// Token mode: use the token from config, ignore password env var
+		// Token mode: use the token from config, with remote token as fallback.
 		token = cfg.Gateway.Auth.Token
+		if token == "" {
+			token = cfg.Gateway.Remote.Token
+		}
 	default:
-		// Password mode (or legacy): env var overrides config, token is fallback
+		// Password mode (or legacy): env var overrides config, token is fallback.
 		token = cfg.Gateway.Auth.Token
 		password = cfg.Gateway.Auth.Password
+		if token == "" {
+			token = cfg.Gateway.Remote.Token
+		}
+		if password == "" {
+			password = cfg.Gateway.Remote.Password
+		}
+		if envPw := os.Getenv("OPENCLAW_GATEWAY_PASSWORD"); envPw != "" {
+			password = envPw
+		}
 		if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
 			password = envPw
 		}
@@ -967,6 +981,12 @@ func configureOpenClaw() error {
 	providerSnippet := os.Getenv("ELASTICCLAW_PROVIDER_CONFIG")
 
 	gatewayPassword := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD")
+	if gatewayPassword == "" {
+		gatewayPassword = os.Getenv("OPENCLAW_GATEWAY_PASSWORD")
+	}
+	if gatewayPassword != "" {
+		os.Setenv("OPENCLAW_GATEWAY_PASSWORD", gatewayPassword)
+	}
 	defaultModel := envOr("OPENCLAW_DEFAULT_MODEL", "anthropic/claude-sonnet-4-6")
 
 	// Build the python config patch.
@@ -1032,6 +1052,9 @@ func startGateway() (*exec.Cmd, error) {
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
+	if gatewayPassword := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); gatewayPassword != "" {
+		os.Setenv("OPENCLAW_GATEWAY_PASSWORD", gatewayPassword)
+	}
 
 	home, _ := os.UserHomeDir()
 	logFile := filepath.Join(home, "openclaw-gateway.log")
@@ -1560,7 +1583,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
 			}
 		}
-		pingCancel()   // stop the ping goroutine before closing the connection
+		pingCancel() // stop the ping goroutine before closing the connection
 		conn.CloseNow()
 		select {
 		case <-ctx.Done():
