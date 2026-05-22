@@ -122,7 +122,7 @@ jobs:
             if not s:
               return True
             normalized = re.sub(r"\s+", " ", s.strip().lower())
-            if len(normalized.split()) > 8:
+            if len(normalized.split()) > 7:
               return True
             return any(re.search(pattern, normalized) for pattern in boring_patterns)
 
