@@ -134,6 +134,10 @@ func getDir(path string) string {
 	return ""
 }
 
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 // Status checks current sandbox state
 func (p *Provider) Status(ctx context.Context, instanceID string) (types.InstanceStatus, error) {
 	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
@@ -348,7 +352,7 @@ func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir
 	// Use gateway run (foreground mode) with setsid/nohup so the gateway
 	// stays alive after the exec session ends.  gateway start is for
 	// systemd/launchd service installation and is not appropriate here.
-	cmd := fmt.Sprintf("bash -c 'cd %s && source ~/.openclaw/env 2>/dev/null; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &'", workdir)
+	cmd := buildStartOpenClawCommand(workdir)
 	response, err := sandbox.Process.ExecuteCommand(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start gateway: %w", err)
@@ -358,4 +362,9 @@ func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir
 	}
 
 	return nil
+}
+
+func buildStartOpenClawCommand(workdir string) string {
+	script := fmt.Sprintf("cd %s && source ~/.openclaw/env 2>/dev/null; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &", shellQuote(workdir))
+	return fmt.Sprintf("bash -c %s", shellQuote(script))
 }
