@@ -247,7 +247,10 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 			token = cfg.Gateway.Remote.Token
 		}
 	default:
-		// Password mode (or legacy): env var overrides config, token is fallback.
+		// Password mode (or legacy): config takes priority; env vars are fallback only.
+		// The gateway generates its own auth password and writes it to gateway.auth.password.
+		// Env var overrides would send the bootstrap password instead of the gateway's
+		// current password, causing a mismatch.
 		token = cfg.Gateway.Auth.Token
 		password = cfg.Gateway.Auth.Password
 		if token == "" {
@@ -256,11 +259,13 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		if password == "" {
 			password = cfg.Gateway.Remote.Password
 		}
-		if envPw := os.Getenv("OPENCLAW_GATEWAY_PASSWORD"); envPw != "" {
-			password = envPw
-		}
-		if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
-			password = envPw
+		if password == "" {
+			if envPw := os.Getenv("OPENCLAW_GATEWAY_PASSWORD"); envPw != "" {
+				password = envPw
+			}
+			if envPw := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); envPw != "" {
+				password = envPw
+			}
 		}
 		if password != "" {
 			token = ""
