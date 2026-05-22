@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -66,6 +66,24 @@ test-install:
 
 lint:
 	golangci-lint run
+
+clawpatch-init:
+	hack/clawpatch-pr.sh init
+
+clawpatch-review:
+	hack/clawpatch-pr.sh review
+
+clawpatch-report:
+	hack/clawpatch-pr.sh report
+
+clawpatch-show:
+	hack/clawpatch-pr.sh show
+
+clawpatch-triage:
+	hack/clawpatch-pr.sh triage
+
+clawpatch-pr:
+	hack/clawpatch-pr.sh pr
 
 clean:
 	rm -rf bin/
