@@ -147,7 +147,7 @@ func (vtr *VMTestRunner) RunVMBootTest(ctx context.Context) (*VMBootResult, erro
 
 	// Phase 4: Cleanup — destroy immediately, we only needed timing
 	if err := vtr.cleanupClaw(clawID); err != nil {
-		result.Error = err.Error()
+		result.CleanupError = err.Error()
 		return result, err
 	}
 
@@ -161,6 +161,9 @@ type VMBootResult struct {
 	TotalMs int64            `json:"total_ms"`
 	Phases  map[string]int64 `json:"phases"`
 	Error   string           `json:"error,omitempty"`
+	// CleanupError records post-measurement cleanup failures without invalidating
+	// successful boot timing data.
+	CleanupError string `json:"cleanup_error,omitempty"`
 }
 
 // createClaw provisions a new claw via the elasticclaw CLI.
@@ -285,7 +288,7 @@ func parseClawStatus(jsonOutput, clawID string) (string, error) {
 func AggregateVMBootResults(results []*VMBootResult) (mean, median, p95 int64, phaseMeans map[string]int64) {
 	var valid []*VMBootResult
 	for _, r := range results {
-		if r.Error == "" {
+		if r.Error == "" && r.TotalMs > 0 {
 			valid = append(valid, r)
 		}
 	}

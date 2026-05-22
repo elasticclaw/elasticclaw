@@ -95,10 +95,51 @@ esac
 	if result.ClawID != clawID {
 		t.Fatalf("claw ID = %q, want %q", result.ClawID, clawID)
 	}
-	if !strings.Contains(result.Error, "cleanup claw "+clawID) {
-		t.Fatalf("result error %q missing claw cleanup context", result.Error)
+	if result.Error != "" {
+		t.Fatalf("result error = %q, want empty boot error", result.Error)
+	}
+	if !strings.Contains(result.CleanupError, "cleanup claw "+clawID) {
+		t.Fatalf("cleanup error %q missing claw cleanup context", result.CleanupError)
 	}
 	if !strings.Contains(err.Error(), "kill failed for "+clawID) {
 		t.Fatalf("error %q missing kill failure output", err.Error())
+	}
+}
+
+func TestAggregateVMBootResultsIncludesCleanupFailures(t *testing.T) {
+	results := []*VMBootResult{
+		{
+			TotalMs:      100,
+			Phases:       map[string]int64{"vm_create_api": 10, "vm_provisioning": 20, "bootstrap": 70},
+			CleanupError: "cleanup failed",
+		},
+		{
+			TotalMs: 300,
+			Phases:  map[string]int64{"vm_create_api": 30, "vm_provisioning": 60, "bootstrap": 210},
+		},
+		{
+			Error:  "wait online failed",
+			Phases: map[string]int64{"vm_create_api": 5},
+		},
+	}
+
+	mean, median, p95, phaseMeans := AggregateVMBootResults(results)
+	if mean != 200 {
+		t.Fatalf("mean = %d, want 200", mean)
+	}
+	if median != 200 {
+		t.Fatalf("median = %d, want 200", median)
+	}
+	if p95 != 300 {
+		t.Fatalf("p95 = %d, want 300", p95)
+	}
+	if phaseMeans["vm_create_api"] != 20 {
+		t.Fatalf("vm_create_api mean = %d, want 20", phaseMeans["vm_create_api"])
+	}
+	if phaseMeans["vm_provisioning"] != 40 {
+		t.Fatalf("vm_provisioning mean = %d, want 40", phaseMeans["vm_provisioning"])
+	}
+	if phaseMeans["bootstrap"] != 140 {
+		t.Fatalf("bootstrap mean = %d, want 140", phaseMeans["bootstrap"])
 	}
 }
