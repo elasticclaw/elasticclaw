@@ -499,7 +499,7 @@ func runFactoryTrigger(name string, inputs []string) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
-	fmt.Printf("Triggered factory %q → claw %s (%s)\n", name, result.ClawID[:8], result.Status)
+	fmt.Printf("Triggered factory %q → claw %s (%s)\n", name, shortID(result.ClawID), result.Status)
 	return nil
 }
 

@@ -125,7 +125,7 @@ func runListHub(h *types.HubProfile) error {
 			tags = "-"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			c.ID[:8], c.Name, c.Template, c.Status, formatAge(c.CreatedAt), tags)
+			shortID(c.ID), c.Name, c.Template, c.Status, formatAge(c.CreatedAt), tags)
 	}
 	w.Flush()
 	return nil
