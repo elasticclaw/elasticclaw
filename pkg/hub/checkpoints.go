@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -31,6 +32,7 @@ const (
 	checkpointMinInterval        = 5 * time.Minute
 	checkpointRequestTimeout     = 2 * time.Minute
 	checkpointTerminationTimeout = 90 * time.Second
+	maxCheckpointBlobBytes       = 256 << 20
 )
 
 type checkpointSummary struct {
@@ -70,7 +72,6 @@ type checkpointHubManifest struct {
 	Template          string   `json:"template"`
 	TemplateFilesSHA  string   `json:"template_files_sha256"`
 	DefaultModel      string   `json:"default_model,omitempty"`
-	LLMKey            string   `json:"llm_key,omitempty"`
 	Tags              []string `json:"tags,omitempty"`
 	Color             string   `json:"color,omitempty"`
 	FactoryName       string   `json:"factory_name,omitempty"`
@@ -168,6 +169,21 @@ func (s *Server) hasRecentCheckpoint(clawID string, minAge time.Duration) bool {
 	var completedAt time.Time
 	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status='ready' ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
 	return err == nil && time.Since(completedAt) < minAge
+}
+
+func (s *Server) hasRecentCheckpointReason(clawID, reason string, minAge time.Duration) bool {
+	var createdAt time.Time
+	err := s.db.QueryRow(`SELECT created_at FROM claw_checkpoints WHERE claw_id=? AND reason=? AND status IN ('creating','ready') ORDER BY created_at DESC LIMIT 1`, clawID, reason).Scan(&createdAt)
+	return err == nil && time.Since(createdAt) < minAge
+}
+
+func (s *Server) requestBootstrapCheckpoint(clawID string) {
+	if s.hasRecentCheckpointReason(clawID, "bootstrap", time.Hour) {
+		return
+	}
+	if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
+		log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
+	}
 }
 
 func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, clawID string) {
@@ -661,6 +677,7 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxCheckpointBlobBytes)
 	path := checkpointBlobPath(sha)
 	if _, err := os.Stat(path); err == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -681,6 +698,11 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 	closeErr := f.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(tmp)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(copyErr, &maxBytesErr) {
+			http.Error(w, "blob too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "write error", http.StatusInternalServerError)
 		return
 	}
@@ -839,11 +861,11 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 
 func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA string, msgCount int, cutoff time.Time, files []types.CheckpointFile) (*checkpointManifest, error) {
 	var row struct {
-		TenantID, Template, Provider, ProviderID, DefaultModel, TemplateFiles, Tags, Color, LLMKey                     string
+		TenantID, Template, Provider, ProviderID, DefaultModel, TemplateFiles, Tags, Color                             string
 		FactoryName, ConcurrencyGroup, LinearIssueID, GitHubIssueID, ShortcutStoryID, ExternalTriggerID, PipelineStage string
 	}
-	err := s.db.QueryRow(`SELECT tenant_id, template, provider, provider_id, default_model, template_files, tags, color, llm_key, factory_name, concurrency_group, linear_issue_id, github_issue_id, shortcut_story_id, external_trigger_id, pipeline_stage FROM claws WHERE id=?`, clawID).Scan(
-		&row.TenantID, &row.Template, &row.Provider, &row.ProviderID, &row.DefaultModel, &row.TemplateFiles, &row.Tags, &row.Color, &row.LLMKey,
+	err := s.db.QueryRow(`SELECT tenant_id, template, provider, provider_id, default_model, template_files, tags, color, factory_name, concurrency_group, linear_issue_id, github_issue_id, shortcut_story_id, external_trigger_id, pipeline_stage FROM claws WHERE id=?`, clawID).Scan(
+		&row.TenantID, &row.Template, &row.Provider, &row.ProviderID, &row.DefaultModel, &row.TemplateFiles, &row.Tags, &row.Color,
 		&row.FactoryName, &row.ConcurrencyGroup, &row.LinearIssueID, &row.GitHubIssueID, &row.ShortcutStoryID, &row.ExternalTriggerID, &row.PipelineStage,
 	)
 	if err != nil {
@@ -866,7 +888,6 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 			Template:          row.Template,
 			TemplateFilesSHA:  shaBytes([]byte(row.TemplateFiles)),
 			DefaultModel:      row.DefaultModel,
-			LLMKey:            row.LLMKey,
 			Tags:              tags,
 			Color:             row.Color,
 			FactoryName:       row.FactoryName,

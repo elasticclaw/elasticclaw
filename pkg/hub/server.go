@@ -1519,11 +1519,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
-		go func() {
-			if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
-				log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
-			}
-		}()
+		go s.requestBootstrapCheckpoint(clawID)
 	}
 
 	// Read loop — claw sends messages back to users
@@ -1625,11 +1621,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
 								shouldWake = true
 								wakeConn = cc
-								go func() {
-									if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
-										log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
-									}
-								}()
+								go s.requestBootstrapCheckpoint(clawID)
 							}
 						} else if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
