@@ -69,10 +69,10 @@ jobs:
           prompt = {
             "model": "openai/gpt-oss-120b",
             "messages": [
-              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. Each release gets a creative, slightly playful title (like \"The One With...\" or a movie reference). You categorize changes into: What's New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don't just list commit messages."},
-              {"role": "user", "content": "Write release notes for ElasticClaw version " + tag + ". Here are the commits since the last release:\n\n" + commits + "\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
+              {"role": "system", "content": "You are a technical writer who writes engaging, human-friendly release notes for developer tools. You write in a casual but informative tone. You categorize changes into: What's New (features), Improvements (enhancements), Fixes (bug fixes). Be descriptive and specific — mention what changed and why it matters. Don't just list commit messages. Release titles must be concise, fresh, and varied across releases. Do NOT use sitcom-style titles like \"The One With...\", \"The One Where...\", or any title beginning with \"The One\". Do NOT use generic titles like \"Bug Fixes and Improvements\", \"Release Update\", or \"What's New\"."},
+              {"role": "user", "content": "Write release notes for ElasticClaw version " + tag + ". Here are the commits since the last release:\n\n" + commits + "\n\nCreate a title that is 2-7 words, specific to the most important change, and uses one of these varied styles: crisp product headline, action phrase, metaphor, workshop/tooling phrase, or short playful phrase. Avoid copying these examples, but aim for this kind of variety: \"Sharper Factory Signals\", \"Bridge Work, Less Guesswork\", \"A Cleaner Claw Path\", \"Issue Triage Gets Teeth\", \"Bootstraps That Stick\".\n\nRespond with ONLY a JSON object in this exact shape (no markdown code block, no extra text):\n{\n  \"title\": \"creative title here\",\n  \"whatsNew\": [\"descriptive bullet\", \"another bullet\"],\n  \"improvements\": [\"descriptive bullet\"],\n  \"fixes\": [\"descriptive bullet\"],\n  \"summary\": \"one-line teaser for the release list page\"\n}"}
             ],
-            "temperature": 0.7,
+            "temperature": 0.95,
             "max_tokens": 4096
           }
 
@@ -98,6 +98,68 @@ jobs:
 
           # Clean up markdown code fences if present
           echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' > /tmp/notes.json
+
+          # Guard against repetitive or generic titles even if the model ignores the prompt.
+          cat > /tmp/vary_title.py << 'PYEOF'
+          import hashlib, json, re
+
+          with open("/tmp/notes.json", "r") as f:
+            notes = json.load(f)
+          with open("/tmp/changelog.txt", "r") as f:
+            changelog = f.read()
+
+          title = str(notes.get("title") or "").strip()
+          boring_patterns = [
+            r"^the one\b",
+            r"^what'?s new\b",
+            r"^release update\b",
+            r"^bug fixes? and improvements?$",
+            r"^improvements? and fixes?$",
+            r"^elasticclaw (release|update)\b",
+          ]
+
+          def boring(s):
+            if not s:
+              return True
+            normalized = re.sub(r"\s+", " ", s.strip().lower())
+            if len(normalized.split()) > 8:
+              return True
+            return any(re.search(pattern, normalized) for pattern in boring_patterns)
+
+          def category(text):
+            lowered = text.lower()
+            categories = [
+              ("Factory Signals", ["factory", "factories", "trigger", "webhook", "issue"]),
+              ("Bridge Work", ["bridge", "bootstrap", "connector", "openclaw"]),
+              ("Sharper Sandboxes", ["sandbox", "replicated", "daytona", "exedev", "vm"]),
+              ("Cleaner Pipelines", ["pipeline", "stage", "done", "pr"]),
+              ("Quieter Settings", ["settings", "config", "doctor", "secret"]),
+              ("Tighter GitHub Flow", ["github", "repo", "pull request", "comment"]),
+            ]
+            for label, words in categories:
+              if any(word in lowered for word in words):
+                return label
+            return "Sharper Claw Work"
+
+          fallback_templates = [
+            "{topic}, Less Guesswork",
+            "A Cleaner {topic}",
+            "{topic} That Stick",
+            "More Signal for {topic}",
+            "{topic} Gets Sharper",
+            "Smoother {topic}",
+            "Tighter {topic}",
+            "{topic}, Tuned Up",
+          ]
+
+          if boring(title):
+            topic = category(changelog)
+            idx = int(hashlib.sha256(changelog.encode("utf-8")).hexdigest()[:8], 16) % len(fallback_templates)
+            notes["title"] = fallback_templates[idx].format(topic=topic)
+            with open("/tmp/notes.json", "w") as f:
+              json.dump(notes, f, indent=2)
+          PYEOF
+          python3 /tmp/vary_title.py
 
       - name: Parse release notes
         id: parsed
