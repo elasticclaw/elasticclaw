@@ -54,14 +54,20 @@ func TestKnownHostsCallbackVerifiesServerKey(t *testing.T) {
 	if err := callback("example.com:22", addr, otherPub); err == nil {
 		t.Fatal("mismatched host key accepted")
 	}
-	if err := callback("unknown.example.com:22", addr, trustedPub); err == nil {
-		t.Fatal("unknown host key accepted")
-	} else if !strings.Contains(err.Error(), "ssh-keyscan -H unknown.example.com") {
-		t.Fatalf("unknown host key error missing ssh-keyscan hint: %v", err)
+	if err := callback("unknown.example.com:22", addr, trustedPub); err != nil {
+		t.Fatalf("unknown host key rejected: %v", err)
+	}
+
+	callback, err = knownHostsCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("unknown.example.com:22", addr, trustedPub); err != nil {
+		t.Fatalf("trusted unknown host key rejected after persisting: %v", err)
 	}
 }
 
-func TestKnownHostsCallbackMissingFileRejectsWithHint(t *testing.T) {
+func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -81,14 +87,25 @@ func TestKnownHostsCallbackMissingFileRejectsWithHint(t *testing.T) {
 
 	addr := &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 2222}
 	err = callback("example.com:2222", addr, pub)
-	if err == nil {
-		t.Fatal("missing known_hosts file accepted host key")
+	if err != nil {
+		t.Fatalf("missing known_hosts file rejected host key: %v", err)
 	}
-	if !strings.Contains(err.Error(), "known_hosts file not found") {
-		t.Fatalf("missing known_hosts error missing context: %v", err)
+
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	contents, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "ssh-keyscan -p 2222 -H example.com") {
-		t.Fatalf("missing known_hosts error missing port-aware ssh-keyscan hint: %v", err)
+	if !strings.Contains(string(contents), "[example.com]:2222 "+pub.Type()) {
+		t.Fatalf("known_hosts missing trusted host key entry: %s", contents)
+	}
+
+	callback, err = knownHostsCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := callback("example.com:2222", addr, pub); err != nil {
+		t.Fatalf("persisted host key rejected: %v", err)
 	}
 }
 

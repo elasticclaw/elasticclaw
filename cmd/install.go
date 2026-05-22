@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -406,17 +407,38 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
-				return fmt.Errorf("SSH known_hosts file not found at %s; add the server host key first with: %s", path, sshKeyscanHint(hostname, path))
+				return trustUnknownHostKey(path, hostname, key)
 			}, nil
 		}
 		return nil, fmt.Errorf("could not load SSH known_hosts from %s: %w", path, err)
 	}
 	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
 		if err := callback(hostname, remote, key); err != nil {
+			var keyErr *knownhosts.KeyError
+			if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
+				return trustUnknownHostKey(path, hostname, key)
+			}
 			return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, path))
 		}
 		return nil
 	}, nil
+}
+
+func trustUnknownHostKey(knownHostsPath, hostname string, key gossh.PublicKey) error {
+	if err := os.MkdirAll(filepath.Dir(knownHostsPath), 0700); err != nil {
+		return fmt.Errorf("could not create SSH known_hosts directory: %w", err)
+	}
+	file, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("could not open SSH known_hosts at %s: %w", knownHostsPath, err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(knownhosts.Line([]string{hostname}, key) + "\n"); err != nil {
+		return fmt.Errorf("could not add SSH host key for %s to %s: %w", hostname, knownHostsPath, err)
+	}
+	fmt.Fprintf(os.Stderr, "Trusted new SSH host key for %s (%s); added to %s\n", hostname, key.Type(), knownHostsPath)
+	return nil
 }
 
 func sshKeyscanHint(hostname, knownHostsPath string) string {
