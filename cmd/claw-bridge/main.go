@@ -882,8 +882,9 @@ func runShell(script string) error {
 
 // nixInstallBg starts the Nix installer in background and returns a done channel.
 // The channel receives an error (or nil) when the install finishes.
+// Capacity 2 so both setupFlakeEnvironmentSync and finishNix can receive.
 func nixInstallBg() <-chan error {
-	ch := make(chan error, 1)
+	ch := make(chan error, 2)
 	go func() {
 		log.Printf("[bootstrap] starting Nix (Determinate Systems) in background...")
 		script := `
@@ -901,6 +902,7 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			log.Printf("[bootstrap] Nix install complete")
 		}
 		ch <- err
+		ch <- err // Send twice so both receivers can read
 	}()
 	return ch
 }
@@ -960,6 +962,151 @@ func finishDocker(dockerDone <-chan error) {
 	_ = runShell("sudo usermod -aG docker daytona 2>/dev/null || true")
 	_ = runShell("sudo usermod -aG docker root 2>/dev/null || true")
 	log.Printf("[bootstrap] Docker ready")
+}
+
+// setupFlakeEnvironmentSync is the synchronous version that waits for Nix and sets up the flake.
+// Used when we need the flake ready before starting the gateway.
+func setupFlakeEnvironmentSync(nixDone <-chan error) error {
+	home, _ := os.UserHomeDir()
+	workspaceDir := filepath.Join(home, "workspace")
+	flakeNixPath := filepath.Join(workspaceDir, "flake.nix")
+
+	if _, err := os.Stat(flakeNixPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	log.Printf("[bootstrap] flake.nix found in workspace, setting up flake environment (sync)...")
+
+	// Wait for Nix to complete - we need it for the gateway
+	if nixDone != nil {
+		log.Printf("[bootstrap] waiting for Nix install to complete...")
+		select {
+		case err := <-nixDone:
+			if err != nil {
+				return fmt.Errorf("Nix install failed: %w", err)
+			}
+			log.Printf("[bootstrap] Nix install complete")
+		case <-time.After(5 * time.Minute):
+			return fmt.Errorf("timeout waiting for Nix install")
+		}
+	}
+
+	// Ensure nix command is available
+	if err := runShell("command -v nix"); err != nil {
+		return fmt.Errorf("nix command not available after install: %w", err)
+	}
+
+	// Also check for flake.lock
+	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")
+	hasFlakeLock := false
+	if _, err := os.Stat(flakeLockPath); err == nil {
+		hasFlakeLock = true
+	}
+
+	// Create a dedicated flake directory
+	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
+	if err := os.MkdirAll(flakeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create flake directory: %w", err)
+	}
+
+	// Copy flake.nix and flake.lock to the flake directory
+	flakeNixData, err := os.ReadFile(flakeNixPath)
+	if err != nil {
+		return fmt.Errorf("failed to read flake.nix: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(flakeDir, "flake.nix"), flakeNixData, 0644); err != nil {
+		return fmt.Errorf("failed to write flake.nix: %w", err)
+	}
+
+	if hasFlakeLock {
+		flakeLockData, err := os.ReadFile(flakeLockPath)
+		if err == nil {
+			if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
+				return fmt.Errorf("failed to write flake.lock: %w", err)
+			}
+		}
+	}
+
+	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
+	script := fmt.Sprintf(`
+set -euo pipefail
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+cd %q
+nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
+`, flakeDir)
+	if err := runShell(script); err != nil {
+		log.Printf("[bootstrap] flake profile install warning: %v", err)
+	}
+
+	wrapperScript := fmt.Sprintf(`#!/bin/bash
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+cd %q
+exec nix develop --accept-flake-config -c "$@"
+`, flakeDir)
+	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
+		return fmt.Errorf("failed to write flake wrapper: %w", err)
+	}
+
+	log.Printf("[bootstrap] flake environment ready at %s", flakeDir)
+	return nil
+}
+
+// startGatewayWithFlake starts the gateway, optionally inside the flake environment.
+func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
+	if !useFlake {
+		// No flake, use normal gateway start
+		return startGateway()
+	}
+
+	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop...")
+
+	// Set env vars that suppress respawn / bonjour.
+	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
+	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
+
+	home, _ := os.UserHomeDir()
+	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
+	logFile := filepath.Join(home, "openclaw-gateway.log")
+
+	// Build the nix develop command that runs openclaw gateway
+	// Properly escape the flakeDir to prevent shell injection
+	script := fmt.Sprintf(`
+set -euo pipefail
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+cd %q
+exec nix develop --accept-flake-config -c openclaw gateway run
+`, flakeDir)
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = os.Environ()
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open gateway log: %w", err)
+	}
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("start gateway in nix develop: %w", err)
+	}
+	f.Close()
+	log.Printf("[bootstrap] gateway PID %d (in nix develop), waiting for health...", cmd.Process.Pid)
+
+	// Poll /healthz up to 60s.
+	for i := 0; i < 60; i++ {
+		time.Sleep(time.Second)
+		if checkGateway("localhost:18789") {
+			log.Printf("[bootstrap] gateway ready after %ds", i+1)
+			return cmd, nil
+		}
+	}
+	// Not fatal — bridge will retry.
+	log.Printf("[bootstrap] WARNING: gateway did not respond in 60s — continuing anyway")
+	return cmd, nil
 }
 
 // installNodeGit installs Node.js 24 and git via apt.
@@ -1182,19 +1329,35 @@ func finishNix(nixDone <-chan error) {
 	log.Printf("[bootstrap] Nix: %s", strings.TrimSpace(string(out)))
 }
 
+// hasWorkspaceFlake checks if flake.nix exists in the workspace directory
+func hasWorkspaceFlake() bool {
+	home, _ := os.UserHomeDir()
+	workspaceDir := filepath.Join(home, "workspace")
+	flakeNixPath := filepath.Join(workspaceDir, "flake.nix")
+	_, err := os.Stat(flakeNixPath)
+	return err == nil
+}
+
 // runBootstrap executes all VM bootstrap steps, then returns so the caller
 // can continue into the normal bridge connect loop.
 func runBootstrap() error {
 	log.Printf("[bootstrap] starting claw-bridge bootstrap mode")
+
+	// Check early if we have a workspace flake - this affects how we start the gateway
+	hasFlake := hasWorkspaceFlake()
+	if hasFlake {
+		log.Printf("[bootstrap] flake.nix detected in workspace, will set up flake environment")
+	}
 
 	// Step 1: Install Node.js 24 + git (serial)
 	if err := installNodeGit(); err != nil {
 		return fmt.Errorf("installNodeGit: %w", err)
 	}
 
-	// Step 2: Start Nix install in background (if requested)
+	// Step 2: Start Nix install in background (if requested or if we have a flake)
 	var nixDone <-chan error
-	if os.Getenv("ELASTICCLAW_NIX") == "true" {
+	if os.Getenv("ELASTICCLAW_NIX") == "true" || hasFlake {
+		// Auto-enable Nix if a flake is present
 		nixDone = nixInstallBg()
 	}
 
@@ -1220,20 +1383,30 @@ func runBootstrap() error {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
 	}
 
-	// Step 5: Start the gateway once so OpenClaw writes its final first-run config.
-	initialGateway, err := startGateway()
+	// Step 5: Set up flake environment BEFORE starting gateway if flake.nix exists
+	// This ensures the gateway runs inside the flake environment
+	if hasFlake {
+		if err := setupFlakeEnvironmentSync(nixDone); err != nil {
+			log.Printf("[bootstrap] flake setup warning: %v (continuing without flake)", err)
+			hasFlake = false // Fall back to non-flake mode
+		}
+	}
+
+	// Step 6: Start the gateway once so OpenClaw writes its final first-run config.
+	// If we have a flake, this will run inside nix develop
+	initialGateway, err := startGatewayWithFlake(hasFlake)
 	if err != nil {
 		return fmt.Errorf("startGateway initial: %w", err)
 	}
 	stopGateway(initialGateway)
 
-	// Step 6: Configure openclaw.json (model, LLM keys, gateway auth, disable bonjour)
+	// Step 7: Configure openclaw.json (model, LLM keys, gateway auth, disable bonjour)
 	if err := configureOpenClaw(); err != nil {
 		return fmt.Errorf("configureOpenClaw: %w", err)
 	}
 
-	// Step 7: Restart gateway and wait for health
-	gateway, err := startGateway()
+	// Step 8: Restart gateway and wait for health (inside flake if present)
+	gateway, err := startGatewayWithFlake(hasFlake)
 	if err != nil {
 		return fmt.Errorf("startGateway: %w", err)
 	}
@@ -1245,12 +1418,12 @@ func runBootstrap() error {
 		}
 	}()
 
-	// Step 8: Wait for device.json
+	// Step 9: Wait for device.json
 	if err := waitForDeviceJSON(); err != nil {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 9: After bridge connects, finish Nix and Docker in background
+	// Step 10: After bridge connects, finish Nix and Docker in background
 	go finishNix(nixDone)
 	go finishDocker(dockerDone)
 

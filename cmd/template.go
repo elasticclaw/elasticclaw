@@ -86,6 +86,12 @@ func runTemplateCreate(cmd *cobra.Command, args []string) error {
 provider: %s
 instance_type: %s
 ttl: %s
+
+# Enable Nix (Determinate Systems installer)
+# nix: true
+
+# Enable Docker
+# docker: true
 `, templateCreateProvider, templateCreateInstanceType, templateCreateTTL),
 
 		"AGENTS.md": fmt.Sprintf(`# AGENTS.md - Your Workspace

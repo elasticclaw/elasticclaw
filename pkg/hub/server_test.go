@@ -119,6 +119,28 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 	}
 }
 
+func TestTemplateFlakeFiles(t *testing.T) {
+	files := map[string]string{
+		"flake.nix":  "{ description = \"test\"; }",
+		"flake.lock": "{}",
+		"AGENTS.md":  "instructions",
+	}
+
+	flakeFiles := templateFlakeFiles(files)
+	if len(flakeFiles) != 2 {
+		t.Fatalf("len(flakeFiles) = %d, want 2", len(flakeFiles))
+	}
+	if flakeFiles["flake.nix"] != files["flake.nix"] {
+		t.Fatalf("flake.nix = %q, want %q", flakeFiles["flake.nix"], files["flake.nix"])
+	}
+	if flakeFiles["flake.lock"] != files["flake.lock"] {
+		t.Fatalf("flake.lock = %q, want %q", flakeFiles["flake.lock"], files["flake.lock"])
+	}
+	if _, ok := flakeFiles["AGENTS.md"]; ok {
+		t.Fatal("AGENTS.md should not be included in flake staging files")
+	}
+}
+
 func TestCheckDefaultModel(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 

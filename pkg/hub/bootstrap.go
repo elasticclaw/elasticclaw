@@ -29,6 +29,9 @@ type BootstrapParams struct {
 	Nix    bool
 	Docker bool
 
+	// TemplateFiles includes all template files (may contain flake.nix)
+	TemplateFiles map[string]string
+
 	// GitHub credential helper
 	HubCfg      *types.HubConfig
 	GitHubRepos []types.GitHubRepoAccess

@@ -601,6 +601,7 @@ type CreateClawRequest struct {
 	GitHub     *GitHubTemplateConfig `json:"github,omitempty"`
 	Linear     *LinearTemplateConfig `json:"linear,omitempty"`
 	Nix        bool                  `json:"nix,omitempty"`
+	Flake      string                `json:"flake,omitempty"`
 	Docker     bool                  `json:"docker,omitempty"`
 	Tags       []string              `json:"tags,omitempty"`
 	Color      string                `json:"color,omitempty"`
