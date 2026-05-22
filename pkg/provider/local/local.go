@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -36,7 +37,7 @@ func (p *Provider) instanceDir(instanceID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(paths.StateDir, "local-instances", instanceID), nil
+	return confinedPath(filepath.Join(paths.StateDir, "local-instances"), instanceID, "instance ID")
 }
 
 // Create provisions a new local instance
@@ -59,7 +60,10 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 
 	// Write template files
 	for path, content := range req.TemplateFiles {
-		fullPath := filepath.Join(workspaceDir, path)
+		fullPath, err := confinedPath(workspaceDir, path, "template path")
+		if err != nil {
+			return nil, err
+		}
 		dir := filepath.Dir(fullPath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory for %s: %w", path, err)
@@ -230,4 +234,27 @@ func parseEnvFile(content string) []string {
 		}
 	}
 	return env
+}
+
+func confinedPath(base, path, label string) (string, error) {
+	clean := filepath.Clean(path)
+	if path == "" || clean == "." || filepath.IsAbs(path) {
+		return "", fmt.Errorf("invalid %s %q", label, path)
+	}
+	for _, part := range strings.Split(clean, string(os.PathSeparator)) {
+		if part == ".." {
+			return "", fmt.Errorf("invalid %s %q", label, path)
+		}
+	}
+
+	fullPath := filepath.Join(base, clean)
+	rel, err := filepath.Rel(base, fullPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s %q: %w", label, path, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid %s %q", label, path)
+	}
+
+	return fullPath, nil
 }
