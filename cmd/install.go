@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -400,12 +401,35 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not locate home directory for SSH known_hosts: %w", err)
 	}
-	path := home + "/.ssh/known_hosts"
+	path := filepath.Join(home, ".ssh", "known_hosts")
 	callback, err := knownhosts.New(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+				return fmt.Errorf("SSH known_hosts file not found at %s; add the server host key first with: %s", path, sshKeyscanHint(hostname, path))
+			}, nil
+		}
 		return nil, fmt.Errorf("could not load SSH known_hosts from %s: %w", path, err)
 	}
-	return callback, nil
+	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+		if err := callback(hostname, remote, key); err != nil {
+			return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, path))
+		}
+		return nil
+	}, nil
+}
+
+func sshKeyscanHint(hostname, knownHostsPath string) string {
+	host := hostname
+	port := ""
+	if splitHost, splitPort, err := net.SplitHostPort(hostname); err == nil {
+		host = splitHost
+		port = splitPort
+	}
+	if port != "" && port != "22" {
+		return fmt.Sprintf("ssh-keyscan -p %s -H %s >> %s", port, host, knownHostsPath)
+	}
+	return fmt.Sprintf("ssh-keyscan -H %s >> %s", host, knownHostsPath)
 }
 
 func detectRemotePrivilegeMode(client *gossh.Client) (bool, error) {
