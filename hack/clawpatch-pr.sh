@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 cmd="${1:-}"
 
@@ -222,30 +222,62 @@ run_pr() {
   slug="$(printf '%s' "$id" | slugify)"
   branch="clawpatch/${severity}/${slug}"
 
-  if git show-ref --verify --quiet "refs/heads/${branch}"; then
-    echo "error: branch ${branch} already exists" >&2
+  if git show-ref --verify --quiet "refs/heads/${branch}" || \
+     git show-ref --verify --quiet "refs/remotes/${remote}/${branch}"; then
+    echo "error: branch ${branch} already exists locally or on ${remote}" >&2
     exit 1
   fi
 
+  local cleanup_new_branch=0
+  cleanup_pr_failure() {
+    local status="$1"
+    trap - ERR
+
+    if [[ "$cleanup_new_branch" != "1" ]]; then
+      return "$status"
+    fi
+
+    echo "error: failed while preparing ${branch}" >&2
+    if [[ "$(git branch --show-current)" != "$branch" ]]; then
+      return "$status"
+    fi
+
+    if [[ -z "$(git status --porcelain)" ]]; then
+      git switch "$base_branch" >/dev/null
+      git branch -D "$branch" >/dev/null
+      echo "Cleaned up empty branch ${branch}" >&2
+    else
+      echo "Leaving ${branch} checked out because it has uncommitted changes to inspect." >&2
+      git status --short >&2
+    fi
+
+    return "$status"
+  }
+  trap 'cleanup_pr_failure "$?"' ERR
+
   git switch -c "$branch"
+  cleanup_new_branch=1
 
   echo "Fixing Clawpatch finding ${id} (${severity}, ${confidence}, ${category})"
   clawpatch show --finding "$id"
   clawpatch fix --finding "$id"
-  clawpatch revalidate --finding "$id"
-  bash -lc "$validate_cmd"
 
   if [[ -z "$(git status --porcelain)" ]]; then
     echo "error: clawpatch fix produced no git changes" >&2
     exit 1
   fi
 
+  clawpatch revalidate --finding "$id"
+  bash -lc "$validate_cmd"
+
   git add -A
   git commit -m "Fix Clawpatch finding ${id}"
+  cleanup_new_branch=0
   git push -u "$remote" "$branch"
 
   local pr_body
   pr_body="$(mktemp)"
+  trap 'rm -f "$pr_body"' RETURN
   cat >"$pr_body" <<EOF
 ## Clawpatch finding
 
