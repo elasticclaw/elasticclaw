@@ -640,6 +640,7 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			_ = s.failCheckpoint(checkpointID, complete.Error)
 			s.notifyCheckpointWaiter(checkpointID, fmt.Errorf("%s", complete.Error))
 			s.finishCheckpointRequest(clawID, checkpointID)
+			s.drainPendingCheckpoint(clawID)
 			jsonOK(w, map[string]string{"status": "failed"})
 			return
 		}
@@ -647,6 +648,7 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			_ = s.failCheckpoint(checkpointID, err.Error())
 			s.notifyCheckpointWaiter(checkpointID, err)
 			s.finishCheckpointRequest(clawID, checkpointID)
+			s.drainPendingCheckpoint(clawID)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
