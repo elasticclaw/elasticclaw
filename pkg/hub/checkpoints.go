@@ -470,6 +470,9 @@ func (s *Server) waitCheckpointStatus(ctx context.Context, checkpointID string, 
 func (s *Server) dispatchCheckpoint(ctx context.Context, cc *clawConn, clawID, checkpointID, reason string, wait bool, timeout time.Duration) (string, error) {
 	ch := make(chan error, 1)
 	s.checkpointMu.Lock()
+	if s.checkpointWaiters == nil {
+		s.checkpointWaiters = make(map[string]chan error)
+	}
 	s.checkpointWaiters[checkpointID] = ch
 	s.checkpointMu.Unlock()
 
