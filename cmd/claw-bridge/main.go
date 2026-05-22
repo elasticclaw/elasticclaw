@@ -964,111 +964,9 @@ func finishDocker(dockerDone <-chan error) {
 	log.Printf("[bootstrap] Docker ready")
 }
 
-// setupFlakeEnvironment sets up a Nix flake environment if flake.nix exists in the template files.
-// It writes the flake files to ~/.elasticclaw/flake/ and installs packages from it.
-func setupFlakeEnvironment(nixDone <-chan error) error {
-	// Check if flake.nix exists in the template files that were written by the hub
-	// Template files are written to the workspace directory after bootstrap
-	home, _ := os.UserHomeDir()
-	workspaceDir := filepath.Join(home, "workspace")
-	flakeNixPath := filepath.Join(workspaceDir, "flake.nix")
-
-	// Check if flake.nix was written by the hub (it will exist if template had it)
-	if _, err := os.Stat(flakeNixPath); os.IsNotExist(err) {
-		// No flake.nix in template, nothing to do
-		return nil
-	}
-
-	log.Printf("[bootstrap] flake.nix found in workspace, setting up flake environment...")
-
-	// Wait for Nix to be ready if it's being installed
-	if nixDone != nil {
-		log.Printf("[bootstrap] waiting for Nix install before setting up flake...")
-		select {
-		case err := <-nixDone:
-			if err != nil {
-				log.Printf("[bootstrap] Nix install failed, skipping flake setup: %v", err)
-				return nil
-			}
-		case <-time.After(30 * time.Second):
-			log.Printf("[bootstrap] timeout waiting for Nix, trying flake setup anyway...")
-		}
-	}
-
-	// Ensure nix command is available
-	if err := runShell("command -v nix"); err != nil {
-		log.Printf("[bootstrap] nix command not available, skipping flake setup")
-		return nil
-	}
-
-	// Also check for flake.lock
-	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")
-	hasFlakeLock := false
-	if _, err := os.Stat(flakeLockPath); err == nil {
-		hasFlakeLock = true
-	}
-
-	// Create a dedicated flake directory
-	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
-	if err := os.MkdirAll(flakeDir, 0755); err != nil {
-		return fmt.Errorf("failed to create flake directory: %w", err)
-	}
-
-	// Copy flake.nix and flake.lock to the flake directory
-	flakeNixData, err := os.ReadFile(flakeNixPath)
-	if err != nil {
-		return fmt.Errorf("failed to read flake.nix: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(flakeDir, "flake.nix"), flakeNixData, 0644); err != nil {
-		return fmt.Errorf("failed to write flake.nix: %w", err)
-	}
-
-	if hasFlakeLock {
-		flakeLockData, err := os.ReadFile(flakeLockPath)
-		if err == nil {
-			os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644)
-		}
-	}
-
-	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
-
-	// Install packages from the flake using nix profile install
-	// This makes the flake's packages available in the user's profile
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-# Install the default package from the flake
-nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
-# Also try to install common development tools if they exist in the flake
-nix profile install .#devShells.default --accept-flake-config 2>&1 || true
-`, flakeDir)
-
-	if err := runShell(script); err != nil {
-		log.Printf("[bootstrap] flake profile install warning: %v", err)
-		// Don't fail - the flake might be optional or partially broken
-	}
-
-	// Create a wrapper script that runs commands in the flake environment
-	wrapperScript := fmt.Sprintf(`#!/bin/bash
-# Flake environment wrapper - runs commands in the flake's dev shell
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-exec nix develop --accept-flake-config -c "$@"
-`, flakeDir)
-	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
-	os.WriteFile(wrapperPath, []byte(wrapperScript), 0755)
-
-	log.Printf("[bootstrap] flake environment setup complete. Use %s to run commands in the flake.", wrapperPath)
-	return nil
-}
-
 // setupFlakeEnvironmentSync is the synchronous version that waits for Nix and sets up the flake.
 // Used when we need the flake ready before starting the gateway.
 func setupFlakeEnvironmentSync(nixDone <-chan error) error {
-	// This is the same as setupFlakeEnvironment but we always wait for nixDone
 	home, _ := os.UserHomeDir()
 	workspaceDir := filepath.Join(home, "workspace")
 	flakeNixPath := filepath.Join(workspaceDir, "flake.nix")
@@ -1088,7 +986,7 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 				return fmt.Errorf("Nix install failed: %w", err)
 			}
 			log.Printf("[bootstrap] Nix install complete")
-		case <-time.After(120 * time.Second):
+		case <-time.After(5 * time.Minute):
 			return fmt.Errorf("timeout waiting for Nix install")
 		}
 	}
@@ -1123,8 +1021,33 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	if hasFlakeLock {
 		flakeLockData, err := os.ReadFile(flakeLockPath)
 		if err == nil {
-			os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644)
+			if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
+				return fmt.Errorf("failed to write flake.lock: %w", err)
+			}
 		}
+	}
+
+	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
+	script := fmt.Sprintf(`
+set -euo pipefail
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+cd %q
+nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
+`, flakeDir)
+	if err := runShell(script); err != nil {
+		log.Printf("[bootstrap] flake profile install warning: %v", err)
+	}
+
+	wrapperScript := fmt.Sprintf(`#!/bin/bash
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
+cd %q
+exec nix develop --accept-flake-config -c "$@"
+`, flakeDir)
+	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
+		return fmt.Errorf("failed to write flake wrapper: %w", err)
 	}
 
 	log.Printf("[bootstrap] flake environment ready at %s", flakeDir)
