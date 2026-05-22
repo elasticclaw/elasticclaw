@@ -1,6 +1,9 @@
 package bootopt
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +56,49 @@ func TestRunTiming_AllErrorsReturnsError(t *testing.T) {
 	}
 	if len(runs) != 2 {
 		t.Fatalf("len(runs) = %d, want 2", len(runs))
+	}
+}
+
+func TestRunVMBootTestReturnsCleanupError(t *testing.T) {
+	const clawID = "550e8400-e29b-41d4-a716-446655440000"
+	bin := filepath.Join(t.TempDir(), "elasticclaw")
+	script := `#!/bin/sh
+case "$1" in
+create)
+	echo "Created claw bootopt (id: 550e8400-e29b-41d4-a716-446655440000)"
+	;;
+list)
+	printf '[{"id":"550e8400-e29b-41d4-a716-446655440000","status":"online"}]\n'
+	;;
+kill)
+	echo "kill failed for $2" >&2
+	exit 17
+	;;
+*)
+	echo "unexpected command: $1" >&2
+	exit 2
+	;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+
+	runner := NewVMTestRunnerWithConfig(bin, "", "base")
+	result, err := runner.RunVMBootTest(t.Context())
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.ClawID != clawID {
+		t.Fatalf("claw ID = %q, want %q", result.ClawID, clawID)
+	}
+	if !strings.Contains(result.Error, "cleanup claw "+clawID) {
+		t.Fatalf("result error %q missing claw cleanup context", result.Error)
+	}
+	if !strings.Contains(err.Error(), "kill failed for "+clawID) {
+		t.Fatalf("error %q missing kill failure output", err.Error())
 	}
 }
