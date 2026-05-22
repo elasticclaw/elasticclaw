@@ -18,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 var (
 	chatNoStream bool
 )
@@ -92,21 +91,34 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 	defer wsCancel()
 	replyCh := make(chan struct{}, 4)
 
-	// clearOnce is reset per-send; the chunk callback clears the spinner synchronously.
+	// clearOnce is reset per-send; callbacks and send coordinate through spinnerMu.
+	var spinnerMu sync.Mutex
 	var spinnerDone chan struct{}
-	var clearOnce sync.Once
+	var clearOnce *sync.Once
+	clearSpinner := func() bool {
+		spinnerMu.Lock()
+		done := spinnerDone
+		once := clearOnce
+		spinnerMu.Unlock()
+
+		cleared := false
+		if done != nil && once != nil {
+			once.Do(func() {
+				close(done)
+				fmt.Print("\r\033[K")
+				cleared = true
+			})
+		}
+		return cleared
+	}
 
 	go func() {
 		_ = client.WatchStream(wsCtx, resolvedID,
 			func(chunk string) {
 				// Synchronously erase spinner and print prefix on first chunk
-				clearOnce.Do(func() {
-					if spinnerDone != nil {
-						close(spinnerDone)
-					}
-					fmt.Print("\r\033[K") // erase spinner line
+				if clearSpinner() {
 					fmt.Print("Claw: ")
-				})
+				}
 				fmt.Print(chunk)
 			},
 			func(msg types.HubMessage) {
@@ -126,8 +138,11 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 		}
 
 		// Reset per-send state
+		spinnerMu.Lock()
 		spinnerDone = make(chan struct{})
-		clearOnce = sync.Once{}
+		clearOnce = &sync.Once{}
+		done := spinnerDone
+		spinnerMu.Unlock()
 
 		// Spinner animates until closed (by the chunk callback)
 		go func(done chan struct{}) {
@@ -142,17 +157,14 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 					i++
 				}
 			}
-		}(spinnerDone)
+		}(done)
 
 		// Wait up to 90s for reply
 		select {
 		case <-replyCh:
-			// chunk callback already cleared; nothing to do
+			clearSpinner()
 		case <-time.After(90 * time.Second):
-			clearOnce.Do(func() {
-				close(spinnerDone)
-				fmt.Print("\r\033[K")
-			})
+			clearSpinner()
 			fmt.Println("(no reply received within 90s)")
 		}
 		return nil
