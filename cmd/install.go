@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 var installCmd = &cobra.Command{
@@ -37,12 +39,12 @@ Prerequisites:
 }
 
 var (
-	installServer   string
-	installDomain  string
-	installSSHKey  string
-	installVersion string
-	installToken        string
-	installUIPassword   string
+	installServer     string
+	installDomain     string
+	installSSHKey     string
+	installVersion    string
+	installToken      string
+	installUIPassword string
 )
 
 func init() {
@@ -83,11 +85,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	clawToken := randomHex32()
 
 	params := install.Params{
-		Domain:       installDomain,
-		Version:      version,
-		Token:        token,
-		ClawToken:    clawToken,
-		UIPassword:   uiToken,
+		Domain:     installDomain,
+		Version:    version,
+		Token:      token,
+		ClawToken:  clawToken,
+		UIPassword: uiToken,
 	}
 
 	// ── Preflight: DNS check (skipped with --skip-caddy) ─────────────────────
@@ -202,9 +204,10 @@ func findGitHubRelease(owner, repo, tag string) error {
 }
 
 // extractTrack returns the non-incrementing prefix of a CalVer/SemVer tag.
-//   "2026.05.11-beta.2" → "2026.05.11-beta"
-//   "2026.05.11.1"      → "2026.05.11"
-//   "2026.05.11"        → "2026.05.11"
+//
+//	"2026.05.11-beta.2" → "2026.05.11-beta"
+//	"2026.05.11.1"      → "2026.05.11"
+//	"2026.05.11"        → "2026.05.11"
 func extractTrack(version string) string {
 	if idx := strings.LastIndex(version, "-"); idx != -1 {
 		suffix := version[idx+1:]
@@ -379,13 +382,54 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 		return nil, fmt.Errorf("no SSH auth methods available — ensure SSH agent is running (eval $(ssh-agent)) or use --ssh-key with an unencrypted key")
 	}
 
+	hostKeyCallback, err := knownHostsCallback()
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
 	return gossh.Dial("tcp", addr, cfg)
+}
+
+func knownHostsCallback() (gossh.HostKeyCallback, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not locate home directory for SSH known_hosts: %w", err)
+	}
+	path := filepath.Join(home, ".ssh", "known_hosts")
+	callback, err := knownhosts.New(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+				return fmt.Errorf("SSH known_hosts file not found at %s; add the server host key first with: %s", path, sshKeyscanHint(hostname, path))
+			}, nil
+		}
+		return nil, fmt.Errorf("could not load SSH known_hosts from %s: %w", path, err)
+	}
+	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+		if err := callback(hostname, remote, key); err != nil {
+			return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, path))
+		}
+		return nil
+	}, nil
+}
+
+func sshKeyscanHint(hostname, knownHostsPath string) string {
+	host := hostname
+	port := ""
+	if splitHost, splitPort, err := net.SplitHostPort(hostname); err == nil {
+		host = splitHost
+		port = splitPort
+	}
+	if port != "" && port != "22" {
+		return fmt.Sprintf("ssh-keyscan -p %s -H %s >> %s", port, host, knownHostsPath)
+	}
+	return fmt.Sprintf("ssh-keyscan -H %s >> %s", host, knownHostsPath)
 }
 
 func detectRemotePrivilegeMode(client *gossh.Client) (bool, error) {
