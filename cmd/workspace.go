@@ -71,15 +71,82 @@ repositories: []
 secrets: []
 webhook_secrets: []
 `, name)
+	workspaceFiles := map[string]string{
+		"elasticclaw-config.yaml": `schema_version: v1
+provider: replicated
+
+# Optional runtime overrides:
+# instance_type: r1.large
+# ttl: 48h
+# default_model: anthropic/claude-sonnet-4-6
+# llm_key: anthropic-prod
+
+# Optional workspace features:
+# nix: false
+# docker: false
+# tags: ["backend"]
+# color: teal
+
+# Optional tool and repository access:
+# github:
+#   repos:
+#     - repo: owner/repo
+#       permissions: write
+
+# Optional environment secrets:
+# secret_refs:
+#   GITHUB_TOKEN: github_app
+`,
+		"AGENTS.md": `# Agent Instructions
+
+Work in this workspace as a focused coding agent.
+
+When the task is complete, open a pull request when appropriate and report the result clearly.
+`,
+		"TOOLS.md": `# Tools
+
+Use the tools and credentials made available by this workspace.
+
+Prefer small, verifiable changes. Run the relevant tests before reporting completion.
+`,
+		"SOUL.md": `# Persona
+
+You are a pragmatic software engineer. Be direct, careful, and useful.
+`,
+		"IDENTITY.md": fmt.Sprintf(`# Identity
+
+Workspace: %s
+`, name),
+		"USER.md": `# User
+
+The user owns the product direction. Ask only when a decision cannot be inferred from the repository or task.
+`,
+		"MEMORY.md": `# Memory
+
+Persistent notes for this workspace can go here.
+`,
+	}
 
 	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), []byte(workspaceYAML), 0644); err != nil {
 		return fmt.Errorf("write workspace.yaml: %w", err)
 	}
+	for fileName, content := range workspaceFiles {
+		if err := os.WriteFile(filepath.Join(dir, fileName), []byte(content), 0644); err != nil {
+			return fmt.Errorf("write %s: %w", fileName, err)
+		}
+	}
 
 	fmt.Printf("\nCreated %s/\n", dir)
 	fmt.Printf("  workspace.yaml\n")
+	fmt.Printf("  elasticclaw-config.yaml\n")
+	fmt.Printf("  AGENTS.md\n")
+	fmt.Printf("  TOOLS.md\n")
+	fmt.Printf("  SOUL.md\n")
+	fmt.Printf("  IDENTITY.md\n")
+	fmt.Printf("  USER.md\n")
+	fmt.Printf("  MEMORY.md\n")
 	fmt.Printf("Next steps:\n")
-	fmt.Printf("  1. Edit %s/workspace.yaml\n", dir)
+	fmt.Printf("  1. Edit %s/workspace.yaml and workspace files\n", dir)
 	fmt.Printf("  2. Push to hub: elasticclaw workspace push %s\n", name)
 	return nil
 }
