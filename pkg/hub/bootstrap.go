@@ -224,6 +224,7 @@ for p in %s:
 # (or any k2p5 reference) that openclaw may have auto-registered under
 # models, routers, or inside provider objects. This is the only way to
 # guarantee we never "pass" the removed model to the agent.
+_DROP_K2P5 = object()
 def _scrub_k2p5(obj):
     if isinstance(obj, dict):
         cleaned = {}
@@ -231,18 +232,18 @@ def _scrub_k2p5(obj):
             if 'k2p5' in str(k).lower():
                 continue
             scrubbed = _scrub_k2p5(v)
-            if scrubbed is not None:
+            if scrubbed is not _DROP_K2P5:
                 cleaned[k] = scrubbed
         return cleaned
     if isinstance(obj, list):
         cleaned = []
         for v in obj:
             scrubbed = _scrub_k2p5(v)
-            if scrubbed is not None:
+            if scrubbed is not _DROP_K2P5:
                 cleaned.append(scrubbed)
         return cleaned
     if isinstance(obj, str) and 'k2p5' in obj.lower():
-        return None
+        return _DROP_K2P5
     return obj
 
 config['models'] = _scrub_k2p5(models)
