@@ -109,7 +109,6 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
                 {'id': 'accounts/fireworks/models/minimax-m2p7',               'name': 'MiniMax M2.7'},
                 {'id': 'accounts/fireworks/models/glm-5p1',                    'name': 'GLM 5.1'},
                 {'id': 'accounts/fireworks/models/qwen3p6-plus',               'name': 'Qwen3.6 Plus'},
-                {'id': 'accounts/fireworks/models/kimi-k2p5',                  'name': 'Kimi K2.5'},
                 {'id': 'accounts/fireworks/models/gpt-oss-120b',               'name': 'OpenAI gpt-oss-120b'},
                 {'id': 'accounts/fireworks/models/gpt-oss-20b',                'name': 'OpenAI gpt-oss-20b'},
                 {'id': 'accounts/fireworks/models/minimax-m2p5',               'name': 'MiniMax M2.5'},
