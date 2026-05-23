@@ -2397,22 +2397,21 @@ for i in $(seq 1 30); do
   sleep 1
 done
 curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway to be truly ready (plugins loaded, channels up)
+# Phase 2: wait for gateway startup to complete. Do not use openclaw health
+# here: it pairs the CLI device with read-only scopes before claw-bridge can
+# connect, then claw-bridge is rejected as a scope-upgrade.
 for i in $(seq 1 30); do
-  health=$(openclaw health --json --timeout 5000 2>/dev/null)
-  if [ -n "$health" ]; then
-    plugins_loaded=$(echo "$health" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("plugins",{}).get("loaded",[])))' 2>/dev/null)
-    if [ "${plugins_loaded:-0}" -gt 0 ]; then
-      echo "gateway ready (plugins=$plugins_loaded)"
-      exit 0
-    fi
+  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
+    echo "gateway ready"
+    exit 0
   fi
+  curl -sf http://localhost:18789/healthz >/dev/null || break
   sleep 1
 done
-# Fallback: if plugins are empty but the gateway is still listening and healthy,
-# don't fail the bootstrap — a zero-plugin gateway is still a valid gateway.
+# Fallback: if the readiness log line is unavailable but the gateway is still
+# listening and healthy, don't fail the bootstrap.
 if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (no plugins loaded)"
+  echo "gateway ready (healthz)"
   exit 0
 fi
 echo 'gateway not ready'
