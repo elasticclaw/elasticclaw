@@ -1,0 +1,51 @@
+terms:
+  - text: ElasticClaw
+    pronunciation: "elastic claw"
+    aliases:
+      - "Elastic Claw"
+      - "elaticclaw"
+      - "elasticlaw"
+
+  - text: Kimi 2.6
+    pronunciation: "Kimmy 2 6"
+    aliases:
+      - "kimi"
+      - "kimi 26"
+      - "kimi 2.6"
+
+  - text: AmazeCRM
+    pronunciation: "amaze C R M"
+    aliases:
+      - "Amaze CRM"
+      - "Amazed CRM"
+      - "amaze see are em"
+
+  - text: Greptile
+    pronunciation: "grep tile"
+    aliases:
+      - "greptyle"
+
+  - text: Daytona
+    pronunciation: "daytona"
+
+  - text: BYOK
+    pronunciation: "B Y O K"
+    aliases:
+      - "bring your own key"
+
+  - text: ffmpeg
+    pronunciation: "F F em peg"
+    aliases:
+      - "FFmpeg"
+      - "F F MPEG"
+
+  - text: ffprobe
+    pronunciation: "F F probe"
+    aliases:
+      - "FFprobe"
+
+  - text: gpt-4o-mini-tts
+    pronunciation: "G P T four oh mini T T S"
+    aliases:
+      - "GPT 4o mini TTS"
+      - "GPT four oh mini TTS"
