@@ -19,7 +19,7 @@ var (
 
 var createCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new claw from a template",
+	Short: "Create a new claw",
 	Long: `Resolve a template and provision a new claw via the hub.
 
 With --source auto (default), the template is looked up in order:
@@ -75,9 +75,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	// Resolve template based on --source (auto|local|hub).
 	var (
-		tmplCfg         *types.TemplateConfig
-		files           map[string]string
-		resolvedSource  string
+		tmplCfg        *types.TemplateConfig
+		files          map[string]string
+		resolvedSource string
 	)
 	switch createSource {
 	case "auto", "local":

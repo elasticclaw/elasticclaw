@@ -21,7 +21,7 @@ var (
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize working directory from a template",
+	Short: "Initialize working directory",
 	Long: `Initialize the working directory for ElasticClaw.
 
 This command prepares the working directory for 'elasticclaw create'.
@@ -117,7 +117,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Source:  templateSource,
 			Version: manifest.Version,
 		},
-		LockedAt:       time.Now().UTC().Format(time.RFC3339),
+		LockedAt:      time.Now().UTC().Format(time.RFC3339),
 		SchemaVersion: "v1",
 		ToolVersion:   Version,
 	}

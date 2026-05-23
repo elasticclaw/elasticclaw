@@ -532,7 +532,3 @@ func resolveHubConn() (hubURL, clawToken string, err error) {
 	}
 	return hubURL, clawToken, nil
 }
-
-func init() {
-	rootCmd.AddCommand(FactoryCmd())
-}

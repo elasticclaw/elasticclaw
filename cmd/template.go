@@ -53,7 +53,6 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(templateCmd)
 	templateCmd.AddCommand(templateCreateCmd)
 	templateCmd.AddCommand(templateListCmd)
 
