@@ -40,7 +40,7 @@ func TestWorkspacesPushPersistsWorkspaceWorkflows(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
-	body := `{"workspaces":[{"name":"engineering","repositories":["elasticclaw/elasticclaw"],"secrets":["openai_api_key"],"workflows":[{"name":"bugfix","integration":"github","template":"bugbot","enable_manual_trigger":true}]}]}`
+	body := `{"workspaces":[{"name":"engineering","repositories":["elasticclaw/elasticclaw"],"secrets":["openai_api_key"],"workflows":[{"name":"bugfix","integration":"github","enable_manual_trigger":true}]}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
@@ -72,7 +72,7 @@ func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
-	body := `{"workspaces":[{"name":"engineering","workflows":[{"name":"disabled","template":"bugbot","enable_manual_trigger":false}]}]}`
+	body := `{"workspaces":[{"name":"engineering","workflows":[{"name":"disabled","enable_manual_trigger":false}]}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")

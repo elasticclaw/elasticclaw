@@ -604,10 +604,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		return nil
 	}
 
-	templateFiles, err := s.resolveTemplateFiles(workflow.Template)
-	if err != nil {
-		return err
-	}
+	templateFiles := cloneStringMap(workspace.Files)
 	templateFiles["CONTEXT.md"] = buildGitHubIssuesContext(payload)
 
 	clawName := issueID
@@ -617,11 +614,11 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		clawName = strings.ReplaceAll(clawName, "{repo}", payload.Repository.FullName)
 	}
 
-	_, _, err = s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		templateFiles: templateFiles,
-		clawName:      clawName,
-		githubIssueID: issueID,
-		reason:        reason,
+	_, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		workspaceFiles: templateFiles,
+		clawName:       clawName,
+		githubIssueID:  issueID,
+		reason:         reason,
 	})
 	return err
 }

@@ -328,6 +328,9 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 	if workspace.Name == "" {
 		workspace.Name = name
 	}
+	if files, err := config.ReadTemplateFiles(dir); err == nil {
+		workspace.Files = files
+	}
 
 	workflowDir := filepath.Join(dir, "workflows")
 	entries, err := os.ReadDir(workflowDir)
@@ -403,6 +406,18 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), data, 0640); err != nil {
 		return fmt.Errorf("write workspace.yaml: %w", err)
+	}
+	for name, content := range workspace.Files {
+		if strings.Contains(name, "..") || strings.HasPrefix(name, "workflows/") || name == "workspace.yaml" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			return fmt.Errorf("mkdir for workspace file %s: %w", name, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0640); err != nil {
+			return fmt.Errorf("write workspace file %s: %w", name, err)
+		}
 	}
 	for _, workflow := range workspace.Workflows {
 		if workflow == nil {

@@ -47,8 +47,6 @@ What it does:
 }
 
 func init() {
-	rootCmd.AddCommand(initCmd)
-
 	initCmd.Flags().StringVarP(&initTemplate, "template", "t", "", "template source (e.g., github.com/acme/support-claw)")
 	initCmd.Flags().BoolVar(&initUpgrade, "upgrade", false, "refresh template to latest version")
 }

@@ -156,9 +156,6 @@ func (w *WorkflowConfig) Validate() error {
 	if strings.TrimSpace(w.Name) == "" {
 		return fmt.Errorf("workflow name is required")
 	}
-	if strings.TrimSpace(w.Template) == "" {
-		return fmt.Errorf("workflow %q: template is required", w.Name)
-	}
 	if w.Integration != "" && !validIntegrations[w.Integration] {
 		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", w.Name, w.Integration)
 	}

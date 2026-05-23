@@ -50,7 +50,6 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(createCmd)
 	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
 	createCmd.MarkFlagRequired("name")
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")

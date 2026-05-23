@@ -15,12 +15,12 @@ import (
 )
 
 type workflowCreateOptions struct {
-	inputs        map[string]string
-	templateFiles map[string]string
-	clawName      string
-	githubIssueID string
-	linearIssueID string
-	reason        string
+	inputs         map[string]string
+	workspaceFiles map[string]string
+	clawName       string
+	githubIssueID  string
+	linearIssueID  string
+	reason         string
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
@@ -28,20 +28,17 @@ func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workfl
 }
 
 func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, opts workflowCreateOptions) (string, bool, error) {
-	templateFiles := opts.templateFiles
-	var err error
-	if templateFiles == nil {
-		templateFiles, err = s.resolveTemplateFiles(workflow.Template)
-		if err != nil {
-			return "", false, fmt.Errorf("template %q not found: %w", workflow.Template, err)
-		}
+	templateFiles := cloneStringMap(workspace.Files)
+	if opts.workspaceFiles != nil {
+		templateFiles = cloneStringMap(opts.workspaceFiles)
 	}
 
 	var tmplCfg *types.TemplateConfig
 	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		var err error
 		tmplCfg, err = config.ParseTemplateConfig([]byte(cfgContent))
 		if err != nil {
-			log.Printf("[workflow:%s/%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", workspace.Name, workflow.Name, workflow.Template, err)
+			log.Printf("[workflow:%s/%s] warning: could not parse workspace elasticclaw-config.yaml: %v", workspace.Name, workflow.Name, err)
 			tmplCfg = nil
 		}
 	}
@@ -111,7 +108,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := hubSecrets[secretRef]; ok {
 				env[envName] = val
-				resolvedSecrets[envName] = "template secret_ref"
+				resolvedSecrets[envName] = "workspace secret_ref"
 			}
 		}
 	}
@@ -162,7 +159,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		s.mu.RUnlock()
 	}
 
-	tags := mergeTags(workflow.Template, workflow.Tags, nil)
+	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
 	if opts.inputs != nil {
 		tags = append(tags, "manual-trigger")
@@ -181,10 +178,10 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
-	_, err = s.db.Exec(`
+	_, err := s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, clawName, workflow.Template, provider, defaultModel, string(filesJSON),
+		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
 		initialStatus, now, "", groupName,
 	)
@@ -212,7 +209,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	req := types.CreateClawRequest{
 		Name:         clawName,
-		TemplateName: workflow.Template,
+		TemplateName: workspace.Name,
 		Provider:     provider,
 		DefaultModel: defaultModel,
 		LLMKey:       llmKey,

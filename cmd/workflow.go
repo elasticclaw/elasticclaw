@@ -34,7 +34,6 @@ type workflowCLIView struct {
 	IntegrationWorkspace string                   `json:"integrationWorkspace"`
 	TriggerStatus        string                   `json:"triggerStatus"`
 	DoneStatus           string                   `json:"doneStatus"`
-	Template             string                   `json:"template"`
 	Labels               []string                 `json:"labels"`
 	AssignedTo           string                   `json:"assignedTo"`
 	Enabled              bool                     `json:"enabled"`
@@ -73,13 +72,12 @@ func runWorkflowList(workspace string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tINTEGRATION\tTRIGGER\tTEMPLATE\tMANUAL\tENABLED\tSOURCE")
+	fmt.Fprintln(w, "NAME\tINTEGRATION\tTRIGGER\tMANUAL\tENABLED\tSOURCE")
 	for _, workflow := range workflows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%t\t%s\n",
 			workflow.Name,
 			workflow.Integration,
 			workflow.TriggerStatus,
-			workflow.Template,
 			workflow.EnableManualTrigger,
 			workflow.Enabled,
 			workflow.Source,

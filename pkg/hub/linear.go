@@ -415,10 +415,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return nil
 	}
 
-	templateFiles, err := s.resolveTemplateFiles(workflow.Template)
-	if err != nil {
-		return fmt.Errorf("template %q not found: %w", workflow.Template, err)
-	}
+	templateFiles := cloneStringMap(workspace.Files)
 	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
 
 	clawName := issueID
@@ -428,10 +425,10 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	}
 
 	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		templateFiles: templateFiles,
-		clawName:      clawName,
-		linearIssueID: issueID,
-		reason:        reason,
+		workspaceFiles: templateFiles,
+		clawName:       clawName,
+		linearIssueID:  issueID,
+		reason:         reason,
 	})
 	if err != nil {
 		return err

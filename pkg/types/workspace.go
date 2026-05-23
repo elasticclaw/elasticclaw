@@ -11,6 +11,7 @@ type WorkspaceConfig struct {
 	Secrets        []string          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
 	WebhookSecrets []string          `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
 	Workflows      []*WorkflowConfig `yaml:"-" json:"workflows,omitempty"`
+	Files          map[string]string `yaml:"-" json:"files,omitempty"`
 }
 
 // WorkflowConfig is the persisted workflow schema.
@@ -25,7 +26,6 @@ type WorkflowConfig struct {
 	WorkingStatus       string            `yaml:"working_status,omitempty" json:"working_status,omitempty"`
 	FinishedStatus      string            `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`
 	TerminateOnLeave    bool              `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"`
-	Template            string            `yaml:"template" json:"template"`
 	Provider            string            `yaml:"provider,omitempty" json:"provider,omitempty"`
 	NamePattern         string            `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`
 	Tags                []string          `yaml:"tags,omitempty" json:"tags,omitempty"`

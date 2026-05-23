@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -43,11 +44,7 @@ type workspaceAccessView struct {
 }
 
 func workspaceCreateCmd() *cobra.Command {
-	var (
-		name     string
-		workflow string
-		tmpl     string
-	)
+	var name string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Bootstrap a new workspace directory",
@@ -55,21 +52,17 @@ func workspaceCreateCmd() *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			return runWorkspaceCreate(name, workflow, tmpl)
+			return runWorkspaceCreate(name)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "workspace name [required]")
-	cmd.Flags().StringVar(&workflow, "workflow", "manual", "initial workflow name")
-	cmd.Flags().StringVar(&tmpl, "template", "elasticclaw", "claw template to use")
 	return cmd
 }
 
-func runWorkspaceCreate(name, workflow, tmpl string) error {
+func runWorkspaceCreate(name string) error {
 	name = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
-	workflow = strings.ToLower(strings.ReplaceAll(workflow, " ", "-"))
 	dir := filepath.Join(".elasticclaw", "workspaces", name)
-	workflowDir := filepath.Join(dir, "workflows")
-	if err := os.MkdirAll(workflowDir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create workspace directory: %w", err)
 	}
 
@@ -78,27 +71,15 @@ repositories: []
 secrets: []
 webhook_secrets: []
 `, name)
-	workflowYAML := fmt.Sprintf(`name: %s
-integration: github-issues
-trigger_status: open
-trigger_repos: []
-template: %s
-enable_manual_trigger: true
-inputs: []
-`, workflow, tmpl)
 
 	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), []byte(workspaceYAML), 0644); err != nil {
 		return fmt.Errorf("write workspace.yaml: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(workflowDir, workflow+".yaml"), []byte(workflowYAML), 0644); err != nil {
-		return fmt.Errorf("write workflow yaml: %w", err)
-	}
 
 	fmt.Printf("\nCreated %s/\n", dir)
 	fmt.Printf("  workspace.yaml\n")
-	fmt.Printf("  workflows/%s.yaml\n\n", workflow)
 	fmt.Printf("Next steps:\n")
-	fmt.Printf("  1. Edit %s/workspace.yaml and workflows/%s.yaml\n", dir, workflow)
+	fmt.Printf("  1. Edit %s/workspace.yaml\n", dir)
 	fmt.Printf("  2. Push to hub: elasticclaw workspace push %s\n", name)
 	return nil
 }
@@ -218,6 +199,9 @@ func readWorkspaceDir(dir string) (*types.WorkspaceConfig, error) {
 	}
 	if workspace.Name == "" {
 		workspace.Name = filepath.Base(dir)
+	}
+	if files, err := config.ReadTemplateFiles(dir); err == nil {
+		workspace.Files = files
 	}
 
 	workflowDir := filepath.Join(dir, "workflows")

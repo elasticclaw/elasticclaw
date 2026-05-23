@@ -252,7 +252,6 @@ export interface Workflow {
   integrationWorkspace?: string
   triggerStatus?: string
   doneStatus?: string
-  template: string
   labels?: string[]
   assignedTo?: string
   enabled: boolean

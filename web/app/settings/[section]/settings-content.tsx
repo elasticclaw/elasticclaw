@@ -2126,7 +2126,7 @@ function WorkspacesSection() {
                           <div className="min-w-0">
                             <p className="text-sm font-medium truncate">{workflow.name}</p>
                             <p className="text-xs text-muted-foreground truncate">
-                              {workflow.integration} · {workflow.template}
+                              {workflow.integration}
                             </p>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
