@@ -302,7 +302,7 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 
 	assertContains(t, snippet, `'openai': {`, "openai provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "openai baseUrl")
-	assertContains(t, snippet, "{'id': 'gpt-4o',      'name': 'GPT-4o'}", "openai models")
+	assertContains(t, snippet, "{'id': 'gpt-5.5',      'name': 'GPT-5.5'}", "openai models")
 
 	assertContains(t, snippet, `'fireworks': {`, "fireworks provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.fireworks.ai/inference/v1'", "fireworks baseUrl")

@@ -235,7 +235,7 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
 	case "openai":
-		return "openai/gpt-4o-mini"
+		return "openai/gpt-5.4-mini"
 	case "codex":
 		return "codex/o4-mini"
 	case "fireworks":
