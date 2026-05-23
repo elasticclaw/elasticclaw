@@ -739,6 +739,7 @@ const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
   { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
+  { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
@@ -769,8 +770,14 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "openai/gpt-5.4-mini", name: "GPT-5.4 Mini" },
     { id: "openai/o4-mini",      name: "o4-mini" },
     { id: "openai/o3",           name: "o3" },
-    { id: "openai/codex",        name: "Codex" },
-    { id: "openai/codex-pro",    name: "Codex Pro" },
+    // coding-tuned variants available via regular OpenAI API
+    { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex (coding tuned)" },
+  ],
+  codex: [
+    // Codex is an autonomous agentic coding platform — it selects and routes to the
+    // appropriate underlying model (including special Codex checkpoints) on its own.
+    { id: "codex",      name: "Codex (auto)" },
+    { id: "codex-pro",  name: "Codex Pro (auto)" },
   ],
 }
 
@@ -788,7 +795,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formDefault, setFormDefault] = useState(false)
   const [formDefaultModel, setFormDefaultModel] = useState("")
 
-  const providerLabel = (p: string) => (p === "codex" ? "OpenAI" : PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p)
+  const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
 
   const resetForm = () => {
