@@ -2376,6 +2376,13 @@ openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with 
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
+	// Run doctor --fix to repair any config issues introduced by version
+	// mismatches between the openclaw installed in the image and the config
+	// we patch in (e.g. models schema changes between 2026.5.12 and 2026.5.20).
+	_ = exec("openclaw doctor --fix", 60*time.Second,
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+openclaw doctor --fix 2>&1 || echo "doctor --fix completed (may have warnings)"`)
+
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
