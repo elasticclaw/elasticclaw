@@ -1,0 +1,30 @@
+profile: default
+providers:
+    stt:
+        provider: openai
+        model: whisper-1
+    tts:
+        provider: openai
+        model: gpt-4o-mini-tts
+        voice: cedar
+profiles:
+    default:
+        pace: original
+        emotion: neutral
+        voice_instructions: |
+            Use natural technical demo narration. Preserve conversational inflection. Emphasize product names lightly. Pause briefly after commas and section transitions. Do not rush.
+        preserve_timing: true
+        max_segment_stretch: 1.12
+        max_segment_compress: 0.88
+        max_tempo_delta: 0.12
+        max_forced_tempo: 1.05
+        min_segment_seconds: 2.5
+        max_segment_seconds: 10
+        max_phrase_seconds: 10
+        silence_padding_ms: 650
+        rewrite_max_retries: 6
+        segment_concurrency: 4
+presets:
+    - tech-demo
+glossaries:
+    - glossary.yaml

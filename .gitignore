@@ -36,3 +36,5 @@ internal/webui/out/
 web/out/
 memory/
 bootopt
+
+.demovoice/runs
