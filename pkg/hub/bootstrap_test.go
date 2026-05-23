@@ -292,6 +292,7 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "openai-main", Provider: "openai", Default: true},
+		{Name: "fireworks-main", Provider: "fireworks"},
 		{Name: "groq-main", Provider: "groq"},
 		{Name: "deepseek-main", Provider: "deepseek"},
 		{Name: "codex-main", Provider: "codex"},
@@ -302,6 +303,11 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	assertContains(t, snippet, `'openai': {`, "openai provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "openai baseUrl")
 	assertContains(t, snippet, "{'id': 'gpt-4o',      'name': 'GPT-4o'}", "openai models")
+
+	assertContains(t, snippet, `'fireworks': {`, "fireworks provider entry")
+	assertContains(t, snippet, "'baseUrl': 'https://api.fireworks.ai/inference/v1'", "fireworks baseUrl")
+	assertContains(t, snippet, "{'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2.6'}", "fireworks kimi model")
+	assertContains(t, snippet, "{'id': 'accounts/fireworks/models/deepseek-v4-pro',            'name': 'DeepSeek V4 Pro'}", "fireworks deepseek model")
 
 	assertContains(t, snippet, `'groq': {`, "groq provider entry")
 	assertContains(t, snippet, "'baseUrl': 'https://api.groq.com/openai/v1'", "groq baseUrl")

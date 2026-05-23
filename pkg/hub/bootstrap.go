@@ -103,9 +103,17 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
             'baseUrl': 'https://api.fireworks.ai/inference/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2'},
-                {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B'},
-                {'id': 'accounts/fireworks/models/deepseek-v3',                'name': 'DeepSeek V3'}
+                {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2.6'},
+                {'id': 'accounts/fireworks/models/deepseek-v4-pro',            'name': 'DeepSeek V4 Pro'},
+                {'id': 'accounts/fireworks/models/deepseek-v4-flash',          'name': 'DeepSeek V4 Flash'},
+                {'id': 'accounts/fireworks/models/minimax-m2p7',               'name': 'MiniMax M2.7'},
+                {'id': 'accounts/fireworks/models/glm-5p1',                    'name': 'GLM 5.1'},
+                {'id': 'accounts/fireworks/models/qwen3p6-plus',               'name': 'Qwen3.6 Plus'},
+                {'id': 'accounts/fireworks/models/kimi-k2p5',                  'name': 'Kimi K2.5'},
+                {'id': 'accounts/fireworks/models/gpt-oss-120b',               'name': 'OpenAI gpt-oss-120b'},
+                {'id': 'accounts/fireworks/models/gpt-oss-20b',                'name': 'OpenAI gpt-oss-20b'},
+                {'id': 'accounts/fireworks/models/minimax-m2p5',               'name': 'MiniMax M2.5'},
+                {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B Instruct'}
             ]
         }`, envVar)
 		case "openai":

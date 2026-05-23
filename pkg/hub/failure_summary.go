@@ -239,7 +239,7 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 	case "codex":
 		return "codex/o4-mini"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
+		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":

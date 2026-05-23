@@ -3886,7 +3886,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "openai":
 		return "openai/gpt-4o"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
+		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":

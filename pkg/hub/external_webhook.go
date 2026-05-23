@@ -780,7 +780,7 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/kimi-k2p5-turbo"
+		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:
