@@ -1130,10 +1130,10 @@ echo "Node: $(node --version)"
 	return runShell(script)
 }
 
-// installOpenClaw installs openclaw@2026.5.12 via npm.
+// installOpenClaw installs openclaw@2026.5.20 via npm.
 func installOpenClaw() error {
-	log.Printf("[bootstrap] installing openclaw@2026.5.12...")
-	if err := runShell("sudo npm install -g openclaw@2026.5.12 --ignore-scripts"); err != nil {
+	log.Printf("[bootstrap] installing openclaw@2026.5.20...")
+	if err := runShell("sudo npm install -g openclaw@2026.5.20 --ignore-scripts"); err != nil {
 		return fmt.Errorf("npm install openclaw: %w", err)
 	}
 	out, _ := exec.Command("openclaw", "--version").Output()

@@ -362,7 +362,7 @@ func getKnownBottlenecks() []string {
 	return []string{
 		"apt-get update takes 5-10s",
 		"Node.js install via apt requires GPG key + source list setup",
-		"npm install -g openclaw@2026.5.12 downloads ~50MB",
+		"npm install -g openclaw@2026.5.20 downloads ~50MB",
 		"openclaw onboard runs interactive setup even with --non-interactive",
 		"gateway started twice (first for device.json, then restarted with config)",
 		"device.json wait polls every 1s for up to 120s",
