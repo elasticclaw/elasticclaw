@@ -241,7 +241,17 @@ models = _scrub_k2p5(models)
 # This was previously only done in the replicated bootstrap script, not
 # during Daytona / claw-bridge configure steps.
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
+defaults = config.setdefault('agents', {}).setdefault('defaults', {})
+defaults['model'] = model
+
+# Also nuke any stale per-model aliases that openclaw onboard may have
+# registered under agents.defaults.models (e.g. the k2p5-turbo router
+# alias the user just showed).
+if 'models' in defaults:
+    defaults['models'] = {
+        k: v for k, v in defaults.get('models', {}).items()
+        if 'k2p5' not in str(k).lower()
+    }
 `, providersDict, providerNamesPy)
 	}
 	if anthropicEnvVar != "" {
