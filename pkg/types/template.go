@@ -73,12 +73,15 @@ func (k *LLMKeyConfig) EnvVarName() string {
 type TemplateConfig struct {
 	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	SchemaVersion string            `yaml:"schema_version,omitempty"`
-	Provider      string            `yaml:"provider"`
-	Resources     TemplateResources `yaml:"resources,omitempty"`
-	InstanceType  string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
-	Image         string            `yaml:"image,omitempty"`
-	TTL           string            `yaml:"ttl,omitempty"`
+	SchemaVersion  string            `yaml:"schema_version,omitempty"`
+	Name           string            `yaml:"name,omitempty"`
+	Repositories   []string          `yaml:"repositories,omitempty"`
+	WebhookSecrets []string          `yaml:"webhook_secrets,omitempty"`
+	Provider       string            `yaml:"provider"`
+	Resources      TemplateResources `yaml:"resources,omitempty"`
+	InstanceType   string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
+	Image          string            `yaml:"image,omitempty"`
+	TTL            string            `yaml:"ttl,omitempty"`
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string `yaml:"default_model,omitempty"`

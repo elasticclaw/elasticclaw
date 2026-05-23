@@ -66,13 +66,13 @@ func runWorkspaceCreate(name string) error {
 		return fmt.Errorf("create workspace directory: %w", err)
 	}
 
-	workspaceYAML := fmt.Sprintf(`name: %s
+	workspaceConfigYAML := fmt.Sprintf(`schema_version: v1
+name: %s
+
 repositories: []
 secrets: []
 webhook_secrets: []
-`, name)
-	workspaceFiles := map[string]string{
-		"elasticclaw-config.yaml": `schema_version: v1
+
 provider: replicated
 
 # Optional runtime overrides:
@@ -96,7 +96,8 @@ provider: replicated
 # Optional environment secrets:
 # secret_refs:
 #   GITHUB_TOKEN: github_app
-`,
+`, name)
+	workspaceFiles := map[string]string{
 		"AGENTS.md": `# Agent Instructions
 
 Work in this workspace as a focused coding agent.
@@ -127,8 +128,8 @@ Persistent notes for this workspace can go here.
 `,
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), []byte(workspaceYAML), 0644); err != nil {
-		return fmt.Errorf("write workspace.yaml: %w", err)
+	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), []byte(workspaceConfigYAML), 0644); err != nil {
+		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
 	}
 	for fileName, content := range workspaceFiles {
 		if err := os.WriteFile(filepath.Join(dir, fileName), []byte(content), 0644); err != nil {
@@ -137,7 +138,6 @@ Persistent notes for this workspace can go here.
 	}
 
 	fmt.Printf("\nCreated %s/\n", dir)
-	fmt.Printf("  workspace.yaml\n")
 	fmt.Printf("  elasticclaw-config.yaml\n")
 	fmt.Printf("  AGENTS.md\n")
 	fmt.Printf("  TOOLS.md\n")
@@ -146,7 +146,7 @@ Persistent notes for this workspace can go here.
 	fmt.Printf("  USER.md\n")
 	fmt.Printf("  MEMORY.md\n")
 	fmt.Printf("Next steps:\n")
-	fmt.Printf("  1. Edit %s/workspace.yaml and workspace files\n", dir)
+	fmt.Printf("  1. Edit %s/elasticclaw-config.yaml and workspace files\n", dir)
 	fmt.Printf("  2. Push to hub: elasticclaw workspace push %s\n", name)
 	return nil
 }
@@ -202,7 +202,7 @@ func runWorkspacePush(filterName string) error {
 		return err
 	}
 
-	pattern := filepath.Join(".elasticclaw", "workspaces", "*", "workspace.yaml")
+	pattern := filepath.Join(".elasticclaw", "workspaces", "*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
 		return fmt.Errorf("no workspaces found under .elasticclaw/workspaces/")
@@ -210,7 +210,10 @@ func runWorkspacePush(filterName string) error {
 
 	var workspaces []*types.WorkspaceConfig
 	for _, match := range matches {
-		workspace, err := readWorkspaceDir(filepath.Dir(match))
+		if info, err := os.Stat(match); err != nil || !info.IsDir() {
+			continue
+		}
+		workspace, err := readWorkspaceDir(match)
 		if err != nil {
 			return err
 		}
@@ -256,13 +259,19 @@ func runWorkspacePush(filterName string) error {
 }
 
 func readWorkspaceDir(dir string) (*types.WorkspaceConfig, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "workspace.yaml"))
+	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", filepath.Join(dir, "workspace.yaml"), err)
+		legacyPath := filepath.Join(dir, "workspace.yaml")
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", configPath, err)
+		}
+		configPath = legacyPath
 	}
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", filepath.Join(dir, "workspace.yaml"), err)
+		return nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 	if workspace.Name == "" {
 		workspace.Name = filepath.Base(dir)

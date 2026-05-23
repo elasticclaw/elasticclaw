@@ -317,13 +317,19 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		return nil, err
 	}
 	dir := filepath.Join(workspacesDir(), name)
-	data, err := os.ReadFile(filepath.Join(dir, "workspace.yaml"))
+	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("read workspace.yaml: %w", err)
+		legacyPath := filepath.Join(dir, "workspace.yaml")
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
+		}
+		configPath = legacyPath
 	}
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
-		return nil, fmt.Errorf("parse workspace.yaml: %w", err)
+		return nil, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
 	}
 	if workspace.Name == "" {
 		workspace.Name = name
@@ -398,17 +404,15 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
 
-	workspaceCopy := *workspace
-	workspaceCopy.Workflows = nil
-	data, err := yaml.Marshal(&workspaceCopy)
+	data, err := marshalWorkspaceElasticClawConfig(workspace, workspace.Files["elasticclaw-config.yaml"])
 	if err != nil {
-		return fmt.Errorf("marshal workspace.yaml: %w", err)
+		return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), data, 0640); err != nil {
-		return fmt.Errorf("write workspace.yaml: %w", err)
+	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), data, 0640); err != nil {
+		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
 	}
 	for name, content := range workspace.Files {
-		if strings.Contains(name, "..") || strings.HasPrefix(name, "workflows/") || name == "workspace.yaml" {
+		if strings.Contains(name, "..") || strings.HasPrefix(name, "workflows/") || name == "workspace.yaml" || name == "elasticclaw-config.yaml" {
 			continue
 		}
 		path := filepath.Join(dir, name)
@@ -435,6 +439,25 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		}
 	}
 	return nil
+}
+
+func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existing string) ([]byte, error) {
+	values := map[string]interface{}{}
+	if strings.TrimSpace(existing) != "" {
+		if err := yaml.Unmarshal([]byte(existing), &values); err != nil {
+			return nil, err
+		}
+	}
+	values["name"] = workspace.Name
+	if workspace.SchemaVersion != "" {
+		values["schema_version"] = workspace.SchemaVersion
+	} else if _, ok := values["schema_version"]; !ok {
+		values["schema_version"] = "v1"
+	}
+	values["repositories"] = workspace.Repositories
+	values["secrets"] = workspace.Secrets
+	values["webhook_secrets"] = workspace.WebhookSecrets
+	return yaml.Marshal(values)
 }
 
 func deleteExternalWorkspace(name string) error {
