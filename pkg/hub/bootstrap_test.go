@@ -356,6 +356,79 @@ func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
 	assertContains(t, snippet, "profiles['anthropic:default']", "still configures Anthropic auth")
 }
 
+func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	providerName := `custom"\provider`
+	keys := []*types.LLMKeyConfig{
+		{Name: "custom-main", Provider: providerName, Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "custom-main")
+
+	assertContains(t, snippet, `"custom\"\\provider": {`, "escaped provider dict key")
+	assertContains(t, snippet, `for p in ["custom\"\\provider"]:`, "escaped router cleanup list")
+
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".openclaw")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "openclaw.json")
+	initialConfig := map[string]interface{}{
+		"models": map[string]interface{}{
+			"routers": map[string]interface{}{
+				providerName: map[string]interface{}{"stale": true},
+			},
+		},
+	}
+	data, _ := json.Marshal(initialConfig)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		keys[0].EnvVarName()+"=sk-custom-test",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, string(out))
+	}
+
+	var patched map[string]interface{}
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	if err := json.Unmarshal(configData, &patched); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	models, ok := patched["models"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models missing or wrong type: %#v", patched["models"])
+	}
+	providers, ok := models["providers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models.providers missing or wrong type: %#v", models["providers"])
+	}
+	if _, ok := providers[providerName]; !ok {
+		t.Fatalf("escaped provider missing from config: %#v", providers)
+	}
+	routers, ok := models["routers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models.routers missing or wrong type: %#v", models["routers"])
+	}
+	if _, ok := routers[providerName]; ok {
+		t.Fatalf("stale router entry was not removed: %#v", routers)
+	}
+}
+
 func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingProviderCatalog(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")

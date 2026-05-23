@@ -33,11 +33,11 @@ build-release: build-web
 
 build-bridge:
 	mkdir -p bin
-	CGO_ENABLED=0 go build -o bin/claw-bridge ./cmd/claw-bridge/
+	CGO_ENABLED=0 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge ./cmd/claw-bridge/
 
 build-bridge-linux:
 	mkdir -p bin
-	GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
+	GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
 
 install:

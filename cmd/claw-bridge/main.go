@@ -43,6 +43,12 @@ import (
 	"nhooyr.io/websocket/wsjson"
 )
 
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildDate = "unknown"
+)
+
 // ─── hub wire types ─────────────────────────────────────────────────────────
 
 type hubMsg struct {
@@ -420,7 +426,7 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 		"maxProtocol": 4,
 		"client": map[string]interface{}{
 			"id":         clientID,
-			"version":    "1.0.0",
+			"version":    Version,
 			"platform":   "linux",
 			"mode":       clientMode,
 			"instanceId": instanceID,
@@ -1565,7 +1571,21 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func printVersion() {
+	fmt.Printf("claw-bridge %s (commit: %s, built: %s)\n", Version, Commit, BuildDate)
+}
+
 func main() {
+	// Handle version requests very early, before any env var requirements.
+	// Supports: claw-bridge version, claw-bridge --version, claw-bridge -v
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+		if arg == "version" || arg == "--version" || arg == "-v" {
+			printVersion()
+			os.Exit(0)
+		}
+	}
+
 	// Subcommand dispatch: linear CLI embedded in the bridge binary.
 	if len(os.Args) > 1 && os.Args[1] == "linear" {
 		os.Exit(runLinearCLI(os.Args[2:]))
