@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { clearConfig, fetchFactories, type Factory } from "@/lib/api"
+import { clearConfig, fetchWorkflows, type Workflow } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,7 +55,7 @@ interface SidebarProps {
   isCollapsed: boolean
   onToggleCollapse: () => void
   isAdmin?: boolean
-  onSelectFactory?: (factory: Factory | null) => void
+  onSelectWorkflow?: (workflow: Workflow | null) => void
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -111,31 +111,32 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
   isAdmin = true,
-  onSelectFactory,
+  onSelectWorkflow,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
-  const [manualFactories, setManualFactories] = useState<Factory[]>([])
-  const [showFactoryPicker, setShowFactoryPicker] = useState(false)
+  const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
+  const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
 
-  // Load manual-trigger factories
+  // Load manual-trigger workflows. The backend currently projects workflows
+  // from factories for compatibility.
   useEffect(() => {
     let cancelled = false
     let attempts = 0
     const load = () => {
-      fetchFactories()
+      fetchWorkflows()
         .then((data) => {
           if (cancelled) return
           const manual = data.filter(
-            (f) => (f.enabled !== false) && f.enable_manual_trigger
+            (workflow) => workflow.enabled && workflow.enableManualTrigger
           )
-          console.log("[sidebar] loaded factories:", data.length, "manual:", manual.length)
-          setManualFactories(manual)
+          console.log("[sidebar] loaded workflows:", data.length, "manual:", manual.length)
+          setManualWorkflows(manual)
         })
         .catch((err) => {
           if (cancelled) return
-          console.error("[sidebar] fetchFactories error (attempt", attempts + 1, "):", err)
+          console.error("[sidebar] fetchWorkflows error (attempt", attempts + 1, "):", err)
           attempts++
           if (attempts < 3) {
             setTimeout(load, attempts * 500)
@@ -208,17 +209,17 @@ export function Sidebar({
           >
             <PanelLeft className="size-4" />
           </Button>
-          {manualFactories.length > 0 && (
+          {manualWorkflows.length > 0 && (
             <Button
               variant="ghost"
               size="icon"
               className="size-8"
               title="Create Claw"
               onClick={() => {
-                if (manualFactories.length === 1) {
-                  onSelectFactory?.(manualFactories[0])
+                if (manualWorkflows.length === 1) {
+                  onSelectWorkflow?.(manualWorkflows[0])
                 } else {
-                  setShowFactoryPicker(true)
+                  setShowWorkflowPicker(true)
                 }
               }}
             >
@@ -275,17 +276,17 @@ export function Sidebar({
           {appName}
         </h1>
         <div className="flex items-center gap-1">
-          {manualFactories.length > 0 && (
+          {manualWorkflows.length > 0 && (
             <Button
               variant="ghost"
               size="icon"
               className="size-8"
               title="Create Claw"
               onClick={() => {
-                if (manualFactories.length === 1) {
-                  onSelectFactory?.(manualFactories[0])
+                if (manualWorkflows.length === 1) {
+                  onSelectWorkflow?.(manualWorkflows[0])
                 } else {
-                  setShowFactoryPicker(true)
+                  setShowWorkflowPicker(true)
                 }
               }}
             >
@@ -499,29 +500,29 @@ export function Sidebar({
   return (
     <>
       {sidebar}
-      {showFactoryPicker && (
-        <FactoryPickerOverlay
-          factories={manualFactories}
-          onSelect={(f) => {
-            onSelectFactory?.(f)
-            setShowFactoryPicker(false)
+      {showWorkflowPicker && (
+        <WorkflowPickerOverlay
+          workflows={manualWorkflows}
+          onSelect={(workflow) => {
+            onSelectWorkflow?.(workflow)
+            setShowWorkflowPicker(false)
           }}
-          onClose={() => setShowFactoryPicker(false)}
+          onClose={() => setShowWorkflowPicker(false)}
         />
       )}
     </>
   )
 }
 
-/** FactoryPickerOverlay — a keyboard-accessible overlay for picking a factory.
+/** WorkflowPickerOverlay is a keyboard-accessible overlay for picking a workflow.
  *  Closes on Escape key and click outside the card. */
-function FactoryPickerOverlay({
-  factories,
+function WorkflowPickerOverlay({
+  workflows,
   onSelect,
   onClose,
 }: {
-  factories: Factory[]
-  onSelect: (f: Factory) => void
+  workflows: Workflow[]
+  onSelect: (workflow: Workflow) => void
   onClose: () => void
 }) {
   const handleKeyDown = useCallback(
@@ -545,20 +546,20 @@ function FactoryPickerOverlay({
     >
       <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-[90vw]">
         <div className="flex items-center justify-between p-3 border-b border-border">
-          <h3 className="text-sm font-medium">Select Factory</h3>
+          <h3 className="text-sm font-medium">Select Workflow</h3>
           <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
             <X className="size-4" />
           </Button>
         </div>
         <div className="p-2 space-y-1">
-          {factories.map((f) => (
+          {workflows.map((workflow) => (
             <button
-              key={f.name}
+              key={workflow.name}
               className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors"
-              onClick={() => onSelect(f)}
+              onClick={() => onSelect(workflow)}
             >
-              <div className="font-medium">{f.name}</div>
-              <div className="text-xs text-muted-foreground">{f.template}</div>
+              <div className="font-medium">{workflow.name}</div>
+              <div className="text-xs text-muted-foreground">{workflow.template}</div>
             </button>
           ))}
         </div>

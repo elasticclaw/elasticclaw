@@ -8,7 +8,7 @@ import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
-import { isConfigured, type Factory } from "@/lib/api"
+import { isConfigured, type Workflow } from "@/lib/api"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -21,7 +21,7 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
   const [isAdmin, setIsAdmin] = useState(true) // default true so UI doesn't flicker
-  const [selectedFactory, setSelectedFactory] = useState<Factory | null>(null)
+  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
   // Check configured on mount (needs browser for localStorage)
   useEffect(() => {
@@ -286,7 +286,7 @@ export default function Home() {
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
-        onSelectFactory={setSelectedFactory}
+        onSelectWorkflow={setSelectedWorkflow}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <ConversationView
@@ -313,9 +313,9 @@ export default function Home() {
         onSpawn={handleSpawn}
       />
       <ManualTriggerModal
-        open={!!selectedFactory}
-        onOpenChange={(open) => { if (!open) setSelectedFactory(null) }}
-        factory={selectedFactory}
+        open={!!selectedWorkflow}
+        onOpenChange={(open) => { if (!open) setSelectedWorkflow(null) }}
+        workflow={selectedWorkflow}
       />
     </div>
   )
