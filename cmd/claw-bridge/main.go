@@ -1169,7 +1169,8 @@ func configureOpenClaw() error {
 	log.Printf("[bootstrap] OpenClaw config model=%q config_patch=%t gateway_password=%t", defaultModel, providerSnippet != "", gatewayPassword != "")
 
 	// Build the python config patch.
-	// The provider snippet (if any) is inserted as a block that sets config['models'].
+	// The provider snippet (if any) patches openclaw.json: sets the agent default
+	// model, strips the legacy top-level models catalog, and configures the gateway.
 	var configPy string
 	if providerSnippet != "" {
 		// providerSnippet is the full python << 'PYEOF' ... PYEOF block from the hub.
