@@ -2262,7 +2262,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.5.12"
+	const daytonaOpenClawVersion = "2026.5.20"
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
