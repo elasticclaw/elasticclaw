@@ -446,34 +446,9 @@ func runFactoryTrigger(name string, inputs []string) error {
 		return err
 	}
 
-	// Parse inputs
-	inputMap := make(map[string]interface{})
-	for _, in := range inputs {
-		parts := strings.SplitN(in, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid input format %q (expected key=value)", in)
-		}
-		key := parts[0]
-		val := parts[1]
-
-		// Try bool
-		if strings.EqualFold(val, "true") {
-			inputMap[key] = true
-			continue
-		}
-		if strings.EqualFold(val, "false") {
-			inputMap[key] = false
-			continue
-		}
-
-		// Try number
-		if num, err := strconv.ParseFloat(val, 64); err == nil {
-			inputMap[key] = num
-			continue
-		}
-
-		// String
-		inputMap[key] = val
+	inputMap, err := parseTriggerInputs(inputs)
+	if err != nil {
+		return err
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{"inputs": inputMap})
@@ -504,6 +479,33 @@ func runFactoryTrigger(name string, inputs []string) error {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+func parseTriggerInputs(inputs []string) (map[string]interface{}, error) {
+	inputMap := make(map[string]interface{})
+	for _, in := range inputs {
+		parts := strings.SplitN(in, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid input format %q (expected key=value)", in)
+		}
+		key := parts[0]
+		val := parts[1]
+
+		if strings.EqualFold(val, "true") {
+			inputMap[key] = true
+			continue
+		}
+		if strings.EqualFold(val, "false") {
+			inputMap[key] = false
+			continue
+		}
+		if num, err := strconv.ParseFloat(val, 64); err == nil {
+			inputMap[key] = num
+			continue
+		}
+		inputMap[key] = val
+	}
+	return inputMap, nil
+}
 
 func resolveHubConn() (hubURL, clawToken string, err error) {
 	// Try env first

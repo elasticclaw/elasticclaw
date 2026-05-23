@@ -3,13 +3,14 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, BarChart3, Wrench } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
+import { fetchWorkspaces, type Workspace } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -63,16 +64,6 @@ interface SettingsData {
     shortcut?: Array<{ workspace: string; tokenSet: boolean }>
     githubIssues?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
   }
-  factories?: Array<{
-    name: string; integration: string; workspace: string; team: string
-    triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
-    concurrencyGroup?: string
-    inputs?: Array<{
-      name: string; type: string; required?: boolean; default?: string
-      description?: string; options?: string[]; validation?: string
-    }>
-  }>
   secrets?: string[]
   mcpServers?: Array<{
     name: string
@@ -213,8 +204,7 @@ export default function SettingsSectionPage() {
     // Configuration
     [
       { id: "secrets", label: "Secrets", icon: Lock },
-      { id: "templates", label: "Templates", icon: LayoutTemplate },
-      { id: "factories", label: "Factories", icon: Factory },
+      { id: "workspaces", label: "Workspaces", icon: LayoutTemplate },
     ],
     // Access
     [
@@ -223,10 +213,6 @@ export default function SettingsSectionPage() {
     // AI Assistant
     [
       { id: "ai-config", label: "Configure with AI", icon: Sparkles },
-    ],
-    // Analytics
-    [
-      { id: "analytics", label: "Analytics", icon: BarChart3 },
     ],
     // Diagnostics
     [
@@ -298,17 +284,14 @@ export default function SettingsSectionPage() {
           {settings && section === "issue-trackers" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "factories" && (
-            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} onSaveSilent={saveSilent} saving={saving} />
+          {section === "workspaces" && (
+            <WorkspacesSection />
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} />
           )}
           {settings && section === "mcp-servers" && (
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
-          )}
-          {section === "templates" && (
-            <TemplatesSection />
           )}
           {section === "ai-config" && (
             <AIConfigSection />
@@ -321,9 +304,6 @@ export default function SettingsSectionPage() {
           )}
           {section === "troubleshoot" && (
             <TroubleshootSection />
-          )}
-          {section === "analytics" && (
-            <AnalyticsSection />
           )}
         </main>
       </div>
@@ -855,7 +835,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       <div>
         <h2 className="text-base font-semibold mb-1">Models</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          API keys for LLM providers. The default key is used unless overridden by a template.
+          API keys for LLM providers. The default key is used unless overridden by a workflow.
         </p>
 
         <div className="flex items-center gap-2 mb-6">
@@ -1127,7 +1107,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       <h2 className="text-base font-semibold mb-1">GitHub Apps</h2>
       <div className="text-sm text-muted-foreground mb-6 space-y-1.5">
         <p>
-          Register a GitHub App so your ElasticClaw templates can access repositories.
+          Register a GitHub App so your ElasticClaw workflows can access repositories.
           When a claw is created, it gets a scoped token that can read and write code,
           open pull requests, and check CI status — but only on repos the App is installed on.
         </p>
@@ -1851,7 +1831,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Issue Trackers</h2>
-        <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from Factories.</p>
+        <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from workflows.</p>
 
         {/* Summary badges */}
         <div className="flex items-center gap-2 mb-6">
@@ -2068,201 +2048,103 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   )
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
-  const [savedFactory, setSavedFactory] = useState<string | null>(null)
-  const factories = settings.factories || []
-  const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
+function WorkspacesSection() {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
 
-  // Concurrency groups state — use local editable state so inputs are
-  // responsive, then debounce saves to the server.
-  const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
-  const groupsRef = useRef(groups)
-  groupsRef.current = groups
-
-  const [groupLimits, setGroupLimits] = useState<Record<string, number>>(() => {
-    const init: Record<string, number> = {}
-    for (const g of groups) init[g.name] = g.limit
-    return init
-  })
-  // Keep local state in sync when props change from outside (e.g. initial load)
-  useEffect(() => {
-    const next: Record<string, number> = {}
-    for (const g of groups) next[g.name] = g.limit
-    setGroupLimits(next)
-  }, [settings.concurrencyGroups])
-
-  const [newGroupName, setNewGroupName] = useState("")
-  const [newGroupLimit, setNewGroupLimit] = useState(0)
-
-  const allGroupNames = groups.map(g => g.name)
-
-  function saveGroups(updatedGroups: typeof groups) {
-    onSave({ concurrencyGroups: updatedGroups.map(g => ({ name: g.name, limit: g.limit })) })
-  }
-
-  function addGroup() {
-    if (!newGroupName.trim() || groups.some(g => g.name === newGroupName.trim())) return
-    const updated = [...groups, { name: newGroupName.trim(), limit: newGroupLimit }]
-    setNewGroupName("")
-    setNewGroupLimit(0)
-    saveGroups(updated)
-  }
-
-  function removeGroup(name: string) {
-    if (name === "global") return
-    saveGroups(groups.filter(g => g.name !== name))
-  }
-
-  // Debounce group limit updates to avoid firing a PATCH on every keystroke.
-  // Each group gets its own timer so edits to different groups don't cancel
-  // each other — without this, editing group A then group B within 500ms would
-  // silently drop group A's change.
-  const groupLimitTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
-
-  function updateGroupLimit(name: string, limit: number) {
-    setGroupLimits(prev => ({ ...prev, [name]: limit }))
-    const timers = groupLimitTimersRef.current
-    if (timers[name]) {
-      clearTimeout(timers[name])
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      setWorkspaces(await fetchWorkspaces())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load workspaces")
+    } finally {
+      setLoading(false)
     }
-    timers[name] = setTimeout(() => {
-      delete timers[name]
-      const latest = groupsRef.current
-      const updated = latest.map(g => g.name === name ? { ...g, limit } : g)
-      saveGroups(updated)
-    }, 500)
-  }
+  }, [])
 
-  function updateFactoryGroup(factoryIdx: number, groupName: string) {
-    const updated = factories.map((x, j) => j === factoryIdx ? { ...x, concurrencyGroup: groupName } : x)
-    setSavedFactory(factories[factoryIdx].name)
-    setTimeout(() => setSavedFactory(null), 1500)
-    onSaveSilent({ factories: updated })
-  }
+  useEffect(() => { load() }, [load])
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Factories</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Automatically spawn and terminate claws based on issue tracker events.
-        </p>
-      </div>
-
-      {/* Concurrency Groups */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-4">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="font-medium text-sm">Concurrency Groups</p>
-          <p className="text-muted-foreground text-xs mt-0.5">
-            Limit how many claws can run simultaneously per group. 0 = unlimited.
+          <h2 className="text-base font-semibold mb-1">Workspaces</h2>
+          <p className="text-sm text-muted-foreground">
+            Workspaces group workflows, repositories, and secret names.
           </p>
         </div>
-
-        {/* Groups table */}
-        <div className="space-y-2">
-          {groups.map(g => (
-            <div key={g.name} className="flex items-center gap-3">
-              <span className="text-sm font-mono w-24 shrink-0">{g.name}</span>
-              <Input
-                type="number"
-                min={0}
-                value={groupLimits[g.name] ?? g.limit}
-                onChange={(e) => updateGroupLimit(g.name, parseInt(e.target.value) || 0)}
-                className="w-24 text-sm h-7"
-                placeholder="0 = unlimited"
-              />
-              <span className="text-xs text-muted-foreground">limit</span>
-              {g.name !== "global" && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-destructive hover:text-destructive h-7 px-2"
-                  onClick={() => removeGroup(g.name)}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Add group */}
-        <div className="flex items-center gap-2 pt-2 border-t border-border">
-          <Input
-            placeholder="Group name"
-            value={newGroupName}
-            onChange={(e) => setNewGroupName(e.target.value)}
-            className="w-32 text-sm h-7"
-            onKeyDown={(e) => { if (e.key === "Enter") addGroup() }}
-          />
-          <Input
-            type="number"
-            min={0}
-            value={newGroupLimit}
-            onChange={(e) => setNewGroupLimit(parseInt(e.target.value) || 0)}
-            className="w-24 text-sm h-7"
-            placeholder="Limit"
-          />
-          <Button size="sm" variant="outline" className="h-7" onClick={addGroup} disabled={!newGroupName.trim()}>
-            + Add Group
-          </Button>
-        </div>
+        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
+          Refresh
+        </Button>
       </div>
 
-      {factories.length > 0 && (
-        <div className="space-y-2">
-          {factories.map((f, i) => (
-            <div key={i} className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium">{f.name}</p>
-                  {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading && workspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspaces…</p>
+      ) : workspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces configured.</p>
+      ) : (
+        <div className="space-y-4">
+          {workspaces.map((workspace) => (
+            <div key={workspace.name} className="border border-border rounded-lg p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold">{workspace.name}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {workspace.workflows.length} workflow{workspace.workflows.length === 1 ? "" : "s"} · {workspace.source}
+                  </p>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {f.integration} · {f.workspace} · &ldquo;{f.triggerStatus}&rdquo; → {f.template}
-                  {f.labels && f.labels.length > 0 && ` · labels: ${f.labels.join(", ")}`}
-                  {f.assigned_to && ` · assigned: ${f.assigned_to}`}
-                  {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
-                </p>
+                <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">
+                  {workspace.access.repositories?.length || 0} repos
+                </span>
               </div>
-              <div className="flex items-center gap-2">
-                {savedFactory === f.name && (
-                  <span className="text-xs text-green-500">✓</span>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <WorkspaceAccessList title="Repositories" values={workspace.access.repositories || []} />
+                <WorkspaceAccessList title="Secrets" values={workspace.access.secrets || []} />
+                <WorkspaceAccessList title="Webhook Secrets" values={workspace.access.webhookSecrets || []} />
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Workflows</h4>
+                {workspace.workflows.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No workflows in this workspace.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {workspace.workflows.map((workflow) => (
+                      <div key={workflow.name} className="border border-border rounded-md px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium truncate">{workflow.name}</p>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {workflow.integration} · {workflow.template}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {workflow.enableManualTrigger && (
+                              <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
+                            )}
+                            <span className={cn(
+                              "text-xs px-2 py-0.5 rounded",
+                              workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
+                            )}>
+                              {workflow.enabled ? "enabled" : "paused"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
-                {/* Concurrency group dropdown */}
-                <select
-                  value={f.concurrencyGroup || "global"}
-                  onChange={(e) => updateFactoryGroup(i, e.target.value)}
-                  className="text-xs rounded-md border border-border bg-background px-2 py-1 h-7"
-                >
-                  {allGroupNames.map(name => (
-                    <option key={name} value={name}>{name}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={async () => {
-                    const enabled = !(f.enabled ?? true)
-                    const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
-                    setSavedFactory(f.name)
-                    setTimeout(() => setSavedFactory(null), 1500)
-                    onSaveSilent({ factories: updated })
-                  }}
-                  className={cn(
-                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
-                    (f.enabled ?? true)
-                      ? "bg-green-600 border-2 border-transparent"
-                      : "bg-transparent border-2 border-muted-foreground/40"
-                  )}
-                  title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
-                >
-                  <span className={cn(
-                    "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
-                    (f.enabled ?? true)
-                      ? "bg-white translate-x-4"
-                      : "bg-muted-foreground/50 translate-x-0"
-                  )} />
-                </button>
-                <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
               </div>
             </div>
           ))}
@@ -2272,7 +2154,27 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   )
 }
 
-
+function WorkspaceAccessList({ title, values }: { title: string; values: string[] }) {
+  return (
+    <div className="space-y-1">
+      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+      {values.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70">None</p>
+      ) : (
+        <div className="space-y-1">
+          {values.slice(0, 4).map((value) => (
+            <code key={value} className="block text-xs bg-muted px-2 py-1 rounded truncate">
+              {value}
+            </code>
+          ))}
+          {values.length > 4 && (
+            <p className="text-xs text-muted-foreground">+{values.length - 4} more</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function SecretsSection({ settings }: { settings: SettingsData | null }) {
   const [secrets, setSecrets] = useState<string[]>([])
@@ -2338,7 +2240,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
       <div>
         <h2 className="text-base font-semibold mb-1">Secrets</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Named secrets referenced by factories via <code className="bg-muted px-1 rounded text-xs">webhook_secret_ref</code>.
+          Named secrets referenced by workflows via <code className="bg-muted px-1 rounded text-xs">webhook_secret_ref</code>.
         </p>
       </div>
 
@@ -3170,7 +3072,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       <div>
         <h2 className="text-base font-semibold mb-1">MCP Servers</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          Model Context Protocol servers add tools to your claws. Configure them here and reference them in templates.
+          Model Context Protocol servers add tools to your claws. Configure them here and reference them in workflows.
         </p>
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
@@ -3382,92 +3284,6 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
   )
 }
 
-function TemplatesSection() {
-  const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])
-  const [loading, setLoading] = useState(true)
-  const [deleting, setDeleting] = useState<string | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/templates`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) setTemplates(await res.json())
-    } catch {}
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load() }, [load])
-
-  const handleDelete = async (name: string) => {
-    setDeleting(name)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) throw new Error(await res.text())
-      await load()
-    } catch {}
-    setDeleting(null)
-    setConfirmDelete(null)
-  }
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Templates</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Templates pushed to the hub and available for claw creation.
-          Push new templates with <code className="bg-muted px-1 rounded text-xs">elasticclaw template push</code>.
-        </p>
-      </div>
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground animate-pulse">Loading…</p>
-      ) : templates.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No templates pushed yet. Use <code className="bg-muted px-1 rounded text-xs">elasticclaw template push &lt;name&gt;</code> to add one.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {templates.map((t) => (
-            <div key={t.name} className="border border-border rounded-lg p-4 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-mono font-medium">{t.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  Updated {new Date(t.updatedAt).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
-                </p>
-              </div>
-              {confirmDelete === t.name ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Delete {t.name}?</span>
-                  <Button size="sm" variant="destructive" disabled={deleting === t.name}
-                    onClick={() => handleDelete(t.name)}>
-                    {deleting === t.name ? "Deleting…" : "Delete"}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-                </div>
-              ) : (
-                <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive"
-                  onClick={() => setConfirmDelete(t.name)}>
-                  <Trash2 className="size-3.5" />
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // linkifyText converts URLs in text into clickable <a> elements.
 function linkifyText(text: string): React.ReactNode {
   const urlRegex = /(https?:\/\/[^\s]+)/g
@@ -3637,7 +3453,7 @@ function TroubleshootSection() {
               <label className="text-sm font-medium mb-2 block">What&apos;s happening?</label>
               <textarea
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[100px] resize-none"
-                placeholder="e.g. Factory webhook is firing but the machine isn't being bootstrapped..."
+                placeholder="e.g. Workflow webhook is firing but the machine isn't being bootstrapped..."
                 value={problem}
                 onChange={e => setProblem(e.target.value)}
                 disabled={loading}
@@ -3919,249 +3735,6 @@ function DoctorSection() {
               ))}
             </div>
           )}
-        </>
-      )}
-    </div>
-  )
-}
-
-// ─── Analytics Section ───────────────────────────────────────────────────────
-
-interface AnalyticsSummary {
-  factoryName: string
-  totalTriggers: number
-  successfulCreations: number
-  failedCreations: number
-  terminations: number
-  prOpened: number
-  prMerged: number
-  prClosed: number
-  doneSignals: number
-  errors: number
-  successRate: number
-  prMergeRate: number
-  byTriggerStatus: Record<string, number>
-  recentEvents: Array<{
-    id: string
-    factoryName: string
-    issueId: string
-    clawId: string
-    action: string
-    detail: string
-    result: string
-    createdAt: string
-  }>
-  computeError?: string
-}
-
-function AnalyticsSection() {
-  const [summaries, setSummaries] = useState<AnalyticsSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
-  const [days, setDays] = useState(30)
-  const [selectedFactory, setSelectedFactory] = useState<string | null>(null)
-  const [partialData, setPartialData] = useState(false)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError("")
-    setPartialData(false)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/analytics/factories?days=${days}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) throw new Error(await res.text())
-      setPartialData(res.headers.get("X-Analytics-Partial") === "true")
-      const data = await res.json()
-      setSummaries(data || [])
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load analytics")
-    } finally {
-      setLoading(false)
-    }
-  }, [days])
-
-  useEffect(() => { load() }, [load])
-
-  const totalTriggers = summaries.reduce((sum, s) => sum + s.totalTriggers, 0)
-  const totalSuccess = summaries.reduce((sum, s) => sum + s.successfulCreations, 0)
-  const totalFailed = summaries.reduce((sum, s) => sum + s.failedCreations, 0)
-  const totalPRsOpened = summaries.reduce((sum, s) => sum + s.prOpened, 0)
-  const totalPRsMerged = summaries.reduce((sum, s) => sum + s.prMerged, 0)
-  const overallSuccessRate = totalTriggers > 0 ? (totalSuccess / totalTriggers * 100).toFixed(1) : "0"
-  const overallMergeRate = totalPRsOpened > 0 ? (totalPRsMerged / totalPRsOpened * 100).toFixed(1) : "0"
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Factory Analytics</h2>
-        <p className="text-sm text-muted-foreground mb-4">
-          Usage and success metrics for factories. Data is retained for up to 1 year.
-        </p>
-      </div>
-
-      <div className="flex items-center gap-4">
-        <label className="text-sm text-muted-foreground">Time range:</label>
-        <select
-          value={days}
-          onChange={e => setDays(Number(e.target.value))}
-          className="h-8 rounded-md border border-border bg-background px-2 text-sm"
-        >
-          <option value={7}>Last 7 days</option>
-          <option value={30}>Last 30 days</option>
-          <option value={90}>Last 90 days</option>
-        </select>
-        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-          <RotateCcw className="size-3 mr-1" /> Refresh
-        </Button>
-      </div>
-
-      {error && <p className="text-sm text-red-500">{error}</p>}
-
-      {partialData && (
-        <div className="flex items-center gap-2 text-sm text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
-          <AlertTriangle className="size-4 shrink-0" />
-          Some factory data could not be loaded. Metrics shown may be incomplete.
-        </div>
-      )}
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground">Loading analytics...</p>
-      ) : summaries.length === 0 ? (
-        <div className="border border-dashed border-border rounded-lg p-8 text-center">
-          <BarChart3 className="size-8 text-muted-foreground mx-auto mb-3" />
-          <p className="text-sm text-muted-foreground">No analytics data yet</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Factory activity will appear here once factories start creating claws.
-          </p>
-        </div>
-      ) : (
-        <>
-          {/* Overall stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">Total Triggers</p>
-              <p className="text-2xl font-semibold mt-1">{totalTriggers}</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">Success Rate</p>
-              <p className="text-2xl font-semibold mt-1">{overallSuccessRate}%</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">PRs Opened</p>
-              <p className="text-2xl font-semibold mt-1">{totalPRsOpened}</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">PR Merge Rate</p>
-              <p className="text-2xl font-semibold mt-1">{overallMergeRate}%</p>
-            </div>
-          </div>
-
-          {/* Per-factory breakdown */}
-          <div className="space-y-4">
-            <h3 className="text-sm font-medium">Per Factory</h3>
-            {summaries.map(summary => (
-              <div key={summary.factoryName} className="border border-border rounded-lg overflow-hidden">
-                <button
-                  onClick={() => setSelectedFactory(selectedFactory === summary.factoryName ? null : summary.factoryName)}
-                  className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors text-left"
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium">{summary.factoryName}</p>
-                      {summary.computeError && (
-                        <span className="inline-flex items-center gap-1 text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">
-                          <AlertTriangle className="size-3" /> Error
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(1)}% success · {summary.prOpened} PRs · {summary.prMergeRate.toFixed(1)}% merge rate
-                    </p>
-                    {summary.computeError && (
-                      <p className="text-xs text-red-400 mt-1">{summary.computeError}</p>
-                    )}
-                  </div>
-                  <ArrowRight className={cn("size-4 transition-transform", selectedFactory === summary.factoryName ? "rotate-90" : "")} />
-                </button>
-
-                {selectedFactory === summary.factoryName && (
-                  <div className="border-t border-border p-4 space-y-4">
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Created</p>
-                        <p className="text-lg font-semibold">{summary.successfulCreations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Failed</p>
-                        <p className="text-lg font-semibold text-red-500">{summary.failedCreations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Terminated</p>
-                        <p className="text-lg font-semibold">{summary.terminations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Opened</p>
-                        <p className="text-lg font-semibold">{summary.prOpened}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Merged</p>
-                        <p className="text-lg font-semibold text-green-500">{summary.prMerged}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Closed</p>
-                        <p className="text-lg font-semibold text-orange-500">{summary.prClosed}</p>
-                      </div>
-                    </div>
-
-                    {Object.keys(summary.byTriggerStatus).length > 0 && (
-                      <div>
-                        <p className="text-xs font-medium mb-2">By Trigger Status</p>
-                        <div className="flex flex-wrap gap-2">
-                          {Object.entries(summary.byTriggerStatus).map(([status, count]) => (
-                            <span key={status} className="text-xs bg-muted px-2 py-1 rounded">
-                              {status}: {count}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {summary.recentEvents.length > 0 && (
-                      <div>
-                        <p className="text-xs font-medium mb-2">Recent Events</p>
-                        <div className="space-y-1 max-h-48 overflow-y-auto">
-                          {summary.recentEvents.slice(0, 20).map(event => (
-                            <div key={event.id} className="flex items-center gap-2 text-xs p-2 rounded hover:bg-muted/50">
-                              <span className={cn(
-                                "px-1.5 py-0.5 rounded font-medium",
-                                event.action === "claw_created" && "bg-green-500/20 text-green-400",
-                                event.action === "error" && "bg-red-500/20 text-red-400",
-                                event.action === "claw_terminated" && "bg-orange-500/20 text-orange-400",
-                                event.action === "pr_opened" && "bg-blue-500/20 text-blue-400",
-                                event.action === "pr_merged" && "bg-purple-500/20 text-purple-400",
-                                event.action === "pr_closed" && "bg-red-500/20 text-red-400",
-                                event.action === "done_signal" && "bg-emerald-500/20 text-emerald-400",
-                              )}>
-                                {event.action}
-                              </span>
-                              <span className="text-muted-foreground">{event.issueId}</span>
-                              {event.detail && <span className="text-muted-foreground truncate">{event.detail}</span>}
-                              <span className="ml-auto text-muted-foreground/50">
-                                {new Date(event.createdAt).toLocaleDateString()}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
         </>
       )}
     </div>

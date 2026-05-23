@@ -4,14 +4,12 @@ export const VALID_SECTIONS = [
   "github",
   "authentication",
   "issue-trackers",
-  "factories",
+  "workspaces",
   "secrets",
-  "templates",
   "ai-config",
   "mcp-servers",
   "webhooks",
   "doctor",
-  "analytics",
   "troubleshoot",
 ] as const
 

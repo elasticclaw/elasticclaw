@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -213,16 +212,23 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	factory, err := loadExternalFactory(name)
+	s.triggerFactoryByName(w, r, name)
+}
+
+func (s *Server) triggerFactoryByName(w http.ResponseWriter, r *http.Request, name string) {
+	factory, err := s.resolveFactoryByName(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			jsonError(w, http.StatusNotFound, "factory not found")
-		} else {
-			jsonError(w, http.StatusInternalServerError, "failed to load factory: "+err.Error())
-		}
+		jsonError(w, http.StatusInternalServerError, "failed to load factory: "+err.Error())
 		return
 	}
+	if factory == nil {
+		jsonError(w, http.StatusNotFound, "factory not found")
+		return
+	}
+	s.triggerFactoryConfig(w, r, factory)
+}
 
+func (s *Server) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, factory *types.FactoryConfig) {
 	// Verify factory supports manual triggers
 	if !factory.EnableManualTrigger {
 		jsonError(w, http.StatusForbidden, "factory does not support manual triggers")
@@ -263,4 +269,19 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 		"claw_id": clawID,
 		"status":  "created",
 	})
+}
+
+func (s *Server) resolveFactoryByName(name string) (*types.FactoryConfig, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, nil
+	}
+	if factory, err := loadExternalFactory(name); err == nil {
+		return factory, nil
+	}
+	for _, factory := range s.resolveFactories() {
+		if factory != nil && strings.EqualFold(factory.Name, name) {
+			return factory, nil
+		}
+	}
+	return nil, nil
 }

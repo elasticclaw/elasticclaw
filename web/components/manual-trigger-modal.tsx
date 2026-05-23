@@ -13,7 +13,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
-import { triggerWorkflow, type FactoryInput, type Workflow } from "@/lib/api"
+import { triggerWorkflow, type WorkflowInput, type Workflow } from "@/lib/api"
 
 interface ManualTriggerModalProps {
   open: boolean
@@ -109,7 +109,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         {workflow.inputs && workflow.inputs.length > 0 && (
           <div className="space-y-4 py-2">
             {workflow.inputs.map((input) => (
-              <FactoryInputField
+              <WorkflowInputField
                 key={input.name}
                 input={input}
                 value={inputValues[input.name] || ""}
@@ -149,12 +149,12 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   )
 }
 
-function FactoryInputField({
+function WorkflowInputField({
   input,
   value,
   onChange,
 }: {
-  input: FactoryInput
+  input: WorkflowInput
   value: string
   onChange: (val: string) => void
 }) {

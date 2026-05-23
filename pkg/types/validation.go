@@ -148,6 +148,58 @@ func (f *FactoryConfig) Validate() error {
 	return nil
 }
 
+// Validate validates a WorkflowConfig and returns an error if invalid.
+func (w *WorkflowConfig) Validate() error {
+	if w == nil {
+		return fmt.Errorf("workflow config is nil")
+	}
+	if strings.TrimSpace(w.Name) == "" {
+		return fmt.Errorf("workflow name is required")
+	}
+	if strings.TrimSpace(w.Template) == "" {
+		return fmt.Errorf("workflow %q: template is required", w.Name)
+	}
+	if w.Integration != "" && !validIntegrations[w.Integration] {
+		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", w.Name, w.Integration)
+	}
+	if w.Color != "" && !validColors[w.Color] {
+		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
+	}
+	if w.NamePattern != "" && !namePatternRegex.MatchString(w.NamePattern) {
+		return fmt.Errorf("workflow %q: invalid name_pattern %q (must contain only alphanumeric, hyphens, underscores, and {placeholders})", w.Name, w.NamePattern)
+	}
+	if w.Provider != "" && !validProviders[w.Provider] {
+		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: replicated, daytona, exedev)", w.Name, w.Provider)
+	}
+	if w.Trigger != nil {
+		if err := validateGitHubTrigger(w.Name, w.Trigger); err != nil {
+			return err
+		}
+	}
+	for i, repo := range w.Repos {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: repos[%d] cannot be empty", w.Name, i)
+		}
+		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+			return fmt.Errorf("workflow %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+		}
+	}
+	for i, repo := range w.TriggerRepos {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: trigger_repos[%d] cannot be empty", w.Name, i)
+		}
+		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+			return fmt.Errorf("workflow %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+		}
+	}
+	for i, input := range w.Inputs {
+		if err := validateFactoryInput(w.Name, i, input); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateFactoryInput(factoryName string, index int, input FactoryInput) error {
 	if strings.TrimSpace(input.Name) == "" {
 		return fmt.Errorf("factory %q: inputs[%d] name is required", factoryName, index)

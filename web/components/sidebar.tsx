@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { clearConfig, fetchWorkflows, type Workflow } from "@/lib/api"
+import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,7 +44,6 @@ interface SidebarProps {
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
   onReorderClaws: (ids: string[]) => void
-  onSpawn: () => void
   searchQuery: string
   onSearchChange: (query: string) => void
   allTags: string[]
@@ -100,7 +99,6 @@ export function Sidebar({
   onSelectClaw,
   onTogglePin,
   onReorderClaws,
-  onSpawn,
   searchQuery,
   onSearchChange,
   allTags,
@@ -119,19 +117,19 @@ export function Sidebar({
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
 
-  // Load manual-trigger workflows. The backend currently projects workflows
-  // from factories for compatibility.
+  // Load manual-trigger workflows from persisted workspaces.
   useEffect(() => {
     let cancelled = false
     let attempts = 0
     const load = () => {
-      fetchWorkflows()
+      fetchWorkspaces()
         .then((data) => {
           if (cancelled) return
-          const manual = data.filter(
+          const workflows = data.flatMap((workspace) => workspace.workflows || [])
+          const manual = workflows.filter(
             (workflow) => workflow.enabled && workflow.enableManualTrigger
           )
-          console.log("[sidebar] loaded workflows:", data.length, "manual:", manual.length)
+          console.log("[sidebar] loaded workflows:", workflows.length, "manual:", manual.length)
           setManualWorkflows(manual)
         })
         .catch((err) => {
@@ -309,7 +307,7 @@ export function Sidebar({
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input
-            placeholder="Filter by name or template..."
+            placeholder="Filter by name or workflow..."
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             className="pl-8 h-8 text-sm bg-background"
@@ -559,7 +557,7 @@ function WorkflowPickerOverlay({
               onClick={() => onSelect(workflow)}
             >
               <div className="font-medium">{workflow.name}</div>
-              <div className="text-xs text-muted-foreground">{workflow.template}</div>
+              <div className="text-xs text-muted-foreground">{workflow.workspaceName}</div>
             </button>
           ))}
         </div>

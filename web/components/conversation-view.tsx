@@ -201,7 +201,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
 
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-          Template
+          Source
         </h3>
         <p className="text-sm font-mono text-foreground">
           {claw.template}
@@ -1055,7 +1055,6 @@ function ClawChatView({
             </Button>
             <h2 className="font-mono text-xl font-semibold text-foreground">{claw.name}</h2>
             <StatusBadge status={claw.status} />
-            <span className="text-sm text-muted-foreground">{claw.template}</span>
             <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
           </div>
           <div className="flex items-center gap-2">

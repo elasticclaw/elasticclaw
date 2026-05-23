@@ -226,8 +226,7 @@ export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
   return apiFetch<ClawPR[]>(`/api/claws/${clawId}/prs`)
 }
 
-// Factory types for manual trigger
-export interface FactoryInput {
+export interface WorkflowInput {
   name: string
   type: string
   required?: boolean
@@ -237,30 +236,6 @@ export interface FactoryInput {
   validation?: string
   min?: number
   max?: number
-}
-
-// Factory matches FactoryPushView from GET /api/factories.
-// Field names match the JSON tags from the backend (snake_case / lowercase).
-export interface Factory {
-  name: string
-  integration: string
-  workspace: string
-  trigger_status: string
-  done_status?: string
-  template: string
-  labels?: string[]
-  assigned_to?: string
-  enabled?: boolean
-  has_webhook_secret: boolean
-  webhook_secret_ref?: string
-  pipeline_yaml?: string
-  enable_manual_trigger?: boolean
-  secret_refs?: Record<string, string>
-  inputs?: FactoryInput[]
-}
-
-export async function fetchFactories(): Promise<Factory[]> {
-  return apiFetch<Factory[]>("/api/factories")
 }
 
 export interface WorkspaceAccess {
@@ -273,7 +248,6 @@ export interface Workflow {
   name: string
   workspaceName: string
   source: string
-  legacyFactoryName: string
   integration: string
   integrationWorkspace?: string
   triggerStatus?: string
@@ -287,7 +261,7 @@ export interface Workflow {
   pipelineYAML?: string
   enableManualTrigger?: boolean
   secretRefs?: Record<string, string>
-  inputs?: FactoryInput[]
+  inputs?: WorkflowInput[]
 }
 
 export interface Workspace {
@@ -301,17 +275,20 @@ export async function fetchWorkspaces(): Promise<Workspace[]> {
   return apiFetch<Workspace[]>("/api/workspaces")
 }
 
-export async function fetchWorkflows(workspaceName = "default"): Promise<Workflow[]> {
+export async function fetchWorkflows(workspaceName: string): Promise<Workflow[]> {
   return apiFetch<Workflow[]>(`/api/workspaces/${encodeURIComponent(workspaceName)}/workflows`)
 }
 
-export async function triggerFactory(name: string, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return apiFetch<{ claw_id: string; status: string }>(`/api/factories/${encodeURIComponent(name)}/trigger`, {
-    method: "POST",
-    body: JSON.stringify({ inputs: inputs || {} }),
-  })
+export async function fetchWorkflow(workspaceName: string, workflowName: string): Promise<Workflow> {
+  return apiFetch<Workflow>(`/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}`)
 }
 
 export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return triggerFactory(workflow.legacyFactoryName || workflow.name, inputs)
+  return apiFetch<{ claw_id: string; status: string }>(
+    `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
+    {
+      method: "POST",
+      body: JSON.stringify({ inputs: inputs || {} }),
+    }
+  )
 }

@@ -51,10 +51,15 @@ func templatesDir() string {
 	return filepath.Join(hubConfigDir(), "templates")
 }
 
+// workspacesDir returns the path to the external workspaces directory.
+func workspacesDir() string {
+	return filepath.Join(hubConfigDir(), "workspaces")
+}
+
 // EnsureExternalDirs creates the factories/ and templates/ directories
 // alongside hub.yaml if they don't exist.
 func EnsureExternalDirs() error {
-	for _, dir := range []string{factoriesDir(), templatesDir()} {
+	for _, dir := range []string{factoriesDir(), templatesDir(), workspacesDir()} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -279,6 +284,149 @@ func deleteExternalFactory(name string) error {
 	}
 	dir := filepath.Join(factoriesDir(), name)
 	return os.RemoveAll(dir)
+}
+
+// ── Workspaces ───────────────────────────────────────────────────────────────
+
+func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
+	entries, err := os.ReadDir(workspacesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workspaces dir: %w", err)
+	}
+
+	var workspaces []*types.WorkspaceConfig
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		workspace, err := loadExternalWorkspace(e.Name())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] skip workspace %q: %v\n", e.Name(), err)
+			continue
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces, nil
+}
+
+func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(workspacesDir(), name)
+	data, err := os.ReadFile(filepath.Join(dir, "workspace.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("read workspace.yaml: %w", err)
+	}
+	var workspace types.WorkspaceConfig
+	if err := yaml.Unmarshal(data, &workspace); err != nil {
+		return nil, fmt.Errorf("parse workspace.yaml: %w", err)
+	}
+	if workspace.Name == "" {
+		workspace.Name = name
+	}
+
+	workflowDir := filepath.Join(dir, "workflows")
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(workflowDir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read workflow %s: %w", e.Name(), err)
+		}
+		var workflow types.WorkflowConfig
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			return nil, fmt.Errorf("parse workflow %s: %w", e.Name(), err)
+		}
+		workspace.Workflows = append(workspace.Workflows, &workflow)
+	}
+	return &workspace, nil
+}
+
+func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
+	workspaces, err := loadExternalWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	var matched []*types.WorkspaceConfig
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		copyWorkspace := *workspace
+		copyWorkspace.Workflows = nil
+		for _, workflow := range workspace.Workflows {
+			if workflow != nil && strings.EqualFold(workflow.Integration, integration) {
+				copyWorkspace.Workflows = append(copyWorkspace.Workflows, workflow)
+			}
+		}
+		if len(copyWorkspace.Workflows) > 0 {
+			matched = append(matched, &copyWorkspace)
+		}
+	}
+	return matched, nil
+}
+
+func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
+	if workspace == nil || workspace.Name == "" {
+		return fmt.Errorf("workspace name required")
+	}
+	if err := validateName(workspace.Name); err != nil {
+		return err
+	}
+	if err := workspace.Validate(); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(workspacesDir(), workspace.Name)
+	workflowDir := filepath.Join(dir, "workflows")
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove old workspace dir %s: %w", dir, err)
+	}
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+
+	workspaceCopy := *workspace
+	workspaceCopy.Workflows = nil
+	data, err := yaml.Marshal(&workspaceCopy)
+	if err != nil {
+		return fmt.Errorf("marshal workspace.yaml: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "workspace.yaml"), data, 0640); err != nil {
+		return fmt.Errorf("write workspace.yaml: %w", err)
+	}
+	for _, workflow := range workspace.Workflows {
+		if workflow == nil {
+			continue
+		}
+		if err := validateName(workflow.Name); err != nil {
+			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
+		}
+		data, err := yaml.Marshal(workflow)
+		if err != nil {
+			return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
+		}
+		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
+			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
+		}
+	}
+	return nil
+}
+
+func deleteExternalWorkspace(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(workspacesDir(), name))
 }
 
 // ── Migration ────────────────────────────────────────────────────────────────

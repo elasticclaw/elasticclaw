@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -8,10 +10,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-const defaultWorkspaceName = "default"
-
-// WorkspaceView is the compatibility view that presents today's hub-level
-// config as the new workspace/workflow model.
+// WorkspaceView is the API view of a persisted workspace.
 type WorkspaceView struct {
 	Name      string          `json:"name"`
 	Source    string          `json:"source"`
@@ -32,7 +31,6 @@ type WorkflowView struct {
 	Name                 string               `json:"name"`
 	WorkspaceName        string               `json:"workspaceName"`
 	Source               string               `json:"source"`
-	LegacyFactoryName    string               `json:"legacyFactoryName"`
 	Integration          string               `json:"integration"`
 	IntegrationWorkspace string               `json:"integrationWorkspace,omitempty"`
 	TriggerStatus        string               `json:"triggerStatus,omitempty"`
@@ -53,6 +51,72 @@ func (s *Server) handleWorkspacesList(w http.ResponseWriter, _ *http.Request) {
 	jsonOK(w, s.workspaceViews())
 }
 
+func (s *Server) handleWorkspacesCRUD(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleWorkspacesList(w, r)
+	case http.MethodPost:
+		s.handleWorkspacesPush(w, r)
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		s.handleWorkspaceDelete(w, r, name)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type WorkspacePushRequest struct {
+	Workspaces []*types.WorkspaceConfig `json:"workspaces"`
+}
+
+func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
+	var req WorkspacePushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Workspaces) == 0 {
+		http.Error(w, "no workspaces provided", http.StatusBadRequest)
+		return
+	}
+
+	var saveErrs []string
+	for _, workspace := range req.Workspaces {
+		if workspace == nil {
+			saveErrs = append(saveErrs, "workspace cannot be nil")
+			continue
+		}
+		if err := saveExternalWorkspace(workspace); err != nil {
+			saveErrs = append(saveErrs, fmt.Sprintf("save workspace %q: %v", workspace.Name, err))
+		}
+	}
+	if len(saveErrs) > 0 {
+		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
+		return
+	}
+
+	views := make([]WorkspaceView, 0, len(req.Workspaces))
+	for _, workspace := range req.Workspaces {
+		views = append(views, workspaceToView(workspace))
+	}
+	jsonOK(w, map[string]interface{}{
+		"pushed":     len(req.Workspaces),
+		"workspaces": views,
+	})
+}
+
+func (s *Server) handleWorkspaceDelete(w http.ResponseWriter, _ *http.Request, name string) {
+	if err := deleteExternalWorkspace(name); err != nil {
+		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"deleted": name})
+}
+
 func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
@@ -68,143 +132,166 @@ func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Req
 	http.Error(w, "workspace not found", http.StatusNotFound)
 }
 
-func (s *Server) workspaceViews() []WorkspaceView {
-	s.mu.RLock()
-	cfg := s.hubCfg
-	s.mu.RUnlock()
-
-	factories := s.resolveFactories()
-	workspace := projectDefaultWorkspace(cfg, factories)
-	return []WorkspaceView{workspace}
+func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Request) {
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	workflowName := strings.TrimSpace(r.PathValue("workflow"))
+	if workspaceName == "" || workflowName == "" {
+		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
+		return
+	}
+	workflow, ok := s.findWorkflowView(workspaceName, workflowName)
+	if !ok {
+		http.Error(w, "workflow not found", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, workflow)
 }
 
-func projectDefaultWorkspace(cfg *types.HubConfig, factories []*types.FactoryConfig) WorkspaceView {
-	if cfg == nil {
-		cfg = &types.HubConfig{}
+func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
 	}
 
-	access := WorkspaceAccess{
-		Repositories:   collectWorkspaceRepositories(factories),
-		Secrets:        sortedMapKeys(cfg.Secrets),
-		WebhookSecrets: collectWebhookSecretNames(cfg, factories),
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	workflowName := strings.TrimSpace(r.PathValue("workflow"))
+	if workspaceName == "" || workflowName == "" {
+		jsonError(w, http.StatusBadRequest, "workspace and workflow names required")
+		return
+	}
+	workspace, workflow, ok, err := s.resolveWorkflowConfig(workspaceName, workflowName)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to load workflow: "+err.Error())
+		return
+	}
+	if !ok {
+		jsonError(w, http.StatusNotFound, "workflow not found")
+		return
 	}
 
-	workflows := make([]WorkflowView, 0, len(factories))
-	for _, f := range factories {
-		if f == nil {
+	s.triggerWorkflowConfig(w, r, workspace, workflow)
+}
+
+func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
+	if !workflow.EnableManualTrigger {
+		jsonError(w, http.StatusForbidden, "workflow does not support manual triggers")
+		return
+	}
+	if workflow.Enabled != nil && !*workflow.Enabled {
+		jsonError(w, http.StatusForbidden, "workflow is disabled")
+		return
+	}
+
+	var req FactoryTriggerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	validatedInputs, err := validateFactoryInputs(workflow.Inputs, req.Inputs)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "validation error: "+err.Error())
+		return
+	}
+
+	clawID, _, err := s.createClawFromWorkflow(workspace, workflow, validatedInputs, "manual workflow trigger")
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]string{
+		"claw_id": clawID,
+		"status":  "created",
+	})
+}
+
+func (s *Server) findWorkflowView(workspaceName, workflowName string) (WorkflowView, bool) {
+	for _, workspace := range s.workspaceViews() {
+		if !strings.EqualFold(workspace.Name, workspaceName) {
 			continue
 		}
-		workflows = append(workflows, workflowFromFactory(f))
+		for _, workflow := range workspace.Workflows {
+			if strings.EqualFold(workflow.Name, workflowName) {
+				return workflow, true
+			}
+		}
+	}
+	return WorkflowView{}, false
+}
+
+func (s *Server) workspaceViews() []WorkspaceView {
+	persisted, err := loadExternalWorkspaces()
+	if err != nil {
+		return []WorkspaceView{}
+	}
+	views := make([]WorkspaceView, 0, len(persisted))
+	for _, workspace := range persisted {
+		if workspace == nil {
+			continue
+		}
+		views = append(views, workspaceToView(workspace))
+	}
+	sort.Slice(views, func(i, j int) bool {
+		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
+	})
+	return views
+}
+
+func workspaceToView(workspace *types.WorkspaceConfig) WorkspaceView {
+	if workspace == nil {
+		return WorkspaceView{}
+	}
+	workflows := make([]WorkflowView, 0, len(workspace.Workflows))
+	for _, workflow := range workspace.Workflows {
+		if workflow == nil {
+			continue
+		}
+		workflows = append(workflows, workflowToView(workspace.Name, workflow))
 	}
 	sort.Slice(workflows, func(i, j int) bool {
 		return strings.ToLower(workflows[i].Name) < strings.ToLower(workflows[j].Name)
 	})
 
 	return WorkspaceView{
-		Name:      defaultWorkspaceName,
-		Source:    "compatibility",
-		Access:    access,
+		Name:   workspace.Name,
+		Source: "workspace",
+		Access: WorkspaceAccess{
+			Repositories:   append([]string(nil), workspace.Repositories...),
+			Secrets:        append([]string(nil), workspace.Secrets...),
+			WebhookSecrets: append([]string(nil), workspace.WebhookSecrets...),
+		},
 		Workflows: workflows,
 	}
 }
 
-func workflowFromFactory(f *types.FactoryConfig) WorkflowView {
+func workflowToView(workspaceName string, workflow *types.WorkflowConfig) WorkflowView {
 	return WorkflowView{
-		Name:                 f.Name,
-		WorkspaceName:        defaultWorkspaceName,
-		Source:               "factory",
-		LegacyFactoryName:    f.Name,
-		Integration:          f.Integration,
-		IntegrationWorkspace: f.Workspace,
-		TriggerStatus:        f.TriggerStatus,
-		DoneStatus:           f.DoneStatus,
-		Template:             f.Template,
-		Labels:               append([]string(nil), f.Labels...),
-		AssignedTo:           f.AssignedTo,
-		Enabled:              isFactoryEnabled(f),
-		HasWebhookSecret:     f.WebhookSecret != "" || f.WebhookSecretRef != "",
-		WebhookSecretRef:     f.WebhookSecretRef,
-		PipelineYAML:         f.PipelineYAML,
-		EnableManualTrigger:  f.EnableManualTrigger,
-		SecretRefs:           cloneStringMap(f.SecretRefs),
-		Inputs:               append([]types.FactoryInput(nil), f.Inputs...),
+		Name:                 workflow.Name,
+		WorkspaceName:        workspaceName,
+		Source:               "workflow",
+		Integration:          workflow.Integration,
+		IntegrationWorkspace: workflow.Workspace,
+		TriggerStatus:        workflow.TriggerStatus,
+		Template:             workflow.Template,
+		Labels:               append([]string(nil), workflow.Labels...),
+		AssignedTo:           workflow.AssignedTo,
+		Enabled:              workflow.Enabled == nil || *workflow.Enabled,
+		EnableManualTrigger:  workflow.EnableManualTrigger,
+		SecretRefs:           cloneStringMap(workflow.SecretRefs),
+		Inputs:               append([]types.FactoryInput(nil), workflow.Inputs...),
 	}
 }
 
-func collectWorkspaceRepositories(factories []*types.FactoryConfig) []string {
-	repos := map[string]struct{}{}
-	for _, f := range factories {
-		if f == nil {
-			continue
-		}
-		for _, repo := range f.Repos {
-			addNonEmpty(repos, repo)
-		}
-		for _, repo := range f.TriggerRepos {
-			addNonEmpty(repos, repo)
-		}
-		if f.ExternalTrigger != nil && f.ExternalTrigger.Filter != nil {
-			addNonEmpty(repos, f.ExternalTrigger.Filter.Repository)
+func (s *Server) resolveWorkflowConfig(workspaceName, workflowName string) (*types.WorkspaceConfig, *types.WorkflowConfig, bool, error) {
+	workspace, err := loadExternalWorkspace(workspaceName)
+	if err != nil {
+		return nil, nil, false, nil
+	}
+	for _, workflow := range workspace.Workflows {
+		if workflow != nil && strings.EqualFold(workflow.Name, workflowName) {
+			return workspace, workflow, true, nil
 		}
 	}
-	return sortedSetKeys(repos)
-}
-
-func collectWebhookSecretNames(cfg *types.HubConfig, factories []*types.FactoryConfig) []string {
-	names := map[string]struct{}{}
-	if cfg != nil && cfg.Integrations != nil {
-		for _, linear := range cfg.Integrations.Linear {
-			if linear != nil && linear.WebhookSecret != "" {
-				addNonEmpty(names, "linear:"+linear.Workspace)
-			}
-		}
-		for _, githubIssues := range cfg.Integrations.GitHubIssues {
-			if githubIssues != nil && githubIssues.WebhookSecret != "" {
-				addNonEmpty(names, "github-issues:"+githubIssues.Workspace)
-			}
-		}
-	}
-	for _, f := range factories {
-		if f == nil {
-			continue
-		}
-		addNonEmpty(names, f.WebhookSecretRef)
-		if f.WebhookSecret != "" && f.WebhookSecretRef == "" {
-			addNonEmpty(names, "factory:"+f.Name)
-		}
-	}
-	return sortedSetKeys(names)
-}
-
-func sortedMapKeys(values map[string]string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func sortedSetKeys(values map[string]struct{}) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func addNonEmpty(values map[string]struct{}, value string) {
-	value = strings.TrimSpace(value)
-	if value != "" {
-		values[value] = struct{}{}
-	}
+	return nil, nil, false, nil
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

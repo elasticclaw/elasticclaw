@@ -3,7 +3,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
-import { SpawnModal } from "@/components/spawn-modal"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
@@ -15,7 +14,6 @@ export default function Home() {
     if (typeof window === 'undefined') return null
     return localStorage.getItem('elasticclaw_selected_claw') ?? null
   })
-  const [spawnModalOpen, setSpawnModalOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -122,7 +120,7 @@ export default function Home() {
       result = result.filter(
         (c) =>
           c.name.toLowerCase().includes(query) ||
-          c.template.toLowerCase().includes(query)
+          c.tags.some((tag) => tag.toLowerCase().includes(query))
       )
     }
 
@@ -211,14 +209,6 @@ export default function Home() {
     [hub]
   )
 
-  const handleSpawn = useCallback(
-    (template: string, name?: string) => {
-      hub.createClaw({ name: name || `claw-${Date.now()}`, template })
-      setSpawnModalOpen(false)
-    },
-    [hub]
-  )
-
   const handleKill = useCallback(() => {
     if (!selectedClawId) return
     hub.killClaw(selectedClawId)
@@ -274,7 +264,6 @@ export default function Home() {
         selectedClawId={selectedClawId}
         onSelectClaw={handleSelectClaw}
         onTogglePin={handleTogglePin}
-        onSpawn={() => setSpawnModalOpen(true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         allTags={allTags}
@@ -307,11 +296,6 @@ export default function Home() {
           hubError={hubError}
         />
       </div>
-      <SpawnModal
-        open={spawnModalOpen}
-        onOpenChange={setSpawnModalOpen}
-        onSpawn={handleSpawn}
-      />
       <ManualTriggerModal
         open={!!selectedWorkflow}
         onOpenChange={(open) => { if (!open) setSelectedWorkflow(null) }}
