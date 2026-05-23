@@ -189,6 +189,7 @@ type gatewayClient struct {
 	token    string // gateway auth token (may be empty for password auth)
 	password string // gateway auth password (may be empty for token auth)
 	device   *deviceIdentity
+	home     string
 }
 
 func loadGatewayClient(addr string) (*gatewayClient, error) {
@@ -283,7 +284,82 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		token:    token,
 		password: password,
 		device:   &dev,
+		home:     home,
 	}, nil
+}
+
+func hasAllScopes(current, required []string) bool {
+	have := make(map[string]bool, len(current))
+	for _, scope := range current {
+		have[scope] = true
+	}
+	for _, scope := range required {
+		if !have[scope] {
+			return false
+		}
+	}
+	return true
+}
+
+func promoteInsufficientGatewayPairing(home, deviceID string, requiredScopes []string) (bool, error) {
+	if deviceID == "" {
+		return false, nil
+	}
+	path := filepath.Join(home, ".openclaw", "devices", "paired.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read paired devices: %w", err)
+	}
+
+	records := map[string]interface{}{}
+	if err := json.Unmarshal(data, &records); err != nil {
+		return false, fmt.Errorf("parse paired devices: %w", err)
+	}
+	rawRecord, ok := records[deviceID]
+	if !ok {
+		return false, nil
+	}
+
+	recordData, err := json.Marshal(rawRecord)
+	if err != nil {
+		return false, fmt.Errorf("encode paired device %s: %w", deviceID, err)
+	}
+	var record struct {
+		Scopes         []string `json:"scopes"`
+		ApprovedScopes []string `json:"approvedScopes"`
+	}
+	if err := json.Unmarshal(recordData, &record); err != nil {
+		return false, fmt.Errorf("parse paired device %s: %w", deviceID, err)
+	}
+	scopes := record.ApprovedScopes
+	if len(scopes) == 0 {
+		scopes = record.Scopes
+	}
+	if hasAllScopes(scopes, requiredScopes) {
+		return false, nil
+	}
+
+	recordMap, ok := rawRecord.(map[string]interface{})
+	if !ok {
+		return false, fmt.Errorf("paired device %s has unexpected shape", deviceID)
+	}
+	recordMap["scopes"] = requiredScopes
+	recordMap["approvedScopes"] = requiredScopes
+	recordMap["role"] = gwRole
+	recordMap["roles"] = []string{gwRole}
+	records[deviceID] = recordMap
+	updated, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("encode paired devices: %w", err)
+	}
+	updated = append(updated, '\n')
+	if err := os.WriteFile(path, updated, 0600); err != nil {
+		return false, fmt.Errorf("write paired devices: %w", err)
+	}
+	return true, nil
 }
 
 // randomID generates a UUID-like random ID.
@@ -364,6 +440,18 @@ var defaultScopes = []string{
 // connectToGateway opens a WebSocket to the gateway, performs the auth
 // handshake, and returns the live connection.
 func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn, error) {
+	// OpenClaw CLI commands can pair the shared sandbox device with read-only
+	// scopes before claw-bridge connects. Password auth is our bootstrap-time
+	// authority to use the gateway, so promote only this device's existing
+	// record before requesting the bridge scopes.
+	if gc.password != "" {
+		if promoted, err := promoteInsufficientGatewayPairing(gc.home, gc.device.DeviceID, defaultScopes); err != nil {
+			log.Printf("[gateway] warning: could not promote insufficient pairing for device %.16s: %v", gc.device.DeviceID, err)
+		} else if promoted {
+			log.Printf("[gateway] promoted pairing for device %.16s before requesting bridge scopes", gc.device.DeviceID)
+		}
+	}
+
 	gwURL := fmt.Sprintf("ws://%s", gc.addr)
 	conn, _, err := websocket.Dial(ctx, gwURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"User-Agent": {"claw-bridge/1.0"}},
