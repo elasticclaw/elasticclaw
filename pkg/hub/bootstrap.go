@@ -219,6 +219,13 @@ providers.update({
 routers = models.setdefault('routers', {})
 for p in %s:
     routers.pop(p, None)
+
+# Ensure the default agent model respects the hub's choice (e.g. the
+# default_model set on the default LLM key, such as a Fireworks k2p6 key).
+# This was previously only done in the replicated bootstrap script, not
+# during Daytona / claw-bridge configure steps.
+model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
+config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
 `, providersDict, providerNamesPy)
 	}
 	if anthropicEnvVar != "" {
