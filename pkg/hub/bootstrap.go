@@ -129,8 +129,9 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
                 {'id': 'gpt-5.4-mini', 'name': 'GPT-5.4 Mini'},
                 {'id': 'o4-mini',      'name': 'o4-mini'},
                 {'id': 'o3',           'name': 'o3'},
-                {'id': 'codex',        'name': 'Codex'},
-                {'id': 'codex-pro',    'name': 'Codex Pro'}
+                {'id': 'gpt-5.3-codex',  'name': 'GPT-5.3 Codex (coding tuned)'},
+                {'id': 'codex',          'name': 'Codex'},
+                {'id': 'codex-pro',      'name': 'Codex Pro'}
             ]
         }`, envVar)
 		case "codex":

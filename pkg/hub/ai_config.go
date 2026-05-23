@@ -576,7 +576,7 @@ func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
 	if openaiKey != "" {
-		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
+		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-5.5")
 	}
 	if codexKey != "" {
 		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
