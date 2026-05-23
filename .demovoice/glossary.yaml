@@ -7,12 +7,12 @@ terms:
       - "elasticlaw"
 
   - text: Kimi 2.6
-    pronouciation: "Kimmy 2 6"
+    pronunciation: "Kimmy 2 6"
     aliases:
       - "kimi"
       - "kimi 26"
       - "kimi 2.6"
-      
+
   - text: AmazeCRM
     pronunciation: "amaze C R M"
     aliases:
@@ -23,7 +23,6 @@ terms:
   - text: Greptile
     pronunciation: "grep tile"
     aliases:
-      - "grep tile"
       - "greptyle"
 
   - text: Daytona
@@ -44,7 +43,6 @@ terms:
     pronunciation: "F F probe"
     aliases:
       - "FFprobe"
-      - "F F probe"
 
   - text: gpt-4o-mini-tts
     pronunciation: "G P T four oh mini T T S"
