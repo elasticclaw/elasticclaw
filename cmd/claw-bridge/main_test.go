@@ -179,6 +179,33 @@ func TestPromoteInsufficientGatewayPairingKeepsFullyScopedDevice(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomicReplacesContentAndCleansTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paired.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0600); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	if err := writeFileAtomic(path, []byte(`{"new":true}`+"\n"), 0600); err != nil {
+		t.Fatalf("write atomic: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(data) != "{\"new\":true}\n" {
+		t.Fatalf("file content = %q, want new content", string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "paired.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp files were not cleaned up: %v", matches)
+	}
+}
+
 func TestGatewayReadLoopFailsPendingRequestsOnDisconnect(t *testing.T) {
 	serverRead := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

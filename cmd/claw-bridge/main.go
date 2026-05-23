@@ -301,6 +301,38 @@ func hasAllScopes(current, required []string) bool {
 	return true
 }
 
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	cleanup = false
+	return nil
+}
+
 func promoteInsufficientGatewayPairing(home, deviceID string, requiredScopes []string) (bool, error) {
 	if deviceID == "" {
 		return false, nil
@@ -356,7 +388,7 @@ func promoteInsufficientGatewayPairing(home, deviceID string, requiredScopes []s
 		return false, fmt.Errorf("encode paired devices: %w", err)
 	}
 	updated = append(updated, '\n')
-	if err := os.WriteFile(path, updated, 0600); err != nil {
+	if err := writeFileAtomic(path, updated, 0600); err != nil {
 		return false, fmt.Errorf("write paired devices: %w", err)
 	}
 	return true, nil
