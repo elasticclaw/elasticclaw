@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -79,6 +80,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	// otherwise the first occurrence.
 	seen := map[string]bool{}
 	var providerLines []string
+	var providerNames []string
 	anthropicEnvVar := ""
 	if activeKey.Provider == "anthropic" {
 		anthropicEnvVar = activeKey.EnvVarName()
@@ -92,6 +94,11 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	}
 
 	// Helper: build a single provider dict as a python literal.
+	pythonStringLiteral := func(value string) string {
+		encoded, _ := json.Marshal(value)
+		return string(encoded)
+	}
+
 	buildEntry := func(k *types.LLMKeyConfig) string {
 		envVar := k.EnvVarName()
 		switch k.Provider {
@@ -163,21 +170,27 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
             ]
         }`, envVar)
 		default:
-			return fmt.Sprintf(`'%s': {
-            'apiKey': os.environ.get('%s', ''),
+			return fmt.Sprintf(`%s: {
+            'apiKey': os.environ.get(%s, ''),
             'api': 'openai-completions'
-        }`, k.Provider, envVar)
+        }`, pythonStringLiteral(k.Provider), pythonStringLiteral(envVar))
 		}
+	}
+
+	appendProvider := func(k *types.LLMKeyConfig) {
+		entry := buildEntry(k)
+		if entry == "" {
+			return
+		}
+		seen[k.Provider] = true
+		providerLines = append(providerLines, entry)
+		providerNames = append(providerNames, k.Provider)
 	}
 
 	// Prioritize the active key's provider first. Anthropic is intentionally
 	// omitted so OpenClaw's bundled Anthropic provider owns model metadata.
 	if activeKey.Provider != "anthropic" {
-		entry := buildEntry(activeKey)
-		if entry != "" {
-			seen[activeKey.Provider] = true
-			providerLines = append(providerLines, entry)
-		}
+		appendProvider(activeKey)
 	}
 
 	// Then remaining keys
@@ -185,33 +198,16 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 		if k.Provider == "anthropic" || seen[k.Provider] {
 			continue
 		}
-		entry := buildEntry(k)
-		if entry == "" {
-			continue
-		}
-		seen[k.Provider] = true
-		providerLines = append(providerLines, entry)
+		appendProvider(k)
 	}
 
 	providersDict := strings.Join(providerLines, ",\n        ")
 
-	// Collect just the provider names so we can also clean up any stale
-	// router/recommendation entries that openclaw onboard may have seeded.
-	providerNames := []string{}
-	for _, line := range providerLines {
-		// lines look like: 'fireworks': { ... }
-		if idx := strings.Index(line, "':"); idx > 1 {
-			name := strings.Trim(line[:idx], " \t'\"")
-			if name != "" {
-				providerNames = append(providerNames, name)
-			}
-		}
-	}
-
 	modelsPatch := ""
 	anthropicPatch := ""
 	if providersDict != "" {
-		providerNamesPy := `["` + strings.Join(providerNames, `", "`) + `"]`
+		providerNamesJSON, _ := json.Marshal(providerNames)
+		providerNamesPy := string(providerNamesJSON)
 		modelsPatch = fmt.Sprintf(`models = config.setdefault('models', {})
 providers = models.setdefault('providers', {})
 providers.update({
