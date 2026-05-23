@@ -289,7 +289,7 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 	}
 }
 
-func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
+func TestBuildOpenClawProviderConfig_DoesNotWriteLegacyProviderCatalog(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "openai-main", Provider: "openai", Default: true},
 		{Name: "fireworks-main", Provider: "fireworks"},
@@ -300,27 +300,11 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 
 	snippet := buildOpenClawProviderConfig(keys, "openai-main")
 
-	assertContains(t, snippet, `'openai': {`, "openai provider entry")
-	assertContains(t, snippet, "'baseUrl': 'https://api.openai.com/v1'", "openai baseUrl")
-	assertContains(t, snippet, "{'id': 'gpt-5.5',      'name': 'GPT-5.5'}", "openai models")
-
-	assertContains(t, snippet, `'fireworks': {`, "fireworks provider entry")
-	assertContains(t, snippet, "'baseUrl': 'https://api.fireworks.ai/inference/v1'", "fireworks baseUrl")
-	assertContains(t, snippet, "{'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2.6'}", "fireworks kimi model")
-	assertContains(t, snippet, "{'id': 'accounts/fireworks/models/deepseek-v4-pro',            'name': 'DeepSeek V4 Pro'}", "fireworks deepseek model")
-
-	assertContains(t, snippet, `'groq': {`, "groq provider entry")
-	assertContains(t, snippet, "'baseUrl': 'https://api.groq.com/openai/v1'", "groq baseUrl")
-	assertContains(t, snippet, "{'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}", "groq models")
-
-	assertContains(t, snippet, `'deepseek': {`, "deepseek provider entry")
-	assertContains(t, snippet, "'baseUrl': 'https://api.deepseek.com/v1'", "deepseek baseUrl")
-	assertContains(t, snippet, "{'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}", "deepseek models")
-
-	assertContains(t, snippet, `'codex': {`, "codex provider entry")
-	assertContains(t, snippet, "'id': 'codex', 'name': 'Codex (auto)'", "codex models")
-	assertContains(t, snippet, "'id': 'o4-mini', 'name': 'Codex o4-mini (legacy)'", "codex legacy model")
-	assertContains(t, snippet, "'codex': {\n            'apiKey': os.environ.get('CODEX_API_KEY', ''),", "codex apiKey with correct env var")
+	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
+	assertContains(t, snippet, "config.pop('models', None)", "removes legacy top-level models catalog")
+	assertNotContains(t, snippet, "providers.update", "does not write legacy provider catalog")
+	assertNotContains(t, snippet, "'fireworks': {", "does not write fireworks provider entry")
+	assertNotContains(t, snippet, "'openai': {", "does not write openai provider entry")
 }
 
 func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T) {
@@ -330,7 +314,7 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
-	assertContains(t, snippet, "config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model", "still sets default model")
+	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
 	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
 	assertContains(t, snippet, "auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')", "writes Anthropic agent auth profile")
 	assertContains(t, snippet, "profiles['anthropic:default']", "adds Anthropic default auth profile")
@@ -340,7 +324,15 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 	assertNotContains(t, snippet, "providers.update", "does not add an empty providers patch for Anthropic-only config")
 }
 
-func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
+func TestBuildOpenClawProviderConfig_NoKeysStillPatchesDefaultModel(t *testing.T) {
+	snippet := buildOpenClawProviderConfig(nil, "")
+
+	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
+	assertContains(t, snippet, "config['gateway']['remote'] = {'password': gw_password}", "sets gateway remote password")
+	assertNotContains(t, snippet, "providers.update", "does not add provider config without keys")
+}
+
+func TestBuildOpenClawProviderConfig_ConfiguresAnthropicWithoutProviderCatalog(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "anthropic-main", Provider: "anthropic", Default: true},
 		{Name: "groq-main", Provider: "groq"},
@@ -348,15 +340,13 @@ func TestBuildOpenClawProviderConfig_MergesCustomProviders(t *testing.T) {
 
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
-	assertContains(t, snippet, "models = config.setdefault('models', {})", "preserves existing models section")
-	assertContains(t, snippet, "providers = models.setdefault('providers', {})", "preserves existing providers")
-	assertContains(t, snippet, "providers.update({", "merges custom provider config")
-	assertContains(t, snippet, "'groq': {", "adds custom provider")
+	assertContains(t, snippet, "profiles['anthropic:default']", "configures Anthropic auth")
+	assertNotContains(t, snippet, "providers.update({", "does not write legacy provider config")
+	assertNotContains(t, snippet, "'groq': {", "does not add custom provider")
 	assertNotContains(t, snippet, "'anthropic': {", "does not add Anthropic custom provider")
-	assertContains(t, snippet, "profiles['anthropic:default']", "still configures Anthropic auth")
 }
 
-func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
+func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alias(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")
 	}
@@ -364,15 +354,11 @@ func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
 		t.Skip("python3 not in PATH")
 	}
 
-	providerName := `custom"\provider`
 	keys := []*types.LLMKeyConfig{
-		{Name: "custom-main", Provider: providerName, Default: true},
+		{Name: "fireworks-main", Provider: "fireworks", Default: true},
 	}
 
 	snippet := buildOpenClawProviderConfig(keys, "custom-main")
-
-	assertContains(t, snippet, `"custom\"\\provider": {`, "escaped provider dict key")
-	assertContains(t, snippet, `for p in ["custom\"\\provider"]:`, "escaped router cleanup list")
 
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".openclaw")
@@ -381,9 +367,21 @@ func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
 	}
 	configPath := filepath.Join(configDir, "openclaw.json")
 	initialConfig := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"defaults": map[string]interface{}{
+				"models": map[string]interface{}{
+					"fireworks/accounts/fireworks/routers/kimi-k2p5-turbo": map[string]interface{}{"alias": "Kimi K2.5 Turbo"},
+					"fireworks/accounts/fireworks/models/kimi-k2p6":        map[string]interface{}{"alias": "Kimi K2.6"},
+				},
+			},
+		},
 		"models": map[string]interface{}{
+			"mode": "merge",
+			"providers": map[string]interface{}{
+				"fireworks": map[string]interface{}{"apiKey": "fw-test"},
+			},
 			"routers": map[string]interface{}{
-				providerName: map[string]interface{}{"stale": true},
+				"fireworks": map[string]interface{}{"stale": true},
 			},
 		},
 	}
@@ -395,7 +393,8 @@ func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
 	cmd := exec.Command("bash", "-c", snippet)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		keys[0].EnvVarName()+"=sk-custom-test",
+		"OPENCLAW_DEFAULT_MODEL=fireworks/accounts/fireworks/models/kimi-k2p6",
+		keys[0].EnvVarName()+"=fw-test",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run config snippet: %v\n%s", err, string(out))
@@ -409,27 +408,33 @@ func TestBuildOpenClawProviderConfig_EscapesUnknownProviderNames(t *testing.T) {
 	if err := json.Unmarshal(configData, &patched); err != nil {
 		t.Fatalf("parse patched config: %v", err)
 	}
-	models, ok := patched["models"].(map[string]interface{})
+	if _, ok := patched["models"]; ok {
+		t.Fatalf("legacy top-level models catalog was not removed: %#v", patched["models"])
+	}
+	agents, ok := patched["agents"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("models missing or wrong type: %#v", patched["models"])
+		t.Fatalf("agents missing or wrong type: %#v", patched["agents"])
 	}
-	providers, ok := models["providers"].(map[string]interface{})
+	defaults, ok := agents["defaults"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("models.providers missing or wrong type: %#v", models["providers"])
+		t.Fatalf("agents.defaults missing or wrong type: %#v", agents["defaults"])
 	}
-	if _, ok := providers[providerName]; !ok {
-		t.Fatalf("escaped provider missing from config: %#v", providers)
+	if defaults["model"] != "fireworks/accounts/fireworks/models/kimi-k2p6" {
+		t.Fatalf("default model not patched: %#v", defaults["model"])
 	}
-	routers, ok := models["routers"].(map[string]interface{})
+	agentModels, ok := defaults["models"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("models.routers missing or wrong type: %#v", models["routers"])
+		t.Fatalf("agents.defaults.models missing or wrong type: %#v", defaults["models"])
 	}
-	if _, ok := routers[providerName]; ok {
-		t.Fatalf("stale router entry was not removed: %#v", routers)
+	if _, ok := agentModels["fireworks/accounts/fireworks/routers/kimi-k2p5-turbo"]; ok {
+		t.Fatalf("stale k2p5 alias was not removed: %#v", agentModels)
+	}
+	if _, ok := agentModels["fireworks/accounts/fireworks/models/kimi-k2p6"]; !ok {
+		t.Fatalf("non-stale k2p6 alias was removed: %#v", agentModels)
 	}
 }
 
-func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingProviderCatalog(t *testing.T) {
+func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileAndRemovesLegacyProviderCatalog(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")
 	}
@@ -481,26 +486,8 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileWithoutBreakingPr
 	if err := json.Unmarshal(configData, &patched); err != nil {
 		t.Fatalf("parse patched config: %v", err)
 	}
-	models, ok := patched["models"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("models missing or wrong type: %#v", patched["models"])
-	}
-	providers, ok := models["providers"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("models.providers missing or wrong type: %#v", models["providers"])
-	}
-	anthropic, ok := providers["anthropic"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("models.providers.anthropic missing or wrong type: %#v", providers["anthropic"])
-	}
-	if _, ok := anthropic["baseUrl"].(string); !ok {
-		t.Fatalf("anthropic baseUrl missing after patch: %#v", anthropic)
-	}
-	if _, ok := anthropic["models"].([]interface{}); !ok {
-		t.Fatalf("anthropic models missing after patch: %#v", anthropic)
-	}
-	if _, ok := anthropic["apiKey"]; ok {
-		t.Fatalf("anthropic provider config should not store apiKey: %#v", anthropic)
+	if _, ok := patched["models"]; ok {
+		t.Fatalf("legacy top-level models catalog was not removed: %#v", patched["models"])
 	}
 	gateway, ok := patched["gateway"].(map[string]interface{})
 	if !ok {
