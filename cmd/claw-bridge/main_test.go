@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -96,6 +97,112 @@ func TestLoadGatewayClientEnvVarFallbackWhenNoConfigPassword(t *testing.T) {
 	}
 	if client.password != "env-password" {
 		t.Fatalf("password = %q, want env-password (env var fallback when config has no password)", client.password)
+	}
+}
+
+func TestPromoteInsufficientGatewayPairingPromotesReadOnlyDevice(t *testing.T) {
+	home := t.TempDir()
+	devicesDir := filepath.Join(home, ".openclaw", "devices")
+	if err := os.MkdirAll(devicesDir, 0700); err != nil {
+		t.Fatalf("mkdir devices dir: %v", err)
+	}
+	path := filepath.Join(devicesDir, "paired.json")
+	initial := map[string]interface{}{
+		"device-1": map[string]interface{}{
+			"deviceId":       "device-1",
+			"scopes":         []string{"operator.read"},
+			"approvedScopes": []string{"operator.read"},
+		},
+		"device-2": map[string]interface{}{
+			"deviceId":       "device-2",
+			"scopes":         defaultScopes,
+			"approvedScopes": defaultScopes,
+		},
+	}
+	data, _ := json.Marshal(initial)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write paired devices: %v", err)
+	}
+
+	promoted, err := promoteInsufficientGatewayPairing(home, "device-1", defaultScopes)
+	if err != nil {
+		t.Fatalf("promote pairing: %v", err)
+	}
+	if !promoted {
+		t.Fatal("promoted = false, want true")
+	}
+
+	var after map[string]struct {
+		ApprovedScopes []string `json:"approvedScopes"`
+		Scopes         []string `json:"scopes"`
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read paired devices: %v", err)
+	}
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatalf("parse paired devices: %v", err)
+	}
+	if !hasAllScopes(after["device-1"].ApprovedScopes, defaultScopes) {
+		t.Fatalf("read-only paired device was not promoted: %#v", after["device-1"])
+	}
+	if _, ok := after["device-2"]; !ok {
+		t.Fatalf("unrelated device was removed: %#v", after)
+	}
+}
+
+func TestPromoteInsufficientGatewayPairingKeepsFullyScopedDevice(t *testing.T) {
+	home := t.TempDir()
+	devicesDir := filepath.Join(home, ".openclaw", "devices")
+	if err := os.MkdirAll(devicesDir, 0700); err != nil {
+		t.Fatalf("mkdir devices dir: %v", err)
+	}
+	path := filepath.Join(devicesDir, "paired.json")
+	initial := map[string]interface{}{
+		"device-1": map[string]interface{}{
+			"deviceId":       "device-1",
+			"scopes":         defaultScopes,
+			"approvedScopes": defaultScopes,
+		},
+	}
+	data, _ := json.Marshal(initial)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write paired devices: %v", err)
+	}
+
+	promoted, err := promoteInsufficientGatewayPairing(home, "device-1", defaultScopes)
+	if err != nil {
+		t.Fatalf("promote pairing: %v", err)
+	}
+	if promoted {
+		t.Fatal("promoted = true, want false")
+	}
+}
+
+func TestWriteFileAtomicReplacesContentAndCleansTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paired.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0600); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	if err := writeFileAtomic(path, []byte(`{"new":true}`+"\n"), 0600); err != nil {
+		t.Fatalf("write atomic: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(data) != "{\"new\":true}\n" {
+		t.Fatalf("file content = %q, want new content", string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "paired.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp files were not cleaned up: %v", matches)
 	}
 }
 
