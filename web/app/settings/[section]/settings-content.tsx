@@ -776,8 +776,8 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
   codex: [
     // Codex is an autonomous agentic coding platform — it selects and routes to the
     // appropriate underlying model (including special Codex checkpoints) on its own.
-    { id: "codex",      name: "Codex (auto)" },
-    { id: "codex-pro",  name: "Codex Pro (auto)" },
+    { id: "codex/codex",      name: "Codex (auto)" },
+    { id: "codex/codex-pro",  name: "Codex Pro (auto)" },
   ],
 }
 

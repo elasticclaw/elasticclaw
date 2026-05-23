@@ -140,7 +140,9 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
             'baseUrl': 'https://api.openai.com/v1',
             'api': 'openai-completions',
             'models': [
-                {'id': 'o4-mini', 'name': 'Codex o4-mini'}
+                {'id': 'codex', 'name': 'Codex (auto)'},
+                {'id': 'codex-pro', 'name': 'Codex Pro (auto)'},
+                {'id': 'o4-mini', 'name': 'Codex o4-mini (legacy)'}
             ]
         }`, envVar)
 		case "groq":

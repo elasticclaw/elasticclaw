@@ -318,7 +318,8 @@ func TestBuildOpenClawProviderConfig_OpenAICompatibleProviders(t *testing.T) {
 	assertContains(t, snippet, "{'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}", "deepseek models")
 
 	assertContains(t, snippet, `'codex': {`, "codex provider entry")
-	assertContains(t, snippet, "'id': 'o4-mini', 'name': 'Codex o4-mini'", "codex models")
+	assertContains(t, snippet, "'id': 'codex', 'name': 'Codex (auto)'", "codex models")
+	assertContains(t, snippet, "'id': 'o4-mini', 'name': 'Codex o4-mini (legacy)'", "codex legacy model")
 	assertContains(t, snippet, "'codex': {\n            'apiKey': os.environ.get('CODEX_API_KEY', ''),", "codex apiKey with correct env var")
 }
 
