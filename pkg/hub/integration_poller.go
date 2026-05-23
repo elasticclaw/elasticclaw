@@ -44,8 +44,6 @@ func (s *Server) pollTick() {
 	integrations := s.hubCfg.Integrations
 	s.mu.RUnlock()
 
-	log.Printf("[poll] tick: %d factories loaded, evaluating integrations", len(factories))
-
 	// === LINEAR ===
 	if integrations != nil && len(integrations.Linear) > 0 {
 		s.pollLinear(factories, integrations.Linear, since)
