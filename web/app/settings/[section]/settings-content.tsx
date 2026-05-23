@@ -755,7 +755,6 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "fireworks/accounts/fireworks/models/minimax-m2p7",               name: "MiniMax M2.7" },
     { id: "fireworks/accounts/fireworks/models/glm-5p1",                    name: "GLM 5.1" },
     { id: "fireworks/accounts/fireworks/models/qwen3p6-plus",               name: "Qwen3.6 Plus" },
-    { id: "fireworks/accounts/fireworks/models/kimi-k2p5",                  name: "Kimi K2.5" },
     { id: "fireworks/accounts/fireworks/models/gpt-oss-120b",               name: "OpenAI gpt-oss-120b" },
     { id: "fireworks/accounts/fireworks/models/gpt-oss-20b",                name: "OpenAI gpt-oss-20b" },
     { id: "fireworks/accounts/fireworks/models/minimax-m2p5",               name: "MiniMax M2.5" },
