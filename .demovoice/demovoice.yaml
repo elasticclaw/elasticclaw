@@ -17,7 +17,7 @@ profiles:
         max_segment_stretch: 1.12
         max_segment_compress: 0.88
         max_tempo_delta: 0.12
-        max_forced_tempo: 1.05
+        max_forced_tempo: 1.25
         min_segment_seconds: 2.5
         max_segment_seconds: 10
         max_phrase_seconds: 10
