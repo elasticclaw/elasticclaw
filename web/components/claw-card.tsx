@@ -18,15 +18,6 @@ interface ClawCardProps {
   showPinButton?: boolean
 }
 
-function formatUptime(seconds: number): string {
-  if (seconds === 0) return "—"
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  const hours = Math.floor(seconds / 3600)
-  const mins = Math.floor((seconds % 3600) / 60)
-  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
-}
-
 function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
   if (isStreaming) {
     return <Loader2 className="size-3.5 text-green-500 animate-spin shrink-0" />
@@ -194,20 +185,6 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             />
           </button>
         )}
-      </div>
-      <div className="flex items-center justify-between pl-5">
-        <span className="text-xs text-muted-foreground truncate">
-          {claw.template}
-        </span>
-        <span className="text-xs font-mono max-w-[11rem] truncate text-right" title={claw.bootstrap_status}>
-          {claw.status === "provisioning" ? (
-            <span className="text-blue-400">{claw.bootstrap_status || "starting..."}</span>
-          ) : claw.status === "error" ? (
-            <span className="text-red-500">error</span>
-          ) : (
-            <span className="text-muted-foreground">{formatUptime(claw.uptime)}</span>
-          )}
-        </span>
       </div>
       {(localTags.length > 0 || isSelected) && (
         <div className="mt-1.5 pl-5 flex items-start gap-2" onClick={(e) => e.stopPropagation()}>

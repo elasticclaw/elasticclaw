@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -40,7 +39,7 @@ type BootstrapParams struct {
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
 	LinearEnv      string // pre-built export line
-	ProviderConfig string // python snippet to configure models.providers
+	ProviderConfig string // python snippet to patch OpenClaw config
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
 
@@ -62,27 +61,16 @@ func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types
 	return nil
 }
 
-// buildOpenClawProviderConfig returns a python snippet that writes the correct
-// models.providers config to ~/.openclaw/openclaw.json based on configured LLM keys.
+// buildOpenClawProviderConfig returns a python snippet that patches
+// ~/.openclaw/openclaw.json with the agent default, gateway settings, and any
+// auth-profile compatibility writes needed after openclaw onboard.
 // selectedKeyName is used to pick the active key (falls back to default, then first).
 func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string) string {
-	if len(keys) == 0 {
-		// No keys configured — produce empty snippet
-		return ""
-	}
-
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
 
-	// Build per-provider config entries.
-	// We emit an entry for every unique provider across all configured keys.
-	// If a provider appears multiple times we use the active key's entry if it matches,
-	// otherwise the first occurrence.
-	seen := map[string]bool{}
-	var providerLines []string
-	var providerNames []string
 	anthropicEnvVar := ""
-	if activeKey.Provider == "anthropic" {
+	if activeKey != nil && activeKey.Provider == "anthropic" {
 		anthropicEnvVar = activeKey.EnvVarName()
 	} else {
 		for _, k := range keys {
@@ -93,134 +81,7 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 		}
 	}
 
-	// Helper: build a single provider dict as a python literal.
-	pythonStringLiteral := func(value string) string {
-		encoded, _ := json.Marshal(value)
-		return string(encoded)
-	}
-
-	buildEntry := func(k *types.LLMKeyConfig) string {
-		envVar := k.EnvVarName()
-		switch k.Provider {
-		case "anthropic":
-			return ""
-		case "fireworks":
-			return fmt.Sprintf(`'fireworks': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.fireworks.ai/inference/v1',
-            'api': 'openai-completions',
-            'models': [
-                {'id': 'accounts/fireworks/models/kimi-k2p6',                  'name': 'Kimi K2.6'},
-                {'id': 'accounts/fireworks/models/deepseek-v4-pro',            'name': 'DeepSeek V4 Pro'},
-                {'id': 'accounts/fireworks/models/deepseek-v4-flash',          'name': 'DeepSeek V4 Flash'},
-                {'id': 'accounts/fireworks/models/minimax-m2p7',               'name': 'MiniMax M2.7'},
-                {'id': 'accounts/fireworks/models/glm-5p1',                    'name': 'GLM 5.1'},
-                {'id': 'accounts/fireworks/models/qwen3p6-plus',               'name': 'Qwen3.6 Plus'},
-                {'id': 'accounts/fireworks/models/gpt-oss-120b',               'name': 'OpenAI gpt-oss-120b'},
-                {'id': 'accounts/fireworks/models/gpt-oss-20b',                'name': 'OpenAI gpt-oss-20b'},
-                {'id': 'accounts/fireworks/models/minimax-m2p5',               'name': 'MiniMax M2.5'},
-                {'id': 'accounts/fireworks/models/llama-v3p3-70b-instruct',    'name': 'Llama 3.3 70B Instruct'}
-            ]
-        }`, envVar)
-		case "openai":
-			return fmt.Sprintf(`'openai': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.openai.com/v1',
-            'api': 'openai-completions',
-            'models': [
-                {'id': 'gpt-5.5',      'name': 'GPT-5.5'},
-                {'id': 'gpt-5.5-pro',  'name': 'GPT-5.5 Pro'},
-                {'id': 'gpt-5.4',      'name': 'GPT-5.4'},
-                {'id': 'gpt-5.4-pro',  'name': 'GPT-5.4 Pro'},
-                {'id': 'gpt-5.4-mini', 'name': 'GPT-5.4 Mini'},
-                {'id': 'o4-mini',      'name': 'o4-mini'},
-                {'id': 'o3',           'name': 'o3'},
-                {'id': 'gpt-5.3-codex',  'name': 'GPT-5.3 Codex (coding tuned)'},
-                {'id': 'codex',          'name': 'Codex'},
-                {'id': 'codex-pro',      'name': 'Codex Pro'}
-            ]
-        }`, envVar)
-		case "codex":
-			return fmt.Sprintf(`'codex': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.openai.com/v1',
-            'api': 'openai-completions',
-            'models': [
-                {'id': 'codex', 'name': 'Codex (auto)'},
-                {'id': 'codex-pro', 'name': 'Codex Pro (auto)'},
-                {'id': 'o4-mini', 'name': 'Codex o4-mini (legacy)'}
-            ]
-        }`, envVar)
-		case "groq":
-			return fmt.Sprintf(`'groq': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.groq.com/openai/v1',
-            'api': 'openai-completions',
-            'models': [
-                {'id': 'llama-3.3-70b-versatile', 'name': 'Llama 3.3 70B'}
-            ]
-        }`, envVar)
-		case "deepseek":
-			return fmt.Sprintf(`'deepseek': {
-            'apiKey': os.environ.get('%s', ''),
-            'baseUrl': 'https://api.deepseek.com/v1',
-            'api': 'openai-completions',
-            'models': [
-                {'id': 'deepseek-chat', 'name': 'DeepSeek Chat'}
-            ]
-        }`, envVar)
-		default:
-			return fmt.Sprintf(`%s: {
-            'apiKey': os.environ.get(%s, ''),
-            'api': 'openai-completions'
-        }`, pythonStringLiteral(k.Provider), pythonStringLiteral(envVar))
-		}
-	}
-
-	appendProvider := func(k *types.LLMKeyConfig) {
-		entry := buildEntry(k)
-		if entry == "" {
-			return
-		}
-		seen[k.Provider] = true
-		providerLines = append(providerLines, entry)
-		providerNames = append(providerNames, k.Provider)
-	}
-
-	// Prioritize the active key's provider first. Anthropic is intentionally
-	// omitted so OpenClaw's bundled Anthropic provider owns model metadata.
-	if activeKey.Provider != "anthropic" {
-		appendProvider(activeKey)
-	}
-
-	// Then remaining keys
-	for _, k := range keys {
-		if k.Provider == "anthropic" || seen[k.Provider] {
-			continue
-		}
-		appendProvider(k)
-	}
-
-	providersDict := strings.Join(providerLines, ",\n        ")
-
-	modelsPatch := ""
 	anthropicPatch := ""
-	if providersDict != "" {
-		providerNamesJSON, _ := json.Marshal(providerNames)
-		providerNamesPy := string(providerNamesJSON)
-		modelsPatch = fmt.Sprintf(`models = config.setdefault('models', {})
-providers = models.setdefault('providers', {})
-providers.update({
-        %s
-})
-# Also remove any pre-seeded routers/recommendations for providers we control.
-# openclaw onboard can inject things like "routers/kimi-k2p5-turbo" for fireworks
-# based on its own built-in knowledge.
-routers = models.setdefault('routers', {})
-for p in %s:
-    routers.pop(p, None)
-`, providersDict, providerNamesPy)
-	}
 	if anthropicEnvVar != "" {
 		anthropicPatch = fmt.Sprintf(`anthropic_key = os.environ.get('%s', '')
 if anthropic_key:
@@ -258,8 +119,19 @@ except FileNotFoundError:
 except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = model
-%s%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
+agent_defaults = config.setdefault('agents', {}).setdefault('defaults', {})
+agent_defaults['model'] = model
+agent_models = agent_defaults.get('models')
+if isinstance(agent_models, dict):
+    for key in list(agent_models.keys()):
+        if 'kimi-k2p5' in key:
+            agent_models.pop(key, None)
+# OpenClaw 2026.5.20 rejects the legacy top-level models provider catalog
+# shape we used to write. Onboard handles provider auth; keep only agent default.
+models = config.get('models')
+if isinstance(models, dict) and any(k in models for k in ('providers', 'routers', 'mode')):
+    config.pop('models', None)
+%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
@@ -268,7 +140,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, modelsPatch, anthropicPatch)
+PYEOF`, anthropicPatch)
 }
 
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads

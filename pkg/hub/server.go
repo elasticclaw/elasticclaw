@@ -2321,13 +2321,21 @@ docker --version`); err != nil {
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
 	var llmKeyNameDaytona string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
+	activeKeyNameDaytona := ""
+	activeKeyProviderDaytona := ""
 	s.mu.RLock()
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	if activeKeyDaytona != nil {
+		activeKeyNameDaytona = activeKeyDaytona.Name
+		activeKeyProviderDaytona = activeKeyDaytona.Provider
+	}
 	s.mu.RUnlock()
+	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
+		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
 	onboardCmd := fmt.Sprintf(
 		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
@@ -2352,11 +2360,9 @@ docker --version`); err != nil {
 		log.Printf("[daytona] onboard openclaw done")
 	}
 
-	if providerConfigScript != "" {
-		configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
-		if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
-			return err
-		}
+	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
+	if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
+		return err
 	}
 	// Step 2a: Preflight required commands and environment.
 	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
@@ -2397,22 +2403,21 @@ for i in $(seq 1 30); do
   sleep 1
 done
 curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway to be truly ready (plugins loaded, channels up)
+# Phase 2: wait for gateway startup to complete. Do not use openclaw health
+# here: it pairs the CLI device with read-only scopes before claw-bridge can
+# connect, then claw-bridge is rejected as a scope-upgrade.
 for i in $(seq 1 30); do
-  health=$(openclaw health --json --timeout 5000 2>/dev/null)
-  if [ -n "$health" ]; then
-    plugins_loaded=$(echo "$health" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("plugins",{}).get("loaded",[])))' 2>/dev/null)
-    if [ "${plugins_loaded:-0}" -gt 0 ]; then
-      echo "gateway ready (plugins=$plugins_loaded)"
-      exit 0
-    fi
+  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
+    echo "gateway ready"
+    exit 0
   fi
+  curl -sf http://localhost:18789/healthz >/dev/null || break
   sleep 1
 done
-# Fallback: if plugins are empty but the gateway is still listening and healthy,
-# don't fail the bootstrap — a zero-plugin gateway is still a valid gateway.
+# Fallback: if the readiness log line is unavailable but the gateway is still
+# listening and healthy, don't fail the bootstrap.
 if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (no plugins loaded)"
+  echo "gateway ready (healthz)"
   exit 0
 fi
 echo 'gateway not ready'
@@ -2985,7 +2990,8 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	log.Printf("[exedev bootstrap] claw %.8s nix=%d docker=%d", clawID, nixEnabled, dockerEnabled)
+	log.Printf("[exedev bootstrap] claw %.8s nix=%d docker=%d llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
+		clawID, nixEnabled, dockerEnabled, llmKeyName, templateDefaultModel, hubCfg.DefaultModel, defaultModel)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
@@ -3546,6 +3552,8 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
+	log.Printf("[bootstrap] OpenClaw model resolution claw=%s llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
+		clawID[:8], llmKeyName, templateDefaultModel, s.hubCfg.DefaultModel, defaultModel)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
