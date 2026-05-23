@@ -220,6 +220,22 @@ routers = models.setdefault('routers', {})
 for p in %s:
     routers.pop(p, None)
 
+# Nuclear cleanup: remove ANY occurrence of the dead k2p5-turbo router
+# (or any k2p5 reference) that openclaw may have auto-registered under
+# models, routers, or inside provider objects. This is the only way to
+# guarantee we never "pass" the removed model to the agent.
+import json as _json
+def _scrub_k2p5(obj):
+    if isinstance(obj, dict):
+        return {k: _scrub_k2p5(v) for k, v in obj.items() if 'k2p5' not in str(k).lower()}
+    if isinstance(obj, list):
+        return [_scrub_k2p5(v) for v in obj if 'k2p5' not in str(v).lower()]
+    if isinstance(obj, str) and 'k2p5' in obj.lower():
+        return None
+    return obj
+
+models = _scrub_k2p5(models)
+
 # Ensure the default agent model respects the hub's choice (e.g. the
 # default_model set on the default LLM key, such as a Fireworks k2p6 key).
 # This was previously only done in the replicated bootstrap script, not
