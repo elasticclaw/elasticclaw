@@ -495,7 +495,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		}
 	case "openai":
 		if openaiKey != "" {
-			return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
+			return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-5.5")
 		}
 	case "codex":
 		if codexKey != "" {
@@ -508,7 +508,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		return callAnthropic(anthropicKey, systemPrompt, msgs)
 	}
 	if openaiKey != "" {
-		return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-4o")
+		return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-5.5")
 	}
 	if codexKey != "" {
 		return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
@@ -564,7 +564,7 @@ func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []
 		}
 	case "openai":
 		if openaiKey != "" {
-			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
+			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-5.5")
 		}
 	case "codex":
 		if codexKey != "" {
@@ -576,7 +576,7 @@ func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []
 		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
 	}
 	if openaiKey != "" {
-		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-4o")
+		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-5.5")
 	}
 	if codexKey != "" {
 		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")

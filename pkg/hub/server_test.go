@@ -57,7 +57,7 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			key: &types.LLMKeyConfig{
 				Provider: "openai",
 			},
-			expectedModel: "openai/gpt-4o",
+			expectedModel: "openai/gpt-5.5",
 		},
 		{
 			name: "no hub default - use provider default",

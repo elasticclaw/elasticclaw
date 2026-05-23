@@ -3884,7 +3884,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
 	case "openai":
-		return "openai/gpt-4o"
+		return "openai/gpt-5.5"
 	case "fireworks":
 		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "groq":

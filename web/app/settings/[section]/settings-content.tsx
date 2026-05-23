@@ -738,6 +738,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 const PROVIDER_OPTIONS = [
   { value: "anthropic",  label: "Anthropic",  placeholder: "sk-ant-..." },
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
+  { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
   { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
@@ -760,8 +761,22 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "fireworks/accounts/fireworks/models/minimax-m2p5",               name: "MiniMax M2.5" },
     { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B Instruct" },
   ],
+  openai: [
+    { id: "openai/gpt-5.5",      name: "GPT-5.5" },
+    { id: "openai/gpt-5.5-pro",  name: "GPT-5.5 Pro" },
+    { id: "openai/gpt-5.4",      name: "GPT-5.4" },
+    { id: "openai/gpt-5.4-pro",  name: "GPT-5.4 Pro" },
+    { id: "openai/gpt-5.4-mini", name: "GPT-5.4 Mini" },
+    { id: "openai/o4-mini",      name: "o4-mini" },
+    { id: "openai/o3",           name: "o3" },
+    // coding-tuned variants available via regular OpenAI API
+    { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex (coding tuned)" },
+  ],
   codex: [
-    { id: "codex/o4-mini", name: "Codex o4-mini" },
+    // Codex is an autonomous agentic coding platform — it selects and routes to the
+    // appropriate underlying model (including special Codex checkpoints) on its own.
+    { id: "codex/codex",      name: "Codex (auto)" },
+    { id: "codex/codex-pro",  name: "Codex Pro (auto)" },
   ],
 }
 
@@ -907,7 +922,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
-                    {k.provider === "anthropic" || k.provider === "codex" ? (
+                    {k.provider === "anthropic" || k.provider === "openai" || k.provider === "codex" ? (
                       <Sparkles className="size-4 text-muted-foreground" />
                     ) : (
                       <Zap className="size-4 text-muted-foreground" />
