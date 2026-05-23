@@ -194,15 +194,36 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	}
 
 	providersDict := strings.Join(providerLines, ",\n        ")
+
+	// Collect just the provider names so we can also clean up any stale
+	// router/recommendation entries that openclaw onboard may have seeded.
+	providerNames := []string{}
+	for _, line := range providerLines {
+		// lines look like: 'fireworks': { ... }
+		if idx := strings.Index(line, "':"); idx > 1 {
+			name := strings.Trim(line[:idx], " \t'\"")
+			if name != "" {
+				providerNames = append(providerNames, name)
+			}
+		}
+	}
+
 	modelsPatch := ""
 	anthropicPatch := ""
 	if providersDict != "" {
+		providerNamesPy := `["` + strings.Join(providerNames, `", "`) + `"]`
 		modelsPatch = fmt.Sprintf(`models = config.setdefault('models', {})
 providers = models.setdefault('providers', {})
 providers.update({
         %s
 })
-`, providersDict)
+# Also remove any pre-seeded routers/recommendations for providers we control.
+# openclaw onboard can inject things like "routers/kimi-k2p5-turbo" for fireworks
+# based on its own built-in knowledge.
+routers = models.setdefault('routers', {})
+for p in %s:
+    routers.pop(p, None)
+`, providersDict, providerNamesPy)
 	}
 	if anthropicEnvVar != "" {
 		anthropicPatch = fmt.Sprintf(`anthropic_key = os.environ.get('%s', '')
