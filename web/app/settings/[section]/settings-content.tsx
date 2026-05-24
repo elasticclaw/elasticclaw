@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
@@ -142,6 +142,7 @@ export default function SettingsSectionPage() {
   const [hubPublicUrl, setHubPublicUrl] = useState("")
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [selectedWorkspace, setSelectedWorkspace] = useState("default")
+  const selectedWorkspaceInitial = (selectedWorkspace.trim()[0] || "D").toUpperCase()
 
   const load = useCallback(async () => {
     try {
@@ -244,14 +245,15 @@ export default function SettingsSectionPage() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
-          <div className="mb-4 rounded-lg border border-border bg-secondary/30 p-3">
-            <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-              Workspace
-            </label>
+          <div className="relative mb-2">
+            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-8 -translate-y-1/2 items-center justify-center rounded-md bg-primary text-sm font-semibold text-primary-foreground">
+              {selectedWorkspaceInitial}
+            </div>
             <select
+              aria-label="Workspace"
               value={selectedWorkspace}
               onChange={(event) => setSelectedWorkspace(event.target.value)}
-              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm font-medium outline-none focus:border-primary"
+              className="h-12 w-full appearance-none rounded-lg border border-border bg-background pl-14 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:border-primary focus:ring-2 focus:ring-primary/20"
             >
               {workspaces.length === 0 ? (
                 <option value="default">default</option>
@@ -261,6 +263,7 @@ export default function SettingsSectionPage() {
                 ))
               )}
             </select>
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           </div>
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
