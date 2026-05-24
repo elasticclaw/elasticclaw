@@ -284,30 +284,6 @@ func readWorkspaceDir(dir string) (*types.WorkspaceConfig, error) {
 	if files, err := config.ReadTemplateFiles(dir); err == nil {
 		workspace.Files = files
 	}
-
-	workflowDir := filepath.Join(dir, "workflows")
-	entries, err := os.ReadDir(workflowDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &workspace, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", workflowDir, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
-			continue
-		}
-		path := filepath.Join(workflowDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		var workflow types.WorkflowConfig
-		if err := yaml.Unmarshal(data, &workflow); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
-		}
-		workspace.Workflows = append(workspace.Workflows, &workflow)
-	}
 	return &workspace, nil
 }
 

@@ -119,6 +119,14 @@ func (s *Server) handleWorkspaceDelete(w http.ResponseWriter, _ *http.Request, n
 }
 
 func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.handleWorkspaceWorkflowsPush(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
 		http.Error(w, "workspace name required", http.StatusBadRequest)
@@ -131,6 +139,46 @@ func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Req
 		}
 	}
 	http.Error(w, "workspace not found", http.StatusNotFound)
+}
+
+type WorkflowPushRequest struct {
+	Workflows []*types.WorkflowConfig `json:"workflows"`
+}
+
+func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		http.Error(w, "workspace name required", http.StatusBadRequest)
+		return
+	}
+	var req WorkflowPushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Workflows) == 0 {
+		http.Error(w, "no workflows provided", http.StatusBadRequest)
+		return
+	}
+	for _, workflow := range req.Workflows {
+		if workflow == nil {
+			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
+			return
+		}
+		if err := workflow.Validate(); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := saveExternalWorkflows(name, req.Workflows); err != nil {
+		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	workflows := make([]WorkflowView, 0, len(req.Workflows))
+	for _, workflow := range req.Workflows {
+		workflows = append(workflows, workflowToView(name, workflow))
+	}
+	jsonOK(w, map[string]interface{}{"pushed": len(req.Workflows), "workflows": workflows})
 }
 
 func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Request) {

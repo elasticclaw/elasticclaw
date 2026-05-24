@@ -89,6 +89,19 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if !ok {
 		return "", false, fmt.Errorf("provider %q is not configured on this hub", provider)
 	}
+	workspaceSecrets, err := loadWorkspaceSecrets(workspace.Name)
+	if err != nil {
+		return "", false, fmt.Errorf("load workspace secrets: %w", err)
+	}
+	resolveSecret := func(secretRef string) (string, bool) {
+		if val, ok := workspaceSecrets[secretRef]; ok {
+			return val, true
+		}
+		if val, ok := hubSecrets[secretRef]; ok {
+			return val, true
+		}
+		return "", false
+	}
 
 	clawID := uuid.New().String()
 	env := map[string]string{
@@ -107,7 +120,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if tmplCfg != nil {
 		for envName, envVar := range tmplCfg.Env {
 			if envVar.Secret != "" {
-				if val, ok := hubSecrets[envVar.Secret]; ok {
+				if val, ok := resolveSecret(envVar.Secret); ok {
 					env[envName] = val
 					resolvedSecrets[envName] = "workspace env secret"
 				}
@@ -116,14 +129,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			env[envName] = envVar.Value
 		}
 		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := hubSecrets[secretRef]; ok {
+			if val, ok := resolveSecret(secretRef); ok {
 				env[envName] = val
 				resolvedSecrets[envName] = "workspace secret_ref"
 			}
 		}
 	}
 	for envName, secretRef := range workflow.SecretRefs {
-		if val, ok := hubSecrets[secretRef]; ok {
+		if val, ok := resolveSecret(secretRef); ok {
 			env[envName] = val
 			resolvedSecrets[envName] = "workflow secret_ref"
 		}
@@ -190,7 +203,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),

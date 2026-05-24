@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +24,7 @@ func WorkflowCmd() *cobra.Command {
 	}
 	cmd.AddCommand(workflowListCmd())
 	cmd.AddCommand(workflowShowCmd())
+	cmd.AddCommand(workflowPushCmd())
 	cmd.AddCommand(workflowTriggerCmd())
 	return cmd
 }
@@ -131,6 +134,112 @@ func workflowTriggerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
 	cmd.Flags().StringArrayVar(&inputs, "input", nil, "input values as key=value (can be repeated)")
 	return cmd
+}
+
+func workflowPushCmd() *cobra.Command {
+	var workspace string
+	cmd := &cobra.Command{
+		Use:   "push <file-or-dir>...",
+		Short: "Push workflow definitions to a workspace",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowPush(workspace, args)
+		},
+	}
+	cmd.Flags().StringVar(&workspace, "workspace", "", "workspace name [required]")
+	return cmd
+}
+
+func runWorkflowPush(workspace string, paths []string) error {
+	if strings.TrimSpace(workspace) == "" {
+		return fmt.Errorf("--workspace is required")
+	}
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+	workflows, err := readWorkflowFiles(paths)
+	if err != nil {
+		return err
+	}
+	if len(workflows) == 0 {
+		return fmt.Errorf("no workflow YAML files found")
+	}
+	for _, workflow := range workflows {
+		if err := workflow.Validate(); err != nil {
+			return fmt.Errorf("validation failed for workflow %q: %w", workflow.Name, err)
+		}
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"workflows": workflows})
+	req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/workspaces/"+url.PathEscape(workspace)+"/workflows", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("push workflows failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result struct {
+		Pushed    int `json:"pushed"`
+		Workflows []struct {
+			Name string `json:"name"`
+		} `json:"workflows"`
+	}
+	_ = json.Unmarshal(respBody, &result)
+	fmt.Printf("Pushed %d workflow(s) to workspace %q:\n", result.Pushed, workspace)
+	for _, workflow := range result.Workflows {
+		fmt.Printf("  ✓ %s\n", workflow.Name)
+	}
+	return nil
+}
+
+func readWorkflowFiles(paths []string) ([]*types.WorkflowConfig, error) {
+	var files []string
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+			continue
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			if strings.HasSuffix(entry.Name(), ".yaml") || strings.HasSuffix(entry.Name(), ".yml") {
+				files = append(files, filepath.Join(path, entry.Name()))
+			}
+		}
+	}
+
+	var workflows []*types.WorkflowConfig
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		var workflow types.WorkflowConfig
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		if workflow.Name == "" {
+			workflow.Name = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(path), ".yaml"), ".yml")
+		}
+		workflows = append(workflows, &workflow)
+	}
+	return workflows, nil
 }
 
 func runWorkflowTrigger(workspace, name string, inputs []string) error {

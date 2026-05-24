@@ -398,16 +398,20 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 
 	dir := filepath.Join(workspacesDir(), workspace.Name)
 	workflowDir := filepath.Join(dir, "workflows")
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove old workspace dir %s: %w", dir, err)
-	}
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
+	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
+		return err
+	}
 
-	data, err := marshalWorkspaceElasticClawConfig(workspace, workspace.Files["elasticclaw-config.yaml"])
-	if err != nil {
-		return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
+	data := []byte(workspace.Files["elasticclaw-config.yaml"])
+	if len(strings.TrimSpace(string(data))) == 0 {
+		var err error
+		data, err = marshalWorkspaceElasticClawConfig(workspace, "")
+		if err != nil {
+			return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), data, 0640); err != nil {
 		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
@@ -424,7 +428,38 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 			return fmt.Errorf("write workspace file %s: %w", name, err)
 		}
 	}
-	for _, workflow := range workspace.Workflows {
+	return nil
+}
+
+func removeWorkspaceAuthoredFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "workflows" || name == workspaceManagedDirName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("remove stale workspace file %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConfig) error {
+	if err := validateName(workspaceName); err != nil {
+		return err
+	}
+	if _, err := loadExternalWorkspace(workspaceName); err != nil {
+		return err
+	}
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
 		}

@@ -51,6 +51,15 @@ interface GitHubAppView {
   permCheckError?: string
 }
 
+interface WorkspaceGitHubAppView {
+  name: string
+  appId: number
+  url?: string
+  installation?: string
+  private_key_set?: boolean
+  privateKeySet?: boolean
+}
+
 interface SettingsData {
   llmKeys: LLMKeyView[]
   providers: Record<string, {
@@ -366,7 +375,7 @@ export default function SettingsSectionPage() {
             <LLMSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "github" && (
-            <GitHubSection settings={settings} onSave={save} saving={saving} />
+            <GitHubSection settings={settings} onSave={save} saving={saving} workspace={selectedWorkspace} />
           )}
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
@@ -384,7 +393,7 @@ export default function SettingsSectionPage() {
             <AnalyticsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "secrets" && (
-            <SecretsSection settings={settings} />
+            <SecretsSection settings={settings} workspace={selectedWorkspace} />
           )}
           {settings && section === "mcp-servers" && (
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
@@ -1138,31 +1147,57 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   )
 }
 
-function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+function GitHubSection({ settings, onSave, saving, workspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; workspace: string }) {
   const [showModal, setShowModal] = useState(false)
+  const [appName, setAppName] = useState("")
   const [appId, setAppId] = useState("")
   const [url, setUrl] = useState("")
+  const [installation, setInstallation] = useState("")
   const [pem, setPem] = useState("")
   const [testResult, setTestResult] = useState<GitHubAppView | null>(null)
   const [testing, setTesting] = useState(false)
   const [testError, setTestError] = useState("")
+  const [workspaceApps, setWorkspaceApps] = useState<WorkspaceGitHubAppView[]>([])
+  const [workspaceLoading, setWorkspaceLoading] = useState(true)
+  const [workspaceError, setWorkspaceError] = useState("")
+  const hubUrl = getHubUrl()
+  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
 
   const resetModal = () => {
-    setAppId(""); setUrl(""); setPem("")
+    setAppName(""); setAppId(""); setUrl(""); setInstallation(""); setPem("")
     setTestResult(null); setTestError(""); setTesting(false)
   }
 
   const openModal = () => { resetModal(); setShowModal(true) }
   const closeModal = () => { setShowModal(false); resetModal() }
 
+  const workspaceGitHubPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/github-apps` : ""
+  const loadWorkspaceApps = useCallback(async () => {
+    if (!workspace) return
+    setWorkspaceLoading(true)
+    setWorkspaceError("")
+    try {
+      const res = await fetch(`${hubUrl}${workspaceGitHubPath}`, { headers: { Authorization: `Bearer ${token()}` } })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setWorkspaceApps(data.githubApps || [])
+    } catch (e) {
+      setWorkspaceError(e instanceof Error ? e.message : "Failed to load GitHub Apps")
+    } finally {
+      setWorkspaceLoading(false)
+    }
+  }, [hubUrl, workspace, workspaceGitHubPath])
+
+  useEffect(() => {
+    loadWorkspaceApps()
+  }, [loadWorkspaceApps])
+
   async function runTest() {
     setTesting(true); setTestError(""); setTestResult(null)
     try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
       const res = await fetch(`${hubUrl}/api/settings/github/test`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
         body: JSON.stringify({ appId: parseInt(appId, 10), url, privateKeyPem: pem }),
       })
       if (!res.ok) {
@@ -1179,7 +1214,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 
   const [showConfirmModal, setShowConfirmModal] = useState(false)
 
-  function doSave(force = false) {
+  async function doSave(force = false) {
     // Not tested yet — recommend testing
     if (!force && testResult === null) {
       setShowConfirmModal(true)
@@ -1191,10 +1226,40 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       return
     }
     const parsedAppId = parseInt(appId, 10)
+    if (workspace) {
+      setWorkspaceError("")
+      const name = appName.trim() || `app-${parsedAppId}`
+      const res = await fetch(`${hubUrl}${workspaceGitHubPath}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name, appId: parsedAppId, url, installation, privateKeyPem: pem }),
+      })
+      if (!res.ok) {
+        setWorkspaceError(await res.text())
+        return
+      }
+      closeModal()
+      await loadWorkspaceApps()
+      return
+    }
     const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
     if (url) newApp.url = url
     onSave({ github: [...(settings.github || []), newApp] })
     closeModal()
+  }
+
+  async function deleteWorkspaceApp(name: string) {
+    if (!workspace) return
+    setWorkspaceError("")
+    const res = await fetch(`${hubUrl}${workspaceGitHubPath}?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token()}` },
+    })
+    if (!res.ok) {
+      setWorkspaceError(await res.text())
+      return
+    }
+    await loadWorkspaceApps()
   }
 
   const needsAttention = testResult?.permissions?.filter(p => !p.ok).length ?? 0
@@ -1217,7 +1282,43 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
         </p>
       </div>
 
-      {settings.github?.length > 0 && (
+      {workspaceError && <p className="mb-4 text-sm text-destructive">{workspaceError}</p>}
+
+      {workspace ? (
+        <div className="mb-6 space-y-2">
+          {workspaceLoading ? (
+            <p className="text-sm text-muted-foreground animate-pulse">Loading GitHub Apps...</p>
+          ) : workspaceApps.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No GitHub Apps configured for this workspace.</p>
+          ) : (
+            workspaceApps.map(app => (
+              <div key={app.name} className="border border-border rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">{app.name}</p>
+                    <p className="text-xs text-muted-foreground">App ID: {app.appId}</p>
+                    {app.url && (
+                      <a href={app.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1">
+                        {app.url} <ExternalLink className="size-3" />
+                      </a>
+                    )}
+                    {app.installation && <p className="text-xs text-muted-foreground">Installation: {app.installation}</p>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-xs px-2 py-1 rounded", (app.privateKeySet || app.private_key_set) ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
+                      {(app.privateKeySet || app.private_key_set) ? "Key set" : "No key"}
+                    </span>
+                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
+                      onClick={() => deleteWorkspaceApp(app.name)}>
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      ) : settings.github?.length > 0 && (
         <div className="mb-6 space-y-2">
           {settings.github.map(app => (
             <div key={app.appId} className="border border-border rounded-lg p-4">
@@ -1345,6 +1446,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 
           <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
+                {workspace && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                    <Input value={appName} onChange={e => setAppName(e.target.value)} className="h-8 text-sm" placeholder="primary" />
+                  </div>
+                )}
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
                   <Input type="number" value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
@@ -1353,6 +1460,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                   <label className="text-xs text-muted-foreground mb-1 block">App URL (optional)</label>
                   <Input value={url} onChange={e => setUrl(e.target.value)} className="h-8 text-sm" placeholder="https://github.com/apps/..." />
                 </div>
+                {workspace && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Installation (optional)</label>
+                    <Input value={installation} onChange={e => setInstallation(e.target.value)} className="h-8 text-sm" placeholder="owner or org" />
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Private Key (PEM)</label>
@@ -2236,17 +2349,11 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold mb-1">Workflows</h2>
-          <p className="text-sm text-muted-foreground">
-            Workflows define triggers and runtime behavior within this workspace.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
-          Refresh
-        </Button>
+      <div>
+        <h2 className="text-base font-semibold mb-1">Workflows</h2>
+        <p className="text-sm text-muted-foreground">
+          Workflows define triggers and runtime behavior within this workspace.
+        </p>
       </div>
 
       {error && (
@@ -2356,17 +2463,11 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold mb-1">Analytics</h2>
-          <p className="text-sm text-muted-foreground">
-            {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
-          Refresh
-        </Button>
+      <div>
+        <h2 className="text-base font-semibold mb-1">Analytics</h2>
+        <p className="text-sm text-muted-foreground">
+          {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
+        </p>
       </div>
 
       {error && (
@@ -2464,7 +2565,7 @@ function WorkspaceAccessList({ title, values }: { title: string; values: string[
   )
 }
 
-function SecretsSection({ settings }: { settings: SettingsData | null }) {
+function SecretsSection({ settings, workspace }: { settings: SettingsData | null; workspace: string }) {
   const [secrets, setSecrets] = useState<string[]>([])
   const [newName, setNewName] = useState("")
   const [newValue, setNewValue] = useState("")
@@ -2474,10 +2575,11 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
 
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const secretsPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
+      const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
         const data = await res.json()
         setSecrets(data.secrets || [])
@@ -2485,11 +2587,8 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
     } finally {
       setLoading(false)
     }
-  }, [hubUrl])
+  }, [hubUrl, secretsPath])
 
-  // Load secrets from API on mount — the authoritative source of truth.
-  // The /api/secrets endpoint reads from disk, so manually-edited hub.yaml
-  // entries are visible immediately without waiting for a server restart.
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -2499,7 +2598,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
     setSaving(true)
     setError(null)
     try {
-      const res = await fetch(`${hubUrl}/api/secrets`, {
+      const res = await fetch(`${hubUrl}${secretsPath}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
         body: JSON.stringify({ name: newName.trim(), value: newValue.trim() }),
@@ -2515,7 +2614,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
 
   const handleDelete = async (name: string) => {
     setError(null)
-    const res = await fetch(`${hubUrl}/api/secrets?name=${encodeURIComponent(name)}`, {
+    const res = await fetch(`${hubUrl}${secretsPath}?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token()}` },
     })
@@ -2528,7 +2627,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
       <div>
         <h2 className="text-base font-semibold mb-1">Secrets</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Named secrets referenced by workflows via <code className="bg-muted px-1 rounded text-xs">webhook_secret_ref</code>.
+          Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace || "default"}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.
         </p>
       </div>
 
@@ -3908,10 +4007,6 @@ function DoctorSection() {
               {showPassed ? "Hide passed" : `Show passed (${passedChecks.length})`}
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={() => load(true)} disabled={loading}>
-            <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
-            {loading ? "Checking…" : "Refresh"}
-          </Button>
         </div>
       </div>
 

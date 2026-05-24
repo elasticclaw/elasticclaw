@@ -234,6 +234,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
+	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAuth(s.handleWorkspaceSecretsCRUD))
+	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAuth(s.handleWorkspaceGitHubAppsCRUD))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
@@ -4341,14 +4343,6 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 // URL: GET /api/github/token/:clawId
 // Used by the git credential helper on the VM.
 func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
-	s.mu.RUnlock()
-	if !hasGitHubApps {
-		http.Error(w, "no github apps configured", http.StatusNotImplemented)
-		return
-	}
-
 	clawToken := r.URL.Query().Get("claw_token")
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -4368,11 +4362,12 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var workspaceName string
 	var reposJSON string
 	err := s.db.QueryRow(
-		`SELECT github_repos FROM claws WHERE id = ?`,
+		`SELECT COALESCE(template,''), github_repos FROM claws WHERE id = ?`,
 		clawID,
-	).Scan(&reposJSON)
+	).Scan(&workspaceName, &reposJSON)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
 		return
@@ -4411,8 +4406,15 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 
 	// Try each configured GitHub App in order; use the first that finds an installation
 	s.mu.RLock()
-	githubApps := s.hubCfg.GitHubApps
+	githubApps := append([]*types.GitHubAppConfig(nil), s.hubCfg.GitHubApps...)
 	s.mu.RUnlock()
+	if workspaceApps, err := loadWorkspaceGitHubAppConfigs(workspaceName); err == nil && len(workspaceApps) > 0 {
+		githubApps = append(workspaceApps, githubApps...)
+	}
+	if len(githubApps) == 0 {
+		http.Error(w, "no github apps configured", http.StatusNotImplemented)
+		return
+	}
 	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
