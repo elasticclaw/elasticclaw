@@ -3,17 +3,28 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Factory, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, BarChart3, Wrench } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
+import { fetchWorkspaces, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
 }
+
+const WORKSPACE_SECTIONS = new Set<Section>([
+  "workspaces",
+  "workflows",
+  "workspace-analytics",
+  "github",
+  "issue-trackers",
+  "secrets",
+  "mcp-servers",
+])
 
 interface LLMKeyView {
   name: string
@@ -37,6 +48,16 @@ interface GitHubAppView {
   permissions?: GitHubAppPermission[]
   permCheckOk?: boolean
   permCheckError?: string
+}
+
+interface WorkspaceGitHubAppView {
+  name: string
+  appId: number
+  url?: string
+  installation?: string
+  installations?: string[]
+  private_key_set?: boolean
+  privateKeySet?: boolean
 }
 
 interface SettingsData {
@@ -63,16 +84,6 @@ interface SettingsData {
     shortcut?: Array<{ workspace: string; tokenSet: boolean }>
     githubIssues?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
   }
-  factories?: Array<{
-    name: string; integration: string; workspace: string; team: string
-    triggerStatus: string; doneStatus: string; terminateOnLeave: boolean; template: string
-    webhookSecretSet?: boolean; tags?: string[]; color?: string; enabled?: boolean; labels?: string[]; assigned_to?: string
-    concurrencyGroup?: string
-    inputs?: Array<{
-      name: string; type: string; required?: boolean; default?: string
-      description?: string; options?: string[]; validation?: string
-    }>
-  }>
   secrets?: string[]
   mcpServers?: Array<{
     name: string
@@ -133,13 +144,21 @@ async function patchSettings(patch: object): Promise<void> {
 export default function SettingsSectionPage() {
   const params = useParams()
   const router = useRouter()
-  const rawSection = Array.isArray(params.section) ? params.section[0] : (params.section ?? "runtimes")
-  const section: Section = isValidSection(rawSection) ? rawSection : "runtimes"
+  const parts = Array.isArray(params.parts) ? params.parts : []
+  const firstPart = parts[0] ?? ""
+  const secondPart = parts[1] ?? ""
+  const firstPartIsSection = isValidSection(firstPart)
+  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection
+  const rawSection = hasRouteWorkspace ? (secondPart || "workspaces") : (firstPart || "workspaces")
+  const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
+  const rawWorkspace = hasRouteWorkspace ? firstPart : ""
+  const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
+  const routeHasOverviewSlug = hasRouteWorkspace && secondPart === "workspaces"
 
-  // Redirect invalid sections to runtimes
+  // Redirect invalid sections to the workspace overview.
   useEffect(() => {
     if (!isValidSection(rawSection)) {
-      router.replace("/settings/runtimes")
+      router.replace("/settings/workspaces")
     }
   }, [rawSection, router])
 
@@ -149,6 +168,10 @@ export default function SettingsSectionPage() {
   const [success, setSuccess] = useState("")
   const [version, setVersion] = useState("")
   const [hubPublicUrl, setHubPublicUrl] = useState("")
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [selectedWorkspace, setSelectedWorkspace] = useState("")
+  const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
+  const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
   const load = useCallback(async () => {
     try {
@@ -168,6 +191,34 @@ export default function SettingsSectionPage() {
       .then((d) => { setVersion(d.version || "unknown"); setHubPublicUrl(d.hubUrl || "") })
       .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    fetchWorkspaces()
+      .then((data) => {
+        setWorkspaces(data)
+        setSelectedWorkspace((current) => {
+          if (data.length === 0) return ""
+          if (routeWorkspace && data.some((workspace) => workspace.name === routeWorkspace)) return routeWorkspace
+          return data.some((workspace) => workspace.name === current) ? current : data[0].name
+        })
+      })
+      .catch(() => {
+        setWorkspaces([])
+        setSelectedWorkspace("")
+      })
+  }, [routeWorkspace])
+
+  useEffect(() => {
+    if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
+    const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
+      ? routeWorkspace
+      : selectedWorkspace || workspaces[0].name
+    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
+    const target = section === "workspaces" ? workspaceBase : `${workspaceBase}/${section}`
+    if ((!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug) {
+      router.replace(target)
+    }
+  }, [routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)
@@ -197,43 +248,50 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const navGroups: { id: Section; label: string; icon: React.ElementType }[][] = [
-    // Infrastructure
-    [
-      { id: "runtimes", label: "Sandboxes", icon: Cpu },
-      { id: "models", label: "Models", icon: Key },
-    ],
-    // Integrations
-    [
-      { id: "github", label: "GitHub Apps", icon: Github },
-      { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-      { id: "mcp-servers", label: "MCP Servers", icon: Zap },
-      { id: "webhooks", label: "Webhooks", icon: Webhook },
-    ],
-    // Configuration
-    [
-      { id: "secrets", label: "Secrets", icon: Lock },
-      { id: "templates", label: "Templates", icon: LayoutTemplate },
-      { id: "factories", label: "Factories", icon: Factory },
-    ],
-    // Access
-    [
-      { id: "authentication", label: "Authentication", icon: Shield },
-    ],
-    // AI Assistant
-    [
-      { id: "ai-config", label: "Configure with AI", icon: Sparkles },
-    ],
-    // Analytics
-    [
-      { id: "analytics", label: "Analytics", icon: BarChart3 },
-    ],
-    // Diagnostics
-    [
-      { id: "doctor", label: "Doctor", icon: Stethoscope },
-      { id: "troubleshoot", label: "Troubleshoot", icon: Wrench },
-    ],
+  const navGroups: { label: string; items: { id: Section; label: string; icon: React.ElementType }[] }[] = [
+    {
+      label: "Workspace",
+      items: [
+        { id: "workspaces", label: "Overview", icon: LayoutTemplate },
+        { id: "workflows", label: "Workflows", icon: GitBranch },
+        { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
+        { id: "github", label: "GitHub Apps", icon: Github },
+        { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
+        { id: "secrets", label: "Secrets", icon: Lock },
+        { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+      ],
+    },
+    {
+      label: "System",
+      items: [
+        { id: "runtimes", label: "Sandboxes", icon: Cpu },
+        { id: "models", label: "Models", icon: Key },
+        { id: "authentication", label: "Authentication", icon: Shield },
+        { id: "analytics", label: "Analytics", icon: BarChart3 },
+        { id: "ai-config", label: "Configure with AI", icon: Sparkles },
+      ],
+    },
+    {
+      label: "Diagnostics",
+      items: [
+        { id: "doctor", label: "Doctor", icon: Stethoscope },
+        { id: "troubleshoot", label: "Troubleshoot", icon: Wrench },
+      ],
+    },
   ]
+  const settingsHref = (id: Section) => {
+    if (WORKSPACE_SECTIONS.has(id) && selectedWorkspace) {
+      const workspaceBase = `/settings/${encodeURIComponent(selectedWorkspace)}`
+      return id === "workspaces" ? workspaceBase : `${workspaceBase}/${id}`
+    }
+    return `/settings/${id}`
+  }
+  const selectWorkspace = (workspace: string) => {
+    setSelectedWorkspace(workspace)
+    const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
+    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
+    router.push(targetSection === "workspaces" ? workspaceBase : `${workspaceBase}/${targetSection}`)
+  }
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -242,21 +300,47 @@ export default function SettingsSectionPage() {
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
           <ChevronLeft className="size-4" />
         </Button>
-        <h1 className="text-lg font-semibold">Settings</h1>
+        <h1 className="text-lg font-semibold">Configure</h1>
         {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
+          <div className="relative mb-1">
+            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
+              {selectedWorkspaceInitial}
+            </div>
+            <select
+              aria-label="Workspace"
+              value={selectedWorkspace}
+              onChange={(event) => selectWorkspace(event.target.value)}
+              disabled={workspaces.length === 0}
+              className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
+            >
+              {workspaces.length === 0 ? (
+                <option value="">{selectedWorkspaceLabel}</option>
+              ) : (
+                workspaces.map((workspace) => (
+                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+                ))
+              )}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          </div>
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
-              <div key={groupIdx}>
-                {groupIdx > 0 && <div className="my-2 border-t border-border/50" />}
-                {group.map(({ id, label, icon: Icon }) => (
+              <div key={group.label}>
+                {groupIdx > 0 && <div className="h-5" />}
+                {groupIdx > 0 && (
+                  <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                    {group.label}
+                  </p>
+                )}
+                {group.items.map(({ id, label, icon: Icon }) => (
                   <Link
                     key={id}
-                    href={`/settings/${id}`}
+                    href={settingsHref(id)}
                     className={cn(
                       "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
                       section === id
@@ -290,40 +374,40 @@ export default function SettingsSectionPage() {
             <LLMSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "github" && (
-            <GitHubSection settings={settings} onSave={save} saving={saving} />
+            <GitHubSection settings={settings} onSave={save} saving={saving} workspace={selectedWorkspace} />
           )}
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "issue-trackers" && (
-            <IntegrationsSection settings={settings} onSave={save} saving={saving} />
+            <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} />
           )}
-          {settings && section === "factories" && (
-            <FactoriesSection hubUrl={hubPublicUrl} settings={settings} onSave={save} onSaveSilent={saveSilent} saving={saving} />
+          {section === "workspaces" && (
+            <WorkspacesSection selectedWorkspace={selectedWorkspace} />
+          )}
+          {section === "workflows" && (
+            <WorkflowsSection selectedWorkspace={selectedWorkspace} />
+          )}
+          {section === "workspace-analytics" && (
+            <AnalyticsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "secrets" && (
-            <SecretsSection settings={settings} />
+            <SecretsSection settings={settings} workspace={selectedWorkspace} />
           )}
           {settings && section === "mcp-servers" && (
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
           )}
-          {section === "templates" && (
-            <TemplatesSection />
-          )}
           {section === "ai-config" && (
             <AIConfigSection />
           )}
-          {section === "webhooks" && (
-            <WebhooksSection hubUrl={hubPublicUrl} />
+          {section === "analytics" && (
+            <AnalyticsSection />
           )}
           {section === "doctor" && (
             <DoctorSection />
           )}
           {section === "troubleshoot" && (
             <TroubleshootSection />
-          )}
-          {section === "analytics" && (
-            <AnalyticsSection />
           )}
         </main>
       </div>
@@ -855,7 +939,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       <div>
         <h2 className="text-base font-semibold mb-1">Models</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          API keys for LLM providers. The default key is used unless overridden by a template.
+          API keys for LLM providers. The default key is used unless overridden by a workflow.
         </p>
 
         <div className="flex items-center gap-2 mb-6">
@@ -1059,31 +1143,57 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   )
 }
 
-function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
+function GitHubSection({ settings, onSave, saving, workspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; workspace: string }) {
   const [showModal, setShowModal] = useState(false)
+  const [appName, setAppName] = useState("")
   const [appId, setAppId] = useState("")
   const [url, setUrl] = useState("")
+  const [installation, setInstallation] = useState("")
   const [pem, setPem] = useState("")
   const [testResult, setTestResult] = useState<GitHubAppView | null>(null)
   const [testing, setTesting] = useState(false)
   const [testError, setTestError] = useState("")
+  const [workspaceApps, setWorkspaceApps] = useState<WorkspaceGitHubAppView[]>([])
+  const [workspaceLoading, setWorkspaceLoading] = useState(true)
+  const [workspaceError, setWorkspaceError] = useState("")
+  const hubUrl = getHubUrl()
+  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
 
   const resetModal = () => {
-    setAppId(""); setUrl(""); setPem("")
+    setAppName(""); setAppId(""); setUrl(""); setInstallation(""); setPem("")
     setTestResult(null); setTestError(""); setTesting(false)
   }
 
   const openModal = () => { resetModal(); setShowModal(true) }
   const closeModal = () => { setShowModal(false); resetModal() }
 
+  const workspaceGitHubPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/github-apps` : ""
+  const loadWorkspaceApps = useCallback(async () => {
+    if (!workspace) return
+    setWorkspaceLoading(true)
+    setWorkspaceError("")
+    try {
+      const res = await fetch(`${hubUrl}${workspaceGitHubPath}`, { headers: { Authorization: `Bearer ${token()}` } })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setWorkspaceApps(data.githubApps || [])
+    } catch (e) {
+      setWorkspaceError(e instanceof Error ? e.message : "Failed to load GitHub Apps")
+    } finally {
+      setWorkspaceLoading(false)
+    }
+  }, [hubUrl, workspace, workspaceGitHubPath])
+
+  useEffect(() => {
+    loadWorkspaceApps()
+  }, [loadWorkspaceApps])
+
   async function runTest() {
     setTesting(true); setTestError(""); setTestResult(null)
     try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
       const res = await fetch(`${hubUrl}/api/settings/github/test`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
         body: JSON.stringify({ appId: parseInt(appId, 10), url, privateKeyPem: pem }),
       })
       if (!res.ok) {
@@ -1100,7 +1210,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 
   const [showConfirmModal, setShowConfirmModal] = useState(false)
 
-  function doSave(force = false) {
+  async function doSave(force = false) {
     // Not tested yet — recommend testing
     if (!force && testResult === null) {
       setShowConfirmModal(true)
@@ -1112,10 +1222,40 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       return
     }
     const parsedAppId = parseInt(appId, 10)
+    if (workspace) {
+      setWorkspaceError("")
+      const name = appName.trim() || `app-${parsedAppId}`
+      const res = await fetch(`${hubUrl}${workspaceGitHubPath}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name, appId: parsedAppId, url, installation, privateKeyPem: pem }),
+      })
+      if (!res.ok) {
+        setWorkspaceError(await res.text())
+        return
+      }
+      closeModal()
+      await loadWorkspaceApps()
+      return
+    }
     const newApp: { appId: number; privateKeyPem: string; url?: string } = { appId: parsedAppId, privateKeyPem: pem }
     if (url) newApp.url = url
     onSave({ github: [...(settings.github || []), newApp] })
     closeModal()
+  }
+
+  async function deleteWorkspaceApp(name: string) {
+    if (!workspace) return
+    setWorkspaceError("")
+    const res = await fetch(`${hubUrl}${workspaceGitHubPath}?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token()}` },
+    })
+    if (!res.ok) {
+      setWorkspaceError(await res.text())
+      return
+    }
+    await loadWorkspaceApps()
   }
 
   const needsAttention = testResult?.permissions?.filter(p => !p.ok).length ?? 0
@@ -1127,7 +1267,7 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
       <h2 className="text-base font-semibold mb-1">GitHub Apps</h2>
       <div className="text-sm text-muted-foreground mb-6 space-y-1.5">
         <p>
-          Register a GitHub App so your ElasticClaw templates can access repositories.
+          Register a GitHub App so your ElasticClaw workflows can access repositories.
           When a claw is created, it gets a scoped token that can read and write code,
           open pull requests, and check CI status — but only on repos the App is installed on.
         </p>
@@ -1138,7 +1278,43 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
         </p>
       </div>
 
-      {settings.github?.length > 0 && (
+      {workspaceError && <p className="mb-4 text-sm text-destructive">{workspaceError}</p>}
+
+      {workspace ? (
+        <div className="mb-6 space-y-2">
+          {workspaceLoading ? (
+            <p className="text-sm text-muted-foreground animate-pulse">Loading GitHub Apps...</p>
+          ) : workspaceApps.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No GitHub Apps configured for this workspace.</p>
+          ) : (
+            workspaceApps.map(app => (
+              <div key={app.name} className="border border-border rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">{app.name}</p>
+                    <p className="text-xs text-muted-foreground">App ID: {app.appId}</p>
+                    {app.url && (
+                      <a href={app.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1">
+                        {app.url} <ExternalLink className="size-3" />
+                      </a>
+                    )}
+                    {app.installation && <p className="text-xs text-muted-foreground">Installation: {app.installation}</p>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-xs px-2 py-1 rounded", (app.privateKeySet || app.private_key_set) ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
+                      {(app.privateKeySet || app.private_key_set) ? "Key set" : "No key"}
+                    </span>
+                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
+                      onClick={() => deleteWorkspaceApp(app.name)}>
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      ) : settings.github?.length > 0 && (
         <div className="mb-6 space-y-2">
           {settings.github.map(app => (
             <div key={app.appId} className="border border-border rounded-lg p-4">
@@ -1266,6 +1442,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 
           <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
+                {workspace && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                    <Input value={appName} onChange={e => setAppName(e.target.value)} className="h-8 text-sm" placeholder="primary" />
+                  </div>
+                )}
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">App ID</label>
                   <Input type="number" value={appId} onChange={e => setAppId(e.target.value)} className="h-8 text-sm" placeholder="123456" />
@@ -1274,6 +1456,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
                   <label className="text-xs text-muted-foreground mb-1 block">App URL (optional)</label>
                   <Input value={url} onChange={e => setUrl(e.target.value)} className="h-8 text-sm" placeholder="https://github.com/apps/..." />
                 </div>
+                {workspace && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Installation (optional)</label>
+                    <Input value={installation} onChange={e => setInstallation(e.target.value)} className="h-8 text-sm" placeholder="owner or org" />
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Private Key (PEM)</label>
@@ -1441,6 +1629,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 function AuthenticationSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const ghOAuth = settings.auth?.githubOAuth
   const ghAccess = settings.auth?.access
+  const ghAllowedUsers = ghOAuth?.allowedUsers || []
+  const ghAllowedOrgs = ghOAuth?.allowedOrgs || []
+  const ghAllowedTeams = ghOAuth?.allowedTeams || []
+  const ghAdmins = ghAccess?.admins || []
+  const ghViewRequiresTags = ghAccess?.viewRequiresTags || []
+  const ghInteractRequiresTags = ghAccess?.interactRequiresTags || []
 
   // Password card state
   const [newPw, setNewPw] = useState('')
@@ -1451,12 +1645,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   const [showGhForm, setShowGhForm] = useState(false)
   const [clientId, setClientId] = useState(ghOAuth?.clientId || '')
   const [clientSecret, setClientSecret] = useState('')
-  const [allowedUsers, setAllowedUsers] = useState((ghOAuth?.allowedUsers || []).join(', '))
-  const [allowedOrgs, setAllowedOrgs] = useState((ghOAuth?.allowedOrgs || []).join(', '))
-  const [allowedTeams, setAllowedTeams] = useState((ghOAuth?.allowedTeams || []).join(', '))
-  const [admins, setAdmins] = useState((ghAccess?.admins || []).join(', '))
-  const [viewTags, setViewTags] = useState((ghAccess?.viewRequiresTags || []).join(', '))
-  const [interactTags, setInteractTags] = useState((ghAccess?.interactRequiresTags || []).join(', '))
+  const [allowedUsers, setAllowedUsers] = useState(ghAllowedUsers.join(', '))
+  const [allowedOrgs, setAllowedOrgs] = useState(ghAllowedOrgs.join(', '))
+  const [allowedTeams, setAllowedTeams] = useState(ghAllowedTeams.join(', '))
+  const [admins, setAdmins] = useState(ghAdmins.join(', '))
+  const [viewTags, setViewTags] = useState(ghViewRequiresTags.join(', '))
+  const [interactTags, setInteractTags] = useState(ghInteractRequiresTags.join(', '))
   const [ghErr, setGhErr] = useState('')
 
   function handlePasswordSave() {
@@ -1503,12 +1697,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   function handleGitHubEdit() {
     setClientId(ghOAuth?.clientId || '')
     setClientSecret('')
-    setAllowedUsers((ghOAuth?.allowedUsers || []).join(', '))
-    setAllowedOrgs((ghOAuth?.allowedOrgs || []).join(', '))
-    setAllowedTeams((ghOAuth?.allowedTeams || []).join(', '))
-    setAdmins((ghAccess?.admins || []).join(', '))
-    setViewTags((ghAccess?.viewRequiresTags || []).join(', '))
-    setInteractTags((ghAccess?.interactRequiresTags || []).join(', '))
+    setAllowedUsers(ghAllowedUsers.join(', '))
+    setAllowedOrgs(ghAllowedOrgs.join(', '))
+    setAllowedTeams(ghAllowedTeams.join(', '))
+    setAdmins(ghAdmins.join(', '))
+    setViewTags(ghViewRequiresTags.join(', '))
+    setInteractTags(ghInteractRequiresTags.join(', '))
     setShowGhForm(true)
   }
 
@@ -1596,12 +1790,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
           <div className="border-t border-border pt-3 space-y-2 text-xs text-muted-foreground">
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client ID</span><span className="font-mono">{ghOAuth.clientId}</span></div>
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client Secret</span><span>{ghOAuth.clientSecretSet ? '••••••••' : 'not set'}</span></div>
-            {ghAccess?.admins && ghAccess.admins.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Admins</span><span>{ghAccess.admins.join(', ')}</span></div>}
-            {ghOAuth.allowedUsers.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed users</span><span>{ghOAuth.allowedUsers.join(', ')}</span></div>}
-            {ghOAuth.allowedOrgs.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed orgs</span><span>{ghOAuth.allowedOrgs.join(', ')}</span></div>}
-            {ghOAuth.allowedTeams.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed teams</span><span>{ghOAuth.allowedTeams.join(', ')}</span></div>}
-            {ghAccess?.viewRequiresTags && ghAccess.viewRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">View tag filter</span><span className="font-mono">{ghAccess.viewRequiresTags.join(', ')}</span></div>}
-            {ghAccess?.interactRequiresTags && ghAccess.interactRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Interact tag filter</span><span className="font-mono">{ghAccess.interactRequiresTags.join(', ')}</span></div>}
+            {ghAdmins.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Admins</span><span>{ghAdmins.join(', ')}</span></div>}
+            {ghAllowedUsers.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed users</span><span>{ghAllowedUsers.join(', ')}</span></div>}
+            {ghAllowedOrgs.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed orgs</span><span>{ghAllowedOrgs.join(', ')}</span></div>}
+            {ghAllowedTeams.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed teams</span><span>{ghAllowedTeams.join(', ')}</span></div>}
+            {ghViewRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">View tag filter</span><span className="font-mono">{ghViewRequiresTags.join(', ')}</span></div>}
+            {ghInteractRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Interact tag filter</span><span className="font-mono">{ghInteractRequiresTags.join(', ')}</span></div>}
             <div className="flex gap-2 pt-1">
               <Button size="sm" variant="outline" onClick={handleGitHubEdit}>Edit</Button>
               <Button size="sm" variant="outline" onClick={handleGitHubRemove} className="text-destructive hover:text-destructive">Disable</Button>
@@ -1700,16 +1894,61 @@ interface TrackerItem {
   tokenSet: boolean
 }
 
-function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
-  const linear = settings.integrations?.linear || []
-  const shortcut = settings.integrations?.shortcut || []
-  const githubIssues = settings.integrations?.githubIssues || []
+function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubPublicUrl }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string; hubPublicUrl: string }) {
+  const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
+  const [githubOwnerHint, setGithubOwnerHint] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const hubUrl = getHubUrl()
+  const authToken = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const issueTrackersPath = selectedWorkspace ? `/api/workspaces/${encodeURIComponent(selectedWorkspace)}/issue-trackers` : ""
+  const linear = workspaceTrackers.filter(t => t.type === "linear")
+  const shortcut = workspaceTrackers.filter(t => t.type === "shortcut")
+  const githubIssues = workspaceTrackers.filter(t => t.type === "github-issues")
 
-  const allTrackers: TrackerItem[] = [
-    ...linear.map((li: { workspace: string; tokenSet?: boolean }) => ({ type: "linear" as TrackerType, workspace: li.workspace, tokenSet: li.tokenSet ?? false })),
-    ...shortcut.map((sc: { workspace: string; tokenSet?: boolean }) => ({ type: "shortcut" as TrackerType, workspace: sc.workspace, tokenSet: sc.tokenSet ?? false })),
-    ...githubIssues.map((gi: { workspace: string; tokenSet?: boolean }) => ({ type: "github-issues" as TrackerType, workspace: gi.workspace, tokenSet: gi.tokenSet ?? false })),
-  ]
+  const allTrackers: TrackerItem[] = workspaceTrackers
+
+  const loadTrackers = useCallback(async () => {
+    if (!selectedWorkspace) return
+    setLoading(true)
+    setError("")
+    try {
+      const res = await fetch(`${hubUrl}${issueTrackersPath}`, { headers: { Authorization: `Bearer ${authToken()}` } })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setWorkspaceTrackers(data.issueTrackers || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load issue trackers")
+    } finally {
+      setLoading(false)
+    }
+  }, [hubUrl, issueTrackersPath, selectedWorkspace])
+
+  useEffect(() => {
+    loadTrackers()
+  }, [loadTrackers])
+
+  useEffect(() => {
+    if (!selectedWorkspace) return
+    async function loadGitHubOwnerHint() {
+      try {
+        const res = await fetch(`${hubUrl}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/github-apps`, { headers: { Authorization: `Bearer ${authToken()}` } })
+        if (!res.ok) return
+        const data = await res.json()
+        const apps = (data.githubApps || []) as WorkspaceGitHubAppView[]
+        const owners = new Set<string>()
+        for (const app of apps) {
+          for (const owner of app.installations || []) {
+            if (owner) owners.add(owner)
+          }
+        }
+        setGithubOwnerHint(owners.size === 1 ? Array.from(owners)[0] : "")
+      } catch {
+        setGithubOwnerHint("")
+      }
+    }
+    loadGitHubOwnerHint()
+  }, [hubUrl, selectedWorkspace])
 
   // Unified modal state
   const [showModal, setShowModal] = useState(false)
@@ -1717,9 +1956,10 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   const [modalType, setModalType] = useState<TrackerType>("linear")
   const [editIdx, setEditIdx] = useState<number | null>(null)
   const [editType, setEditType] = useState<TrackerType>("linear")
-  const [workspace, setWorkspace] = useState("")
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
+  const [copiedSetup, setCopiedSetup] = useState<string | null>(null)
+  const [githubSetupTab, setGithubSetupTab] = useState<"pat" | "webhook">("pat")
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -1737,7 +1977,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }, [showAddMenu])
 
   const resetModal = () => {
-    setWorkspace(""); setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
+    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setGithubSetupTab("pat")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -1749,78 +1989,51 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
-    let typeIdx: number
-    if (tracker.type === "linear") {
-      typeIdx = idx
-    } else if (tracker.type === "shortcut") {
-      typeIdx = idx - linear.length
-    } else {
-      typeIdx = idx - linear.length - shortcut.length
-    }
-    setWorkspace(tracker.workspace)
     setToken("")
     setWebhookSecret("")
-    setEditIdx(typeIdx)
+    setEditIdx(idx)
     setEditType(tracker.type)
     setModalMode("edit")
     setShowModal(true)
   }
 
-  function saveTracker() {
-    if (!workspace.trim()) return
+  async function saveTracker() {
     if (modalMode === "add" && !token.trim()) return
 
     const type = modalMode === "add" ? modalType : editType
-
-    if (type === "linear") {
-      if (modalMode === "add") {
-        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const li = linear[editIdx]
-        const updated = linear.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { linear: updated } })
-      }
-    } else if (type === "shortcut") {
-      if (modalMode === "add") {
-        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const sc = shortcut[editIdx]
-        const updated = shortcut.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { shortcut: updated } })
-      }
-    } else {
-      // github-issues
-      if (modalMode === "add") {
-        onSave({ integrations: { githubIssues: [...githubIssues.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const gi = githubIssues[editIdx]
-        const updated = githubIssues.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: gi.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { githubIssues: updated } })
-      }
+    const trackerWorkspace = selectedWorkspace
+    const originalWorkspace = modalMode === "edit" && editIdx !== null ? allTrackers[editIdx]?.workspace : ""
+    setError("")
+    const res = await fetch(`${hubUrl}${issueTrackersPath}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${authToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type, workspace: trackerWorkspace, originalWorkspace, token: token.trim(), webhookSecret: webhookSecret.trim() }),
+    })
+    if (!res.ok) {
+      setError(await res.text())
+      return
     }
     setShowModal(false)
     resetModal()
+    await loadTrackers()
   }
 
-  function removeTracker() {
-    if (editType === "linear" && editIdx !== null) {
-      onSave({ integrations: { linear: linear.filter((_: unknown, j: number) => j !== editIdx) } })
-    } else if (editType === "shortcut" && editIdx !== null) {
-      onSave({ integrations: { shortcut: shortcut.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
-    } else if (editType === "github-issues" && editIdx !== null) {
-      onSave({ integrations: { githubIssues: githubIssues.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
+  async function removeTracker() {
+    if (editIdx === null) return
+    const tracker = allTrackers[editIdx]
+    if (!tracker) return
+    setError("")
+    const res = await fetch(`${hubUrl}${issueTrackersPath}?type=${encodeURIComponent(tracker.type)}&workspace=${encodeURIComponent(tracker.workspace)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${authToken()}` },
+    })
+    if (!res.ok) {
+      setError(await res.text())
+      return
     }
     setShowModal(false)
     resetModal()
+    await loadTrackers()
   }
 
   const trackerTypeLabel = (t: TrackerType) => {
@@ -1832,8 +2045,8 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const modalTitle = modalMode === "add"
-    ? `Add ${trackerTypeLabel(modalType)} workspace`
-    : `Edit ${trackerTypeLabel(editType)} — ${workspace}`
+    ? `Add ${trackerTypeLabel(modalType)}`
+    : `Edit ${trackerTypeLabel(editType)}`
 
   const modalIcon = (modalMode === "add" ? modalType : editType) === "linear"
     ? <Zap className="size-4" />
@@ -1841,22 +2054,52 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
     ? <span className="text-[#F4603C]">⚡</span>
     : <Github className="size-4" />
 
+  const githubIssuesTokenParams = new URLSearchParams({
+    name: "ElasticClaw GitHub Issues",
+    description: "Allows ElasticClaw to read and update GitHub issues",
+    expires_in: "90",
+    issues: "write",
+    metadata: "read",
+  })
+  if (githubOwnerHint) {
+    githubIssuesTokenParams.set("target_name", githubOwnerHint)
+  }
+  const githubIssuesTokenUrl = `https://github.com/settings/personal-access-tokens/new?${githubIssuesTokenParams.toString()}`
   const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
-    ? <>Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></>
+    ? <>Use a Linear API key from <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a>.</>
+    : (modalMode === "add" ? modalType : editType) === "shortcut"
+    ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
-    ? <>Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline">github.com/settings/tokens</a> with <code>repo</code> and <code>issues</code> scopes</>
+    ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. {githubOwnerHint ? <>The link starts with <code>{githubOwnerHint}</code> as the resource owner. </> : null}Grant repository access to the repos this workspace watches.</>
     : null
+  const activeTrackerType = modalMode === "add" ? modalType : editType
+  const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
+  const githubIssuesWebhookBase = hubPublicUrl || hubUrl
+  const githubIssuesWebhookUrl = `${githubIssuesWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
+
+  function generateWebhookSecret() {
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    setWebhookSecret(Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""))
+  }
+
+  function copySetupValue(value: string, key: string) {
+    navigator.clipboard.writeText(value).then(() => {
+      setCopiedSetup(key)
+      setTimeout(() => setCopiedSetup(null), 2000)
+    })
+  }
 
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Issue Trackers</h2>
-        <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from Factories.</p>
+        <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from workflows.</p>
 
         {/* Summary badges */}
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-            {allTrackers.length} workspace{allTrackers.length !== 1 ? "s" : ""} connected
+            {allTrackers.length} tracker{allTrackers.length !== 1 ? "s" : ""} connected
           </span>
           {linear.length > 0 && (
             <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Linear: {linear.length}</span>
@@ -1870,8 +2113,12 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         </div>
       </div>
 
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
       {/* Configured trackers list */}
-      {allTrackers.length > 0 && (
+      {loading ? (
+        <p className="text-sm text-muted-foreground animate-pulse">Loading issue trackers...</p>
+      ) : allTrackers.length > 0 && (
         <div className="space-y-2 mb-4">
           {allTrackers.map((tracker, i) => (
             <div
@@ -1910,7 +2157,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         </div>
       )}
 
-      {allTrackers.length === 0 && (
+      {!loading && allTrackers.length === 0 && (
         <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
             <Zap className="size-5 text-muted-foreground" />
@@ -1953,7 +2200,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
       {/* Unified Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
-        <DialogContent className="max-w-lg p-0 gap-0">
+        <DialogContent className={cn("p-0 gap-0", activeTrackerType === "github-issues" ? "sm:max-w-5xl w-[min(1100px,calc(100vw-2rem))]" : "max-w-lg")}>
           <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
@@ -1962,24 +2209,120 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
             </div>
           </div>
           <div className="p-5 space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Connect a {trackerTypeLabel(modalMode === "add" ? modalType : editType)} workspace to sync issues.
-              </p>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                <Input value={workspace} onChange={e => setWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
-                <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
-              </div>
+              {activeTrackerType === "github-issues" ? (
+                <div className="grid min-h-[420px] grid-cols-[240px_1fr]">
+                  <div className="-ml-5 -my-5 border-r border-border p-4">
+                    <div className="space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => setGithubSetupTab("pat")}
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          githubSetupTab === "pat" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        )}
+                      >
+                        GitHub PAT
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGithubSetupTab("webhook")}
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          githubSetupTab === "webhook" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        )}
+                      >
+                        Webhook
+                      </button>
+                    </div>
+                  </div>
+                  <div className="pl-5">
+                    <p className="text-sm text-muted-foreground">Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
+                    {githubSetupTab === "pat" ? (
+                    <div className="mt-4 space-y-4">
+                      <div>
+                        <h4 className="text-sm font-medium">GitHub PAT</h4>
+                        <p className="text-xs text-muted-foreground mt-1">Used by ElasticClaw to read and update issues.</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                        <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder="GitHub Issues API token" />
+                        {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
+                      </div>
+                    </div>
+                    ) : (
+                    <div className="mt-4 space-y-4">
+                      <div>
+                        <h4 className="text-sm font-medium">Webhook</h4>
+                        <p className="text-xs text-muted-foreground mt-1">Create a repo or org webhook for Issues events.</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Payload URL</label>
+                        <div className="flex gap-2">
+                          <Input readOnly value={githubIssuesWebhookUrl} className="h-9 text-xs font-mono" />
+                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(githubIssuesWebhookUrl, "github-url")}>
+                            {copiedSetup === "github-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                          </Button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
+	                        <div className="flex gap-2">
+	                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
+	                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(webhookSecret, "github-secret")} disabled={!webhookSecret}>
+	                            {copiedSetup === "github-secret" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+	                          </Button>
+	                          <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+	                            Generate
+	                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">Paste the same secret into the GitHub webhook Secret field.</p>
+                      </div>
+                    </div>
+                    )}
+                  </div>
+                </div>
+              ) : activeTrackerType === "linear" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect Linear for this workspace. The API key lets ElasticClaw read issues and move them between statuses.</p>
+                  <p>Create a Linear webhook using the Linear URL from the Webhooks page. Subscribe to Issue events, then paste the same signing secret below if you configured one.</p>
+                </div>
+              ) : activeTrackerType === "shortcut" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect Shortcut for this workspace. The API token lets ElasticClaw read stories and update workflow states.</p>
+                  <p>Create a Shortcut webhook using the Shortcut URL from the Webhooks page. If Shortcut signs the payload with a secret, paste that same secret below.</p>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Connect {trackerTypeLabel(activeTrackerType)} for this workspace.
+                </p>
+              )}
+              {activeTrackerType !== "github-issues" && (
+                <>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(modalMode === "add" ? modalType : editType)} API token`} />
+                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(activeTrackerType)} API token`} />
                 {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
-                <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
-                <p className="text-xs text-muted-foreground mt-1">Used to verify incoming webhook signatures. Leave blank to keep existing.</p>
+                <div className="flex gap-2">
+                  <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
+                  {canGenerateWebhookSecret && (
+                    <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+                      Generate
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {activeTrackerType === "linear"
+                    ? "Copy the signing secret from the Linear webhook settings and paste it here. Leave blank only if you intentionally want unsigned Linear webhooks."
+                    : activeTrackerType === "shortcut"
+                    ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
+                    : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
+                </p>
               </div>
+                </>
+              )}
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">
               {modalMode === "edit" && editIdx !== null && (
@@ -1989,8 +2332,8 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
               )}
               <div className="flex items-center gap-2 ml-auto">
                 <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetModal() }}>Cancel</Button>
-                <Button size="sm" disabled={saving || !workspace.trim() || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
-                  {modalMode === "add" ? "Add workspace" : "Save changes"}
+                <Button size="sm" disabled={saving || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
+                  {modalMode === "add" ? "Add tracker" : "Save changes"}
                 </Button>
               </div>
             </div>
@@ -2002,29 +2345,36 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
 
 
-function WebhooksSection({ hubUrl }: { hubUrl: string }) {
+function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; selectedWorkspace: string }) {
   const [copied, setCopied] = useState<string | null>(null)
+  const workspaceSlug = encodeURIComponent(selectedWorkspace)
+  const workspaceWebhookBase = hubUrl ? `${hubUrl}/api/workspaces/${workspaceSlug}/webhooks` : ""
 
   const urls = [
     {
       name: "Linear",
-      url: hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/linear` : "",
       hint: "Paste into Linear → Settings → API → Webhooks, subscribe to Issue events.",
     },
     {
       name: "Shortcut",
-      url: hubUrl ? `${hubUrl}/api/integrations/shortcut/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/shortcut` : "",
       hint: "Use Shortcut's API to register this webhook: POST /api/v3/webhooks with this URL.",
     },
     {
       name: "GitHub Issues",
-      url: hubUrl ? `${hubUrl}/api/integrations/github-issues/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/github-issues` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Issues events.",
     },
     {
       name: "GitHub (PRs)",
-      url: hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/github` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Pull requests and Issue comments.",
+    },
+    {
+      name: "External",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/external` : "",
+      hint: "Use for generic signed webhook events and release events.",
     },
   ]
 
@@ -2039,9 +2389,9 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Webhook URLs</h2>
+        <h2 className="text-base font-semibold mb-1">Webhooks</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Use these URLs to configure webhooks in your integrations.
+          Use these URLs to send events into the selected workspace.
         </p>
       </div>
 
@@ -2068,201 +2418,48 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   )
 }
 
-function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { hubUrl: string; settings: SettingsData; onSave: (p: object) => Promise<boolean>; onSaveSilent: (p: object) => void; saving: boolean }) {
-  const [savedFactory, setSavedFactory] = useState<string | null>(null)
-  const factories = settings.factories || []
-  const token = typeof window !== "undefined" ? (sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || "") : ""
+function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string }) {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
 
-  // Concurrency groups state — use local editable state so inputs are
-  // responsive, then debounce saves to the server.
-  const groups = settings.concurrencyGroups || [{ name: "global", limit: 0 }]
-  const groupsRef = useRef(groups)
-  groupsRef.current = groups
-
-  const [groupLimits, setGroupLimits] = useState<Record<string, number>>(() => {
-    const init: Record<string, number> = {}
-    for (const g of groups) init[g.name] = g.limit
-    return init
-  })
-  // Keep local state in sync when props change from outside (e.g. initial load)
-  useEffect(() => {
-    const next: Record<string, number> = {}
-    for (const g of groups) next[g.name] = g.limit
-    setGroupLimits(next)
-  }, [settings.concurrencyGroups])
-
-  const [newGroupName, setNewGroupName] = useState("")
-  const [newGroupLimit, setNewGroupLimit] = useState(0)
-
-  const allGroupNames = groups.map(g => g.name)
-
-  function saveGroups(updatedGroups: typeof groups) {
-    onSave({ concurrencyGroups: updatedGroups.map(g => ({ name: g.name, limit: g.limit })) })
-  }
-
-  function addGroup() {
-    if (!newGroupName.trim() || groups.some(g => g.name === newGroupName.trim())) return
-    const updated = [...groups, { name: newGroupName.trim(), limit: newGroupLimit }]
-    setNewGroupName("")
-    setNewGroupLimit(0)
-    saveGroups(updated)
-  }
-
-  function removeGroup(name: string) {
-    if (name === "global") return
-    saveGroups(groups.filter(g => g.name !== name))
-  }
-
-  // Debounce group limit updates to avoid firing a PATCH on every keystroke.
-  // Each group gets its own timer so edits to different groups don't cancel
-  // each other — without this, editing group A then group B within 500ms would
-  // silently drop group A's change.
-  const groupLimitTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
-
-  function updateGroupLimit(name: string, limit: number) {
-    setGroupLimits(prev => ({ ...prev, [name]: limit }))
-    const timers = groupLimitTimersRef.current
-    if (timers[name]) {
-      clearTimeout(timers[name])
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      setWorkspaces(await fetchWorkspaces())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load workspaces")
+    } finally {
+      setLoading(false)
     }
-    timers[name] = setTimeout(() => {
-      delete timers[name]
-      const latest = groupsRef.current
-      const updated = latest.map(g => g.name === name ? { ...g, limit } : g)
-      saveGroups(updated)
-    }, 500)
-  }
+  }, [])
 
-  function updateFactoryGroup(factoryIdx: number, groupName: string) {
-    const updated = factories.map((x, j) => j === factoryIdx ? { ...x, concurrencyGroup: groupName } : x)
-    setSavedFactory(factories[factoryIdx].name)
-    setTimeout(() => setSavedFactory(null), 1500)
-    onSaveSilent({ factories: updated })
-  }
+  useEffect(() => { load() }, [load])
+
+  const visibleWorkspaces = workspaces.filter((workspace) => workspace.name === selectedWorkspace)
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Factories</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Automatically spawn and terminate claws based on issue tracker events.
-        </p>
-      </div>
-
-      {/* Concurrency Groups */}
-      <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-4">
-        <div>
-          <p className="font-medium text-sm">Concurrency Groups</p>
-          <p className="text-muted-foreground text-xs mt-0.5">
-            Limit how many claws can run simultaneously per group. 0 = unlimited.
-          </p>
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
         </div>
+      )}
 
-        {/* Groups table */}
-        <div className="space-y-2">
-          {groups.map(g => (
-            <div key={g.name} className="flex items-center gap-3">
-              <span className="text-sm font-mono w-24 shrink-0">{g.name}</span>
-              <Input
-                type="number"
-                min={0}
-                value={groupLimits[g.name] ?? g.limit}
-                onChange={(e) => updateGroupLimit(g.name, parseInt(e.target.value) || 0)}
-                className="w-24 text-sm h-7"
-                placeholder="0 = unlimited"
-              />
-              <span className="text-xs text-muted-foreground">limit</span>
-              {g.name !== "global" && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-destructive hover:text-destructive h-7 px-2"
-                  onClick={() => removeGroup(g.name)}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Add group */}
-        <div className="flex items-center gap-2 pt-2 border-t border-border">
-          <Input
-            placeholder="Group name"
-            value={newGroupName}
-            onChange={(e) => setNewGroupName(e.target.value)}
-            className="w-32 text-sm h-7"
-            onKeyDown={(e) => { if (e.key === "Enter") addGroup() }}
-          />
-          <Input
-            type="number"
-            min={0}
-            value={newGroupLimit}
-            onChange={(e) => setNewGroupLimit(parseInt(e.target.value) || 0)}
-            className="w-24 text-sm h-7"
-            placeholder="Limit"
-          />
-          <Button size="sm" variant="outline" className="h-7" onClick={addGroup} disabled={!newGroupName.trim()}>
-            + Add Group
-          </Button>
-        </div>
-      </div>
-
-      {factories.length > 0 && (
-        <div className="space-y-2">
-          {factories.map((f, i) => (
-            <div key={i} className={cn("border rounded-lg p-4 flex items-center justify-between", (f.enabled ?? true) ? "border-border" : "border-border/50 opacity-60")}>
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium">{f.name}</p>
-                  {!(f.enabled ?? true) && <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">paused</span>}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {f.integration} · {f.workspace} · &ldquo;{f.triggerStatus}&rdquo; → {f.template}
-                  {f.labels && f.labels.length > 0 && ` · labels: ${f.labels.join(", ")}`}
-                  {f.assigned_to && ` · assigned: ${f.assigned_to}`}
-                  {" · webhook: "}{f.webhookSecretSet ? <span className="text-green-500">✓</span> : <span className="text-amber-500">not set</span>}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {savedFactory === f.name && (
-                  <span className="text-xs text-green-500">✓</span>
-                )}
-                {/* Concurrency group dropdown */}
-                <select
-                  value={f.concurrencyGroup || "global"}
-                  onChange={(e) => updateFactoryGroup(i, e.target.value)}
-                  className="text-xs rounded-md border border-border bg-background px-2 py-1 h-7"
-                >
-                  {allGroupNames.map(name => (
-                    <option key={name} value={name}>{name}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={async () => {
-                    const enabled = !(f.enabled ?? true)
-                    const updated = factories.map((x, j) => j === i ? { ...x, enabled } : x)
-                    setSavedFactory(f.name)
-                    setTimeout(() => setSavedFactory(null), 1500)
-                    onSaveSilent({ factories: updated })
-                  }}
-                  className={cn(
-                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
-                    (f.enabled ?? true)
-                      ? "bg-green-600 border-2 border-transparent"
-                      : "bg-transparent border-2 border-muted-foreground/40"
-                  )}
-                  title={(f.enabled ?? true) ? "Pause factory" : "Enable factory"}
-                >
-                  <span className={cn(
-                    "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
-                    (f.enabled ?? true)
-                      ? "bg-white translate-x-4"
-                      : "bg-muted-foreground/50 translate-x-0"
-                  )} />
-                </button>
-                <Button size="sm" variant="outline" onClick={() => window.open(`/factories?name=${encodeURIComponent(f.name)}`, '_self')}>Activity</Button>
+      {loading && visibleWorkspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspace…</p>
+      ) : workspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces pushed yet.</p>
+      ) : visibleWorkspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspace named {selectedWorkspace} is configured.</p>
+      ) : (
+        <div className="space-y-4">
+          {visibleWorkspaces.map((workspace) => (
+            <div key={workspace.name} className="space-y-4">
+              <h2 className="text-base font-semibold">{workspace.name}</h2>
+              <div className="overflow-hidden rounded-md border border-border bg-muted/40">
+                <YamlHighlight code={workspace.config || "No elasticclaw-config.yaml content available."} />
               </div>
             </div>
           ))}
@@ -2272,9 +2469,248 @@ function FactoriesSection({ hubUrl, settings, onSave, onSaveSilent, saving }: { 
   )
 }
 
+function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
 
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      setWorkspaces(await fetchWorkspaces())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load workflows")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
-function SecretsSection({ settings }: { settings: SettingsData | null }) {
+  useEffect(() => { load() }, [load])
+
+  const workflows = workspaces.flatMap((workspace) =>
+    (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
+  ).filter((workflow) => workflow.workspaceName === selectedWorkspace)
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Workflows</h2>
+        <p className="text-sm text-muted-foreground">
+          Workflows define triggers and runtime behavior within this workspace.
+        </p>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading && workflows.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workflows…</p>
+      ) : workflows.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workflows configured.</p>
+      ) : (
+        <div className="border border-border rounded-lg divide-y divide-border">
+          {workflows.map((workflow) => (
+            <WorkflowSummaryRow key={`${workflow.workspaceName}/${workflow.name}`} workflow={workflow} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
+  return (
+    <div className="px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium truncate">{workflow.name}</p>
+          <p className="text-xs text-muted-foreground truncate">
+            {workflow.workspaceName} · {workflow.integration || "manual"}
+            {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {workflow.enableManualTrigger && (
+            <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
+          )}
+          <span className={cn(
+            "text-xs px-2 py-0.5 rounded",
+            workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
+          )}>
+            {workflow.enabled ? "enabled" : "paused"}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface AnalyticsSummary {
+  factoryName: string
+  totalTriggers: number
+  successfulCreations: number
+  failedCreations: number
+  terminations: number
+  prOpened: number
+  prMerged: number
+  prClosed: number
+  doneSignals: number
+  errors: number
+  successRate: number
+  prMergeRate: number
+}
+
+function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string }) {
+  const [summaries, setSummaries] = useState<AnalyticsSummary[]>([])
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const [analyticsRes, workspaceData] = await Promise.all([
+        fetch(`${hubUrl}/api/analytics/factories`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetchWorkspaces(),
+      ])
+      if (!analyticsRes.ok) throw new Error(await analyticsRes.text())
+      setSummaries(await analyticsRes.json())
+      setWorkspaces(workspaceData)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load analytics")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const scopedToWorkspace = selectedWorkspace !== undefined
+  const workflowNames = new Set(
+    scopedToWorkspace && selectedWorkspace
+      ? workspaces.find((workspace) => workspace.name === selectedWorkspace)?.workflows.map((workflow) => workflow.name) || []
+      : []
+  )
+  const visibleSummaries = scopedToWorkspace
+    ? summaries.filter((summary) => workflowNames.has(summary.factoryName))
+    : summaries
+  const totalTriggers = visibleSummaries.reduce((sum, item) => sum + item.totalTriggers, 0)
+  const successfulCreations = visibleSummaries.reduce((sum, item) => sum + item.successfulCreations, 0)
+  const failedCreations = visibleSummaries.reduce((sum, item) => sum + item.failedCreations, 0)
+  const prMerged = visibleSummaries.reduce((sum, item) => sum + item.prMerged, 0)
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Analytics</h2>
+        <p className="text-sm text-muted-foreground">
+          {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
+        </p>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading analytics…</p>
+      ) : visibleSummaries.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No analytics yet.</p>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-4">
+            <AnalyticsMetric label="Triggers" value={totalTriggers} />
+            <AnalyticsMetric label="Created" value={successfulCreations} />
+            <AnalyticsMetric label="Failed" value={failedCreations} />
+            <AnalyticsMetric label="PRs merged" value={prMerged} />
+          </div>
+          <div className="border border-border rounded-lg divide-y divide-border">
+            {visibleSummaries.map((summary) => (
+              <div key={summary.factoryName} className="px-4 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{summary.factoryName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(0)}% create success · {summary.prMergeRate.toFixed(0)}% PR merge
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right text-xs text-muted-foreground">
+                    {summary.errors} errors
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function AnalyticsMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-xl font-semibold mt-1">{value}</p>
+    </div>
+  )
+}
+
+function WorkspaceRepositoryList({ values }: { values: RepositoryAccess[] }) {
+  return (
+    <div className="space-y-1">
+      <h4 className="text-xs font-medium text-muted-foreground">Repositories</h4>
+      {values.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70">None</p>
+      ) : (
+        <div className="space-y-1">
+          {values.slice(0, 4).map((value) => (
+            <div key={value.repo} className="flex items-center justify-between gap-2 text-xs bg-muted px-2 py-1 rounded">
+              <code className="truncate">{value.repo}</code>
+              <span className="shrink-0 text-muted-foreground">{value.permissions || "read"}</span>
+            </div>
+          ))}
+          {values.length > 4 && (
+            <p className="text-xs text-muted-foreground">+{values.length - 4} more</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkspaceAccessList({ title, values }: { title: string; values: string[] }) {
+  return (
+    <div className="space-y-1">
+      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+      {values.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70">None</p>
+      ) : (
+        <div className="space-y-1">
+          {values.slice(0, 4).map((value) => (
+            <code key={value} className="block text-xs bg-muted px-2 py-1 rounded truncate">
+              {value}
+            </code>
+          ))}
+          {values.length > 4 && (
+            <p className="text-xs text-muted-foreground">+{values.length - 4} more</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SecretsSection({ settings, workspace }: { settings: SettingsData | null; workspace: string }) {
   const [secrets, setSecrets] = useState<string[]>([])
   const [newName, setNewName] = useState("")
   const [newValue, setNewValue] = useState("")
@@ -2284,10 +2720,11 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
 
   const hubUrl = getHubUrl()
   const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const secretsPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${hubUrl}/api/secrets`, { headers: { Authorization: `Bearer ${token()}` } })
+      const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
         const data = await res.json()
         setSecrets(data.secrets || [])
@@ -2295,11 +2732,8 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
     } finally {
       setLoading(false)
     }
-  }, [hubUrl])
+  }, [hubUrl, secretsPath])
 
-  // Load secrets from API on mount — the authoritative source of truth.
-  // The /api/secrets endpoint reads from disk, so manually-edited hub.yaml
-  // entries are visible immediately without waiting for a server restart.
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -2309,7 +2743,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
     setSaving(true)
     setError(null)
     try {
-      const res = await fetch(`${hubUrl}/api/secrets`, {
+      const res = await fetch(`${hubUrl}${secretsPath}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
         body: JSON.stringify({ name: newName.trim(), value: newValue.trim() }),
@@ -2325,7 +2759,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
 
   const handleDelete = async (name: string) => {
     setError(null)
-    const res = await fetch(`${hubUrl}/api/secrets?name=${encodeURIComponent(name)}`, {
+    const res = await fetch(`${hubUrl}${secretsPath}?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token()}` },
     })
@@ -2338,7 +2772,7 @@ function SecretsSection({ settings }: { settings: SettingsData | null }) {
       <div>
         <h2 className="text-base font-semibold mb-1">Secrets</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Named secrets referenced by factories via <code className="bg-muted px-1 rounded text-xs">webhook_secret_ref</code>.
+          Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace || "default"}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.
         </p>
       </div>
 
@@ -3170,7 +3604,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       <div>
         <h2 className="text-base font-semibold mb-1">MCP Servers</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          Model Context Protocol servers add tools to your claws. Configure them here and reference them in templates.
+          Model Context Protocol servers add tools to your claws. Configure them here and reference them in workflows.
         </p>
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
@@ -3382,92 +3816,6 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
   )
 }
 
-function TemplatesSection() {
-  const [templates, setTemplates] = useState<{ name: string; updatedAt: string }[]>([])
-  const [loading, setLoading] = useState(true)
-  const [deleting, setDeleting] = useState<string | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/templates`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) setTemplates(await res.json())
-    } catch {}
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load() }, [load])
-
-  const handleDelete = async (name: string) => {
-    setDeleting(name)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/templates/${encodeURIComponent(name)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) throw new Error(await res.text())
-      await load()
-    } catch {}
-    setDeleting(null)
-    setConfirmDelete(null)
-  }
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Templates</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Templates pushed to the hub and available for claw creation.
-          Push new templates with <code className="bg-muted px-1 rounded text-xs">elasticclaw template push</code>.
-        </p>
-      </div>
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground animate-pulse">Loading…</p>
-      ) : templates.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No templates pushed yet. Use <code className="bg-muted px-1 rounded text-xs">elasticclaw template push &lt;name&gt;</code> to add one.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {templates.map((t) => (
-            <div key={t.name} className="border border-border rounded-lg p-4 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-mono font-medium">{t.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  Updated {new Date(t.updatedAt).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
-                </p>
-              </div>
-              {confirmDelete === t.name ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Delete {t.name}?</span>
-                  <Button size="sm" variant="destructive" disabled={deleting === t.name}
-                    onClick={() => handleDelete(t.name)}>
-                    {deleting === t.name ? "Deleting…" : "Delete"}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-                </div>
-              ) : (
-                <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive"
-                  onClick={() => setConfirmDelete(t.name)}>
-                  <Trash2 className="size-3.5" />
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // linkifyText converts URLs in text into clickable <a> elements.
 function linkifyText(text: string): React.ReactNode {
   const urlRegex = /(https?:\/\/[^\s]+)/g
@@ -3637,7 +3985,7 @@ function TroubleshootSection() {
               <label className="text-sm font-medium mb-2 block">What&apos;s happening?</label>
               <textarea
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[100px] resize-none"
-                placeholder="e.g. Factory webhook is firing but the machine isn't being bootstrapped..."
+                placeholder="e.g. Workflow webhook is firing but the machine isn't being bootstrapped..."
                 value={problem}
                 onChange={e => setProblem(e.target.value)}
                 disabled={loading}
@@ -3804,10 +4152,6 @@ function DoctorSection() {
               {showPassed ? "Hide passed" : `Show passed (${passedChecks.length})`}
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={() => load(true)} disabled={loading}>
-            <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
-            {loading ? "Checking…" : "Refresh"}
-          </Button>
         </div>
       </div>
 
@@ -3919,249 +4263,6 @@ function DoctorSection() {
               ))}
             </div>
           )}
-        </>
-      )}
-    </div>
-  )
-}
-
-// ─── Analytics Section ───────────────────────────────────────────────────────
-
-interface AnalyticsSummary {
-  factoryName: string
-  totalTriggers: number
-  successfulCreations: number
-  failedCreations: number
-  terminations: number
-  prOpened: number
-  prMerged: number
-  prClosed: number
-  doneSignals: number
-  errors: number
-  successRate: number
-  prMergeRate: number
-  byTriggerStatus: Record<string, number>
-  recentEvents: Array<{
-    id: string
-    factoryName: string
-    issueId: string
-    clawId: string
-    action: string
-    detail: string
-    result: string
-    createdAt: string
-  }>
-  computeError?: string
-}
-
-function AnalyticsSection() {
-  const [summaries, setSummaries] = useState<AnalyticsSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
-  const [days, setDays] = useState(30)
-  const [selectedFactory, setSelectedFactory] = useState<string | null>(null)
-  const [partialData, setPartialData] = useState(false)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError("")
-    setPartialData(false)
-    try {
-      const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-      const res = await fetch(`${hubUrl}/api/analytics/factories?days=${days}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) throw new Error(await res.text())
-      setPartialData(res.headers.get("X-Analytics-Partial") === "true")
-      const data = await res.json()
-      setSummaries(data || [])
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load analytics")
-    } finally {
-      setLoading(false)
-    }
-  }, [days])
-
-  useEffect(() => { load() }, [load])
-
-  const totalTriggers = summaries.reduce((sum, s) => sum + s.totalTriggers, 0)
-  const totalSuccess = summaries.reduce((sum, s) => sum + s.successfulCreations, 0)
-  const totalFailed = summaries.reduce((sum, s) => sum + s.failedCreations, 0)
-  const totalPRsOpened = summaries.reduce((sum, s) => sum + s.prOpened, 0)
-  const totalPRsMerged = summaries.reduce((sum, s) => sum + s.prMerged, 0)
-  const overallSuccessRate = totalTriggers > 0 ? (totalSuccess / totalTriggers * 100).toFixed(1) : "0"
-  const overallMergeRate = totalPRsOpened > 0 ? (totalPRsMerged / totalPRsOpened * 100).toFixed(1) : "0"
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Factory Analytics</h2>
-        <p className="text-sm text-muted-foreground mb-4">
-          Usage and success metrics for factories. Data is retained for up to 1 year.
-        </p>
-      </div>
-
-      <div className="flex items-center gap-4">
-        <label className="text-sm text-muted-foreground">Time range:</label>
-        <select
-          value={days}
-          onChange={e => setDays(Number(e.target.value))}
-          className="h-8 rounded-md border border-border bg-background px-2 text-sm"
-        >
-          <option value={7}>Last 7 days</option>
-          <option value={30}>Last 30 days</option>
-          <option value={90}>Last 90 days</option>
-        </select>
-        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-          <RotateCcw className="size-3 mr-1" /> Refresh
-        </Button>
-      </div>
-
-      {error && <p className="text-sm text-red-500">{error}</p>}
-
-      {partialData && (
-        <div className="flex items-center gap-2 text-sm text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
-          <AlertTriangle className="size-4 shrink-0" />
-          Some factory data could not be loaded. Metrics shown may be incomplete.
-        </div>
-      )}
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground">Loading analytics...</p>
-      ) : summaries.length === 0 ? (
-        <div className="border border-dashed border-border rounded-lg p-8 text-center">
-          <BarChart3 className="size-8 text-muted-foreground mx-auto mb-3" />
-          <p className="text-sm text-muted-foreground">No analytics data yet</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Factory activity will appear here once factories start creating claws.
-          </p>
-        </div>
-      ) : (
-        <>
-          {/* Overall stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">Total Triggers</p>
-              <p className="text-2xl font-semibold mt-1">{totalTriggers}</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">Success Rate</p>
-              <p className="text-2xl font-semibold mt-1">{overallSuccessRate}%</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">PRs Opened</p>
-              <p className="text-2xl font-semibold mt-1">{totalPRsOpened}</p>
-            </div>
-            <div className="border border-border rounded-lg p-4">
-              <p className="text-xs text-muted-foreground uppercase">PR Merge Rate</p>
-              <p className="text-2xl font-semibold mt-1">{overallMergeRate}%</p>
-            </div>
-          </div>
-
-          {/* Per-factory breakdown */}
-          <div className="space-y-4">
-            <h3 className="text-sm font-medium">Per Factory</h3>
-            {summaries.map(summary => (
-              <div key={summary.factoryName} className="border border-border rounded-lg overflow-hidden">
-                <button
-                  onClick={() => setSelectedFactory(selectedFactory === summary.factoryName ? null : summary.factoryName)}
-                  className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors text-left"
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium">{summary.factoryName}</p>
-                      {summary.computeError && (
-                        <span className="inline-flex items-center gap-1 text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">
-                          <AlertTriangle className="size-3" /> Error
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(1)}% success · {summary.prOpened} PRs · {summary.prMergeRate.toFixed(1)}% merge rate
-                    </p>
-                    {summary.computeError && (
-                      <p className="text-xs text-red-400 mt-1">{summary.computeError}</p>
-                    )}
-                  </div>
-                  <ArrowRight className={cn("size-4 transition-transform", selectedFactory === summary.factoryName ? "rotate-90" : "")} />
-                </button>
-
-                {selectedFactory === summary.factoryName && (
-                  <div className="border-t border-border p-4 space-y-4">
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Created</p>
-                        <p className="text-lg font-semibold">{summary.successfulCreations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Failed</p>
-                        <p className="text-lg font-semibold text-red-500">{summary.failedCreations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">Terminated</p>
-                        <p className="text-lg font-semibold">{summary.terminations}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Opened</p>
-                        <p className="text-lg font-semibold">{summary.prOpened}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Merged</p>
-                        <p className="text-lg font-semibold text-green-500">{summary.prMerged}</p>
-                      </div>
-                      <div className="bg-muted rounded-lg p-3">
-                        <p className="text-xs text-muted-foreground">PRs Closed</p>
-                        <p className="text-lg font-semibold text-orange-500">{summary.prClosed}</p>
-                      </div>
-                    </div>
-
-                    {Object.keys(summary.byTriggerStatus).length > 0 && (
-                      <div>
-                        <p className="text-xs font-medium mb-2">By Trigger Status</p>
-                        <div className="flex flex-wrap gap-2">
-                          {Object.entries(summary.byTriggerStatus).map(([status, count]) => (
-                            <span key={status} className="text-xs bg-muted px-2 py-1 rounded">
-                              {status}: {count}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {summary.recentEvents.length > 0 && (
-                      <div>
-                        <p className="text-xs font-medium mb-2">Recent Events</p>
-                        <div className="space-y-1 max-h-48 overflow-y-auto">
-                          {summary.recentEvents.slice(0, 20).map(event => (
-                            <div key={event.id} className="flex items-center gap-2 text-xs p-2 rounded hover:bg-muted/50">
-                              <span className={cn(
-                                "px-1.5 py-0.5 rounded font-medium",
-                                event.action === "claw_created" && "bg-green-500/20 text-green-400",
-                                event.action === "error" && "bg-red-500/20 text-red-400",
-                                event.action === "claw_terminated" && "bg-orange-500/20 text-orange-400",
-                                event.action === "pr_opened" && "bg-blue-500/20 text-blue-400",
-                                event.action === "pr_merged" && "bg-purple-500/20 text-purple-400",
-                                event.action === "pr_closed" && "bg-red-500/20 text-red-400",
-                                event.action === "done_signal" && "bg-emerald-500/20 text-emerald-400",
-                              )}>
-                                {event.action}
-                              </span>
-                              <span className="text-muted-foreground">{event.issueId}</span>
-                              {event.detail && <span className="text-muted-foreground truncate">{event.detail}</span>}
-                              <span className="ml-auto text-muted-foreground/50">
-                                {new Date(event.createdAt).toLocaleDateString()}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
         </>
       )}
     </div>

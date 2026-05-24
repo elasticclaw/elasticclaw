@@ -121,6 +121,9 @@ func SaveGlobalConfig(cfg *types.GlobalConfig) error {
 
 // LoadProfile loads a profile by name
 func LoadProfile(name string) (*types.Profile, error) {
+	if !validProfileName.MatchString(name) {
+		return nil, fmt.Errorf("invalid profile name %q", name)
+	}
 	paths, err := GetPaths()
 	if err != nil {
 		return nil, err
@@ -147,6 +150,9 @@ func LoadProfile(name string) (*types.Profile, error) {
 
 // SaveProfile writes a profile
 func SaveProfile(profile *types.Profile) error {
+	if profile == nil || !validProfileName.MatchString(profile.Name) {
+		return fmt.Errorf("invalid profile name %q", profileName(profile))
+	}
 	paths, err := GetPaths()
 	if err != nil {
 		return err
@@ -208,6 +214,9 @@ func ListProfiles() ([]*types.Profile, error) {
 
 // DeleteProfile removes a profile
 func DeleteProfile(name string) error {
+	if !validProfileName.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q", name)
+	}
 	paths, err := GetPaths()
 	if err != nil {
 		return err
@@ -223,6 +232,13 @@ func DeleteProfile(name string) error {
 	}
 
 	return nil
+}
+
+func profileName(profile *types.Profile) string {
+	if profile == nil {
+		return ""
+	}
+	return profile.Name
 }
 
 // LoadManifest loads the elasticclaw.yaml from the current directory

@@ -13,28 +13,28 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
-import { triggerFactory, type Factory, type FactoryInput } from "@/lib/api"
+import { triggerWorkflow, type WorkflowInput, type Workflow } from "@/lib/api"
 
 interface ManualTriggerModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  factory?: Factory | null
+  workflow?: Workflow | null
 }
 
-export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTriggerModalProps) {
+export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTriggerModalProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
   const router = useRouter()
 
-  // Seed defaults when factory changes
+  // Seed defaults when workflow changes
   useEffect(() => {
-    if (!factory?.inputs) {
+    if (!workflow?.inputs) {
       setInputValues({})
       return
     }
     const defaults: Record<string, string> = {}
-    for (const input of factory.inputs) {
+    for (const input of workflow.inputs) {
       if (input.default) {
         defaults[input.name] = input.default
       } else if (input.type === "bool") {
@@ -45,16 +45,16 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
     }
     setInputValues(defaults)
     setTriggerError(null)
-  }, [factory])
+  }, [workflow])
 
   const handleTrigger = useCallback(async () => {
-    if (!factory) return
+    if (!workflow) return
     setTriggering(true)
     setTriggerError(null)
     try {
       const inputs: Record<string, unknown> = {}
-      if (factory.inputs) {
-        for (const input of factory.inputs) {
+      if (workflow.inputs) {
+        for (const input of workflow.inputs) {
           const val = inputValues[input.name]
           // Validate required fields
           if (input.required && (val === undefined || val === "")) {
@@ -79,7 +79,7 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
           }
         }
       }
-      await triggerFactory(factory.name, inputs)
+      await triggerWorkflow(workflow, inputs)
       setTriggering(false)
       onOpenChange(false)
     } catch (e) {
@@ -87,9 +87,9 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))
     }
-  }, [factory, inputValues, onOpenChange])
+  }, [workflow, inputValues, onOpenChange])
 
-  if (!factory) return null
+  if (!workflow) return null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -97,19 +97,19 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Zap className="size-4 text-amber-500" />
-            Trigger {factory.name}
+            Trigger {workflow.name}
           </DialogTitle>
           <DialogDescription>
-            {factory.inputs && factory.inputs.length > 0
-              ? "Fill in the inputs below to trigger this factory."
-              : "Click confirm to trigger this factory."}
+            {workflow.inputs && workflow.inputs.length > 0
+              ? "Fill in the inputs below to trigger this workflow."
+              : "Click confirm to trigger this workflow."}
           </DialogDescription>
         </DialogHeader>
 
-        {factory.inputs && factory.inputs.length > 0 && (
+        {workflow.inputs && workflow.inputs.length > 0 && (
           <div className="space-y-4 py-2">
-            {factory.inputs.map((input) => (
-              <FactoryInputField
+            {workflow.inputs.map((input) => (
+              <WorkflowInputField
                 key={input.name}
                 input={input}
                 value={inputValues[input.name] || ""}
@@ -149,12 +149,12 @@ export function ManualTriggerModal({ open, onOpenChange, factory }: ManualTrigge
   )
 }
 
-function FactoryInputField({
+function WorkflowInputField({
   input,
   value,
   onChange,
 }: {
-  input: FactoryInput
+  input: WorkflowInput
   value: string
   onChange: (val: string) => void
 }) {

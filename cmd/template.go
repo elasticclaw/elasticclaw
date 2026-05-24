@@ -53,7 +53,10 @@ var (
 )
 
 func init() {
+	templateCmd.Hidden = true
+	templateCmd.Deprecated = "templates are deprecated; use workspaces instead"
 	rootCmd.AddCommand(templateCmd)
+
 	templateCmd.AddCommand(templateCreateCmd)
 	templateCmd.AddCommand(templateListCmd)
 

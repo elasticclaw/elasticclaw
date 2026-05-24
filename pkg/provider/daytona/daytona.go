@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ type Provider struct {
 	client *daytona.Client
 	apiKey string
 }
+
+var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // New creates a new Daytona provider
 func New(config map[string]interface{}) (*Provider, error) {
@@ -317,6 +320,9 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 	if len(env) > 0 {
 		var envLines []string
 		for k, v := range env {
+			if !shellEnvNameRE.MatchString(k) {
+				return fmt.Errorf("invalid environment variable name %q", k)
+			}
 			// Escape for shell
 			escapedV := strings.ReplaceAll(v, "'", "'\"'\"'")
 			envLines = append(envLines, fmt.Sprintf("export %s='%s'", k, escapedV))
@@ -365,6 +371,6 @@ func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir
 }
 
 func buildStartOpenClawCommand(workdir string) string {
-	script := fmt.Sprintf("cd %s && source ~/.openclaw/env 2>/dev/null; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &", shellQuote(workdir))
+	script := fmt.Sprintf("cd %s && { source ~/.openclaw/env 2>/dev/null || true; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null & }", shellQuote(workdir))
 	return fmt.Sprintf("bash -c %s", shellQuote(script))
 }

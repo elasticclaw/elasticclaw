@@ -66,7 +66,7 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Validate signature if any Linear integration has a webhook_secret
 	sig := r.Header.Get("Linear-Signature")
-	if !s.validateLinearSignature(body, sig) {
+	if !s.validateLinearSignature(r.PathValue("workspace"), body, sig) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -130,15 +130,29 @@ func (s *Server) isDuplicateWebhook(key string) bool {
 	return false
 }
 
-func (s *Server) validateLinearSignature(body []byte, sig string) bool {
+func (s *Server) validateLinearSignature(workspaceName string, body []byte, sig string) bool {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 
 	factories := s.resolveFactories()
+	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("linear")
 
 	hasAnySecret := false
+
+	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "linear") {
+		hasAnySecret = true
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
+		}
+	}
+	if workspaceName != "" {
+		return !hasAnySecret
+	}
 
 	// Check integration-level secrets
 	if integrations != nil {
@@ -178,6 +192,25 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 		}
 	}
 
+	for _, workspace := range workflowWorkspaces {
+		for _, secretRef := range workspace.WebhookSecrets {
+			if secretRef == "" || secrets == nil {
+				continue
+			}
+			secret := secrets[secretRef]
+			if secret == "" {
+				continue
+			}
+			hasAnySecret = true
+			mac := hmac.New(sha256.New, []byte(secret))
+			mac.Write(body)
+			expected := hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				return true
+			}
+		}
+	}
+
 	// If any secrets are configured but none matched, reject
 	if hasAnySecret {
 		return false
@@ -186,6 +219,9 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 }
 
 func (s *Server) processLinearEvent(payload linearWebhookPayload) {
+	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("linear")
+	_ = s.processLinearWorkflowEvent(workflowWorkspaces, payload)
+
 	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		return
@@ -309,6 +345,116 @@ func (s *Server) processLinearEvent(payload linearWebhookPayload) {
 			}
 		}
 	}
+}
+
+func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig, payload linearWebhookPayload) bool {
+	if len(workspaces) == 0 {
+		return false
+	}
+
+	currentStatus := payload.Data.State.Name
+	previousStatus := ""
+	if payload.UpdatedFrom != nil && payload.UpdatedFrom.State != nil {
+		previousStatus = payload.UpdatedFrom.State.Name
+	}
+	teamKey := payload.Data.Team.Key
+	issueID := payload.Data.Identifier
+	issueLabels := map[string]bool{}
+	for _, label := range payload.Data.Labels {
+		issueLabels[strings.ToLower(label.Name)] = true
+	}
+	assignee := ""
+	if payload.Data.Assignee != nil {
+		assignee = payload.Data.Assignee.Name
+	}
+
+	matched := false
+	for _, workspace := range workspaces {
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "linear" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			if workflow.Team != "" && !strings.EqualFold(workflow.Team, teamKey) {
+				continue
+			}
+			if len(workflow.Labels) > 0 {
+				allMatch := true
+				for _, required := range workflow.Labels {
+					if !issueLabels[strings.ToLower(required)] {
+						allMatch = false
+						break
+					}
+				}
+				if !allMatch {
+					continue
+				}
+			}
+			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+				continue
+			}
+			if workflow.TriggerStatus == "" {
+				continue
+			}
+			if strings.EqualFold(currentStatus, workflow.TriggerStatus) && !strings.EqualFold(previousStatus, workflow.TriggerStatus) {
+				matched = true
+				log.Printf("[workflow:%s/%s] Linear issue %s entered %q — creating claw", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus)
+				if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "linear webhook"); err != nil {
+					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+				}
+			}
+			if workflow.TerminateOnLeave && !strings.EqualFold(currentStatus, workflow.TriggerStatus) {
+				var activeClaw string
+				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&activeClaw)
+				if activeClaw != "" {
+					matched = true
+					log.Printf("[workflow:%s/%s] Linear issue %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus, activeClaw[:8])
+					s.terminateClawForIssue(issueID)
+				}
+			}
+		}
+	}
+	return matched
+}
+
+func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
+	issueID := payload.Data.Identifier
+	var existing string
+	_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
+	if existing != "" {
+		log.Printf("[workflow:%s/%s] Linear issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
+		return nil
+	}
+
+	templateFiles := cloneStringMap(workspace.Files)
+	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
+
+	clawName := issueID
+	if workflow.NamePattern != "" {
+		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", issueID)
+		clawName = strings.ReplaceAll(clawName, "{team}", payload.Data.Team.Key)
+	}
+
+	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		workspaceFiles: templateFiles,
+		clawName:       clawName,
+		linearIssueID:  issueID,
+		reason:         reason,
+	})
+	if err != nil {
+		return err
+	}
+	if !isPending && workflow.WorkingStatus != "" {
+		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
+			if err := s.moveLinearIssueOnServer(token, issueID, workflow.WorkingStatus); err != nil {
+				log.Printf("[workflow:%s/%s] failed to move issue %s to working status %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
+			}
+		}
+	}
+	log.Printf("[workflow:%s/%s] created claw %s for Linear issue %s", workspace.Name, workflow.Name, clawID[:8], issueID)
+	return nil
 }
 
 func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload, reason string) error {
@@ -474,6 +620,13 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 		if factory.Workspace == "" || strings.EqualFold(li.Workspace, factory.Workspace) {
 			return li.Token
 		}
+	}
+	return ""
+}
+
+func (s *Server) resolveLinearTokenForWorkflow(workspaceName string, workflow *types.WorkflowConfig) string {
+	if tracker, ok := findWorkspaceIssueTracker(workspaceName, "linear", workflow.Workspace); ok {
+		return tracker.Token
 	}
 	return ""
 }
@@ -921,21 +1074,31 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
 	}
 
-	// Find the factory config for this issue
+	pipelineHandledDone := false
+	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
+		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
+			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+				pipelineHandledDone = true
+			}
+		}
+	}
+
+	// Legacy factory status handling remains for factory-created claws.
 	factory := s.findFactoryForIssue(issueID)
 	if factory == nil {
 		return
 	}
-
-	// Track analytics for done signal
-	s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
-
-	// Check if the pipeline handles the [DONE] signal
-	pipelineHandledDone := false
-	if pl := parsePipelineForFactory(factory); pl != nil {
-		if stage := pl.StageForMessageContains(rawMessage); stage != nil {
-			s.transitionPipelineStage(clawID, *stage, factory, issueID)
-			pipelineHandledDone = true
+	if !pipelineHandledDone {
+		s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
+	}
+	if !pipelineHandledDone {
+		if pl := parsePipelineForFactory(factory); pl != nil {
+			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+				s.transitionPipelineStage(clawID, *stage, factory, issueID)
+				pipelineHandledDone = true
+			}
 		}
 	}
 
@@ -1188,15 +1351,8 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
-			for _, tag := range tags {
-				if strings.HasPrefix(tag, "factory:") {
-					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range factories {
-						if factory.Name == factoryName {
-							return factory
-						}
-					}
-				}
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
 			}
 		}
 	}
@@ -1204,15 +1360,8 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
-			for _, tag := range tags {
-				if strings.HasPrefix(tag, "factory:") {
-					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range factories {
-						if factory.Name == factoryName {
-							return factory
-						}
-					}
-				}
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
 			}
 		}
 	}
@@ -1239,6 +1388,21 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 		}
 		if factory.Team == "" || strings.EqualFold(factory.Team, teamKey) {
 			return factory
+		}
+	}
+	return nil
+}
+
+func (s *Server) factoryFromTags(tags []string, factories []*types.FactoryConfig) *types.FactoryConfig {
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "factory:") {
+			continue
+		}
+		factoryName := strings.TrimPrefix(tag, "factory:")
+		for _, factory := range factories {
+			if factory.Name == factoryName {
+				return factory
+			}
 		}
 	}
 	return nil

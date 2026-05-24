@@ -66,6 +66,7 @@ export function computeUptime(apiClaw: ApiClaw): number {
   if (apiClaw.status !== "connected" && apiClaw.status !== "idle") return 0
   try {
     const created = new Date(apiClaw.created_at).getTime()
+    if (!Number.isFinite(created)) return 0
     const now = Date.now()
     return Math.max(0, Math.floor((now - created) / 1000))
   } catch {

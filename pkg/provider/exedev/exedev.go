@@ -39,12 +39,12 @@ func New(cfg Config) (*Provider, error) {
 
 // exeVM represents a single VM returned by `ssh exe.dev ls --json`.
 type exeVM struct {
-	VMName         string `json:"vm_name"`
-	SSHDest        string `json:"ssh_dest"`
-	Status         string `json:"status"`
-	Region         string `json:"region"`
-	RegionDisplay  string `json:"region_display"`
-	HTTPSURL       string `json:"https_url,omitempty"`
+	VMName        string `json:"vm_name"`
+	SSHDest       string `json:"ssh_dest"`
+	Status        string `json:"status"`
+	Region        string `json:"region"`
+	RegionDisplay string `json:"region_display"`
+	HTTPSURL      string `json:"https_url,omitempty"`
 }
 
 // exeVMList is the top-level JSON response from `ssh exe.dev ls --json`.
@@ -147,9 +147,9 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		Status:    types.StatusRunning,
 		CreatedAt: time.Now().UTC(),
 		ProviderMeta: map[string]string{
-			"vm_name":   resp.VMName,
-			"ssh_dest":  resp.SSHDest,
-			"hostname":  resp.SSHDest,
+			"vm_name":  resp.VMName,
+			"ssh_dest": resp.SSHDest,
+			"hostname": resp.SSHDest,
 		},
 	}, nil
 }
@@ -185,9 +185,9 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 	args := p.sshVMArgs(host)
 	args = append(args, cmdArgs...)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
-	var outBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &outBuf
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	err := cmd.Run()
 	exitCode := 0
@@ -201,10 +201,11 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 
 	result := &types.ExecResult{
 		ExitCode: exitCode,
-		Stdout:   outBuf.String(),
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
 	}
 	if exitCode != 0 {
-		return result, fmt.Errorf("exedev exec: remote command exited with code %d: %s", exitCode, outBuf.String())
+		return result, fmt.Errorf("exedev exec: remote command exited with code %d: %s", exitCode, stderrBuf.String())
 	}
 	return result, nil
 }
@@ -242,8 +243,6 @@ func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState boo
 	}
 	return nil
 }
-
-
 
 // List returns all VMs managed by this account.
 func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
@@ -348,14 +347,14 @@ func (p *Provider) WriteFile(ctx context.Context, instanceID string, path string
 	args := p.sshVMArgs(host)
 
 	// Ensure parent directory exists
-	mkdirArgs := append(args, "mkdir", "-p", filepath.Dir(path))
+	mkdirArgs := append(args, shellQuote([]string{"mkdir", "-p", "--", filepath.Dir(path)}))
 	mkdirCmd := exec.CommandContext(ctx, "ssh", mkdirArgs...)
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("exedev writefile mkdir %s: %w (out: %s)", path, err, string(out))
 	}
 
 	// Pipe raw content via stdin to cat on the remote — no escaping needed
-	catArgs := append(args, "cat", ">", path)
+	catArgs := append(args, "cat > "+shellQuote([]string{path}))
 	cmd := exec.CommandContext(ctx, "ssh", catArgs...)
 	cmd.Stdin = bytes.NewReader(content)
 	out, err := cmd.CombinedOutput()

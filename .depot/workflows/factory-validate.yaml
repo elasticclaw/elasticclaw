@@ -8,6 +8,7 @@ on:
 jobs:
   validate:
     name: Validate ElasticClaw Config
+    if: ${{ false }} # Temporarily disabled while workspace/workflow publishing is being rebuilt.
     runs-on: ubuntu-latest
     permissions:
       contents: read

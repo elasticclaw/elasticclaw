@@ -185,6 +185,7 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 // NewTestServerWithGitHubIssues creates a TestServer that includes GitHub Issues integration.
 func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 	t.Helper()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	gh := NewMockGitHub(t)
 	ghi := NewMockGitHubIssues(t)
 	ghi.WebhookSecret = "test-webhook-secret"
@@ -192,40 +193,43 @@ func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 
 	cfg := &types.HubConfig{
 		ClawToken: "test-claw-token",
-		Factories: []*types.FactoryConfig{
-			{
-				Name:          "test-factory",
-				Integration:   "github-issues",
-				Workspace:     "test-workspace",
-				TriggerStatus: "open",
-				DoneStatus:    "closed",
-				Template:      "elasticclaw",
-				Provider:      "noop",
-				TriggerRepos:  []string{"testorg/testrepo"},
-				WebhookSecret: "test-webhook-secret",
-				PipelineYAML: `stages:
-  - id: working
-    label: "Working"
-    entry: true
-    on_enter:
-      inject: |
-        Read your CONTEXT.md and start working on the issue.
-`,
-			},
-		},
-		Integrations: &types.IntegrationsConfig{
-			GitHubIssues: []*types.GitHubIssuesIntegrationConfig{
-				{
-					Workspace:     "test-workspace",
-					Token:         "test-github-issues-token",
-					WebhookSecret: "test-webhook-secret",
-				},
-			},
-		},
 		Providers: map[string]types.ProviderConfig{
 			"noop": {Type: "noop"},
 		},
 	}
+	hub.SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "test-workspace",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: test-workspace\nprovider: noop\n",
+				"CONTEXT.md":              "Test context\n",
+			},
+		},
+		[]*types.WorkflowConfig{
+			{
+				SchemaVersion: "v1",
+				Name:          "test-workflow",
+				Trigger: &types.WorkflowTrigger{
+					Type:         "github_issues",
+					Event:        "issue_edited",
+					Repositories: []string{"testorg/testrepo"},
+					States:       []string{"open"},
+				},
+				Jobs: []types.WorkflowJob{
+					{
+						ID:    "working",
+						Label: "Working",
+						Entry: true,
+						OnEnter: map[string]interface{}{
+							"inject": "Read your CONTEXT.md and start working on the issue.\n",
+						},
+					},
+				},
+			},
+		},
+	)
+	hub.SaveWorkspaceIssueTrackerForTest(t, "test-workspace", "github-issues", "default", "test-github-issues-token", "test-webhook-secret")
 
 	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
 	s.StartPRWatcherForTest()

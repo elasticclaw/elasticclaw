@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -67,6 +68,9 @@ func runHubServiceInstall(cmd *cobra.Command, args []string) error {
 	binaryPath, err = filepath.EvalSymlinks(binaryPath)
 	if err != nil {
 		return fmt.Errorf("could not resolve binary path: %w", err)
+	}
+	if strings.ContainsAny(binaryPath, " \t\n") {
+		return fmt.Errorf("binary path %q contains whitespace; install elasticclaw to a path without spaces before installing the systemd service", binaryPath)
 	}
 
 	// Create standard dirs

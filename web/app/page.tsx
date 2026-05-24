@@ -3,25 +3,23 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
-import { SpawnModal } from "@/components/spawn-modal"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
-import { isConfigured, type Factory } from "@/lib/api"
+import { isConfigured, type Workflow } from "@/lib/api"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
     return localStorage.getItem('elasticclaw_selected_claw') ?? null
   })
-  const [spawnModalOpen, setSpawnModalOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
-  const [isAdmin, setIsAdmin] = useState(true) // default true so UI doesn't flicker
-  const [selectedFactory, setSelectedFactory] = useState<Factory | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
   // Check configured on mount (needs browser for localStorage)
   useEffect(() => {
@@ -31,13 +29,17 @@ export default function Home() {
   // Fetch admin status
   useEffect(() => {
     const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-    if (!token) return
+    if (!token) {
+      setIsAdmin(false)
+      return
+    }
     import("@/lib/hub-url").then(({ getHubUrl }) => {
       const hubUrl = getHubUrl()
-      fetch(`${hubUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
+      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.ok ? r.json() : null)
-        .then(data => { if (data) setIsAdmin(data.is_admin ?? true) })
-        .catch(() => {})
+        .then(data => { setIsAdmin(data?.is_admin === true) })
+        .catch(() => { setIsAdmin(false) })
     })
   }, [])
 
@@ -122,7 +124,7 @@ export default function Home() {
       result = result.filter(
         (c) =>
           c.name.toLowerCase().includes(query) ||
-          c.template.toLowerCase().includes(query)
+          c.tags.some((tag) => tag.toLowerCase().includes(query))
       )
     }
 
@@ -211,14 +213,6 @@ export default function Home() {
     [hub]
   )
 
-  const handleSpawn = useCallback(
-    (template: string, name?: string) => {
-      hub.createClaw({ name: name || `claw-${Date.now()}`, template })
-      setSpawnModalOpen(false)
-    },
-    [hub]
-  )
-
   const handleKill = useCallback(() => {
     if (!selectedClawId) return
     hub.killClaw(selectedClawId)
@@ -274,7 +268,6 @@ export default function Home() {
         selectedClawId={selectedClawId}
         onSelectClaw={handleSelectClaw}
         onTogglePin={handleTogglePin}
-        onSpawn={() => setSpawnModalOpen(true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         allTags={allTags}
@@ -286,7 +279,7 @@ export default function Home() {
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
-        onSelectFactory={setSelectedFactory}
+        onSelectWorkflow={setSelectedWorkflow}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <ConversationView
@@ -307,15 +300,10 @@ export default function Home() {
           hubError={hubError}
         />
       </div>
-      <SpawnModal
-        open={spawnModalOpen}
-        onOpenChange={setSpawnModalOpen}
-        onSpawn={handleSpawn}
-      />
       <ManualTriggerModal
-        open={!!selectedFactory}
-        onOpenChange={(open) => { if (!open) setSelectedFactory(null) }}
-        factory={selectedFactory}
+        open={!!selectedWorkflow}
+        onOpenChange={(open) => { if (!open) setSelectedWorkflow(null) }}
+        workflow={selectedWorkflow}
       />
     </div>
   )

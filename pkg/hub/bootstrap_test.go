@@ -97,11 +97,11 @@ func TestBootstrapScript_OCIBridgeSrc(t *testing.T) {
 func TestBootstrapScript_BridgeEnvVars(t *testing.T) {
 	p := baseParams()
 	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, `ELASTICCLAW_HUB_URL="https://hub.example.com"`, "hub URL env var")
-	assertContains(t, script, `ELASTICCLAW_CLAW_ID="test-claw-id-1234"`, "claw ID env var")
-	assertContains(t, script, `ELASTICCLAW_CLAW_TOKEN="test-token"`, "claw token env var")
-	assertContains(t, script, `ELASTICCLAW_CLAW_NAME="test-claw"`, "claw name env var")
-	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="test-gw-password"`, "gateway password env var")
+	assertContains(t, script, `ELASTICCLAW_HUB_URL='https://hub.example.com'`, "hub URL env var")
+	assertContains(t, script, `ELASTICCLAW_CLAW_ID='test-claw-id-1234'`, "claw ID env var")
+	assertContains(t, script, `ELASTICCLAW_CLAW_TOKEN='test-token'`, "claw token env var")
+	assertContains(t, script, `ELASTICCLAW_CLAW_NAME='test-claw'`, "claw name env var")
+	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD='test-gw-password'`, "gateway password env var")
 }
 
 func TestBootstrapScript_BridgeEnvFileQuotesValues(t *testing.T) {
@@ -114,14 +114,14 @@ func TestBootstrapScript_NixDisabledByDefault(t *testing.T) {
 	p := baseParams()
 	p.Nix = false
 	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, `ELASTICCLAW_NIX="false"`, "Nix disabled flag passed to bridge")
+	assertContains(t, script, `ELASTICCLAW_NIX='false'`, "Nix disabled flag passed to bridge")
 }
 
 func TestBootstrapScript_NixEnabled(t *testing.T) {
 	p := baseParams()
 	p.Nix = true
 	script := GenerateReplicatedBootstrapScript(p)
-	assertContains(t, script, `ELASTICCLAW_NIX="true"`, "Nix enabled flag passed to bridge")
+	assertContains(t, script, `ELASTICCLAW_NIX='true'`, "Nix enabled flag passed to bridge")
 	// Nix install itself is now in claw-bridge Go code, not bash
 	assertNotContains(t, script, "install.determinate.systems", "Nix URL not in bash script")
 }
@@ -181,7 +181,7 @@ func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
 	p.GatewayPassword = "super-secret-pw"
 	script := GenerateReplicatedBootstrapScript(p)
 	// Must appear at top as literal value
-	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD="super-secret-pw"`, "gateway password set at top")
+	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD='super-secret-pw'`, "gateway password set at top")
 	assertContains(t, script, `export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"`, "openclaw gateway password env set")
 	// Must appear in persist block (as variable reference, not literal)
 	assertContains(t, script, `printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"`, "gateway password in persist block")

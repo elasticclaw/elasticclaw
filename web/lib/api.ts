@@ -66,7 +66,7 @@ if (typeof window !== "undefined") {
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
-  const url = hubBase ? `${hubBase}${path}` : `/hub${path}`
+  const url = hubBase ? `${hubBase}${path}` : path
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -76,15 +76,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     },
   })
   if (res.status === 401) {
-    // Token expired or invalid — clear it and redirect to login
-    clearConfig()
-    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.href = "/login"
-      // Return a never-resolving promise to prevent the error from propagating
-      // and triggering the "Cannot reach hub" error screen before navigation completes
-      return new Promise(() => {})
-    }
-    throw new Error("session expired")
+    return handleSessionExpired<T>()
   }
   if (!res.ok) {
     const body = await res.text()
@@ -99,6 +91,17 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (res.status === 204) return undefined as T
   return res.json()
+}
+
+function handleSessionExpired<T>(): Promise<T> {
+  clearConfig()
+  if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    window.location.href = "/login"
+    // Return a never-resolving promise to prevent the error from propagating
+    // and triggering the "Cannot reach hub" error screen before navigation completes
+    return new Promise(() => {})
+  }
+  return Promise.reject(new Error("session expired"))
 }
 
 export async function fetchClaws(): Promise<ApiClaw[]> {
@@ -134,7 +137,7 @@ export interface UploadedAttachment {
 export function getFileViewUrl(clawId: string, path: string): string {
   const token = getTokenSync()
   const hubBase = getHubUrl()
-  const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/hub/api/files/view/${clawId}`
+  const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/api/files/view/${clawId}`
   const qs = new URLSearchParams({ path, token }).toString()
   return `${base}?${qs}`
 }
@@ -142,7 +145,7 @@ export function getFileViewUrl(clawId: string, path: string): string {
 export async function uploadFiles(clawId: string, files: File[]): Promise<UploadedAttachment[]> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
-  const url = hubBase ? `${hubBase}/api/files/${clawId}` : `/hub/api/files/${clawId}`
+  const url = hubBase ? `${hubBase}/api/files/${clawId}` : `/api/files/${clawId}`
   const form = new FormData()
   for (const f of files) form.append("files", f, f.name)
   const res = await fetch(url, {
@@ -150,6 +153,9 @@ export async function uploadFiles(clawId: string, files: File[]): Promise<Upload
     headers: { Authorization: `Bearer ${token}` },
     body: form,
   })
+  if (res.status === 401) {
+    return handleSessionExpired<UploadedAttachment[]>()
+  }
   if (!res.ok) {
     throw new Error(`upload failed ${res.status}: ${await res.text()}`)
   }
@@ -226,8 +232,7 @@ export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
   return apiFetch<ClawPR[]>(`/api/claws/${clawId}/prs`)
 }
 
-// Factory types for manual trigger
-export interface FactoryInput {
+export interface WorkflowInput {
   name: string
   type: string
   required?: boolean
@@ -239,33 +244,63 @@ export interface FactoryInput {
   max?: number
 }
 
-// Factory matches FactoryPushView from GET /api/factories.
-// Field names match the JSON tags from the backend (snake_case / lowercase).
-export interface Factory {
+export interface RepositoryAccess {
+  repo: string
+  permissions?: string
+}
+
+export interface WorkspaceAccess {
+  repositories?: RepositoryAccess[]
+  env?: string[]
+  secrets?: string[]
+  webhookSecrets?: string[]
+}
+
+export interface Workflow {
   name: string
+  workspaceName: string
+  source: string
   integration: string
-  workspace: string
-  trigger_status: string
-  done_status?: string
-  template: string
+  integrationWorkspace?: string
+  triggerStatus?: string
+  doneStatus?: string
   labels?: string[]
-  assigned_to?: string
-  enabled?: boolean
-  has_webhook_secret: boolean
-  webhook_secret_ref?: string
-  pipeline_yaml?: string
-  enable_manual_trigger?: boolean
-  secret_refs?: Record<string, string>
-  inputs?: FactoryInput[]
+  assignedTo?: string
+  enabled: boolean
+  hasWebhookSecret: boolean
+  webhookSecretRef?: string
+  pipelineYAML?: string
+  enableManualTrigger?: boolean
+  secretRefs?: Record<string, string>
+  inputs?: WorkflowInput[]
 }
 
-export async function fetchFactories(): Promise<Factory[]> {
-  return apiFetch<Factory[]>("/api/factories")
+export interface Workspace {
+  name: string
+  source: string
+  config?: string
+  access: WorkspaceAccess
+  workflows: Workflow[]
 }
 
-export async function triggerFactory(name: string, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return apiFetch<{ claw_id: string; status: string }>(`/api/factories/${encodeURIComponent(name)}/trigger`, {
-    method: "POST",
-    body: JSON.stringify({ inputs: inputs || {} }),
-  })
+export async function fetchWorkspaces(): Promise<Workspace[]> {
+  return apiFetch<Workspace[]>("/api/workspaces")
+}
+
+export async function fetchWorkflows(workspaceName: string): Promise<Workflow[]> {
+  return apiFetch<Workflow[]>(`/api/workspaces/${encodeURIComponent(workspaceName)}/workflows`)
+}
+
+export async function fetchWorkflow(workspaceName: string, workflowName: string): Promise<Workflow> {
+  return apiFetch<Workflow>(`/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}`)
+}
+
+export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
+  return apiFetch<{ claw_id: string; status: string }>(
+    `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
+    {
+      method: "POST",
+      body: JSON.stringify({ inputs: inputs || {} }),
+    }
+  )
 }

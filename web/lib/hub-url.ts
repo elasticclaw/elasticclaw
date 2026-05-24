@@ -6,9 +6,10 @@ let _hubUrl: string | null = null
 export function getHubUrl(): string {
   if (_hubUrl) return _hubUrl
   if (typeof window === "undefined") return ""
-  // Injected at build time via NEXT_PUBLIC_HUB_URL, or falls back to same origin
+  // Injected at build time via NEXT_PUBLIC_HUB_URL; otherwise use same-origin
+  // paths so embedded/static UI deployments call the hub that served them.
   const fromEnv = process.env.NEXT_PUBLIC_HUB_URL
-  _hubUrl = fromEnv || window.location.origin.replace(/:\d+$/, ":8080") || ""
+  _hubUrl = fromEnv || ""
   return _hubUrl
 }
 

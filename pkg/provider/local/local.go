@@ -76,7 +76,7 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	// Write env file
 	if len(req.Env) > 0 {
 		envFile := filepath.Join(instanceDir, ".env")
-		f, err := os.Create(envFile)
+		f, err := os.OpenFile(envFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create env file: %w", err)
 		}
@@ -162,7 +162,7 @@ func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.Conne
 	return &types.ConnectInfo{
 		Shell: &types.ShellConnect{
 			Command: "bash",
-			Args:    []string{"-c", fmt.Sprintf("cd %s && exec bash", workspaceDir)},
+			Args:    []string{"-c", fmt.Sprintf("cd %s && exec bash", shellQuote(workspaceDir))},
 		},
 	}, nil
 }
@@ -227,8 +227,8 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 
 func parseEnvFile(content string) []string {
 	var env []string
-	for _, line := range filepath.SplitList(content) {
-		line = filepath.Clean(line)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
 		if line != "" && line[0] != '#' {
 			env = append(env, line)
 		}
@@ -257,4 +257,8 @@ func confinedPath(base, path, label string) (string, error) {
 	}
 
 	return fullPath, nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

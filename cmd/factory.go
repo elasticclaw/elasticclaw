@@ -33,6 +33,13 @@ func FactoryCmd() *cobra.Command {
 	return cmd
 }
 
+func init() {
+	cmd := FactoryCmd()
+	cmd.Hidden = true
+	cmd.Deprecated = "factories are deprecated; use workflows instead"
+	rootCmd.AddCommand(cmd)
+}
+
 // ── factory create ────────────────────────────────────────────────────────────
 
 func factoryCreateCmd() *cobra.Command {
@@ -446,34 +453,9 @@ func runFactoryTrigger(name string, inputs []string) error {
 		return err
 	}
 
-	// Parse inputs
-	inputMap := make(map[string]interface{})
-	for _, in := range inputs {
-		parts := strings.SplitN(in, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid input format %q (expected key=value)", in)
-		}
-		key := parts[0]
-		val := parts[1]
-
-		// Try bool
-		if strings.EqualFold(val, "true") {
-			inputMap[key] = true
-			continue
-		}
-		if strings.EqualFold(val, "false") {
-			inputMap[key] = false
-			continue
-		}
-
-		// Try number
-		if num, err := strconv.ParseFloat(val, 64); err == nil {
-			inputMap[key] = num
-			continue
-		}
-
-		// String
-		inputMap[key] = val
+	inputMap, err := parseTriggerInputs(inputs)
+	if err != nil {
+		return err
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{"inputs": inputMap})
@@ -505,6 +487,33 @@ func runFactoryTrigger(name string, inputs []string) error {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+func parseTriggerInputs(inputs []string) (map[string]interface{}, error) {
+	inputMap := make(map[string]interface{})
+	for _, in := range inputs {
+		parts := strings.SplitN(in, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid input format %q (expected key=value)", in)
+		}
+		key := parts[0]
+		val := parts[1]
+
+		if strings.EqualFold(val, "true") {
+			inputMap[key] = true
+			continue
+		}
+		if strings.EqualFold(val, "false") {
+			inputMap[key] = false
+			continue
+		}
+		if num, err := strconv.ParseFloat(val, 64); err == nil {
+			inputMap[key] = num
+			continue
+		}
+		inputMap[key] = val
+	}
+	return inputMap, nil
+}
+
 func resolveHubConn() (hubURL, clawToken string, err error) {
 	// Try env first
 	hubURL = os.Getenv("ELASTICCLAW_HUB_URL")
@@ -529,8 +538,4 @@ func resolveHubConn() (hubURL, clawToken string, err error) {
 		return "", "", fmt.Errorf("claw token not set — use ELASTICCLAW_CLAW_TOKEN or configure with `elasticclaw hub init`")
 	}
 	return hubURL, clawToken, nil
-}
-
-func init() {
-	rootCmd.AddCommand(FactoryCmd())
 }

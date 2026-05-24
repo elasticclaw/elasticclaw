@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -35,7 +36,10 @@ func NewStore() (*Store, error) {
 
 // Save persists an instance
 func (s *Store) Save(instance *types.Instance) error {
-	instanceDir := filepath.Join(s.basePath, instance.Name)
+	instanceDir, err := s.instanceDir(instance.Name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(instanceDir, 0755); err != nil {
 		return fmt.Errorf("failed to create instance directory: %w", err)
 	}
@@ -55,7 +59,11 @@ func (s *Store) Save(instance *types.Instance) error {
 
 // Get retrieves an instance by name
 func (s *Store) Get(name string) (*types.Instance, error) {
-	metaFile := filepath.Join(s.basePath, name, "metadata.json")
+	instanceDir, err := s.instanceDir(name)
+	if err != nil {
+		return nil, err
+	}
+	metaFile := filepath.Join(instanceDir, "metadata.json")
 
 	data, err := os.ReadFile(metaFile)
 	if err != nil {
@@ -101,7 +109,10 @@ func (s *Store) List() ([]*types.Instance, error) {
 
 // Delete removes an instance from state
 func (s *Store) Delete(name string) error {
-	instanceDir := filepath.Join(s.basePath, name)
+	instanceDir, err := s.instanceDir(name)
+	if err != nil {
+		return err
+	}
 
 	if _, err := os.Stat(instanceDir); os.IsNotExist(err) {
 		return fmt.Errorf("instance %q not found", name)
@@ -139,4 +150,30 @@ func CreateInstance(name, provider, template, templateVersion string, vars map[s
 		Vars:            vars,
 		ProviderMeta:    make(map[string]string),
 	}
+}
+
+func (s *Store) instanceDir(name string) (string, error) {
+	if err := validateInstanceName(name); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(s.basePath, name)
+	rel, err := filepath.Rel(s.basePath, dir)
+	if err != nil {
+		return "", fmt.Errorf("invalid instance name %q: %w", name, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid instance name %q", name)
+	}
+	return dir, nil
+}
+
+func validateInstanceName(name string) error {
+	clean := filepath.Clean(name)
+	if name == "" || clean == "." || clean == ".." || filepath.IsAbs(name) {
+		return fmt.Errorf("invalid instance name %q", name)
+	}
+	if clean != name || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("invalid instance name %q", name)
+	}
+	return nil
 }

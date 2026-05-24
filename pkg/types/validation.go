@@ -51,6 +51,7 @@ var validExternalTriggerSources = map[string]bool{
 
 // repoRegex validates owner/repo format
 var repoRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
+var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
 
 // namePatternRegex validates that name_pattern only contains allowed placeholders.
 // Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
@@ -132,7 +133,7 @@ func (f *FactoryConfig) Validate() error {
 			return fmt.Errorf("factory %q: repos[%d] cannot be empty", f.Name, i)
 		}
 		// Allow wildcard patterns like "owner/*"
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("factory %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
@@ -140,12 +141,98 @@ func (f *FactoryConfig) Validate() error {
 		if repo == "" {
 			return fmt.Errorf("factory %q: trigger_repos[%d] cannot be empty", f.Name, i)
 		}
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("factory %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
 
 	return nil
+}
+
+// Validate validates a WorkflowConfig and returns an error if invalid.
+func (w *WorkflowConfig) Validate() error {
+	if w == nil {
+		return fmt.Errorf("workflow config is nil")
+	}
+	if strings.TrimSpace(w.Name) == "" {
+		return fmt.Errorf("workflow name is required")
+	}
+	if w.Integration != "" && !validIntegrations[w.Integration] {
+		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", w.Name, w.Integration)
+	}
+	if w.Color != "" && !validColors[w.Color] {
+		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
+	}
+	if w.NamePattern != "" && !namePatternRegex.MatchString(w.NamePattern) {
+		return fmt.Errorf("workflow %q: invalid name_pattern %q (must contain only alphanumeric, hyphens, underscores, and {placeholders})", w.Name, w.NamePattern)
+	}
+	if w.Provider != "" && !validProviders[w.Provider] {
+		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: replicated, daytona, exedev)", w.Name, w.Provider)
+	}
+	if w.Trigger != nil {
+		if err := validateWorkflowTrigger(w.Name, w.Trigger); err != nil {
+			return err
+		}
+	}
+	for i, repo := range w.Repos {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: repos[%d] cannot be empty", w.Name, i)
+		}
+		if !validRepoSelector(repo) {
+			return fmt.Errorf("workflow %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+		}
+	}
+	for i, repo := range w.TriggerRepos {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: trigger_repos[%d] cannot be empty", w.Name, i)
+		}
+		if !validRepoSelector(repo) {
+			return fmt.Errorf("workflow %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+		}
+	}
+	for i, input := range w.Inputs {
+		if err := validateFactoryInput(w.Name, i, input); err != nil {
+			return err
+		}
+	}
+	for i, job := range w.Jobs {
+		if strings.TrimSpace(job.ID) == "" {
+			return fmt.Errorf("workflow %q: jobs[%d].id is required", w.Name, i)
+		}
+	}
+	return nil
+}
+
+func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) error {
+	if trigger.Type == "" {
+		return fmt.Errorf("workflow %q: trigger.type is required", workflowName)
+	}
+	switch trigger.Type {
+	case "github_issues":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.type %q (must be github_issues)", workflowName, trigger.Type)
+	}
+	if trigger.Event == "" {
+		return fmt.Errorf("workflow %q: trigger.event is required", workflowName)
+	}
+	switch trigger.Event {
+	case "issue_labeled", "issue_opened", "issue_reopened", "issue_edited", "issue_assigned", "issue_unassigned":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.event %q", workflowName, trigger.Event)
+	}
+	for i, repo := range trigger.Repositories {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: trigger.repositories[%d] cannot be empty", workflowName, i)
+		}
+		if !validRepoSelector(repo) {
+			return fmt.Errorf("workflow %q: trigger.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
+		}
+	}
+	return nil
+}
+
+func validRepoSelector(repo string) bool {
+	return repoRegex.MatchString(repo) || repoWildcardRegex.MatchString(repo)
 }
 
 func validateFactoryInput(factoryName string, index int, input FactoryInput) error {
@@ -225,6 +312,21 @@ func validateExternalTrigger(factoryName string, trigger *ExternalTrigger) error
 	return nil
 }
 
+func validateRepositoryAccessList(field string, repos []GitHubRepoAccess) error {
+	for i, repo := range repos {
+		if repo.Repo == "" {
+			return fmt.Errorf("%s[%d]: repo is required", field, i)
+		}
+		if !repoRegex.MatchString(repo.Repo) {
+			return fmt.Errorf("%s[%d]: invalid repo format %q (expected owner/repo)", field, i, repo.Repo)
+		}
+		if repo.Permissions != "" && repo.Permissions != "read" && repo.Permissions != "write" {
+			return fmt.Errorf("%s[%d]: invalid permissions %q (must be read or write)", field, i, repo.Permissions)
+		}
+	}
+	return nil
+}
+
 // Validate validates a TemplateConfig and returns an error if invalid.
 func (t *TemplateConfig) Validate() error {
 	if t == nil {
@@ -244,18 +346,14 @@ func (t *TemplateConfig) Validate() error {
 		return fmt.Errorf("invalid color %q", t.Color)
 	}
 
+	if err := validateRepositoryAccessList("repositories", t.Repositories); err != nil {
+		return err
+	}
+
 	// Validate GitHub repos if provided
 	if t.GitHub != nil {
-		for i, repo := range t.GitHub.Repos {
-			if repo.Repo == "" {
-				return fmt.Errorf("github.repos[%d]: repo is required", i)
-			}
-			if !repoRegex.MatchString(repo.Repo) {
-				return fmt.Errorf("github.repos[%d]: invalid repo format %q (expected owner/repo)", i, repo.Repo)
-			}
-			if repo.Permissions != "" && repo.Permissions != "read" && repo.Permissions != "write" {
-				return fmt.Errorf("github.repos[%d]: invalid permissions %q (must be read or write)", i, repo.Permissions)
-			}
+		if err := validateRepositoryAccessList("github.repos", t.GitHub.Repos); err != nil {
+			return err
 		}
 	}
 

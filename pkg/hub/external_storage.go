@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -51,10 +52,15 @@ func templatesDir() string {
 	return filepath.Join(hubConfigDir(), "templates")
 }
 
+// workspacesDir returns the path to the external workspaces directory.
+func workspacesDir() string {
+	return filepath.Join(hubConfigDir(), "workspaces")
+}
+
 // EnsureExternalDirs creates the factories/ and templates/ directories
 // alongside hub.yaml if they don't exist.
 func EnsureExternalDirs() error {
-	for _, dir := range []string{factoriesDir(), templatesDir()} {
+	for _, dir := range []string{factoriesDir(), templatesDir(), workspacesDir()} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -281,6 +287,311 @@ func deleteExternalFactory(name string) error {
 	return os.RemoveAll(dir)
 }
 
+// ── Workspaces ───────────────────────────────────────────────────────────────
+
+func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
+	entries, err := os.ReadDir(workspacesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workspaces dir: %w", err)
+	}
+
+	var workspaces []*types.WorkspaceConfig
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		workspace, err := loadExternalWorkspace(e.Name())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] skip workspace %q: %v\n", e.Name(), err)
+			continue
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces, nil
+}
+
+func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(workspacesDir(), name)
+	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		legacyPath := filepath.Join(dir, "workspace.yaml")
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
+		}
+		configPath = legacyPath
+	}
+	var workspace types.WorkspaceConfig
+	if err := yaml.Unmarshal(data, &workspace); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+	if workspace.Name == "" {
+		workspace.Name = name
+	}
+	if files, err := config.ReadTemplateFiles(dir); err == nil {
+		workspace.Files = files
+	}
+
+	workflowDir := filepath.Join(dir, "workflows")
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(workflowDir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read workflow %s: %w", e.Name(), err)
+		}
+		var workflow types.WorkflowConfig
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			return nil, fmt.Errorf("parse workflow %s: %w", e.Name(), err)
+		}
+		workflow.RawConfig = string(data)
+		if workflow.Name == "" {
+			workflow.Name = strings.TrimSuffix(e.Name(), ".yaml")
+		}
+		if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+			return nil, fmt.Errorf("normalize workflow %s: %w", e.Name(), err)
+		}
+		workspace.Workflows = append(workspace.Workflows, &workflow)
+	}
+	return &workspace, nil
+}
+
+func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
+	workspaces, err := loadExternalWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	var matched []*types.WorkspaceConfig
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		copyWorkspace := *workspace
+		copyWorkspace.Workflows = nil
+		for _, workflow := range workspace.Workflows {
+			if workflow != nil && strings.EqualFold(workflow.Integration, integration) {
+				copyWorkspace.Workflows = append(copyWorkspace.Workflows, workflow)
+			}
+		}
+		if len(copyWorkspace.Workflows) > 0 {
+			matched = append(matched, &copyWorkspace)
+		}
+	}
+	return matched, nil
+}
+
+func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
+	if workspace == nil || workspace.Name == "" {
+		return fmt.Errorf("workspace name required")
+	}
+	if err := validateName(workspace.Name); err != nil {
+		return err
+	}
+	if err := workspace.Validate(); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(workspacesDir(), workspace.Name)
+	workflowDir := filepath.Join(dir, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
+		return err
+	}
+
+	data := []byte(workspace.Files["elasticclaw-config.yaml"])
+	if len(strings.TrimSpace(string(data))) == 0 {
+		var err error
+		data, err = marshalWorkspaceElasticClawConfig(workspace, "")
+		if err != nil {
+			return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), data, 0640); err != nil {
+		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
+	}
+	for name, content := range workspace.Files {
+		if strings.Contains(name, "..") || strings.HasPrefix(name, "workflows/") || name == "workspace.yaml" || name == "elasticclaw-config.yaml" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			return fmt.Errorf("mkdir for workspace file %s: %w", name, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0640); err != nil {
+			return fmt.Errorf("write workspace file %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func removeWorkspaceAuthoredFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "workflows" || name == workspaceManagedDirName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("remove stale workspace file %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConfig) error {
+	if err := validateName(workspaceName); err != nil {
+		return err
+	}
+	if _, err := loadExternalWorkspace(workspaceName); err != nil {
+		return err
+	}
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	if err := removeExternalWorkflowFiles(workflowDir); err != nil {
+		return err
+	}
+	for _, workflow := range workflows {
+		if workflow == nil {
+			continue
+		}
+		if err := validateName(workflow.Name); err != nil {
+			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
+		}
+		data := []byte(workflow.RawConfig)
+		if len(strings.TrimSpace(string(data))) == 0 {
+			var err error
+			data, err = yaml.Marshal(workflow)
+			if err != nil {
+				return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
+			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
+		}
+	}
+	return nil
+}
+
+func removeExternalWorkflowFiles(workflowDir string) error {
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		return fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(workflowDir, entry.Name())); err != nil {
+			return fmt.Errorf("remove stale workflow %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existing string) ([]byte, error) {
+	values := map[string]interface{}{}
+	if strings.TrimSpace(existing) != "" {
+		if err := yaml.Unmarshal([]byte(existing), &values); err != nil {
+			return nil, err
+		}
+	}
+	values["name"] = workspace.Name
+	if workspace.SchemaVersion != "" {
+		values["schema_version"] = workspace.SchemaVersion
+	} else if _, ok := values["schema_version"]; !ok {
+		values["schema_version"] = "v1"
+	}
+	values["repositories"] = workspace.Repositories
+	if len(workspace.Env) > 0 {
+		values["env"] = workspace.Env
+	} else if _, ok := values["env"]; !ok {
+		values["env"] = map[string]string{}
+	}
+	delete(values, "github")
+	if len(workspace.Secrets) > 0 {
+		values["secrets"] = workspace.Secrets
+	} else {
+		delete(values, "secrets")
+	}
+	if len(workspace.WebhookSecrets) > 0 {
+		values["webhook_secrets"] = workspace.WebhookSecrets
+	} else {
+		delete(values, "webhook_secrets")
+	}
+	return marshalOrderedYAML(values, []string{
+		"schema_version",
+		"name",
+		"provider",
+		"nix",
+		"docker",
+		"repositories",
+		"env",
+	})
+}
+
+func marshalOrderedYAML(values map[string]interface{}, order []string) ([]byte, error) {
+	seen := map[string]bool{}
+	root := &yaml.Node{Kind: yaml.MappingNode}
+	for _, key := range order {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		if err := appendYAMLMapEntry(root, key, value); err != nil {
+			return nil, err
+		}
+		seen[key] = true
+	}
+	var rest []string
+	for key := range values {
+		if !seen[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		if err := appendYAMLMapEntry(root, key, values[key]); err != nil {
+			return nil, err
+		}
+	}
+	return yaml.Marshal(root)
+}
+
+func appendYAMLMapEntry(root *yaml.Node, key string, value interface{}) error {
+	var node yaml.Node
+	if err := node.Encode(value); err != nil {
+		return err
+	}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, &node)
+	return nil
+}
+
+func deleteExternalWorkspace(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(workspacesDir(), name))
+}
+
 // ── Migration ────────────────────────────────────────────────────────────────
 
 // migrationMarkerPath returns the path to the migration marker file.
@@ -309,17 +620,20 @@ func (s *Server) MigrateLegacyTemplates() error {
 	defer rows.Close()
 
 	var migrated int
+	var migrationErrs []string
 	for rows.Next() {
 		var name, filesJSON string
 		if err := rows.Scan(&name, &filesJSON); err != nil {
+			migrationErrs = append(migrationErrs, err.Error())
 			continue
 		}
 		var files map[string]string
 		if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: parse files JSON: %v", name, err))
 			continue
 		}
 		if err := saveExternalTemplate(name, files); err != nil {
-			fmt.Fprintf(os.Stderr, "[hub] migrate template %q: %v\n", name, err)
+			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		migrated++
@@ -327,6 +641,9 @@ func (s *Server) MigrateLegacyTemplates() error {
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("migrate templates: %w", err)
+	}
+	if len(migrationErrs) > 0 {
+		return fmt.Errorf("migrate templates failed for %d row(s): %s", len(migrationErrs), strings.Join(migrationErrs, "; "))
 	}
 
 	// Drop legacy table so future runs never see it

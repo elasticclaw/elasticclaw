@@ -41,6 +41,9 @@ func LoadHubConfig() (*types.HubConfig, error) {
 // Used to save config changes back to the right file.
 // Returns an error if no path can be determined.
 func ActiveHubConfigPath() (string, error) {
+	if env := os.Getenv("ELASTICCLAW_HUB_CONFIG"); env != "" {
+		return env, nil
+	}
 	for _, p := range hubConfigPaths() {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
@@ -211,6 +214,11 @@ func ParseTemplateConfig(data []byte) (*types.TemplateConfig, error) {
 			}
 		}
 	}
+	for i, r := range cfg.Repositories {
+		if r.Repo == "" {
+			return nil, fmt.Errorf("elasticclaw-config.yaml: repositories[%d] is missing 'repo' field", i)
+		}
+	}
 	return cfg, nil
 }
 
@@ -241,6 +249,11 @@ func LoadTemplateConfig(templateDir string) (*types.TemplateConfig, error) {
 			if r.Repo == "" {
 				return nil, fmt.Errorf("elasticclaw-config.yaml: github.repos[%d] is missing 'repo' field (e.g. repo: owner/repo)", i)
 			}
+		}
+	}
+	for i, r := range cfg.Repositories {
+		if r.Repo == "" {
+			return nil, fmt.Errorf("elasticclaw-config.yaml: repositories[%d] is missing 'repo' field (e.g. repo: owner/repo)", i)
 		}
 	}
 	return cfg, nil

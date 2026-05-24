@@ -19,7 +19,7 @@ var (
 
 var createCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new claw from a template",
+	Short: "Create a new claw",
 	Long: `Resolve a template and provision a new claw via the hub.
 
 With --source auto (default), the template is looked up in order:
@@ -50,7 +50,10 @@ var (
 )
 
 func init() {
+	createCmd.Hidden = true
+	createCmd.Deprecated = "templates are deprecated; use workspace push and workflow trigger instead"
 	rootCmd.AddCommand(createCmd)
+
 	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
 	createCmd.MarkFlagRequired("name")
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
@@ -75,9 +78,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	// Resolve template based on --source (auto|local|hub).
 	var (
-		tmplCfg         *types.TemplateConfig
-		files           map[string]string
-		resolvedSource  string
+		tmplCfg        *types.TemplateConfig
+		files          map[string]string
+		resolvedSource string
 	)
 	switch createSource {
 	case "auto", "local":
@@ -176,7 +179,6 @@ func loadHubTemplate(client *hub.Client, name string) (*types.TemplateConfig, ma
 	if tmplCfg == nil || tmplCfg.Provider == "" {
 		return nil, nil, fmt.Errorf("hub template %q has no provider in elasticclaw-config.yaml", name)
 	}
-	delete(hubFiles, "elasticclaw-config.yaml")
 	return tmplCfg, hubFiles, nil
 }
 

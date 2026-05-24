@@ -66,6 +66,12 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	if workspaceName == "" {
+		log.Printf("[github-issues-webhook] %s ignored; use /api/workspaces/{workspace}/webhooks/github-issues", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -76,7 +82,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 
 	// Validate signature using X-Hub-Signature-256 header
 	sig := r.Header.Get("X-Hub-Signature-256")
-	reason := s.validateGitHubIssuesSignatureReason(body, sig)
+	reason := s.validateGitHubIssuesSignatureReason(workspaceName, body, sig)
 	if reason != "" {
 		log.Printf("[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -110,68 +116,18 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 
 // validateGitHubIssuesSignatureReason validates the webhook signature and returns
 // an empty string on success, or a human-readable reason on failure.
-func (s *Server) validateGitHubIssuesSignatureReason(body []byte, sig string) string {
-	s.mu.RLock()
-	integrations := s.hubCfg.Integrations
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
-
-	factories := s.resolveFactories()
-
-	integrationSecretCount := 0
-	factorySecretCount := 0
-	factoryMatchCount := 0
-
-	// Check integration-level secrets
-	if integrations != nil {
-		for _, gi := range integrations.GitHubIssues {
-			if gi.WebhookSecret == "" {
-				continue
-			}
-			integrationSecretCount++
-			if verifyGitHubHMAC(body, sig, gi.WebhookSecret) {
-				return "" // valid
-			}
+func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body []byte, sig string) string {
+	workspaceSecretCount := 0
+	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "github-issues") {
+		workspaceSecretCount++
+		if verifyGitHubHMAC(body, sig, secret) {
+			return ""
 		}
 	}
-
-	// Check factory-level secrets
-	if len(factories) > 0 {
-		for _, factory := range factories {
-			if factory.Integration != "github-issues" {
-				continue
-			}
-			factoryMatchCount++
-			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-				secret = secrets[factory.WebhookSecretRef]
-			}
-			if secret == "" {
-				continue
-			}
-			factorySecretCount++
-			if verifyGitHubHMAC(body, sig, secret) {
-				return "" // valid
-			}
-		}
+	if workspaceSecretCount > 0 {
+		return fmt.Sprintf("signature did not match any configured workspace webhook secret (%d checked)", workspaceSecretCount)
 	}
-
-	// Build a diagnostic reason string (never includes the secret itself)
-	if integrationSecretCount == 0 && factorySecretCount == 0 {
-		// No secrets configured at all
-		if integrations != nil && len(integrations.GitHubIssues) > 0 {
-			return "no webhook secrets configured for any github-issues integration"
-		}
-		if factoryMatchCount > 0 {
-			return "no webhook secrets configured for any github-issues factory"
-		}
-		// Dev/testing mode: no integrations and no factory secrets — allow
-		return ""
-	}
-	if sig == "" {
-		return "missing X-Hub-Signature-256 header"
-	}
-	return fmt.Sprintf("signature mismatch (checked %d integration secrets, %d factory secrets across %d github-issues factories)", integrationSecretCount, factorySecretCount, factoryMatchCount)
+	return ""
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {
@@ -191,12 +147,12 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
 
-	factories := s.resolveFactories()
-	if len(factories) == 0 {
-		log.Printf("[github-issues-webhook] no factories configured — nothing to do")
+	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("github-issues")
+	if len(workflowWorkspaces) == 0 {
+		log.Printf("[github-issues-webhook] no workflows configured — nothing to do")
 		return
 	}
-	log.Printf("[github-issues-webhook] checking %d factories", len(factories))
+	log.Printf("[github-issues-webhook] checking %d workflow workspace(s)", len(workflowWorkspaces))
 
 	currentStatus := payload.Issue.State
 	previousStatus := ""
@@ -259,223 +215,8 @@ func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
 		}
 	}
 
-	matched := false
-	for _, factory := range factories {
-		log.Printf("[github-issues-webhook] checking factory %q: integration=%q enabled=%v trigger_status=%q labels=%v assigned_to=%q allowed_labelers=%v",
-			factory.Name, factory.Integration,
-			func() bool {
-				if factory.Enabled == nil {
-					return true
-				}
-				return *factory.Enabled
-			}(),
-			factory.TriggerStatus, factory.Labels, factory.AssignedTo, factory.AllowedLabelers)
-
-		if factory.Integration != "github-issues" {
-			log.Printf("[github-issues-webhook] factory %q: SKIP — integration=%q, want github-issues", factory.Name, factory.Integration)
-			continue
-		}
-		if factory.Enabled != nil && !*factory.Enabled {
-			log.Printf("[github-issues-webhook] factory %q: SKIP — disabled", factory.Name)
-			continue
-		}
-		triggerRepos := githubIssuesTriggerRepos(factory)
-		if !githubRepoMatches(payload.Repository.FullName, triggerRepos) {
-			log.Printf("[github-issues-webhook] factory %q: SKIP — repo %q not in trigger_repos %v",
-				factory.Name, payload.Repository.FullName, triggerRepos)
-			continue
-		}
-
-		// Workspace filter: for Linear/Shortcut, workspace selects the integration token.
-		// For GitHub Issues, workspace is just a human label — no token resolution needed.
-		if factory.Workspace != "" && factory.Integration != "github-issues" {
-			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
-			if ghToken == "" {
-				log.Printf("[github-issues-webhook] factory %q: SKIP — workspace=%q but no token resolved", factory.Name, factory.Workspace)
-				continue
-			}
-			log.Printf("[github-issues-webhook] factory %q: workspace=%q, token resolved", factory.Name, factory.Workspace)
-		}
-
-		// Labels filter: all configured labels must be present on the issue (AND)
-		if len(factory.Labels) > 0 {
-			allMatch := true
-			missing := []string{}
-			for _, required := range factory.Labels {
-				if !issueLabels[strings.ToLower(required)] {
-					allMatch = false
-					missing = append(missing, required)
-				}
-			}
-			if !allMatch {
-				log.Printf("[github-issues-webhook] factory %q: SKIP — missing required labels: %v (have: %v)", factory.Name, missing, func() []string {
-					out := make([]string, 0, len(issueLabels))
-					for k := range issueLabels {
-						out = append(out, k)
-					}
-					return out
-				}())
-				continue
-			}
-			log.Printf("[github-issues-webhook] factory %q: labels match (all %v present)", factory.Name, factory.Labels)
-		}
-
-		// AllowedLabelers filter: restrict who can trigger by labeling
-		if len(factory.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
-			labelerAllowed := false
-			for _, allowed := range factory.AllowedLabelers {
-				if strings.EqualFold(allowed, payload.Sender.Login) {
-					labelerAllowed = true
-					break
-				}
-			}
-			if !labelerAllowed {
-				log.Printf("[github-issues-webhook] factory %q: SKIP — labeler %q not in allowed_labelers %v",
-					factory.Name, payload.Sender.Login, factory.AllowedLabelers)
-				continue
-			}
-			log.Printf("[github-issues-webhook] factory %q: labeler %q allowed", factory.Name, payload.Sender.Login)
-		}
-
-		// AssignedTo filter
-		if factory.AssignedTo != "" {
-			wanted := strings.ToLower(strings.TrimSpace(factory.AssignedTo))
-			assigneeMatch := false
-			skipReason := ""
-			switch {
-			case wanted == "any":
-				if assignee != "" {
-					assigneeMatch = true
-				} else {
-					skipReason = "assignee=any but issue unassigned"
-				}
-			case wanted == "none":
-				if assignee == "" {
-					assigneeMatch = true
-				} else {
-					skipReason = fmt.Sprintf("assignee=none but issue assigned to %q", assignee)
-				}
-			case strings.HasPrefix(wanted, "!"):
-				excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
-				if !strings.EqualFold(assignee, excluded) {
-					assigneeMatch = true
-				} else {
-					skipReason = fmt.Sprintf("assignee %q is excluded (%q)", assignee, wanted)
-				}
-			default:
-				target := strings.TrimPrefix(wanted, "@")
-				if strings.EqualFold(assignee, target) {
-					assigneeMatch = true
-				} else {
-					skipReason = fmt.Sprintf("assignee=%q, want %q", assignee, target)
-				}
-			}
-			if !assigneeMatch {
-				log.Printf("[github-issues-webhook] factory %q: SKIP — %s", factory.Name, skipReason)
-				continue
-			}
-			log.Printf("[github-issues-webhook] factory %q: assignee match (%q)", factory.Name, factory.AssignedTo)
-		}
-
-		// Issue entering trigger status → create claw.
-		// For GitHub Issues, trigger_status maps to state ("open") or a label.
-		triggerMatched := false
-		if strings.EqualFold(currentStatus, factory.TriggerStatus) {
-			triggerMatched = true
-			log.Printf("[github-issues-webhook] factory %q: trigger matched by current status %q == trigger_status %q",
-				factory.Name, currentStatus, factory.TriggerStatus)
-		} else if issueLabels[strings.ToLower(factory.TriggerStatus)] {
-			triggerMatched = true
-			log.Printf("[github-issues-webhook] factory %q: trigger matched by label %q present",
-				factory.Name, factory.TriggerStatus)
-		} else {
-			log.Printf("[github-issues-webhook] factory %q: trigger NOT matched — currentStatus=%q, labels=%v, trigger_status=%q",
-				factory.Name, currentStatus, func() []string {
-					out := make([]string, 0, len(issueLabels))
-					for k := range issueLabels {
-						out = append(out, k)
-					}
-					return out
-				}(), factory.TriggerStatus)
-		}
-
-		// Only create when transitioning into the trigger condition
-		previousMatched := false
-		if previousStatus != "" {
-			if strings.EqualFold(previousStatus, factory.TriggerStatus) {
-				previousMatched = true
-				log.Printf("[github-issues-webhook] factory %q: previous status %q matched trigger (transition detection)",
-					factory.Name, previousStatus)
-			}
-		}
-		// For label-based triggers, also check if the trigger label was already
-		// present before this event (using the pre-event label set).
-		if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
-			if previousLabels[strings.ToLower(factory.TriggerStatus)] {
-				previousMatched = true
-				log.Printf("[github-issues-webhook] factory %q: trigger label %q was already present before this event",
-					factory.Name, factory.TriggerStatus)
-			}
-		}
-
-		if triggerMatched && !previousMatched {
-			matched = true
-			log.Printf("[github-issues-webhook] factory %q: ✓ CREATING CLAW — issue %s entered trigger '%s' (was not in trigger before)",
-				factory.Name, issueID, factory.TriggerStatus)
-			clawID := ""
-			if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
-				if isFactoryTriggerAlreadyClaimed(err) {
-					continue
-				}
-				log.Printf("[github-issues-webhook] factory %q: ✗ FAILED to create claw for %s: %v", factory.Name, issueID, err)
-				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "error", "", err.Error())
-				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
-			} else {
-				_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, issueID, factory.Name).Scan(&clawID)
-				if clawID != "" {
-					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw %s for issue %s", factory.Name, clawID[:8], issueID)
-				} else {
-					log.Printf("[github-issues-webhook] factory %q: ✓ CREATED claw for issue %s (claw ID not yet available)", factory.Name, issueID)
-				}
-				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_created", clawID, "")
-				if clawID != "" {
-					s.trackFactoryCreationSuccess(factory.Name, issueID, clawID)
-				}
-			}
-		} else if triggerMatched && previousMatched {
-			log.Printf("[github-issues-webhook] factory %q: SKIP — issue %s already in trigger '%s', no transition",
-				factory.Name, issueID, factory.TriggerStatus)
-		} else {
-			log.Printf("[github-issues-webhook] factory %q: SKIP — trigger not matched for issue %s", factory.Name, issueID)
-		}
-
-		// Issue leaving trigger status → terminate claw.
-		if factory.TerminateOnLeave && !triggerMatched {
-			var activeClaw string
-			_ = s.db.QueryRow(
-				`SELECT id FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
-				issueID,
-			).Scan(&activeClaw)
-			if activeClaw != "" {
-				matched = true
-				log.Printf("[github-issues-webhook] factory %q: issue %s left trigger '%s' — terminating claw %s",
-					factory.Name, issueID, factory.TriggerStatus, activeClaw[:8])
-				s.terminateClawForGitHubIssue(issueID)
-				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "claw_terminated", activeClaw, "terminated: issue left trigger status")
-			}
-		}
-	}
-
-	if !matched {
-		log.Printf("[github-issues-webhook] no factory matched for issue %s — checking why:", issueID)
-		for _, factory := range factories {
-			if factory.Integration == "github-issues" && (factory.Enabled == nil || *factory.Enabled) {
-				log.Printf("[github-issues-webhook] factory %q: not_actionable — status '%s'→'%s' did not match trigger '%s' (labels=%v)",
-					factory.Name, previousStatus, currentStatus, factory.TriggerStatus, factory.Labels)
-				s.logFactoryEvent(factory.Name, issueID, issueTitle, previousStatus, currentStatus, "not_actionable",
-					"", fmt.Sprintf("status '%s'→'%s' did not match trigger '%s'", previousStatus, currentStatus, factory.TriggerStatus))
-			}
-		}
+	if !s.processGitHubIssuesWorkflowEvent(workflowWorkspaces, payload, issueID, issueTitle, currentStatus, previousStatus, previousLabels, issueLabels, assignee) {
+		log.Printf("[github-issues-webhook] no workflow matched for issue %s", issueID)
 	}
 }
 
@@ -485,6 +226,191 @@ func githubIssuesTriggerRepos(factory *types.FactoryConfig) []string {
 	}
 	// Backward compatibility for older GitHub Issues factory configs.
 	return factory.Repos
+}
+
+func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
+	if workflow.Trigger != nil && len(workflow.Trigger.Repositories) > 0 {
+		return workflow.Trigger.Repositories
+	}
+	if len(workflow.TriggerRepos) > 0 {
+		return workflow.TriggerRepos
+	}
+	return workflow.Repos
+}
+
+func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceConfig, payload githubIssuesWebhookPayload, issueID, issueTitle, currentStatus, previousStatus string, previousLabels, issueLabels map[string]bool, assignee string) bool {
+	matched := false
+	for _, workspace := range workspaces {
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			if !githubRepoMatches(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow)) {
+				continue
+			}
+			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+				continue
+			}
+
+			if workflow.Trigger != nil {
+				if !githubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
+					continue
+				}
+			} else {
+				if len(workflow.Labels) > 0 {
+					allMatch := true
+					for _, required := range workflow.Labels {
+						if !issueLabels[strings.ToLower(required)] {
+							allMatch = false
+							break
+						}
+					}
+					if !allMatch {
+						continue
+					}
+				}
+				if len(workflow.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+					allowed := false
+					for _, labeler := range workflow.AllowedLabelers {
+						if strings.EqualFold(labeler, payload.Sender.Login) {
+							allowed = true
+							break
+						}
+					}
+					if !allowed {
+						continue
+					}
+				}
+				triggerStatus := workflow.TriggerStatus
+				if triggerStatus == "" {
+					triggerStatus = "open"
+				}
+				triggerMatched := strings.EqualFold(currentStatus, triggerStatus) || issueLabels[strings.ToLower(triggerStatus)]
+				previousMatched := previousStatus != "" && strings.EqualFold(previousStatus, triggerStatus)
+				if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+					previousMatched = previousLabels[strings.ToLower(triggerStatus)]
+				}
+				if !triggerMatched || previousMatched {
+					continue
+				}
+			}
+			matched = true
+			log.Printf("[workflow:%s/%s] GitHub issue %s matched workflow trigger — creating claw", workspace.Name, workflow.Name, issueID)
+			if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
+				log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+			}
+		}
+	}
+	return matched
+}
+
+func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
+	if trigger == nil || trigger.Type != "github_issues" {
+		return false
+	}
+	switch trigger.Event {
+	case "issue_labeled":
+		if payload.Action != "labeled" {
+			return false
+		}
+	case "issue_opened":
+		if payload.Action != "opened" {
+			return false
+		}
+	case "issue_reopened":
+		if payload.Action != "reopened" {
+			return false
+		}
+	case "issue_edited":
+		if payload.Action != "edited" {
+			return false
+		}
+	case "issue_assigned":
+		if payload.Action != "assigned" {
+			return false
+		}
+	case "issue_unassigned":
+		if payload.Action != "unassigned" {
+			return false
+		}
+	default:
+		return false
+	}
+	if len(trigger.States) > 0 {
+		stateMatched := false
+		for _, state := range trigger.States {
+			if strings.EqualFold(currentStatus, state) {
+				stateMatched = true
+				break
+			}
+		}
+		if !stateMatched {
+			return false
+		}
+	}
+	for _, required := range trigger.Labels {
+		if !issueLabels[strings.ToLower(required)] {
+			return false
+		}
+	}
+	if len(trigger.Labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+		for _, labeler := range trigger.Labelers {
+			if labeler == "*" || strings.EqualFold(labeler, payload.Sender.Login) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func assignedToMatches(filter, assignee string) bool {
+	wanted := strings.ToLower(strings.TrimSpace(filter))
+	switch {
+	case wanted == "":
+		return true
+	case wanted == "any":
+		return assignee != ""
+	case wanted == "none":
+		return assignee == ""
+	case strings.HasPrefix(wanted, "!"):
+		excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
+		return !strings.EqualFold(assignee, excluded)
+	default:
+		target := strings.TrimPrefix(wanted, "@")
+		return strings.EqualFold(assignee, target)
+	}
+}
+
+func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) error {
+	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
+	var existing string
+	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
+	if existing != "" {
+		log.Printf("[workflow:%s/%s] GitHub issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
+		return nil
+	}
+
+	templateFiles := cloneStringMap(workspace.Files)
+	templateFiles["CONTEXT.md"] = buildGitHubIssuesContext(payload)
+
+	clawName := issueID
+	if workflow.NamePattern != "" {
+		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", issueID)
+		clawName = strings.ReplaceAll(clawName, "{issue_number}", fmt.Sprintf("%d", payload.Issue.Number))
+		clawName = strings.ReplaceAll(clawName, "{repo}", payload.Repository.FullName)
+	}
+
+	_, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		workspaceFiles: templateFiles,
+		clawName:       clawName,
+		githubIssueID:  issueID,
+		reason:         reason,
+	})
+	return err
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {

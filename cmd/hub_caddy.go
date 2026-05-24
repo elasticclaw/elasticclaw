@@ -11,6 +11,10 @@ import (
 )
 
 const caddyfilePath = "/etc/caddy/Caddyfile"
+const (
+	caddyManagedStart = "# BEGIN ElasticClaw managed Caddy config"
+	caddyManagedEnd   = "# END ElasticClaw managed Caddy config"
+)
 
 var hubCaddyCmd = &cobra.Command{
 	Use:   "caddy",
@@ -71,7 +75,7 @@ apt-get install -y caddy`
 	}
 
 	// Write Caddyfile
-	caddyfile := fmt.Sprintf("%s {\n\treverse_proxy localhost:8080\n}\n", hubCaddyDomain)
+	caddyfile := fmt.Sprintf("%s\n%s {\n\treverse_proxy localhost:8080\n}\n%s\n", caddyManagedStart, hubCaddyDomain, caddyManagedEnd)
 
 	fmt.Printf("Writing %s... ", caddyfilePath)
 	if err := os.WriteFile(caddyfilePath, []byte(caddyfile), 0644); err != nil {
@@ -103,12 +107,16 @@ func runHubCaddyUninstall(cmd *cobra.Command, args []string) error {
 	_ = exec.Command("systemctl", "stop", "caddy").Run()
 	_ = exec.Command("systemctl", "disable", "caddy").Run()
 
-	// Remove our Caddyfile
+	// Remove only the Caddyfile that ElasticClaw created. Older installs did
+	// not have markers, so leave unmarked files in place instead of deleting
+	// potentially user-managed reverse proxy configuration.
 	data, err := os.ReadFile(caddyfilePath)
-	if err == nil && strings.Contains(string(data), "localhost:8080") {
+	if err == nil && strings.Contains(string(data), caddyManagedStart) && strings.Contains(string(data), caddyManagedEnd) {
 		fmt.Printf("Removing %s... ", caddyfilePath)
 		_ = os.Remove(caddyfilePath)
 		fmt.Println("OK")
+	} else if err == nil {
+		fmt.Printf("Leaving %s in place; it is not marked as ElasticClaw-managed.\n", caddyfilePath)
 	}
 
 	fmt.Println("✓ Caddy stopped and disabled")
