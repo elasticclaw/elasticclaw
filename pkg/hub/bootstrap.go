@@ -180,21 +180,21 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 set -euo pipefail
 
 # ── Identity + credentials ────────────────────────────────────────────────────
-export ELASTICCLAW_HUB_URL="%s"
-export ELASTICCLAW_CLAW_ID="%s"
-export ELASTICCLAW_CLAW_TOKEN="%s"
-export ELASTICCLAW_CLAW_NAME="%s"
-export ELASTICCLAW_GATEWAY_PASSWORD="%s"
+export ELASTICCLAW_HUB_URL=%s
+export ELASTICCLAW_CLAW_ID=%s
+export ELASTICCLAW_CLAW_TOKEN=%s
+export ELASTICCLAW_CLAW_NAME=%s
+export ELASTICCLAW_GATEWAY_PASSWORD=%s
 export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
-export OPENCLAW_DEFAULT_MODEL="%s"
-export ELASTICCLAW_NIX="%s"
-export ELASTICCLAW_DOCKER="%s"
+export OPENCLAW_DEFAULT_MODEL=%s
+export ELASTICCLAW_NIX=%s
+export ELASTICCLAW_DOCKER=%s
 %s
 %s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
-BRIDGE_SRC="%s"
+BRIDGE_SRC=%s
 download_connector_once() {
   rm -f /tmp/claw-bridge
   if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
@@ -276,10 +276,10 @@ done
 echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
-		p.HubURL, p.ClawID, p.ClawToken, p.ClawName, p.GatewayPassword,
-		p.DefaultModel, nixFlag, dockerFlag,
+		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
+		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
-		p.BridgeURL,
+		shellQuote(p.BridgeURL),
 	)
 }
 

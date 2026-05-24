@@ -18,7 +18,7 @@ export default function Home() {
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(null)
-  const [isAdmin, setIsAdmin] = useState(true) // default true so UI doesn't flicker
+  const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
   // Check configured on mount (needs browser for localStorage)
@@ -29,13 +29,17 @@ export default function Home() {
   // Fetch admin status
   useEffect(() => {
     const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-    if (!token) return
+    if (!token) {
+      setIsAdmin(false)
+      return
+    }
     import("@/lib/hub-url").then(({ getHubUrl }) => {
       const hubUrl = getHubUrl()
-      fetch(`${hubUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
+      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.ok ? r.json() : null)
-        .then(data => { if (data) setIsAdmin(data.is_admin ?? true) })
-        .catch(() => {})
+        .then(data => { setIsAdmin(data?.is_admin === true) })
+        .catch(() => { setIsAdmin(false) })
     })
   }, [])
 

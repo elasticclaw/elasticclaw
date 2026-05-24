@@ -179,7 +179,6 @@ func loadHubTemplate(client *hub.Client, name string) (*types.TemplateConfig, ma
 	if tmplCfg == nil || tmplCfg.Provider == "" {
 		return nil, nil, fmt.Errorf("hub template %q has no provider in elasticclaw-config.yaml", name)
 	}
-	delete(hubFiles, "elasticclaw-config.yaml")
 	return tmplCfg, hubFiles, nil
 }
 

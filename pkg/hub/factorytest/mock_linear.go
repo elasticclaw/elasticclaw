@@ -12,9 +12,9 @@ import (
 
 type MockLinear struct {
 	*httptest.Server
-	mu            sync.Mutex
-	IssueStates   map[string]string // issueID → state ID (from mutations)
-	GraphQLCalls  []string
+	mu           sync.Mutex
+	IssueStates  map[string]string // issueID → state ID (from mutations)
+	GraphQLCalls []string
 	// PollingIssues holds issue data returned by the issues(filter:) polling query.
 	// Key is identifier (e.g. "ELA-123"). Call SetIssueStateName to mutate state.
 	PollingIssues map[string]map[string]interface{}
@@ -89,7 +89,7 @@ func NewMockLinear(t *testing.T) *MockLinear {
 			m.mu.Lock()
 			var nodes []map[string]interface{}
 			for _, issue := range m.PollingIssues {
-				nodes = append(nodes, issue)
+				nodes = append(nodes, cloneMap(issue))
 			}
 			m.mu.Unlock()
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -123,6 +123,21 @@ func NewMockLinear(t *testing.T) *MockLinear {
 	m.Server = httptest.NewServer(mux)
 	t.Cleanup(m.Server.Close)
 	return m
+}
+
+func cloneMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		switch typed := v.(type) {
+		case map[string]interface{}:
+			out[k] = cloneMap(typed)
+		case []interface{}:
+			out[k] = append([]interface{}(nil), typed...)
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // SetIssueStateName updates the state name of a polling issue.

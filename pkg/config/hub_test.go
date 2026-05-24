@@ -1,11 +1,45 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
+
+func TestSaveHubConfigUsesExplicitEnvPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom", "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+
+	if err := SaveHubConfig(&types.HubConfig{Token: "test-token"}); err != nil {
+		t.Fatalf("SaveHubConfig: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read env hub config: %v", err)
+	}
+	if !strings.Contains(string(data), "token: test-token") {
+		t.Fatalf("saved config = %s", string(data))
+	}
+}
+
+func TestLegacyProfilesRejectTraversalNames(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{"../config", "a/b", ".."} {
+		if _, err := LoadProfile(name); err == nil {
+			t.Fatalf("LoadProfile(%q) succeeded, want error", name)
+		}
+		if err := SaveProfile(&types.Profile{Name: name}); err == nil {
+			t.Fatalf("SaveProfile(%q) succeeded, want error", name)
+		}
+		if err := DeleteProfile(name); err == nil {
+			t.Fatalf("DeleteProfile(%q) succeeded, want error", name)
+		}
+	}
+}
 
 // parseLLMKeys is a helper that unmarshals a hub.yaml snippet and returns the LLMKeys.
 func parseLLMKeys(t *testing.T, yamlStr string) types.LLMKeysList {

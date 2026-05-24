@@ -82,12 +82,6 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		sig = r.Header.Get("X-External-Signature")
 	}
 
-	if !s.validateExternalSignature(body, sig) {
-		log.Printf("[external-webhook] signature validation failed")
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
-
 	// Determine event type from headers
 	event := r.Header.Get("X-GitHub-Event")
 	if event == "" {
@@ -175,67 +169,35 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go s.processExternalEvent(payload)
+	go s.processExternalEvent(payload, body, sig)
 	w.WriteHeader(http.StatusOK)
 }
 
-// validateExternalSignature verifies the HMAC-SHA256 signature from external webhooks.
-// It checks against all configured factory webhook secrets for external trigger factories.
-func (s *Server) validateExternalSignature(body []byte, sig string) bool {
-	// Strip sha256= prefix if present
+func (s *Server) validateExternalSignatureForFactory(factory *types.FactoryConfig, body []byte, sig string) bool {
 	sig = strings.TrimPrefix(sig, "sha256=")
 
 	s.mu.RLock()
 	secrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 
+	secret := factory.WebhookSecret
+	if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+		secret = secrets[factory.WebhookSecretRef]
+	}
+	if secret == "" {
+		return sig == ""
+	}
 	if sig == "" {
-		// If no signature provided, check if any factory has a secret configured
-		// If secrets are configured, reject; otherwise allow (dev mode)
-		hasSecret := false
-		factories := s.resolveFactories()
-		for _, factory := range factories {
-			if factory.Integration != "external" {
-				continue
-			}
-			secret := factory.WebhookSecret
-			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-				secret = secrets[factory.WebhookSecretRef]
-			}
-			if secret != "" {
-				hasSecret = true
-				break
-			}
-		}
-		return !hasSecret // allow if no secrets configured
+		return false
 	}
-
-	factories := s.resolveFactories()
-	for _, factory := range factories {
-		if factory.Integration != "external" {
-			continue
-		}
-		// Resolve secret: inline or via named ref
-		secret := factory.WebhookSecret
-		if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
-			secret = secrets[factory.WebhookSecretRef]
-		}
-		if secret == "" {
-			continue
-		}
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
-			return true
-		}
-	}
-
-	return false
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(sig), []byte(expected))
 }
 
 // processExternalEvent finds matching factories and creates claws for external events.
-func (s *Server) processExternalEvent(payload externalWebhookPayload) {
+func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig string) {
 	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		return
@@ -260,6 +222,10 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload) {
 		}
 		if factory.ExternalTrigger == nil {
 			log.Printf("[external-webhook] factory %q: skipped (no external_trigger configured)", factory.Name)
+			continue
+		}
+		if !s.validateExternalSignatureForFactory(factory, body, sig) {
+			log.Printf("[external-webhook] factory %q: skipped (signature mismatch)", factory.Name)
 			continue
 		}
 

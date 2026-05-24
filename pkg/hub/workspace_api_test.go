@@ -76,6 +76,24 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	if workflow.Name != "bugfix" || workflow.WorkspaceName != "engineering" || workflow.Source != "workflow" {
 		t.Fatalf("unexpected workflow: %#v", workflow)
 	}
+
+	body = `{"workflows":[{"name":"second","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows/bugfix", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("stale workflow status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {

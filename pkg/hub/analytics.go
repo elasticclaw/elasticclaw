@@ -21,33 +21,33 @@ func (s *Server) logFactoryAnalytics(factoryName, issueID, clawID, action, detai
 
 // AnalyticsSummary provides aggregated metrics for a factory.
 type AnalyticsSummary struct {
-	FactoryName           string            `json:"factoryName"`
-	TotalTriggers         int               `json:"totalTriggers"`
-	SuccessfulCreations   int               `json:"successfulCreations"`
-	FailedCreations       int               `json:"failedCreations"`
-	Terminations          int               `json:"terminations"`
-	PROpened              int               `json:"prOpened"`
-	PRMerged              int               `json:"prMerged"`
-	PRClosed              int               `json:"prClosed"`
-	DoneSignals           int               `json:"doneSignals"`
-	Errors                int               `json:"errors"`
-	SuccessRate           float64           `json:"successRate"` // percentage of creations that succeeded
-	PRMergeRate           float64           `json:"prMergeRate"` // percentage of opened PRs that merged
-	ByTriggerStatus       map[string]int    `json:"byTriggerStatus"`
-	RecentEvents          []AnalyticsEvent  `json:"recentEvents"`
-	ComputeError          string            `json:"computeError,omitempty"` // set if aggregation failed for this factory
+	FactoryName         string           `json:"factoryName"`
+	TotalTriggers       int              `json:"totalTriggers"`
+	SuccessfulCreations int              `json:"successfulCreations"`
+	FailedCreations     int              `json:"failedCreations"`
+	Terminations        int              `json:"terminations"`
+	PROpened            int              `json:"prOpened"`
+	PRMerged            int              `json:"prMerged"`
+	PRClosed            int              `json:"prClosed"`
+	DoneSignals         int              `json:"doneSignals"`
+	Errors              int              `json:"errors"`
+	SuccessRate         float64          `json:"successRate"` // percentage of creations that succeeded
+	PRMergeRate         float64          `json:"prMergeRate"` // percentage of opened PRs that merged
+	ByTriggerStatus     map[string]int   `json:"byTriggerStatus"`
+	RecentEvents        []AnalyticsEvent `json:"recentEvents"`
+	ComputeError        string           `json:"computeError,omitempty"` // set if aggregation failed for this factory
 }
 
 // AnalyticsEvent is a single analytics record.
 type AnalyticsEvent struct {
-	ID         string `json:"id"`
+	ID          string `json:"id"`
 	FactoryName string `json:"factoryName"`
-	IssueID    string `json:"issueId"`
-	ClawID     string `json:"clawId"`
-	Action     string `json:"action"`
-	Detail     string `json:"detail"`
-	Result     string `json:"result"`
-	CreatedAt  string `json:"createdAt"`
+	IssueID     string `json:"issueId"`
+	ClawID      string `json:"clawId"`
+	Action      string `json:"action"`
+	Detail      string `json:"detail"`
+	Result      string `json:"result"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 // handleFactoryAnalytics serves GET /api/factories/:name/analytics
@@ -117,6 +117,7 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	defer rows.Close()
 
 	var factoryNames []string
 	for rows.Next() {
@@ -131,8 +132,6 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	rows.Close()
-
 	var summaries []AnalyticsSummary
 	var hasErrors bool
 	for _, name := range factoryNames {
@@ -308,5 +307,3 @@ func (s *Server) trackPRClosed(factoryName, issueID, clawID, repo string, prNumb
 func (s *Server) trackDoneSignal(factoryName, issueID, clawID string, prCount int) {
 	s.logFactoryAnalytics(factoryName, issueID, clawID, "done_signal", fmt.Sprintf("prs=%d", prCount), "success")
 }
-
-

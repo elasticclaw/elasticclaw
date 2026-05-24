@@ -466,6 +466,9 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
+	if err := removeExternalWorkflowFiles(workflowDir); err != nil {
+		return err
+	}
 	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
@@ -483,6 +486,22 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		}
 		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
+		}
+	}
+	return nil
+}
+
+func removeExternalWorkflowFiles(workflowDir string) error {
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		return fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(workflowDir, entry.Name())); err != nil {
+			return fmt.Errorf("remove stale workflow %s: %w", entry.Name(), err)
 		}
 	}
 	return nil
@@ -601,17 +620,20 @@ func (s *Server) MigrateLegacyTemplates() error {
 	defer rows.Close()
 
 	var migrated int
+	var migrationErrs []string
 	for rows.Next() {
 		var name, filesJSON string
 		if err := rows.Scan(&name, &filesJSON); err != nil {
+			migrationErrs = append(migrationErrs, err.Error())
 			continue
 		}
 		var files map[string]string
 		if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: parse files JSON: %v", name, err))
 			continue
 		}
 		if err := saveExternalTemplate(name, files); err != nil {
-			fmt.Fprintf(os.Stderr, "[hub] migrate template %q: %v\n", name, err)
+			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		migrated++
@@ -619,6 +641,9 @@ func (s *Server) MigrateLegacyTemplates() error {
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("migrate templates: %w", err)
+	}
+	if len(migrationErrs) > 0 {
+		return fmt.Errorf("migrate templates failed for %d row(s): %s", len(migrationErrs), strings.Join(migrationErrs, "; "))
 	}
 
 	// Drop legacy table so future runs never see it

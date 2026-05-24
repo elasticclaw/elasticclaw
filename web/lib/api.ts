@@ -66,7 +66,7 @@ if (typeof window !== "undefined") {
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
-  const url = hubBase ? `${hubBase}${path}` : `/hub${path}`
+  const url = hubBase ? `${hubBase}${path}` : path
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -76,15 +76,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     },
   })
   if (res.status === 401) {
-    // Token expired or invalid — clear it and redirect to login
-    clearConfig()
-    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.href = "/login"
-      // Return a never-resolving promise to prevent the error from propagating
-      // and triggering the "Cannot reach hub" error screen before navigation completes
-      return new Promise(() => {})
-    }
-    throw new Error("session expired")
+    return handleSessionExpired<T>()
   }
   if (!res.ok) {
     const body = await res.text()
@@ -99,6 +91,17 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (res.status === 204) return undefined as T
   return res.json()
+}
+
+function handleSessionExpired<T>(): Promise<T> {
+  clearConfig()
+  if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    window.location.href = "/login"
+    // Return a never-resolving promise to prevent the error from propagating
+    // and triggering the "Cannot reach hub" error screen before navigation completes
+    return new Promise(() => {})
+  }
+  return Promise.reject(new Error("session expired"))
 }
 
 export async function fetchClaws(): Promise<ApiClaw[]> {
@@ -134,7 +137,7 @@ export interface UploadedAttachment {
 export function getFileViewUrl(clawId: string, path: string): string {
   const token = getTokenSync()
   const hubBase = getHubUrl()
-  const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/hub/api/files/view/${clawId}`
+  const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/api/files/view/${clawId}`
   const qs = new URLSearchParams({ path, token }).toString()
   return `${base}?${qs}`
 }
@@ -142,7 +145,7 @@ export function getFileViewUrl(clawId: string, path: string): string {
 export async function uploadFiles(clawId: string, files: File[]): Promise<UploadedAttachment[]> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
-  const url = hubBase ? `${hubBase}/api/files/${clawId}` : `/hub/api/files/${clawId}`
+  const url = hubBase ? `${hubBase}/api/files/${clawId}` : `/api/files/${clawId}`
   const form = new FormData()
   for (const f of files) form.append("files", f, f.name)
   const res = await fetch(url, {
@@ -150,6 +153,9 @@ export async function uploadFiles(clawId: string, files: File[]): Promise<Upload
     headers: { Authorization: `Bearer ${token}` },
     body: form,
   })
+  if (res.status === 401) {
+    return handleSessionExpired<UploadedAttachment[]>()
+  }
   if (!res.ok) {
     throw new Error(`upload failed ${res.status}: ${await res.text()}`)
   }

@@ -119,6 +119,7 @@ func TestLinearCLI_IssueGet(t *testing.T) {
 
 // TestLinearCLI_IssueUpdate_MutationSuccessFalse verifies the CLI reports failure when Linear returns success=false.
 func TestLinearCLI_IssueUpdate_MutationSuccessFalse(t *testing.T) {
+	sawIssueUpdate := false
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var body map[string]interface{}
@@ -127,12 +128,13 @@ func TestLinearCLI_IssueUpdate_MutationSuccessFalse(t *testing.T) {
 		query, _ := body["query"].(string)
 		w.Header().Set("Content-Type", "application/json")
 
-		if strings.Contains(query, "issues(filter") {
+		if strings.Contains(query, "issue(id:") {
 			// Issue lookup response
-			fmt.Fprintln(w, `{"data":{"issues":{"nodes":[{"id":"issue-uuid","team":{"id":"team-uuid","name":"Eng"}}]}}}`)
+			fmt.Fprintln(w, `{"data":{"issue":{"id":"issue-uuid","team":{"id":"team-uuid","name":"Eng"}}}}`)
 		} else if strings.Contains(query, "workflowStates") {
 			fmt.Fprintln(w, `{"data":{"workflowStates":{"nodes":[{"id":"state-uuid","name":"Done","team":{"name":"Eng"}}]}}}`)
 		} else if strings.Contains(query, "issueUpdate") {
+			sawIssueUpdate = true
 			// Return success: false (application-level failure)
 			fmt.Fprintln(w, `{"data":{"issueUpdate":{"success":false,"issue":null}}}`)
 		} else {
@@ -151,6 +153,9 @@ func TestLinearCLI_IssueUpdate_MutationSuccessFalse(t *testing.T) {
 	got := runLinearCLI([]string{"issue", "update", "CAN-61", "--state=Done"})
 	if got != 1 {
 		t.Fatalf("expected exit 1 when mutation returns success=false, got %d", got)
+	}
+	if !sawIssueUpdate {
+		t.Fatal("expected test to reach issueUpdate mutation")
 	}
 }
 

@@ -51,6 +51,7 @@ var validExternalTriggerSources = map[string]bool{
 
 // repoRegex validates owner/repo format
 var repoRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
+var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
 
 // namePatternRegex validates that name_pattern only contains allowed placeholders.
 // Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
@@ -132,7 +133,7 @@ func (f *FactoryConfig) Validate() error {
 			return fmt.Errorf("factory %q: repos[%d] cannot be empty", f.Name, i)
 		}
 		// Allow wildcard patterns like "owner/*"
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("factory %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
@@ -140,7 +141,7 @@ func (f *FactoryConfig) Validate() error {
 		if repo == "" {
 			return fmt.Errorf("factory %q: trigger_repos[%d] cannot be empty", f.Name, i)
 		}
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("factory %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
@@ -177,7 +178,7 @@ func (w *WorkflowConfig) Validate() error {
 		if repo == "" {
 			return fmt.Errorf("workflow %q: repos[%d] cannot be empty", w.Name, i)
 		}
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("workflow %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
 		}
 	}
@@ -185,7 +186,7 @@ func (w *WorkflowConfig) Validate() error {
 		if repo == "" {
 			return fmt.Errorf("workflow %q: trigger_repos[%d] cannot be empty", w.Name, i)
 		}
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("workflow %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
 		}
 	}
@@ -223,11 +224,15 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 		if repo == "" {
 			return fmt.Errorf("workflow %q: trigger.repositories[%d] cannot be empty", workflowName, i)
 		}
-		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+		if !validRepoSelector(repo) {
 			return fmt.Errorf("workflow %q: trigger.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
 		}
 	}
 	return nil
+}
+
+func validRepoSelector(repo string) bool {
+	return repoRegex.MatchString(repo) || repoWildcardRegex.MatchString(repo)
 }
 
 func validateFactoryInput(factoryName string, index int, input FactoryInput) error {

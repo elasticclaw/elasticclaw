@@ -9,9 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
-	"log"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -296,7 +296,10 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP %s %s: read response body: %w", req.Method, req.URL.Path, err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, req.URL.Path, string(data))
 	}

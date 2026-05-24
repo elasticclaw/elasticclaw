@@ -41,6 +41,9 @@ func LoadHubConfig() (*types.HubConfig, error) {
 // Used to save config changes back to the right file.
 // Returns an error if no path can be determined.
 func ActiveHubConfigPath() (string, error) {
+	if env := os.Getenv("ELASTICCLAW_HUB_CONFIG"); env != "" {
+		return env, nil
+	}
 	for _, p := range hubConfigPaths() {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
