@@ -647,6 +647,13 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 				return
 			}
 		}
+		if workspacePath, ok := settingsWorkspaceStaticPath(p); ok {
+			if f, err := staticFS.Open(workspacePath); err == nil {
+				f.Close()
+				serveFile(w, r, workspacePath)
+				return
+			}
+		}
 		// Unknown path — serve root index.html (SPA fallback)
 		serveFile(w, r, "index.html")
 	})
@@ -655,6 +662,49 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 	// and on the API endpoints (withAuth middleware).
 	// Static HTML/JS/CSS files don't contain secrets so no server-side gate needed.
 	mux.Handle("/", fileServer)
+}
+
+func settingsWorkspaceStaticPath(requestPath string) (string, bool) {
+	p := strings.Trim(strings.TrimPrefix(requestPath, "/"), "/")
+	if p == "" {
+		return "", false
+	}
+	parts := strings.Split(p, "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] != "settings" {
+		return "", false
+	}
+	if parts[1] == "" || settingsStaticSection(parts[1]) || strings.HasPrefix(parts[1], "_") {
+		return "", false
+	}
+	if len(parts) == 2 {
+		return "settings/_workspace/index.html", true
+	}
+	if !settingsStaticSection(parts[2]) {
+		return "", false
+	}
+	return "settings/_workspace/" + parts[2] + "/index.html", true
+}
+
+func settingsStaticSection(section string) bool {
+	switch section {
+	case "runtimes",
+		"models",
+		"github",
+		"authentication",
+		"issue-trackers",
+		"workspaces",
+		"workflows",
+		"workspace-analytics",
+		"secrets",
+		"ai-config",
+		"mcp-servers",
+		"analytics",
+		"doctor",
+		"troubleshoot":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {

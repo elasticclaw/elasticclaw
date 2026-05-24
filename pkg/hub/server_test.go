@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -29,6 +30,46 @@ func TestSanitizeBootstrapOutputTruncatesLongOutput(t *testing.T) {
 	got := sanitizeBootstrapOutput(strings.Repeat("x", 1400))
 	if len(got) != 1200 {
 		t.Fatalf("expected output to be truncated to 1200 bytes, got %d", len(got))
+	}
+}
+
+func TestServeWebUIMapsWorkspaceSettingsRoutesToStaticPlaceholder(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	mux := http.NewServeMux()
+	s.serveWebUI(mux, fstest.MapFS{
+		"index.html":                                         &fstest.MapFile{Data: []byte("root")},
+		"settings/index.html":                                &fstest.MapFile{Data: []byte("settings-root")},
+		"settings/workflows/index.html":                      &fstest.MapFile{Data: []byte("legacy-workflows")},
+		"settings/_workspace/index.html":                     &fstest.MapFile{Data: []byte("workspace-overview")},
+		"settings/_workspace/issue-trackers/index.html":      &fstest.MapFile{Data: []byte("workspace-issue-trackers")},
+		"settings/_workspace/workspace-analytics/index.html": &fstest.MapFile{Data: []byte("workspace-analytics")},
+	})
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{path: "/settings/elasticclaw", want: "workspace-overview"},
+		{path: "/settings/elasticclaw/issue-trackers", want: "workspace-issue-trackers"},
+		{path: "/settings/elasticclaw/workspace-analytics", want: "workspace-analytics"},
+		{path: "/settings/workflows", want: "legacy-workflows"},
+		{path: "/settings/elasticclaw/nonexistent", want: "root"},
+		{path: "/settings/elasticclaw/runtimes", want: "root"},
+		{path: "/settings/elasticclaw/issue-trackers/extra", want: "root"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			mux.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			if got := rr.Body.String(); got != tt.want {
+				t.Fatalf("body = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
