@@ -1964,6 +1964,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
   const [copiedSetup, setCopiedSetup] = useState<string | null>(null)
+  const [githubSetupTab, setGithubSetupTab] = useState<"pat" | "webhook">("pat")
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -1981,7 +1982,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   }, [showAddMenu])
 
   const resetModal = () => {
-    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
+    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setGithubSetupTab("pat")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -2203,7 +2204,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
 
       {/* Unified Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
-        <DialogContent className="max-w-lg p-0 gap-0">
+        <DialogContent className={cn("p-0 gap-0", activeTrackerType === "github-issues" ? "sm:max-w-5xl w-[min(1100px,calc(100vw-2rem))]" : "max-w-lg")}>
           <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
@@ -2213,10 +2214,35 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
           </div>
           <div className="p-5 space-y-4">
               {activeTrackerType === "github-issues" ? (
-                <div className="space-y-4">
-                  <p className="text-sm text-muted-foreground">Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-lg border border-border p-4 space-y-3">
+                <div className="grid min-h-[420px] grid-cols-[240px_1fr]">
+                  <div className="-ml-5 -my-5 border-r border-border p-4">
+                    <div className="space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => setGithubSetupTab("pat")}
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          githubSetupTab === "pat" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        )}
+                      >
+                        GitHub PAT
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGithubSetupTab("webhook")}
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          githubSetupTab === "webhook" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        )}
+                      >
+                        Webhook
+                      </button>
+                    </div>
+                  </div>
+                  <div className="pl-5">
+                    <p className="text-sm text-muted-foreground">Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
+                    {githubSetupTab === "pat" ? (
+                    <div className="mt-4 space-y-4">
                       <div>
                         <h4 className="text-sm font-medium">GitHub PAT</h4>
                         <p className="text-xs text-muted-foreground mt-1">Used by ElasticClaw to read and update issues.</p>
@@ -2227,7 +2253,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
                         {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
                       </div>
                     </div>
-                    <div className="rounded-lg border border-border p-4 space-y-3">
+                    ) : (
+                    <div className="mt-4 space-y-4">
                       <div>
                         <h4 className="text-sm font-medium">Webhook</h4>
                         <p className="text-xs text-muted-foreground mt-1">Create a repo or org webhook for Issues events.</p>
@@ -2252,6 +2279,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
                         <p className="text-xs text-muted-foreground mt-1">Paste the same secret into the GitHub webhook Secret field.</p>
                       </div>
                     </div>
+                    )}
                   </div>
                 </div>
               ) : activeTrackerType === "linear" ? (
