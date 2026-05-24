@@ -1963,6 +1963,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   const [editType, setEditType] = useState<TrackerType>("linear")
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
+  const [copiedSetup, setCopiedSetup] = useState<string | null>(null)
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -2077,11 +2078,19 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
     : null
   const activeTrackerType = modalMode === "add" ? modalType : editType
   const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
+  const githubIssuesWebhookUrl = `${hubUrl}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
 
   function generateWebhookSecret() {
     const bytes = new Uint8Array(32)
     crypto.getRandomValues(bytes)
     setWebhookSecret(Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""))
+  }
+
+  function copySetupValue(value: string, key: string) {
+    navigator.clipboard.writeText(value).then(() => {
+      setCopiedSetup(key)
+      setTimeout(() => setCopiedSetup(null), 2000)
+    })
   }
 
   return (
@@ -2204,9 +2213,46 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
           </div>
           <div className="p-5 space-y-4">
               {activeTrackerType === "github-issues" ? (
-                <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
-                  <p>Create a webhook in either an org or a repo, depending on the scope you want. Use the GitHub Issues webhook URL from the Webhooks page, subscribe to Issues events, and paste the same secret below.</p>
+                <div className="space-y-4">
+                  <p className="text-sm text-muted-foreground">Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-lg border border-border p-4 space-y-3">
+                      <div>
+                        <h4 className="text-sm font-medium">GitHub PAT</h4>
+                        <p className="text-xs text-muted-foreground mt-1">Used by ElasticClaw to read and update issues.</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
+                        <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder="GitHub Issues API token" />
+                        {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border p-4 space-y-3">
+                      <div>
+                        <h4 className="text-sm font-medium">Webhook</h4>
+                        <p className="text-xs text-muted-foreground mt-1">Create a repo or org webhook for Issues events.</p>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Payload URL</label>
+                        <div className="flex gap-2">
+                          <Input readOnly value={githubIssuesWebhookUrl} className="h-9 text-xs font-mono" />
+                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(githubIssuesWebhookUrl, "github-url")}>
+                            {copiedSetup === "github-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                          </Button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
+                        <div className="flex gap-2">
+                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
+                          <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+                            Generate
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">Paste the same secret into the GitHub webhook Secret field.</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               ) : activeTrackerType === "linear" ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
@@ -2223,13 +2269,15 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
                   Connect {trackerTypeLabel(activeTrackerType)} for this workspace.
                 </p>
               )}
+              {activeTrackerType !== "github-issues" && (
+                <>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
                 <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(activeTrackerType)} API token`} />
                 {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret {activeTrackerType === "github-issues" ? null : <span className="text-muted-foreground/60">(optional)</span>}</label>
+                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
                 <div className="flex gap-2">
                   <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
                   {canGenerateWebhookSecret && (
@@ -2239,15 +2287,15 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {activeTrackerType === "github-issues"
-                    ? "Generate one here, then paste it into the GitHub webhook Secret field. Repo webhooks are best for one repository; org webhooks cover many repositories."
-                    : activeTrackerType === "linear"
+                  {activeTrackerType === "linear"
                     ? "Copy the signing secret from the Linear webhook settings and paste it here. Leave blank only if you intentionally want unsigned Linear webhooks."
                     : activeTrackerType === "shortcut"
                     ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
                     : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
                 </p>
               </div>
+                </>
+              )}
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">
               {modalMode === "edit" && editIdx !== null && (
