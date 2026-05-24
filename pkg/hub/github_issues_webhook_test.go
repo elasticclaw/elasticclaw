@@ -180,10 +180,16 @@ func TestGitHubIssuesWorkspaceWebhookIsIdempotentForSameIssue(t *testing.T) {
 	}
 	wg.Wait()
 
-	time.Sleep(100 * time.Millisecond)
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&count); err != nil {
-		t.Fatalf("count claws: %v", err)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&count); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if count > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if count != 1 {
 		t.Fatalf("created %d claws for the same GitHub issue, want 1", count)
