@@ -2269,7 +2269,10 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
 	if err := exec("uninstall old openclaw", 20*time.Second,
 		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-sudo "$NPM" uninstall -g openclaw 2>/dev/null || true; \
+PREFIX="$("$NPM" config get prefix)"; \
+echo "npm=$NPM prefix=$PREFIX"; \
+sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
+hash -r; \
 echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
@@ -2278,13 +2281,23 @@ echo uninstalled`); err != nil {
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
-sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1 && echo 'install done'`, daytonaOpenClawVersion)); err != nil {
+echo "npm=$NVM_DIR/current/bin/npm prefix=$PREFIX"; \
+sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
+hash -r; \
+echo 'install done'`, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-openclaw --version`); err != nil {
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+hash -r; \
+OPENCLAW_PATH="$(command -v openclaw || true)"; \
+OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
+PACKAGE_VERSION="$(node -e "try{console.log(require('$NVM_DIR/current/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
+echo "openclaw path=$OPENCLAW_PATH"; \
+echo "openclaw version=$OPENCLAW_VERSION"; \
+echo "openclaw package_version=$PACKAGE_VERSION"; \
+case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -2488,15 +2501,22 @@ ELASTICCLAW_EOF`,
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
+	var workspaceName string
+	var repositories []types.GitHubRepoAccess
+	var repositoriesJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(template,''), COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&workspaceName, &repositoriesJSON)
+	_ = json.Unmarshal([]byte(repositoriesJSON), &repositories)
 	s.mu.RLock()
-	hasGitHubApps := len(s.hubCfg.GitHubApps) > 0
+	hasHubGitHubApps := len(s.hubCfg.GitHubApps) > 0
 	s.mu.RUnlock()
+	hasWorkspaceGitHubApps := false
+	if workspaceName != "" {
+		if workspaceApps, err := loadWorkspaceGitHubAppConfigs(workspaceName); err == nil && len(workspaceApps) > 0 {
+			hasWorkspaceGitHubApps = true
+		}
+	}
+	hasGitHubApps := hasHubGitHubApps || hasWorkspaceGitHubApps
 	if hasGitHubApps {
-		var githubRepos []types.GitHubRepoAccess
-		var reposJSON string
-		_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
-		_ = json.Unmarshal([]byte(reposJSON), &githubRepos)
-
 		// Use the hub directly during bootstrap. The bridge is intentionally not
 		// started yet so startup cannot race ahead of template file writes and
 		// bootstrap_ok gating.
@@ -2585,7 +2605,7 @@ sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 			}
 
 			ghAuthScript := `export HOME=/home/daytona
-set -x
+set +x
 . /etc/profile.d/elasticclaw-github.sh
 command -v gh
 [ -n "$GH_TOKEN" ]
@@ -2602,12 +2622,12 @@ export GH_TOKEN="$TOKEN"`
 				return fmt.Errorf("auth gh cli: %w", ghAuthErr)
 			}
 			if ghAuthResult.ExitCode != 0 {
-				return fmt.Errorf("auth gh cli failed (exit %d): %s", ghAuthResult.ExitCode, ghAuthResult.Stdout)
+				return fmt.Errorf("auth gh cli failed (exit %d): %s", ghAuthResult.ExitCode, sanitizeBootstrapOutput(ghAuthResult.Stdout))
 			}
 			log.Printf("[daytona] auth gh cli done")
 
 			ghStatusScript := `export HOME=/home/daytona
-set -x
+set +x
 . /etc/profile.d/elasticclaw-github.sh
 gh auth status`
 			log.Printf("[daytona] verify gh auth (no retries)...")
@@ -2616,31 +2636,31 @@ gh auth status`
 				return fmt.Errorf("verify gh auth: %w", ghStatusErr)
 			}
 			if ghStatusResult.ExitCode != 0 {
-				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, ghStatusResult.Stdout)
+				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, sanitizeBootstrapOutput(ghStatusResult.Stdout))
 			}
-			if len(githubRepos) > 0 {
-				verifyReposScript := "export HOME=/home/daytona; . /etc/profile.d/elasticclaw-github.sh; set -x; "
-				for _, repo := range githubRepos {
+			if len(repositories) > 0 {
+				verifyReposScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; "
+				for _, repo := range repositories {
 					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", repo.Repo)
 				}
-				log.Printf("[daytona] verify configured github repos (no retries)...")
+				log.Printf("[daytona] verify configured repositories (no retries)...")
 				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
 				if verifyReposErr != nil {
-					return fmt.Errorf("verify configured github repos: %w", verifyReposErr)
+					return fmt.Errorf("verify configured repositories: %w", verifyReposErr)
 				}
 				if verifyReposResult.ExitCode != 0 {
-					return fmt.Errorf("verify configured github repos failed (exit %d): %s", verifyReposResult.ExitCode, verifyReposResult.Stdout)
+					return fmt.Errorf("verify configured repositories failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
 				}
 			}
 			log.Printf("[daytona] verify gh auth done")
 
-			log.Printf("[daytona] cloning %d repo(s) for claw %s", len(githubRepos), clawID)
-			for i, repo := range githubRepos {
-				log.Printf("[daytona] repo[%d]: %s", i, repo.Repo)
+			log.Printf("[daytona] cloning %d repositories for claw %s", len(repositories), clawID)
+			for i, repo := range repositories {
+				log.Printf("[daytona] repository[%d]: %s", i, repo.Repo)
 			}
 
 			cloneScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
-			for _, repo := range githubRepos {
+			for _, repo := range repositories {
 				repoParts := strings.SplitN(repo.Repo, "/", 2)
 				repoName := repo.Repo
 				if len(repoParts) == 2 {
@@ -2652,15 +2672,14 @@ gh auth status`
 			if cloneErr != nil {
 				return fmt.Errorf("clone repos: %w", cloneErr)
 			}
-			log.Printf("[daytona] clone repos stdout: %s", cloneResult.Stdout)
 			if cloneResult.ExitCode != 0 {
-				return fmt.Errorf("clone repos failed (exit %d): %s", cloneResult.ExitCode, cloneResult.Stdout)
+				return fmt.Errorf("clone repos failed (exit %d): %s", cloneResult.ExitCode, sanitizeBootstrapOutput(cloneResult.Stdout))
 			}
 			log.Printf("[daytona] clone repos done")
 
-			if len(githubRepos) > 0 {
+			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
-				for _, repo := range githubRepos {
+				for _, repo := range repositories {
 					repoParts := strings.SplitN(repo.Repo, "/", 2)
 					repoName := repo.Repo
 					if len(repoParts) == 2 {
@@ -2672,9 +2691,8 @@ gh auth status`
 				if verifyErr != nil {
 					return fmt.Errorf("verify cloned repos: %w", verifyErr)
 				}
-				log.Printf("[daytona] verify cloned repos stdout: %s", verifyResult.Stdout)
 				if verifyResult.ExitCode != 0 {
-					return fmt.Errorf("verify cloned repos failed (exit %d): %s", verifyResult.ExitCode, verifyResult.Stdout)
+					return fmt.Errorf("verify cloned repos failed (exit %d): %s", verifyResult.ExitCode, sanitizeBootstrapOutput(verifyResult.Stdout))
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}

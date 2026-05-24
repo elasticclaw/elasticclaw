@@ -149,9 +149,12 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		llmKey          string
 		nixEnabled      int
 		dockerEnabled   int
-		githubRepos     []types.GitHubRepoAccess
+		repositories    []types.GitHubRepoAccess
 		linearWorkspace string
 	)
+	if len(workspace.Repositories) > 0 {
+		repositories = append([]types.GitHubRepoAccess(nil), workspace.Repositories...)
+	}
 	if tmplCfg != nil {
 		instanceType = tmplCfg.InstanceType
 		llmKey = tmplCfg.LLMKey
@@ -163,11 +166,6 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 		if tmplCfg.Docker {
 			dockerEnabled = 1
-		}
-		if len(tmplCfg.Repositories) > 0 {
-			githubRepos = append([]types.GitHubRepoAccess(nil), tmplCfg.Repositories...)
-		} else if tmplCfg.GitHub != nil {
-			githubRepos = tmplCfg.GitHub.Repos
 		}
 		if tmplCfg.Linear != nil {
 			linearWorkspace = tmplCfg.Linear.Workspace
@@ -190,7 +188,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		tags = append(tags, "manual-trigger")
 	}
 	tagsJSON, _ := json.Marshal(tags)
-	githubReposJSON, _ := json.Marshal(githubRepos)
+	repositoriesJSON, _ := json.Marshal(repositories)
 
 	groupName, groupLimit := s.resolveWorkflowGroupLimit(workflow)
 	s.promoteMu.Lock()
@@ -207,7 +205,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
-		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
+		string(repositoriesJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
 		initialStatus, now, "", groupName,
 	)
 	s.promoteMu.Unlock()

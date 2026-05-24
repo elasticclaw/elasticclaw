@@ -862,8 +862,10 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				Stream     string `json:"stream"`
 				SessionKey string `json:"sessionKey"`
 				Data       struct {
-					Delta string `json:"delta"`
-					Phase string `json:"phase"`
+					Delta   string `json:"delta"`
+					Phase   string `json:"phase"`
+					Error   string `json:"error"`
+					Message string `json:"message"`
 				} `json:"data"`
 			}
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
@@ -886,9 +888,22 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					inf.onChunk(agentPayload.Data.Delta)
 				}
 			}
-			if agentPayload.Stream == "lifecycle" && agentPayload.Data.Phase == "end" {
-				log.Printf("[gateway] agent turn complete")
-				inf.done <- agentResult{text: strings.TrimSpace(inf.fullText.String())}
+			if agentPayload.Stream == "lifecycle" {
+				switch agentPayload.Data.Phase {
+				case "end":
+					log.Printf("[gateway] agent turn complete")
+					inf.done <- agentResult{text: strings.TrimSpace(inf.fullText.String())}
+				case "error":
+					msg := agentPayload.Data.Error
+					if msg == "" {
+						msg = agentPayload.Data.Message
+					}
+					if msg == "" {
+						msg = "agent lifecycle error"
+					}
+					log.Printf("[gateway] agent turn error: %s", msg)
+					inf.done <- agentResult{err: fmt.Errorf("%s", msg)}
+				}
 			}
 		}
 	}
