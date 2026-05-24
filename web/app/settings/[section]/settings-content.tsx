@@ -335,7 +335,7 @@ export default function SettingsSectionPage() {
             <AIConfigSection />
           )}
           {section === "webhooks" && (
-            <WebhooksSection hubUrl={hubPublicUrl} />
+            <WebhooksSection hubUrl={hubPublicUrl} selectedWorkspace={selectedWorkspace} />
           )}
           {section === "doctor" && (
             <DoctorSection />
@@ -2026,29 +2026,36 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
 
 
 
-function WebhooksSection({ hubUrl }: { hubUrl: string }) {
+function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; selectedWorkspace: string }) {
   const [copied, setCopied] = useState<string | null>(null)
+  const workspaceSlug = encodeURIComponent(selectedWorkspace)
+  const workspaceWebhookBase = hubUrl ? `${hubUrl}/api/workspaces/${workspaceSlug}/webhooks` : ""
 
   const urls = [
     {
       name: "Linear",
-      url: hubUrl ? `${hubUrl}/api/integrations/linear/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/linear` : "",
       hint: "Paste into Linear → Settings → API → Webhooks, subscribe to Issue events.",
     },
     {
       name: "Shortcut",
-      url: hubUrl ? `${hubUrl}/api/integrations/shortcut/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/shortcut` : "",
       hint: "Use Shortcut's API to register this webhook: POST /api/v3/webhooks with this URL.",
     },
     {
       name: "GitHub Issues",
-      url: hubUrl ? `${hubUrl}/api/integrations/github-issues/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/github-issues` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Issues events.",
     },
     {
       name: "GitHub (PRs)",
-      url: hubUrl ? `${hubUrl}/api/integrations/github/webhook` : "",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/github` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Pull requests and Issue comments.",
+    },
+    {
+      name: "External",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/external` : "",
+      hint: "Use for generic signed webhook events and release events.",
     },
   ]
 
@@ -2063,9 +2070,9 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Webhook URLs</h2>
+        <h2 className="text-base font-semibold mb-1">Webhooks</h2>
         <p className="text-sm text-muted-foreground mb-6">
-          Use these URLs to configure webhooks in your integrations.
+          Use these URLs to send events into the selected workspace.
         </p>
       </div>
 

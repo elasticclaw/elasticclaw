@@ -220,6 +220,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/integrations/external/webhook", s.handleExternalWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/linear", s.handleLinearWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github-issues", s.handleGitHubIssuesWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/shortcut", s.handleShortcutWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                    // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))     // POST manual trigger
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
