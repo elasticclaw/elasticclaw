@@ -238,28 +238,30 @@ export default function SettingsSectionPage() {
           <ChevronLeft className="size-4" />
         </Button>
         <h1 className="text-lg font-semibold">Configure</h1>
-        <div className="ml-4 flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Workspace</span>
-          <select
-            value={selectedWorkspace}
-            onChange={(event) => setSelectedWorkspace(event.target.value)}
-            className="h-9 min-w-44 rounded-md border border-border bg-background px-3 text-sm font-medium outline-none focus:border-primary"
-          >
-            {workspaces.length === 0 ? (
-              <option value="default">default</option>
-            ) : (
-              workspaces.map((workspace) => (
-                <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
-              ))
-            )}
-          </select>
-        </div>
         {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
+          <div className="mb-4 rounded-lg border border-border bg-secondary/30 p-3">
+            <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+              Workspace
+            </label>
+            <select
+              value={selectedWorkspace}
+              onChange={(event) => setSelectedWorkspace(event.target.value)}
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm font-medium outline-none focus:border-primary"
+            >
+              {workspaces.length === 0 ? (
+                <option value="default">default</option>
+              ) : (
+                workspaces.map((workspace) => (
+                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+                ))
+              )}
+            </select>
+          </div>
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
               <div key={group.label}>
@@ -1452,6 +1454,12 @@ function GitHubSection({ settings, onSave, saving }: { settings: SettingsData; o
 function AuthenticationSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
   const ghOAuth = settings.auth?.githubOAuth
   const ghAccess = settings.auth?.access
+  const ghAllowedUsers = ghOAuth?.allowedUsers || []
+  const ghAllowedOrgs = ghOAuth?.allowedOrgs || []
+  const ghAllowedTeams = ghOAuth?.allowedTeams || []
+  const ghAdmins = ghAccess?.admins || []
+  const ghViewRequiresTags = ghAccess?.viewRequiresTags || []
+  const ghInteractRequiresTags = ghAccess?.interactRequiresTags || []
 
   // Password card state
   const [newPw, setNewPw] = useState('')
@@ -1462,12 +1470,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   const [showGhForm, setShowGhForm] = useState(false)
   const [clientId, setClientId] = useState(ghOAuth?.clientId || '')
   const [clientSecret, setClientSecret] = useState('')
-  const [allowedUsers, setAllowedUsers] = useState((ghOAuth?.allowedUsers || []).join(', '))
-  const [allowedOrgs, setAllowedOrgs] = useState((ghOAuth?.allowedOrgs || []).join(', '))
-  const [allowedTeams, setAllowedTeams] = useState((ghOAuth?.allowedTeams || []).join(', '))
-  const [admins, setAdmins] = useState((ghAccess?.admins || []).join(', '))
-  const [viewTags, setViewTags] = useState((ghAccess?.viewRequiresTags || []).join(', '))
-  const [interactTags, setInteractTags] = useState((ghAccess?.interactRequiresTags || []).join(', '))
+  const [allowedUsers, setAllowedUsers] = useState(ghAllowedUsers.join(', '))
+  const [allowedOrgs, setAllowedOrgs] = useState(ghAllowedOrgs.join(', '))
+  const [allowedTeams, setAllowedTeams] = useState(ghAllowedTeams.join(', '))
+  const [admins, setAdmins] = useState(ghAdmins.join(', '))
+  const [viewTags, setViewTags] = useState(ghViewRequiresTags.join(', '))
+  const [interactTags, setInteractTags] = useState(ghInteractRequiresTags.join(', '))
   const [ghErr, setGhErr] = useState('')
 
   function handlePasswordSave() {
@@ -1514,12 +1522,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   function handleGitHubEdit() {
     setClientId(ghOAuth?.clientId || '')
     setClientSecret('')
-    setAllowedUsers((ghOAuth?.allowedUsers || []).join(', '))
-    setAllowedOrgs((ghOAuth?.allowedOrgs || []).join(', '))
-    setAllowedTeams((ghOAuth?.allowedTeams || []).join(', '))
-    setAdmins((ghAccess?.admins || []).join(', '))
-    setViewTags((ghAccess?.viewRequiresTags || []).join(', '))
-    setInteractTags((ghAccess?.interactRequiresTags || []).join(', '))
+    setAllowedUsers(ghAllowedUsers.join(', '))
+    setAllowedOrgs(ghAllowedOrgs.join(', '))
+    setAllowedTeams(ghAllowedTeams.join(', '))
+    setAdmins(ghAdmins.join(', '))
+    setViewTags(ghViewRequiresTags.join(', '))
+    setInteractTags(ghInteractRequiresTags.join(', '))
     setShowGhForm(true)
   }
 
@@ -1607,12 +1615,12 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
           <div className="border-t border-border pt-3 space-y-2 text-xs text-muted-foreground">
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client ID</span><span className="font-mono">{ghOAuth.clientId}</span></div>
             <div className="flex gap-2"><span className="font-medium text-foreground w-28">Client Secret</span><span>{ghOAuth.clientSecretSet ? '••••••••' : 'not set'}</span></div>
-            {ghAccess?.admins && ghAccess.admins.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Admins</span><span>{ghAccess.admins.join(', ')}</span></div>}
-            {ghOAuth.allowedUsers.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed users</span><span>{ghOAuth.allowedUsers.join(', ')}</span></div>}
-            {ghOAuth.allowedOrgs.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed orgs</span><span>{ghOAuth.allowedOrgs.join(', ')}</span></div>}
-            {ghOAuth.allowedTeams.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed teams</span><span>{ghOAuth.allowedTeams.join(', ')}</span></div>}
-            {ghAccess?.viewRequiresTags && ghAccess.viewRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">View tag filter</span><span className="font-mono">{ghAccess.viewRequiresTags.join(', ')}</span></div>}
-            {ghAccess?.interactRequiresTags && ghAccess.interactRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Interact tag filter</span><span className="font-mono">{ghAccess.interactRequiresTags.join(', ')}</span></div>}
+            {ghAdmins.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Admins</span><span>{ghAdmins.join(', ')}</span></div>}
+            {ghAllowedUsers.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed users</span><span>{ghAllowedUsers.join(', ')}</span></div>}
+            {ghAllowedOrgs.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed orgs</span><span>{ghAllowedOrgs.join(', ')}</span></div>}
+            {ghAllowedTeams.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Allowed teams</span><span>{ghAllowedTeams.join(', ')}</span></div>}
+            {ghViewRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">View tag filter</span><span className="font-mono">{ghViewRequiresTags.join(', ')}</span></div>}
+            {ghInteractRequiresTags.length > 0 && <div className="flex gap-2"><span className="font-medium text-foreground w-28">Interact tag filter</span><span className="font-mono">{ghInteractRequiresTags.join(', ')}</span></div>}
             <div className="flex gap-2 pt-1">
               <Button size="sm" variant="outline" onClick={handleGitHubEdit}>Edit</Button>
               <Button size="sm" variant="outline" onClick={handleGitHubRemove} className="text-destructive hover:text-destructive">Disable</Button>
@@ -2123,6 +2131,8 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
 
       {loading && visibleWorkspaces.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspace…</p>
+      ) : workspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces configured.</p>
       ) : visibleWorkspaces.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspace named {selectedWorkspace} is configured.</p>
       ) : (
