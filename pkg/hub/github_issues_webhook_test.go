@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +128,71 @@ func TestGitHubIssuesWorkspaceWebhookOnlyDispatchesThatWorkspace(t *testing.T) {
 	}
 	if total != 1 || workspaceA != 1 || workspaceB != 0 {
 		t.Fatalf("counts total=%d workspace-a=%d workspace-b=%d, want 1/1/0", total, workspaceA, workspaceB)
+	}
+}
+
+func TestGitHubIssuesWorkspaceWebhookIsIdempotentForSameIssue(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "secret"
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueWorkflowFixture(t, "workspace-a", "secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{Title: "Test Issue", Body: "Test body", State: "open"})
+	payload, _ := ghi.BuildWebhookPayload("testorg/testrepo", 42, "closed", "open")
+
+	var wg sync.WaitGroup
+	for _, deliveryID := range []string{"delivery-a", "delivery-b"} {
+		wg.Add(1)
+		go func(deliveryID string) {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/github-issues", strings.NewReader(string(payload)))
+			if err != nil {
+				t.Errorf("request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Hub-Signature-256", hmacSHA256(payload, "secret"))
+			req.Header.Set("X-GitHub-Delivery", deliveryID)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("post: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want 200", resp.StatusCode)
+			}
+		}(deliveryID)
+	}
+	wg.Wait()
+
+	var count int
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&count); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if count > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if count != 1 {
+		t.Fatalf("created %d claws for the same GitHub issue, want 1", count)
 	}
 }
 

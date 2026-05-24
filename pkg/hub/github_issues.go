@@ -395,6 +395,28 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		return nil
 	}
 
+	triggerKey := factoryTriggerKey("github-issues", issueID)
+	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
+	claimed, err := s.claimFactoryTrigger(triggerOwner, "github-issues", triggerKey, reason, map[string]string{
+		"issue_id":  issueID,
+		"source":    reason,
+		"workspace": workspace.Name,
+		"workflow":  workflow.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("claim workflow trigger: %w", err)
+	}
+	if !claimed {
+		log.Printf("[workflow:%s/%s] GitHub issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
+		return nil
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(triggerOwner, "github-issues", triggerKey)
+		}
+	}()
+
 	templateFiles := cloneStringMap(workspace.Files)
 	templateFiles["CONTEXT.md"] = buildGitHubIssuesContext(payload)
 
@@ -405,13 +427,21 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		clawName = strings.ReplaceAll(clawName, "{repo}", payload.Repository.FullName)
 	}
 
-	_, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		workspaceFiles: templateFiles,
 		clawName:       clawName,
 		githubIssueID:  issueID,
 		reason:         reason,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.completeFactoryTrigger(triggerOwner, "github-issues", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete workflow trigger: %w", err)
+	}
+	claimOpen = false
+	return nil
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
