@@ -34,7 +34,7 @@ func TestShortID(t *testing.T) {
 	}
 }
 
-func TestRunListHubHandlesShortClawID(t *testing.T) {
+func TestRunListHubHandlesShortAgentID(t *testing.T) {
 	oldJSONOut := jsonOut
 	oldListTag := listTag
 	jsonOut = false
@@ -56,7 +56,7 @@ func TestRunListHubHandlesShortClawID(t *testing.T) {
 			Status:   types.StatusRunning,
 		}}
 		if err := json.NewEncoder(w).Encode(claws); err != nil {
-			t.Fatalf("encode claws: %v", err)
+			t.Fatalf("encode agents: %v", err)
 		}
 	}))
 	defer server.Close()
@@ -72,7 +72,7 @@ func TestRunListHubHandlesShortClawID(t *testing.T) {
 	}
 }
 
-func TestRunFactoryTriggerHandlesShortClawID(t *testing.T) {
+func TestRunFactoryTriggerHandlesShortAgentID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/factories/demo/trigger" {
 			http.NotFound(w, r)
@@ -91,8 +91,8 @@ func TestRunFactoryTriggerHandlesShortClawID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runFactoryTrigger returned error: %v", err)
 	}
-	if !strings.Contains(out, "claw abc") {
-		t.Fatalf("output missing short claw ID: %q", out)
+	if !strings.Contains(out, "agent abc") {
+		t.Fatalf("output missing short agent ID: %q", out)
 	}
 }
 

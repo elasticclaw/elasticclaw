@@ -102,9 +102,9 @@ func runListHub(h *types.HubProfile) error {
 	}
 
 	if len(claws) == 0 {
-		fmt.Println("No claws registered.")
+		fmt.Println("No agents registered.")
 		fmt.Println()
-		fmt.Println("Claws register automatically when they start up.")
+		fmt.Println("Agents register automatically when they start up.")
 		return nil
 	}
 

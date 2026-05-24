@@ -876,7 +876,7 @@ func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 	i := payload.Issue
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
-	b.WriteString("This claw was automatically created by a factory to work on a GitHub issue. Read this, understand the task, then get to work.\n\n")
+	b.WriteString("This agent was automatically created by a factory to work on a GitHub issue. Read this, understand the task, then get to work.\n\n")
 	b.WriteString(fmt.Sprintf("## Issue: #%d\n\n", i.Number))
 	b.WriteString(fmt.Sprintf("**Title:** %s\n\n", i.Title))
 	b.WriteString(fmt.Sprintf("**Repository:** %s\n\n", payload.Repository.FullName))

@@ -1,6 +1,10 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
 
 // WorkspaceConfig defines a persisted workspace. Workflows live beside this
 // file in external storage and are loaded into Workflows at API boundaries.
@@ -42,8 +46,27 @@ type WorkflowConfig struct {
 	Repos               []string          `yaml:"repos,omitempty" json:"repos,omitempty"`
 	TriggerRepos        []string          `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
 	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
-	Jobs                []WorkflowJob     `yaml:"jobs,omitempty" json:"jobs,omitempty"`
+	Stages              []WorkflowStage   `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+}
+
+// UnmarshalYAML rejects removed workflow keys so old workflow files fail loudly
+// instead of silently loading without runtime stages.
+func (w *WorkflowConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "jobs" {
+				return fmt.Errorf("workflow uses removed key %q; rename it to %q", "jobs", "stages")
+			}
+		}
+	}
+	type workflowConfig WorkflowConfig
+	var decoded workflowConfig
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*w = WorkflowConfig(decoded)
+	return nil
 }
 
 // WorkflowTrigger defines the event source and filters for a workflow.
@@ -89,9 +112,9 @@ type ShortcutWorkflowTrigger struct {
 	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
 }
 
-// WorkflowJob is one step in a workflow state machine. It intentionally mirrors
+// WorkflowStage is one step in a workflow state machine. It intentionally mirrors
 // the persisted pipeline stage shape without making pkg/types depend on hub.
-type WorkflowJob struct {
+type WorkflowStage struct {
 	ID       string                   `yaml:"id" json:"id"`
 	Label    string                   `yaml:"label,omitempty" json:"label,omitempty"`
 	Entry    bool                     `yaml:"entry,omitempty" json:"entry,omitempty"`

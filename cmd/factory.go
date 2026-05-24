@@ -64,9 +64,9 @@ func factoryCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "factory name (slug, used as directory name) [required]")
 	cmd.Flags().StringVar(&integration, "integration", "linear", "integration type (linear, shortcut, github)")
 	cmd.Flags().StringVar(&workspace, "workspace", "", "workspace name (defaults to --name)")
-	cmd.Flags().StringVar(&triggerStatus, "trigger-status", "In Progress", "issue status that triggers claw creation")
-	cmd.Flags().StringVar(&doneStatus, "done-status", "In Review", "issue status set when claw sends [DONE]")
-	cmd.Flags().StringVar(&tmpl, "template", "elasticclaw", "claw template to use")
+	cmd.Flags().StringVar(&triggerStatus, "trigger-status", "In Progress", "issue status that triggers agent creation")
+	cmd.Flags().StringVar(&doneStatus, "done-status", "In Review", "issue status set when agent sends [DONE]")
+	cmd.Flags().StringVar(&tmpl, "template", "elasticclaw", "agent template to use")
 	return cmd
 }
 
@@ -83,7 +83,7 @@ func runFactoryCreate(name, integration, workspace, triggerStatus, doneStatus, t
 		factoryYAML = fmt.Sprintf(`name: %s
 integration: github-issues
 workspace: %s
-trigger_status: "claw-ready"   # label name or issue state ("open")
+trigger_status: "agent-ready"  # label name or issue state ("open")
 # labels: [bug]                # ALL labels must be present (AND)
 # assigned_to: "@username"      # or !@username, any, none
 # allowed_labelers:             # restrict who can trigger by labeling
@@ -129,7 +129,7 @@ stages:
 integration: %s
 workspace: %s
 trigger_status: %q
-# labels: [bug, claw-ready]
+# labels: [bug, agent-ready]
 # assigned_to: "@username"  # or !@username, any, none
 webhook_secret_ref: %s_webhook_secret
 
@@ -137,8 +137,8 @@ template: %s
 `, name, integration, workspace, triggerStatus, name, tmpl)
 
 		pipelineYAML = fmt.Sprintf(`# Pipeline for %s
-# Stages define the lifecycle of a factory claw.
-# The hub is the state machine — it injects instructions into the claw at each stage.
+# Stages define the lifecycle of a factory-created agent.
+# ElasticClaw Server is the state machine — it injects instructions into the agent at each stage.
 
 stages:
   - id: working
@@ -481,7 +481,7 @@ func runFactoryTrigger(name string, inputs []string) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
-	fmt.Printf("Triggered factory %q → claw %s (%s)\n", name, shortID(result.ClawID), result.Status)
+	fmt.Printf("Triggered factory %q → agent %s (%s)\n", name, shortID(result.ClawID), result.Status)
 	return nil
 }
 
@@ -535,7 +535,7 @@ func resolveHubConn() (hubURL, clawToken string, err error) {
 		return "", "", fmt.Errorf("hub URL not set — use ELASTICCLAW_HUB_URL or configure with `elasticclaw hub init`")
 	}
 	if clawToken == "" {
-		return "", "", fmt.Errorf("claw token not set — use ELASTICCLAW_CLAW_TOKEN or configure with `elasticclaw hub init`")
+		return "", "", fmt.Errorf("agent token not set — use ELASTICCLAW_CLAW_TOKEN or configure with `elasticclaw hub init`")
 	}
 	return hubURL, clawToken, nil
 }

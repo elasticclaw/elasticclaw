@@ -420,23 +420,23 @@ func sanitizeAIChatHistory(history []aiChatMessage) []aiChatMessage {
 	return msgs
 }
 
-const aiConfigSystemPromptTemplate = `You are a configuration assistant for ElasticClaw hub. You help users configure their hub.yaml.
+const aiConfigSystemPromptTemplate = `You are a configuration assistant for ElasticClaw Server. You help users configure their hub.yaml.
 
 The current hub.yaml (with secrets masked as ***) is:
 ---
 %s
 ---
 
-Hub.yaml schema overview:
-- url: public URL of the hub
+hub.yaml schema overview:
+- url: public URL of ElasticClaw Server
 - token: web UI password (shared secret)
-- claw_token: token claws use to connect (required)
+- claw_token: token agents use to connect (required)
 - default_model: default LLM model (e.g. "anthropic/claude-sonnet-4-6")
 - providers: daytona, replicated, exedev sandbox providers
 - github: list of GitHub App configs (app_id, private_key_pem, url)
 - integrations: linear, shortcut workspace tokens and webhook secrets
 - llm_keys: [{name, provider, api_key, default: bool}]
-- ssh_public_keys: list of SSH public keys allowed for claw access
+- ssh_public_keys: list of SSH public keys allowed for agent access
 - secrets: named secrets map (used by factory webhook_secret_ref)
 - auth: github_oauth config and access control (view/interact tag requirements)
 

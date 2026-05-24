@@ -13,8 +13,8 @@ import (
 
 var templatePushCmd = &cobra.Command{
 	Use:   "push [name-or-path]",
-	Short: "Push a template to the hub",
-	Long: `Push a template to the connected hub so it can be used by factories and remote claw creation.
+	Short: "Push a template to ElasticClaw Server",
+	Long: `Push a template to the connected ElasticClaw Server so it can be used by factories and remote agent creation.
 
 Push a local template by name:
   elasticclaw template push elasticclaw-dev
@@ -22,7 +22,7 @@ Push a local template by name:
 Push a template from a specific directory:
   elasticclaw template push ./my-template
 
-Push a template from the public registry to the hub:
+Push a template from the public registry to ElasticClaw Server:
   elasticclaw template push base`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTemplatePush,

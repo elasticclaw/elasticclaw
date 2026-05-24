@@ -14,7 +14,7 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
 
   const handleConnect = () => {
     if (!hubUrl.trim() || !hubToken.trim()) {
-      setError("Both Hub URL and Token are required")
+      setError("Both ElasticClaw Server URL and token are required")
       return
     }
     saveConfig(hubUrl.trim(), hubToken.trim())
@@ -25,18 +25,18 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
     <div className="flex h-screen bg-background items-center justify-center">
       <div className="w-full max-w-md p-8 space-y-6">
         <div className="space-y-2">
-          <h1 className="text-2xl font-bold">Connect to Hub</h1>
+          <h1 className="text-2xl font-bold">Connect to ElasticClaw Server</h1>
           <p className="text-sm text-muted-foreground">
-            Enter your ElasticClaw Hub URL and authentication token to get started.
+            Enter your ElasticClaw Server URL and authentication token to get started.
           </p>
         </div>
 
         <div className="space-y-4">
           <Field>
-            <FieldLabel htmlFor="hub-url">Hub URL</FieldLabel>
+            <FieldLabel htmlFor="hub-url">ElasticClaw Server URL</FieldLabel>
             <Input
               id="hub-url"
-              placeholder="http://your-hub-host:8080"
+              placeholder="http://your-server-host:8080"
               value={hubUrl}
               onChange={(e) => setHubUrl(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleConnect()}

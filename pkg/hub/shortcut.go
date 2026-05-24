@@ -718,7 +718,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 func buildShortcutContext(action shortcutAction, storyID string) string {
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
-	b.WriteString("This claw was automatically created by a factory to work on a Shortcut story.\n\n")
+	b.WriteString("This agent was automatically created by a factory to work on a Shortcut story.\n\n")
 	b.WriteString(fmt.Sprintf("## Story: %s\n\n", storyID))
 	b.WriteString(fmt.Sprintf("**Title:** %s\n\n", action.Name))
 	if action.AppURL != "" {

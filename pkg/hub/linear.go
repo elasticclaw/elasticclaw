@@ -1013,7 +1013,7 @@ func buildLinearContext(payload linearWebhookPayload) string {
 	d := payload.Data
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
-	b.WriteString("This claw was automatically created by a factory to work on a Linear issue. Read this, understand the task, then get to work.\n\n")
+	b.WriteString("This agent was automatically created by a factory to work on a Linear issue. Read this, understand the task, then get to work.\n\n")
 	b.WriteString(fmt.Sprintf("## Issue: %s\n\n", d.Identifier))
 	b.WriteString(fmt.Sprintf("**Title:** %s\n\n", d.Title))
 	if d.URL != "" {

@@ -22,7 +22,7 @@ trigger:
       - agent-ready
     labelers:
       - "*"
-jobs:
+stages:
   - id: working
     entry: true
     on_enter:
@@ -59,7 +59,7 @@ trigger:
     labels:
       - agent-ready
     assigned_to: marc
-jobs:
+stages:
   - id: working
     entry: true
     on_enter:
@@ -93,5 +93,24 @@ jobs:
 	}
 	if !strings.Contains(workflow.PipelineYAML, "move_issue:") {
 		t.Fatalf("pipeline yaml did not contain move_issue: %q", workflow.PipelineYAML)
+	}
+}
+
+func TestWorkflowConfigRejectsJobsKey(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: github-issue
+jobs:
+  - id: working
+    entry: true
+`)
+
+	var workflow WorkflowConfig
+	err := yaml.Unmarshal(data, &workflow)
+	if err == nil {
+		t.Fatal("yaml.Unmarshal() expected error for jobs key")
+	}
+	if !strings.Contains(err.Error(), `rename it to "stages"`) {
+		t.Fatalf("yaml.Unmarshal() error = %v, want stages guidance", err)
 	}
 }

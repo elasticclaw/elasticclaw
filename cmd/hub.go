@@ -13,18 +13,18 @@ import (
 )
 
 var (
-	hubAddr        string
-	hubDBPath      string
-	hubToken       string
-	hubClawToken   string
-	hubUIPassword     string
-	hubNoWebUI     bool
+	hubAddr       string
+	hubDBPath     string
+	hubToken      string
+	hubClawToken  string
+	hubUIPassword string
+	hubNoWebUI    bool
 )
 
 var hubCmd = &cobra.Command{
 	Use:   "hub",
-	Short: "Run the ElasticClaw hub server",
-	Long: `Start the ElasticClaw hub — the control plane that claws register with and clients connect to.
+	Short: "Run the ElasticClaw Server",
+	Long: `Start ElasticClaw Server — the control plane that agents register with and clients connect to.
 
 For first-time setup, provide --token and --claw-token to create the default tenant:
 
@@ -41,7 +41,7 @@ func init() {
 	hubCmd.Flags().StringVar(&hubAddr, "addr", ":8080", "address to listen on")
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
-	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "claw authentication token (required with --token)")
+	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "agent authentication token (required with --token)")
 	hubCmd.Flags().StringVar(&hubUIPassword, "ui-token", "", "web UI login password (default: value from hub.yaml ui_password, or 'admin')")
 	hubCmd.Flags().BoolVar(&hubNoWebUI, "no-web-ui", false, "disable embedded web UI (use when running Next.js dev server separately)")
 }
@@ -156,7 +156,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("ElasticClaw Hub\n")
+	fmt.Printf("ElasticClaw Server\n")
 	fmt.Printf("  Address:    %s\n", hubAddr)
 	fmt.Printf("  Database:   %s\n", dbPath)
 	if hubCfg.URL != "" {
@@ -165,7 +165,12 @@ func runHub(cmd *cobra.Command, args []string) error {
 	if hubCfg.PublicURL != "" {
 		fmt.Printf("  Public URL: %s\n", hubCfg.PublicURL)
 	}
-	fmt.Printf("  Claw token: %s\n", func() string { if hubCfg.ClawToken != "" { return "(set)" }; return "(not set)" }())
+	fmt.Printf("  Agent token: %s\n", func() string {
+		if hubCfg.ClawToken != "" {
+			return "(set)"
+		}
+		return "(not set)"
+	}())
 	fmt.Println()
 
 	if len(hubCfg.Providers) == 0 {

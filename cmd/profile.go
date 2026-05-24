@@ -3,9 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"text/tabwriter"
-	"os"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -14,14 +14,14 @@ import (
 
 var profileCmd = &cobra.Command{
 	Use:   "profile",
-	Short: "Manage hub profiles",
-	Long: `Manage ElasticClaw hub profiles.
+	Short: "Manage server profiles",
+	Long: `Manage ElasticClaw Server profiles.
 
-A profile stores connection details (URL + token) for one hub.
+A profile stores connection details (URL + token) for one ElasticClaw Server.
 You can have multiple profiles and switch between them.
 
   elasticclaw profile ls
-  elasticclaw profile create work --url https://hub2.example.com --token mytoken
+  elasticclaw profile create work --url https://server2.example.com --token mytoken
   elasticclaw profile use work
   elasticclaw profile rename work prod
   elasticclaw profile rm work

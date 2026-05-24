@@ -23,9 +23,9 @@ var (
 )
 
 var chatCmd = &cobra.Command{
-	Use:   "chat <claw-id-or-name> [message]",
-	Short: "Send messages to a claw",
-	Long: `Send messages to a running claw.
+	Use:   "chat <agent-id-or-name> [message]",
+	Short: "Send messages to an agent",
+	Long: `Send messages to a running agent.
 
 One-shot:
   elasticclaw chat support-01 "what's the status?"
@@ -50,7 +50,7 @@ func runChat(cmd *cobra.Command, args []string) error {
 	return runChatDirect(target, args[1:])
 }
 
-// ─── Hub chat ─────────────────────────────────────────────────────────────────
+// ─── Server chat ──────────────────────────────────────────────────────────────
 
 func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 	client := hub.NewClient(h.URL, h.Token)
@@ -77,7 +77,7 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 			for _, m := range msgs {
 				prefix := "You"
 				if m.Role == "claw" {
-					prefix = "Claw"
+					prefix = "Agent"
 				}
 				fmt.Printf("[%s] %s: %s\n", m.CreatedAt.Format(time.Kitchen), prefix, m.Content)
 			}
@@ -117,7 +117,7 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 			func(chunk string) {
 				// Synchronously erase spinner and print prefix on first chunk
 				if clearSpinner() {
-					fmt.Print("Claw: ")
+					fmt.Print("Agent: ")
 				}
 				fmt.Print(chunk)
 			},
@@ -175,7 +175,7 @@ func runChatHub(h *types.HubProfile, clawID string, rest []string) error {
 	}
 
 	// Interactive
-	fmt.Printf("Chat with %s via hub (Ctrl+D to exit)\n\n", clawID)
+	fmt.Printf("Chat with %s via ElasticClaw Server (Ctrl+D to exit)\n\n", clawID)
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("> ")

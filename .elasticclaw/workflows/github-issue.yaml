@@ -15,7 +15,7 @@ trigger:
 
 concurrency_group: ddd
 
-jobs:
+stages:
   - id: working
     label: Working
     entry: true

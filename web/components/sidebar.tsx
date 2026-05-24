@@ -212,7 +212,7 @@ export function Sidebar({
               variant="ghost"
               size="icon"
               className="size-8"
-              title="Create Claw"
+              title="Create Agent"
               onClick={() => {
                 if (manualWorkflows.length === 1) {
                   onSelectWorkflow?.(manualWorkflows[0])
@@ -279,7 +279,7 @@ export function Sidebar({
               variant="ghost"
               size="icon"
               className="size-8"
-              title="Create Claw"
+              title="Create Agent"
               onClick={() => {
                 if (manualWorkflows.length === 1) {
                   onSelectWorkflow?.(manualWorkflows[0])
@@ -410,13 +410,13 @@ export function Sidebar({
             {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
               <div className="flex items-center gap-1.5 px-2 py-2">
                 <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  All Claws
+                  All Agents
                 </span>
               </div>
             )}
             {claws.length === 0 && pinnedClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
-                No claws found
+                No agents found
               </p>
             ) : (
               <SortableContext

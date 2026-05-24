@@ -3349,7 +3349,7 @@ func (s *Server) checkClawStatus() {
 			now.Sub(lastStatusAt) > 5*time.Minute &&
 			now.Sub(lastUserMessageAt) > 5*time.Minute &&
 			now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
-			msg := fmt.Sprintf("🚨 Claw %s appears unresponsive (no status in 5m). It may have crashed.", name)
+			msg := fmt.Sprintf("🚨 Agent %s appears unresponsive (no status in 5m). It may have crashed.", name)
 			log.Printf("[watchdog] %s", msg)
 			// Inject as system message so user sees it in the chat stream
 			s.broadcastToUsers(tenantID, types.WSMessage{
@@ -3372,7 +3372,7 @@ func (s *Server) checkClawStatus() {
 		streaming := !cc.streamingStartedAt.IsZero()
 		cc.mu.RUnlock()
 		if contextUsage > 90 && !contextWarningSent && !streaming {
-			msg := fmt.Sprintf("⚠️ Claw %s is at %d%% context usage. It should wrap up soon or restart.", name, contextUsage)
+			msg := fmt.Sprintf("⚠️ Agent %s is at %d%% context usage. It should wrap up soon or restart.", name, contextUsage)
 			log.Printf("[watchdog] %s", msg)
 			s.broadcastToUsers(tenantID, types.WSMessage{
 				Type: "message",
@@ -3705,7 +3705,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
 
-This claw has authenticated access to the following repositories via a GitHub App installation token. The token is fetched automatically — you don't need to configure anything.
+This agent has authenticated access to the following repositories via a GitHub App installation token. The token is fetched automatically — you don't need to configure anything.
 
 %s
 **git** and **gh CLI** are pre-configured and will work without any additional auth setup:

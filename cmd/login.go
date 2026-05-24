@@ -11,8 +11,8 @@ import (
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Connect the CLI to an ElasticClaw hub",
-	Long: `Configure the CLI to talk to an ElasticClaw hub.
+	Short: "Connect the CLI to ElasticClaw Server",
+	Long: `Configure the CLI to talk to ElasticClaw Server.
 
   elasticclaw login --hub https://hub.example.com --token mytoken
   elasticclaw login --hub https://hub.example.com --token mytoken --profile work`,

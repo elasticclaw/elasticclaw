@@ -280,7 +280,7 @@ func runWorkflowTrigger(workspace, name string, inputs []string) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
-	fmt.Printf("Triggered workflow %q in workspace %q -> claw %s (%s)\n", name, workspace, shortID(result.ClawID), result.Status)
+	fmt.Printf("Triggered workflow %q in workspace %q -> agent %s (%s)\n", name, workspace, shortID(result.ClawID), result.Status)
 	return nil
 }
 

@@ -195,7 +195,7 @@ You are %s.
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Printf("  1. Edit .elasticclaw/templates/%s/SOUL.md and AGENTS.md\n", name)
-	fmt.Printf("  2. elasticclaw create --name my-claw --template %s\n", name)
+	fmt.Printf("  2. elasticclaw create --name my-agent --template %s\n", name)
 
 	return nil
 }

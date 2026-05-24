@@ -6,7 +6,7 @@ const figmaAPIEnvVar = "FIGMA_API_KEY"
 
 const figmaAPIMarkdown = `# Figma API
 
-This claw has access to the Figma REST API through the ` + "`FIGMA_API_KEY`" + ` environment variable.
+This agent has access to the Figma REST API through the ` + "`FIGMA_API_KEY`" + ` environment variable.
 
 Use the token only through request headers. Do not print it, write it to files, include it in logs, or commit it.
 
