@@ -194,9 +194,9 @@ func (s *Server) pollAllPRs() {
 			continue
 		}
 
-		factory, issueID := s.findFactoryForClaw(r.pr.clawID)
-		isPipelineDriven := factory != nil && parsePipelineForFactory(factory) != nil
-		log.Printf("[pr-watcher] claw=%s factory=%v pipelineDriven=%v", r.pr.clawID[:8], factory != nil, isPipelineDriven)
+		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(r.pr.clawID)
+		isPipelineDriven := hasPipelineCtx && parsePipelineForContext(pipelineCtx) != nil
+		log.Printf("[pr-watcher] claw=%s pipeline=%s pipelineDriven=%v", r.pr.clawID[:8], pipelineCtx.Name(), isPipelineDriven)
 
 		// Check if PR is merged/closed for any non-terminal claw status.
 		if s.checkPRMerged(r.pr, token) {
@@ -237,9 +237,9 @@ func (s *Server) pollAllPRs() {
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
 		if isPipelineDriven && !r.pr.prConditionsFired {
-			if stage := s.checkPRConditions(r.pr, token, factory); stage != nil {
+			if stage := s.checkPRConditions(r.pr, token, pipelineCtx); stage != nil {
 				_, _ = s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, r.pr.id)
-				s.transitionPipelineStage(r.pr.clawID, *stage, factory, issueID)
+				s.transitionPipelineStageWithContext(r.pr.clawID, *stage, pipelineCtx)
 			}
 		}
 	}
@@ -852,18 +852,17 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
-		// Track analytics for PR close
-		factory, issueID := s.findFactoryForClaw(clawID)
-		if factory != nil {
-			s.trackPRClosed(factory.Name, issueID, clawID, pr.repo, pr.prNumber)
+		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
+		if hasPipelineCtx {
+			s.trackPRClosed(pipelineCtx.Name(), pipelineCtx.IssueID, clawID, pr.repo, pr.prNumber)
 		}
 
 		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		pipelineHandled := false
-		if factory != nil {
-			if pl := parsePipelineForFactory(factory); pl != nil {
+		if hasPipelineCtx {
+			if pl := parsePipelineForContext(pipelineCtx); pl != nil {
 				if stage := pl.StageForPRClosed(); stage != nil {
-					s.transitionPipelineStage(clawID, *stage, factory, issueID)
+					s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 					if stage.Terminal {
 						_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 						pipelineHandled = true
@@ -881,17 +880,17 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	// Track analytics for PR merge
-	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
-	if mergeFactory != nil {
-		s.trackPRMerged(mergeFactory.Name, mergeIssueID, clawID, pr.repo, pr.prNumber)
+	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
+	if hasMergeCtx {
+		s.trackPRMerged(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber)
 	}
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	pipelineHandled := false
-	if mergeFactory != nil {
-		if pl := parsePipelineForFactory(mergeFactory); pl != nil {
+	if hasMergeCtx {
+		if pl := parsePipelineForContext(mergeCtx); pl != nil {
 			if stage := pl.StageForPRMerged(); stage != nil {
-				s.transitionPipelineStage(clawID, *stage, mergeFactory, mergeIssueID)
+				s.transitionPipelineStageWithContext(clawID, *stage, mergeCtx)
 				if stage.Terminal {
 					pipelineHandled = true
 				}
@@ -899,6 +898,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		}
 	}
 
+	mergeFactory, mergeIssueID := s.findFactoryForClaw(clawID)
 	// Move the issue to DoneStatus if configured (final status after PR merge)
 	// Skip if pipeline already handled it (mirrors handleClawDoneSignal pattern)
 	if !pipelineHandled && mergeFactory != nil && mergeFactory.DoneStatus != "" {
@@ -984,11 +984,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 // checkPRConditions evaluates the pr_conditions trigger for a given PR.
 // Returns the matching stage if ALL conditions pass, nil otherwise.
-func (s *Server) checkPRConditions(pr clawPR, token string, factory *types.FactoryConfig) *pipeline.Stage {
-	if factory == nil {
-		return nil
-	}
-	pl := parsePipelineForFactory(factory)
+func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext) *pipeline.Stage {
+	pl := parsePipelineForContext(ctx)
 	if pl == nil {
 		return nil
 	}

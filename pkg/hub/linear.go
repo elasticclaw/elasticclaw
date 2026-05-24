@@ -1074,21 +1074,31 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
 	}
 
-	// Find the factory config for this issue
+	pipelineHandledDone := false
+	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
+		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
+			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+				pipelineHandledDone = true
+			}
+		}
+	}
+
+	// Legacy factory status handling remains for factory-created claws.
 	factory := s.findFactoryForIssue(issueID)
 	if factory == nil {
 		return
 	}
-
-	// Track analytics for done signal
-	s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
-
-	// Check if the pipeline handles the [DONE] signal
-	pipelineHandledDone := false
-	if pl := parsePipelineForFactory(factory); pl != nil {
-		if stage := pl.StageForMessageContains(rawMessage); stage != nil {
-			s.transitionPipelineStage(clawID, *stage, factory, issueID)
-			pipelineHandledDone = true
+	if !pipelineHandledDone {
+		s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
+	}
+	if !pipelineHandledDone {
+		if pl := parsePipelineForFactory(factory); pl != nil {
+			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+				s.transitionPipelineStage(clawID, *stage, factory, issueID)
+				pipelineHandledDone = true
+			}
 		}
 	}
 
@@ -1394,10 +1404,6 @@ func (s *Server) factoryFromTags(tags []string, factories []*types.FactoryConfig
 				return factory
 			}
 		}
-	}
-	workspaceName, workflowName := workflowTags(tags)
-	if workspaceName != "" && workflowName != "" {
-		return s.workflowPipelineFactory(workspaceName, workflowName)
 	}
 	return nil
 }

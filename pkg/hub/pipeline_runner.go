@@ -194,15 +194,145 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 	return p
 }
 
+type pipelineContext struct {
+	Factory   *types.FactoryConfig
+	Workspace *types.WorkspaceConfig
+	Workflow  *types.WorkflowConfig
+	IssueID   string
+}
+
+func (ctx pipelineContext) Name() string {
+	if ctx.Workflow != nil && ctx.Workspace != nil {
+		return "workflow:" + ctx.Workspace.Name + "/" + ctx.Workflow.Name
+	}
+	if ctx.Factory != nil {
+		return "factory:" + ctx.Factory.Name
+	}
+	return "pipeline"
+}
+
+func (ctx pipelineContext) Integration() string {
+	if ctx.Workflow != nil {
+		return ctx.Workflow.Integration
+	}
+	if ctx.Factory != nil {
+		return ctx.Factory.Integration
+	}
+	return ""
+}
+
+func (ctx pipelineContext) TrackerName() string {
+	if ctx.Workflow != nil {
+		return ctx.Workflow.Workspace
+	}
+	if ctx.Factory != nil {
+		return ctx.Factory.Workspace
+	}
+	return ""
+}
+
+func (ctx pipelineContext) PipelineYAML() string {
+	if ctx.Workflow != nil {
+		return ctx.Workflow.PipelineYAML
+	}
+	if ctx.Factory != nil {
+		return ctx.Factory.PipelineYAML
+	}
+	return ""
+}
+
+func parsePipelineForContext(ctx pipelineContext) *pipeline.Pipeline {
+	pipelineYAML := ctx.PipelineYAML()
+	if pipelineYAML == "" {
+		return nil
+	}
+	p, err := pipeline.Parse([]byte(pipelineYAML))
+	if err != nil {
+		log.Printf("[pipeline] %s: failed to parse pipeline yaml: %v", ctx.Name(), err)
+		log.Printf("[pipeline] %s: pipeline yaml content:\n%s", ctx.Name(), pipelineYAML)
+		return nil
+	}
+	return p
+}
+
+func (s *Server) warnPipelineRender(clawID, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[pipeline] %s", msg)
+	s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+}
+
+func renderInjectWithData(clawID, injectMsg string, data interface{}) string {
+	tmpl, err := template.New("inject").Parse(injectMsg)
+	if err != nil {
+		log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
+		return injectMsg
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
+		return injectMsg
+	}
+	return buf.String()
+}
+
+func fallbackGitHubIssueDetails(issueID string) *githubIssueDetails {
+	details := &githubIssueDetails{Identifier: issueID}
+	parts := strings.Split(issueID, "/")
+	if len(parts) == 3 {
+		details.Identifier = "#" + parts[2]
+		details.URL = fmt.Sprintf("https://github.com/%s/%s/issues/%s", parts[0], parts[1], parts[2])
+	}
+	return details
+}
+
+func (s *Server) resolveLinearTokenForPipeline(ctx pipelineContext) string {
+	if ctx.Workflow != nil && ctx.Workspace != nil {
+		if tracker, ok := findWorkspaceIssueTracker(ctx.Workspace.Name, "linear", ctx.Workflow.Workspace); ok {
+			return tracker.Token
+		}
+		return ""
+	}
+	if ctx.Factory != nil {
+		return s.resolveLinearTokenForFactory(ctx.Factory)
+	}
+	return ""
+}
+
+func (s *Server) resolveShortcutTokenForPipeline(ctx pipelineContext) string {
+	if ctx.Workflow != nil && ctx.Workspace != nil {
+		if tracker, ok := findWorkspaceIssueTracker(ctx.Workspace.Name, "shortcut", ctx.Workflow.Workspace); ok {
+			return tracker.Token
+		}
+		return ""
+	}
+	if ctx.Factory != nil {
+		return s.resolveShortcutToken(ctx.Factory.Workspace)
+	}
+	return ""
+}
+
+func (s *Server) resolveGitHubIssuesTokenForPipeline(ctx pipelineContext) string {
+	if ctx.Workflow != nil && ctx.Workspace != nil {
+		if tracker, ok := findWorkspaceIssueTracker(ctx.Workspace.Name, "github-issues", ctx.Workflow.Workspace); ok {
+			return tracker.Token
+		}
+		return ""
+	}
+	if ctx.Factory != nil {
+		return s.resolveGitHubIssuesTokenForFactory(ctx.Factory)
+	}
+	return ""
+}
+
 // runOnEnter executes the on_enter actions for a given stage.
 //
 // - stage.OnEnter.Inject: injects a user message into the claw
 // - stage.OnEnter.MoveIssue: moves the Linear/Shortcut issue to the named status
 //
-// factory is required for MoveIssue; if nil the move is skipped silently.
-// issueID is the default issue from the factory/webhook; it can be overridden
-// by MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
-func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
+// issueID is the default issue from the trigger; it can be overridden by
+// MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
+func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) {
+	issueID := ctx.IssueID
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
 
@@ -210,30 +340,29 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
 		if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
 			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
-			linearToken := s.resolveLinearTokenForFactory(factory)
+			linearToken := s.resolveLinearTokenForPipeline(ctx)
 			if linearToken == "" {
-				log.Printf("[pipeline] no linear token for factory %q, putting claw in error state", factory.Name)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no linear token for factory %s", factory.Name), false)
-				return
+				s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
+				injectMsg = renderInjectWithData(clawID, injectMsg, struct {
+					Issue *linearIssueDetails
+				}{Issue: &linearIssueDetails{Identifier: issueID}})
+				goto injectMessage
 			}
 			details, err := s.fetchLinearIssueDetails(linearToken, issueID)
 			if err != nil {
-				log.Printf("[pipeline] fetchLinearIssueDetails FAILED for %s: %v", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
+				details = &linearIssueDetails{Identifier: issueID}
 			}
 			if details == nil {
-				log.Printf("[pipeline] fetchLinearIssueDetails returned nil details for %s", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: issue %s returned no details", issueID), false)
-				return
+				s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
+				details = &linearIssueDetails{Identifier: issueID}
 			}
 			log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
 			log.Printf("[pipeline] RAW TEMPLATE for claw %s:\n%s", clawID[:8], injectMsg)
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
-				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: inject template parse failed: %v", ctx.Name(), err)
+				goto injectMessage
 			}
 			var buf bytes.Buffer
 			data := struct {
@@ -243,49 +372,48 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 			log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], data.Issue.Identifier, data.Issue.Title, data.Issue.URL)
 			if err := tmpl.Execute(&buf, data); err != nil {
-				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
+				goto injectMessage
 			}
 			injectMsg = buf.String()
 			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
 		} else if strings.Contains(issueID, "/") {
 			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
-			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+			details := fallbackGitHubIssueDetails(issueID)
 			if ghToken == "" {
-				log.Printf("[pipeline] no GitHub token for factory %q, putting claw in error state", factory.Name)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: no GitHub token for factory %s", factory.Name), false)
-				return
+				s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
+				injectMsg = renderInjectWithData(clawID, injectMsg, struct {
+					Issue *githubIssueDetails
+				}{Issue: details})
+				goto injectMessage
 			}
 			parts := strings.Split(issueID, "/")
 			if len(parts) != 3 {
-				log.Printf("[pipeline] invalid GitHub issue ID format %q, putting claw in error state", issueID)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: invalid GitHub issue ID format %q", issueID), false)
-				return
+				s.warnPipelineRender(clawID, "%s: invalid GitHub issue ID format %q", ctx.Name(), issueID)
+				goto injectMessage
 			}
 			repo := parts[0] + "/" + parts[1]
 			var issueNum int
 			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
-				log.Printf("[pipeline] invalid GitHub issue number in %q: %v, putting claw in error state", issueID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: invalid GitHub issue number in %q: %v", ctx.Name(), issueID, err)
+				goto injectMessage
 			}
 			base := s.githubBaseURL
 			if base == "" {
 				base = "https://api.github.com"
 			}
-			details, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
-			if err != nil || details == nil {
-				log.Printf("[pipeline] fetchGitHubIssueDetails FAILED for %s after retries: %v — continuing without issue details", issueID, err)
-				s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Warning: could not fetch GitHub issue details for %s (GitHub API error). Continuing without issue context.", issueID))
-				details = &githubIssueDetails{Identifier: issueID}
+			fetchedDetails, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
+			if err != nil || fetchedDetails == nil {
+				s.warnPipelineRender(clawID, "%s: failed to fetch GitHub issue details for %s: %v", ctx.Name(), issueID, err)
+			} else {
+				details = fetchedDetails
 			}
 			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
-				log.Printf("[pipeline] template PARSE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: inject template parse failed: %v", ctx.Name(), err)
+				goto injectMessage
 			}
 			var buf bytes.Buffer
 			data := struct {
@@ -294,9 +422,8 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 				Issue: details,
 			}
 			if err := tmpl.Execute(&buf, data); err != nil {
-				log.Printf("[pipeline] template EXECUTE FAILED for claw %s: %v, putting claw in error state", clawID[:8], err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Pipeline template render failed: %v", err), false)
-				return
+				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
+				goto injectMessage
 			}
 			injectMsg = buf.String()
 			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
@@ -326,6 +453,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 			}
 		}
 
+	injectMessage:
 		s.injectHubMessageByID(clawID, injectMsg)
 	}
 
@@ -340,7 +468,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 	// Handle add_labels / remove_labels for GitHub Issues
 	if len(stage.OnEnter.AddLabels) > 0 || len(stage.OnEnter.RemoveLabels) > 0 {
 		if strings.Contains(issueID, "/") {
-			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 			if ghToken != "" {
 				parts := strings.Split(issueID, "/")
 				if len(parts) == 3 {
@@ -372,7 +500,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 	}
 
 	targetStatus := stage.OnEnter.MoveIssue.Status
-	if targetStatus == "" || factory == nil {
+	if targetStatus == "" {
 		return
 	}
 
@@ -398,7 +526,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 		if strings.Contains(resolvedIssueID, "{{.Issue.") {
 			var details *linearIssueDetails
 			if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
-				linearToken := s.resolveLinearTokenForFactory(factory)
+				linearToken := s.resolveLinearTokenForPipeline(ctx)
 				if linearToken != "" {
 					d, err := s.fetchLinearIssueDetails(linearToken, issueID)
 					if err == nil && d != nil {
@@ -406,7 +534,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, factory *types.
 					}
 				}
 			} else if strings.Contains(issueID, "/") {
-				ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+				ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 				if ghToken != "" {
 					parts := strings.Split(issueID, "/")
 					if len(parts) == 3 {
@@ -451,10 +579,10 @@ issueResolved:
 		return
 	}
 
-	// Determine issue tracker: explicit factory.Integration takes precedence,
+	// Determine issue tracker: explicit workflow/factory integration takes precedence,
 	// fall back to ID-format heuristics only when integration is empty.
 	var isShortcut, isGitHub bool
-	switch factory.Integration {
+	switch ctx.Integration() {
 	case "shortcut":
 		isShortcut = true
 	case "github", "github-issues":
@@ -470,9 +598,9 @@ issueResolved:
 		if !strings.HasPrefix(scID, "sc-") {
 			scID = "sc-" + scID
 		}
-		scToken := s.resolveShortcutToken(factory.Workspace)
+		scToken := s.resolveShortcutTokenForPipeline(ctx)
 		if scToken == "" {
-			log.Printf("[pipeline] factory %q: no Shortcut token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
+			log.Printf("[pipeline] %s: no Shortcut token for tracker %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
 			return
 		}
 		if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
@@ -482,20 +610,20 @@ issueResolved:
 		}
 	} else if isGitHub {
 		// GitHub issue (owner/repo/number format)
-		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+		ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 		if ghToken == "" {
-			log.Printf("[pipeline] factory %q: no GitHub token for move_issue, skipping", factory.Name)
+			log.Printf("[pipeline] %s: no GitHub Issues token for move_issue, skipping", ctx.Name())
 			return
 		}
 		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) != 3 {
-			log.Printf("[pipeline] factory %q: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", factory.Name, resolvedIssueID)
+			log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", ctx.Name(), resolvedIssueID)
 			return
 		}
 		repo := parts[0] + "/" + parts[1]
 		var issueNum int
 		if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
-			log.Printf("[pipeline] factory %q: invalid GitHub issue number in %q — skipping move_issue", factory.Name, resolvedIssueID)
+			log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping move_issue", ctx.Name(), resolvedIssueID)
 			return
 		}
 		if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
@@ -505,9 +633,9 @@ issueResolved:
 		}
 	} else {
 		// Linear issue
-		linearToken := s.resolveLinearTokenForFactory(factory)
+		linearToken := s.resolveLinearTokenForPipeline(ctx)
 		if linearToken == "" {
-			log.Printf("[pipeline] factory %q: no Linear token for workspace %q, skipping move_issue", factory.Name, factory.Workspace)
+			log.Printf("[pipeline] %s: no Linear token for tracker %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
 			return
 		}
 		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
@@ -522,9 +650,13 @@ issueResolved:
 // If the stage is terminal, it terminates the claw after running on_enter and
 // ensuring any injected message is delivered (waits if agent is streaming).
 func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
+	s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
+}
+
+func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) {
 	s.setPipelineStage(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
-	s.runOnEnter(clawID, stage, factory, issueID)
+	s.runOnEnter(clawID, stage, ctx)
 
 	// If this is a terminal stage, terminate the claw
 	if stage.Terminal {
@@ -552,7 +684,7 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
-			cc.conn.Close(1000, "factory: pipeline terminal stage")
+			cc.conn.Close(1000, "pipeline terminal stage")
 			delete(s.claws, clawID)
 		}
 		s.mu.Unlock()
@@ -568,7 +700,7 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 	}
 }
 
-// initializePipelineEntryIfNeeded transitions a factory claw into its entry stage
+// initializePipelineEntryIfNeeded transitions a claw into its entry pipeline stage
 // exactly once, after the claw is connected and ready.
 // Returns true when entry on_enter inject should be used as the initial wake-up.
 func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
@@ -577,12 +709,12 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	factory, issueID := s.findFactoryForClaw(clawID)
-	log.Printf("[pipeline] initializePipelineEntryIfNeeded: claw=%s factory=%v issueID=%q", clawID[:8], factory != nil, issueID)
-	if factory == nil {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	log.Printf("[pipeline] initializePipelineEntryIfNeeded: claw=%s pipeline=%s found=%v issueID=%q", clawID[:8], ctx.Name(), ok, ctx.IssueID)
+	if !ok {
 		return false
 	}
-	pl := parsePipelineForFactory(factory)
+	pl := parsePipelineForContext(ctx)
 	if pl == nil {
 		return false
 	}
@@ -591,7 +723,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	s.transitionPipelineStage(clawID, *entry, factory, issueID)
+	s.transitionPipelineStageWithContext(clawID, *entry, ctx)
 	return strings.TrimSpace(entry.OnEnter.Inject) != ""
 }
 
@@ -728,13 +860,59 @@ func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string
 			}
 		}
 	}
-	workspaceName, workflowName := workflowTags(tags)
-	if workspaceName != "" && workflowName != "" {
-		if factory := s.workflowPipelineFactory(workspaceName, workflowName); factory != nil {
-			return factory, issueID
+	return nil, issueID
+}
+
+func (s *Server) findPipelineContextForClaw(clawID string) (pipelineContext, bool) {
+	issueID, tags := s.clawIssueAndTags(clawID)
+	if workspaceName, workflowName := workflowTags(tags); workspaceName != "" && workflowName != "" {
+		workspace, workflow, ok := loadWorkflowPipelineContext(workspaceName, workflowName)
+		if ok {
+			return pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: issueID}, true
 		}
 	}
-	return nil, issueID
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "factory:") {
+			continue
+		}
+		factoryName := strings.TrimPrefix(tag, "factory:")
+		for _, factory := range s.resolveFactories() {
+			if factory.Name == factoryName {
+				return pipelineContext{Factory: factory, IssueID: issueID}, true
+			}
+		}
+	}
+	return pipelineContext{IssueID: issueID}, false
+}
+
+func (s *Server) findPipelineContextForIssue(issueID string) (pipelineContext, bool) {
+	var clawID string
+	queries := []string{
+		`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
+	}
+	for _, query := range queries {
+		if err := s.db.QueryRow(query, issueID).Scan(&clawID); err == nil && clawID != "" {
+			return s.findPipelineContextForClaw(clawID)
+		}
+	}
+	return pipelineContext{IssueID: issueID}, false
+}
+
+func (s *Server) clawIssueAndTags(clawID string) (string, []string) {
+	var issueID, githubIssueID, shortcutStoryID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &tagsJSON); err != nil {
+		return "", nil
+	}
+	if githubIssueID != "" {
+		issueID = githubIssueID
+	} else if shortcutStoryID != "" {
+		issueID = shortcutStoryID
+	}
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	return issueID, tags
 }
 
 func workflowTags(tags []string) (string, string) {
@@ -750,26 +928,16 @@ func workflowTags(tags []string) (string, string) {
 	return workspaceName, workflowName
 }
 
-func (s *Server) workflowPipelineFactory(workspaceName, workflowName string) *types.FactoryConfig {
+func loadWorkflowPipelineContext(workspaceName, workflowName string) (*types.WorkspaceConfig, *types.WorkflowConfig, bool) {
 	workspace, err := loadExternalWorkspace(workspaceName)
 	if err != nil {
-		return nil
+		return nil, nil, false
 	}
 	for _, workflow := range workspace.Workflows {
 		if workflow == nil || !strings.EqualFold(workflow.Name, workflowName) {
 			continue
 		}
-		return &types.FactoryConfig{
-			Name:             "workflow:" + workspace.Name + "/" + workflow.Name,
-			Integration:      workflow.Integration,
-			Workspace:        workspace.Name,
-			PipelineYAML:     workflow.PipelineYAML,
-			SecretRefs:       workflow.SecretRefs,
-			Labels:           workflow.Labels,
-			TriggerRepos:     workflow.TriggerRepos,
-			AllowedLabelers:  workflow.AllowedLabelers,
-			ConcurrencyGroup: workflow.ConcurrencyGroup,
-		}
+		return workspace, workflow, true
 	}
-	return nil
+	return nil, nil, false
 }
