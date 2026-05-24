@@ -1,0 +1,17 @@
+schema_version: v1
+name: elasticclaw
+
+provider: daytona
+nix: true
+docker: true
+
+repositories:
+  - repo: elasticclaw/elasticclaw
+    permissions: write
+  - repo: elasticclaw/elasticclaw.ai
+    permissions: write
+
+env:
+  LINEAR_API_KEY:
+    secret: LINEAR_API_KEY
+  ENVIRONMENT: dev
