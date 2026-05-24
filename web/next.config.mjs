@@ -8,8 +8,19 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  // No rewrites needed — in dev, the browser calls the hub directly via NEXT_PUBLIC_HUB_URL
-  // In production, the hub serves the static files so everything is same-origin
+  ...(isDev
+    ? {
+        async rewrites() {
+          const hubUrl = process.env.NEXT_PUBLIC_HUB_URL || process.env.HUB_URL || "http://localhost:8080"
+          return [
+            {
+              source: "/api/:path*",
+              destination: `${hubUrl}/api/:path*`,
+            },
+          ]
+        },
+      }
+    : {}),
 }
 
 export default nextConfig
