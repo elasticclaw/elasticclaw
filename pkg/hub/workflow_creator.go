@@ -112,7 +112,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	resolvedSecrets := map[string]string{}
 	if workflow.Integration == "linear" {
-		if token := s.resolveLinearTokenForWorkflow(workflow); token != "" {
+		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
 			env["LINEAR_API_KEY"] = token
 			resolvedSecrets["LINEAR_API_KEY"] = "Linear integration token"
 		}

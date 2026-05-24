@@ -76,7 +76,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 
 	// Validate signature using X-Hub-Signature-256 header
 	sig := r.Header.Get("X-Hub-Signature-256")
-	reason := s.validateGitHubIssuesSignatureReason(body, sig)
+	reason := s.validateGitHubIssuesSignatureReason(r.PathValue("workspace"), body, sig)
 	if reason != "" {
 		log.Printf("[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -110,7 +110,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 
 // validateGitHubIssuesSignatureReason validates the webhook signature and returns
 // an empty string on success, or a human-readable reason on failure.
-func (s *Server) validateGitHubIssuesSignatureReason(body []byte, sig string) string {
+func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body []byte, sig string) string {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
 	secrets := s.hubCfg.Secrets
@@ -123,6 +123,20 @@ func (s *Server) validateGitHubIssuesSignatureReason(body []byte, sig string) st
 	factorySecretCount := 0
 	workflowSecretCount := 0
 	factoryMatchCount := 0
+	workspaceSecretCount := 0
+
+	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "github-issues") {
+		workspaceSecretCount++
+		if verifyGitHubHMAC(body, sig, secret) {
+			return ""
+		}
+	}
+	if workspaceName != "" {
+		if workspaceSecretCount > 0 {
+			return fmt.Sprintf("signature did not match any configured workspace webhook secret (%d checked)", workspaceSecretCount)
+		}
+		return ""
+	}
 
 	// Check integration-level secrets
 	if integrations != nil {

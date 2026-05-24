@@ -381,7 +381,7 @@ export default function SettingsSectionPage() {
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "issue-trackers" && (
-            <IntegrationsSection settings={settings} onSave={save} saving={saving} />
+            <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} />
           )}
           {section === "workspaces" && (
             <WorkspacesSection selectedWorkspace={selectedWorkspace} />
@@ -1898,16 +1898,38 @@ interface TrackerItem {
   tokenSet: boolean
 }
 
-function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
-  const linear = settings.integrations?.linear || []
-  const shortcut = settings.integrations?.shortcut || []
-  const githubIssues = settings.integrations?.githubIssues || []
+function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string }) {
+  const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const hubUrl = getHubUrl()
+  const authToken = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const issueTrackersPath = selectedWorkspace ? `/api/workspaces/${encodeURIComponent(selectedWorkspace)}/issue-trackers` : ""
+  const linear = workspaceTrackers.filter(t => t.type === "linear")
+  const shortcut = workspaceTrackers.filter(t => t.type === "shortcut")
+  const githubIssues = workspaceTrackers.filter(t => t.type === "github-issues")
 
-  const allTrackers: TrackerItem[] = [
-    ...linear.map((li: { workspace: string; tokenSet?: boolean }) => ({ type: "linear" as TrackerType, workspace: li.workspace, tokenSet: li.tokenSet ?? false })),
-    ...shortcut.map((sc: { workspace: string; tokenSet?: boolean }) => ({ type: "shortcut" as TrackerType, workspace: sc.workspace, tokenSet: sc.tokenSet ?? false })),
-    ...githubIssues.map((gi: { workspace: string; tokenSet?: boolean }) => ({ type: "github-issues" as TrackerType, workspace: gi.workspace, tokenSet: gi.tokenSet ?? false })),
-  ]
+  const allTrackers: TrackerItem[] = workspaceTrackers
+
+  const loadTrackers = useCallback(async () => {
+    if (!selectedWorkspace) return
+    setLoading(true)
+    setError("")
+    try {
+      const res = await fetch(`${hubUrl}${issueTrackersPath}`, { headers: { Authorization: `Bearer ${authToken()}` } })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setWorkspaceTrackers(data.issueTrackers || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load issue trackers")
+    } finally {
+      setLoading(false)
+    }
+  }, [hubUrl, issueTrackersPath, selectedWorkspace])
+
+  useEffect(() => {
+    loadTrackers()
+  }, [loadTrackers])
 
   // Unified modal state
   const [showModal, setShowModal] = useState(false)
@@ -1947,78 +1969,52 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
-    let typeIdx: number
-    if (tracker.type === "linear") {
-      typeIdx = idx
-    } else if (tracker.type === "shortcut") {
-      typeIdx = idx - linear.length
-    } else {
-      typeIdx = idx - linear.length - shortcut.length
-    }
     setWorkspace(tracker.workspace)
     setToken("")
     setWebhookSecret("")
-    setEditIdx(typeIdx)
+    setEditIdx(idx)
     setEditType(tracker.type)
     setModalMode("edit")
     setShowModal(true)
   }
 
-  function saveTracker() {
+  async function saveTracker() {
     if (!workspace.trim()) return
     if (modalMode === "add" && !token.trim()) return
 
     const type = modalMode === "add" ? modalType : editType
-
-    if (type === "linear") {
-      if (modalMode === "add") {
-        onSave({ integrations: { linear: [...linear, { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const li = linear[editIdx]
-        const updated = linear.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: li.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { linear: updated } })
-      }
-    } else if (type === "shortcut") {
-      if (modalMode === "add") {
-        onSave({ integrations: { shortcut: [...shortcut.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const sc = shortcut[editIdx]
-        const updated = shortcut.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: sc.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { shortcut: updated } })
-      }
-    } else {
-      // github-issues
-      if (modalMode === "add") {
-        onSave({ integrations: { githubIssues: [...githubIssues.map((x: { workspace: string }) => ({ workspace: x.workspace })), { workspace: workspace.trim(), token: token.trim(), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }] } })
-      } else if (editIdx !== null) {
-        const gi = githubIssues[editIdx]
-        const updated = githubIssues.map((item: { workspace: string }, i: number) => i === editIdx
-          ? { workspace: workspace.trim(), originalWorkspace: gi.workspace, ...(token.trim() ? { token: token.trim() } : {}), ...(webhookSecret.trim() ? { webhookSecret: webhookSecret.trim() } : {}) }
-          : { workspace: item.workspace }
-        )
-        onSave({ integrations: { githubIssues: updated } })
-      }
+    const originalWorkspace = modalMode === "edit" && editIdx !== null ? allTrackers[editIdx]?.workspace : ""
+    setError("")
+    const res = await fetch(`${hubUrl}${issueTrackersPath}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${authToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type, workspace: workspace.trim(), originalWorkspace, token: token.trim(), webhookSecret: webhookSecret.trim() }),
+    })
+    if (!res.ok) {
+      setError(await res.text())
+      return
     }
     setShowModal(false)
     resetModal()
+    await loadTrackers()
   }
 
-  function removeTracker() {
-    if (editType === "linear" && editIdx !== null) {
-      onSave({ integrations: { linear: linear.filter((_: unknown, j: number) => j !== editIdx) } })
-    } else if (editType === "shortcut" && editIdx !== null) {
-      onSave({ integrations: { shortcut: shortcut.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
-    } else if (editType === "github-issues" && editIdx !== null) {
-      onSave({ integrations: { githubIssues: githubIssues.filter((_: unknown, j: number) => j !== editIdx).map((x: { workspace: string }) => ({ workspace: x.workspace })) } })
+  async function removeTracker() {
+    if (editIdx === null) return
+    const tracker = allTrackers[editIdx]
+    if (!tracker) return
+    setError("")
+    const res = await fetch(`${hubUrl}${issueTrackersPath}?type=${encodeURIComponent(tracker.type)}&workspace=${encodeURIComponent(tracker.workspace)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${authToken()}` },
+    })
+    if (!res.ok) {
+      setError(await res.text())
+      return
     }
     setShowModal(false)
     resetModal()
+    await loadTrackers()
   }
 
   const trackerTypeLabel = (t: TrackerType) => {
@@ -2068,8 +2064,12 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         </div>
       </div>
 
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
       {/* Configured trackers list */}
-      {allTrackers.length > 0 && (
+      {loading ? (
+        <p className="text-sm text-muted-foreground animate-pulse">Loading issue trackers...</p>
+      ) : allTrackers.length > 0 && (
         <div className="space-y-2 mb-4">
           {allTrackers.map((tracker, i) => (
             <div
@@ -2108,7 +2108,7 @@ function IntegrationsSection({ settings, onSave, saving }: { settings: SettingsD
         </div>
       )}
 
-      {allTrackers.length === 0 && (
+      {!loading && allTrackers.length === 0 && (
         <div className="border border-dashed border-border rounded-lg p-8 text-center space-y-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto">
             <Zap className="size-5 text-muted-foreground" />

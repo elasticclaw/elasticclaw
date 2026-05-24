@@ -52,7 +52,7 @@ type shortcutChange struct {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 // validateShortcutSignature checks HMAC-SHA256 against factory webhook secrets.
-func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
+func (s *Server) validateShortcutSignature(workspaceName string, body []byte, sig string) bool {
 	// Strip sha256= prefix if present
 	sig = strings.TrimPrefix(sig, "sha256=")
 	s.mu.RLock()
@@ -60,6 +60,18 @@ func (s *Server) validateShortcutSignature(body []byte, sig string) bool {
 	s.mu.RUnlock()
 	factories := s.resolveFactories()
 	hasSecrets := false
+	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "shortcut") {
+		hasSecrets = true
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
+		}
+	}
+	if workspaceName != "" {
+		return !hasSecrets
+	}
 	for _, f := range factories {
 		if f.Integration != "shortcut" {
 			continue
@@ -122,7 +134,7 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	// Validate HMAC signature if any factory has a webhook_secret configured.
 	// Shortcut sends: Payload-Signature: sha256=<hex>
 	sig := r.Header.Get("Payload-Signature")
-	if !s.validateShortcutSignature(body, sig) {
+	if !s.validateShortcutSignature(r.PathValue("workspace"), body, sig) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}

@@ -126,3 +126,84 @@ func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+type workspaceIssueTrackerUpsertRequest struct {
+	Type              string `json:"type"`
+	Workspace         string `json:"workspace"`
+	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	Token             string `json:"token,omitempty"`
+	WebhookSecret     string `json:"webhookSecret,omitempty"`
+}
+
+func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http.Request) {
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	if workspaceName == "" {
+		http.Error(w, "workspace required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		trackers, err := workspaceIssueTrackerViews(workspaceName)
+		if err != nil {
+			http.Error(w, "list issue trackers: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string][]workspaceIssueTrackerView{"issueTrackers": trackers})
+	case http.MethodPut, http.MethodPost:
+		var req workspaceIssueTrackerUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Type = strings.TrimSpace(req.Type)
+		req.Workspace = strings.TrimSpace(req.Workspace)
+		if req.Type == "" || req.Workspace == "" {
+			http.Error(w, "type and workspace required", http.StatusBadRequest)
+			return
+		}
+		if req.Token == "" {
+			existingName := req.OriginalWorkspace
+			if existingName == "" {
+				existingName = req.Workspace
+			}
+			if existing, ok := findWorkspaceIssueTracker(workspaceName, req.Type, existingName); ok {
+				req.Token = existing.Token
+				if req.WebhookSecret == "" {
+					req.WebhookSecret = existing.WebhookSecret
+				}
+			}
+		}
+		if req.Token == "" {
+			http.Error(w, "token required", http.StatusBadRequest)
+			return
+		}
+		if req.OriginalWorkspace != "" && !strings.EqualFold(req.OriginalWorkspace, req.Workspace) {
+			if err := deleteWorkspaceIssueTracker(workspaceName, req.Type, req.OriginalWorkspace); err != nil {
+				http.Error(w, "rename issue tracker: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := saveWorkspaceIssueTracker(workspaceName, req.Type, req.Workspace, workspaceIssueTracker{
+			Token:         req.Token,
+			WebhookSecret: req.WebhookSecret,
+		}); err != nil {
+			http.Error(w, "save issue tracker: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]string{"upserted": req.Workspace})
+	case http.MethodDelete:
+		trackerType := strings.TrimSpace(r.URL.Query().Get("type"))
+		name := strings.TrimSpace(r.URL.Query().Get("workspace"))
+		if trackerType == "" || name == "" {
+			http.Error(w, "type and workspace required", http.StatusBadRequest)
+			return
+		}
+		if err := deleteWorkspaceIssueTracker(workspaceName, trackerType, name); err != nil {
+			http.Error(w, "delete issue tracker: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOK(w, map[string]string{"deleted": name})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}

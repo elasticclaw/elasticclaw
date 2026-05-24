@@ -66,7 +66,7 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Validate signature if any Linear integration has a webhook_secret
 	sig := r.Header.Get("Linear-Signature")
-	if !s.validateLinearSignature(body, sig) {
+	if !s.validateLinearSignature(r.PathValue("workspace"), body, sig) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -130,7 +130,7 @@ func (s *Server) isDuplicateWebhook(key string) bool {
 	return false
 }
 
-func (s *Server) validateLinearSignature(body []byte, sig string) bool {
+func (s *Server) validateLinearSignature(workspaceName string, body []byte, sig string) bool {
 	s.mu.RLock()
 	integrations := s.hubCfg.Integrations
 	secrets := s.hubCfg.Secrets
@@ -140,6 +140,19 @@ func (s *Server) validateLinearSignature(body []byte, sig string) bool {
 	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("linear")
 
 	hasAnySecret := false
+
+	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "linear") {
+		hasAnySecret = true
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
+		}
+	}
+	if workspaceName != "" {
+		return !hasAnySecret
+	}
 
 	// Check integration-level secrets
 	if integrations != nil {
@@ -434,7 +447,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return err
 	}
 	if !isPending && workflow.WorkingStatus != "" {
-		if token := s.resolveLinearTokenForWorkflow(workflow); token != "" {
+		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
 			if err := s.moveLinearIssueOnServer(token, issueID, workflow.WorkingStatus); err != nil {
 				log.Printf("[workflow:%s/%s] failed to move issue %s to working status %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
 			}
@@ -611,14 +624,9 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 	return ""
 }
 
-func (s *Server) resolveLinearTokenForWorkflow(workflow *types.WorkflowConfig) string {
-	if s.hubCfg.Integrations == nil {
-		return ""
-	}
-	for _, li := range s.hubCfg.Integrations.Linear {
-		if workflow.Workspace == "" || strings.EqualFold(li.Workspace, workflow.Workspace) {
-			return li.Token
-		}
+func (s *Server) resolveLinearTokenForWorkflow(workspaceName string, workflow *types.WorkflowConfig) string {
+	if tracker, ok := findWorkspaceIssueTracker(workspaceName, "linear", workflow.Workspace); ok {
+		return tracker.Token
 	}
 	return ""
 }
