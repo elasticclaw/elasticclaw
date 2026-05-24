@@ -22,7 +22,7 @@ trigger:
       - agent-ready
     labelers:
       - "*"
-jobs:
+stages:
   - id: working
     entry: true
     on_enter:
@@ -59,7 +59,7 @@ trigger:
     labels:
       - agent-ready
     assigned_to: marc
-jobs:
+stages:
   - id: working
     entry: true
     on_enter:

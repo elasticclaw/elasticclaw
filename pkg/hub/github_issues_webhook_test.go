@@ -216,7 +216,7 @@ func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 				Repositories: []string{"testorg/testrepo"},
 				States:       []string{"open"},
 			},
-			Jobs: []types.WorkflowJob{{
+			Stages: []types.WorkflowStage{{
 				ID:    "working",
 				Label: "Working",
 				Entry: true,

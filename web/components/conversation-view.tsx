@@ -169,7 +169,7 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
         <DialogHeader>
           <DialogTitle>Kill {clawName}?</DialogTitle>
           <DialogDescription>
-            This will terminate the claw and destroy the VM. Any unsaved work will be lost.
+            This will terminate the agent and destroy the VM. Any unsaved work will be lost.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="gap-2">
@@ -195,7 +195,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
           Purpose
         </h3>
         <p className="text-sm text-foreground leading-relaxed">
-          {claw.description || "No description provided for this claw."}
+          {claw.description || "No description provided for this agent."}
         </p>
       </div>
 
@@ -632,7 +632,7 @@ function ClawBoardCard({
                   }
                 }}
                 onPaste={onPaste}
-                placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Claw offline" : "Starting up...") : "Send message..."}
+                placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
                 className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
@@ -1178,7 +1178,7 @@ function ClawChatView({
               }}
               onPaste={onPaste}
               ref={panelTextareaRef}
-              placeholder="Message claw, /stop, or attach files"
+              placeholder="Message agent, /stop, or attach files"
               rows={1}
               className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
             />
@@ -1295,7 +1295,7 @@ export function ConversationView({
   }
 
   if (!claw) {
-    // Use the hub-maintained order (respects user drag preference + falls back to API order)
+    // Use the server-maintained order (respects user drag preference + falls back to API order)
     const sortedClaws = allClaws
 
     return (
@@ -1305,7 +1305,7 @@ export function ConversationView({
           <div className="flex items-center gap-3">
             <Terminal className="size-5 text-muted-foreground" />
             <h2 className="text-lg font-medium text-foreground">
-              {loading ? "Claws" : `${allClaws.length} Active Claws`}
+              {loading ? "Agents" : `${allClaws.length} Active Agents`}
             </h2>
           </div>
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -1335,14 +1335,14 @@ export function ConversationView({
                 draggable={false}
               />
               <div className="space-y-2">
-                <p className="text-lg font-medium text-muted-foreground">No claws running</p>
+                <p className="text-lg font-medium text-muted-foreground">No agents running</p>
                 <p className="text-sm text-muted-foreground/70 max-w-sm">
-                  Spawn your first claw from the CLI to get started.
+                  Start your first agent from the CLI to get started.
                 </p>
               </div>
               <div className="bg-muted rounded-lg px-4 py-3 font-mono text-sm text-foreground/80 max-w-md w-full text-left">
                 <span className="text-muted-foreground select-none">$ </span>
-                elasticclaw create --name my-claw
+                elasticclaw create --name my-agent
               </div>
             </div>
           ) : (

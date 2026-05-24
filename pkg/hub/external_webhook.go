@@ -664,7 +664,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 func buildExternalEventContext(payload externalWebhookPayload, factory *types.FactoryConfig) string {
 	var b strings.Builder
 	b.WriteString("# External Event Context\n\n")
-	b.WriteString("This claw was automatically created by a factory in response to an external event.\n\n")
+	b.WriteString("This agent was automatically created by a factory in response to an external event.\n\n")
 
 	if payload.Release != nil {
 		b.WriteString("## Release Event\n\n")

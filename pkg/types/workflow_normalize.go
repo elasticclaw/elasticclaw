@@ -78,10 +78,10 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			}
 		}
 	}
-	if len(workflow.Jobs) > 0 {
+	if len(workflow.Stages) > 0 {
 		data, err := yaml.Marshal(struct {
-			Stages []WorkflowJob `yaml:"stages"`
-		}{Stages: workflow.Jobs})
+			Stages []WorkflowStage `yaml:"stages"`
+		}{Stages: workflow.Stages})
 		if err != nil {
 			return err
 		}

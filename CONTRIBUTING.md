@@ -2,7 +2,7 @@
 
 ## Development Setup
 
-ElasticClaw has two main components: the **hub** (Go) and the **web UI** (Next.js). In development you run them separately.
+ElasticClaw has two main components: **ElasticClaw Server** (Go) and the **web UI** (Next.js). In development you run them separately.
 
 ### Prerequisites
 
@@ -25,18 +25,18 @@ cd elasticclaw
 
 ### Dev workflow
 
-**Terminal 1 — Hub (Go only, fast rebuild):**
+**Terminal 1 — ElasticClaw Server (Go only, fast rebuild):**
 ```bash
 # First time: build and push the claw-bridge binary
 make build-bridge-linux
 oras push ttl.sh/marc/claw-bridge:1w \
   bin/claw-bridge-linux-amd64:application/octet-stream
 
-# Start the hub (no embedded web UI in dev)
+# Start ElasticClaw Server (no embedded web UI in dev)
 make build && ./bin/elasticclaw hub --no-web-ui
 ```
 
-The hub listens on `:8080`. The `--no-web-ui` flag tells it not to serve the embedded web UI so the Next.js dev server handles that instead.
+ElasticClaw Server listens on `:8080`. The `--no-web-ui` flag tells it not to serve the embedded web UI so the Next.js dev server handles that instead.
 
 **Terminal 2 — Web UI (Next.js dev server):**
 ```bash
@@ -48,23 +48,23 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. Login password is `admin` by default (or whatever `ui_password:` is in your hub.yaml).
+Open `http://localhost:3000`. Login password is `admin` by default (or whatever `ui_password:` is in your `hub.yaml`).
 
-### Hub config
+### Server config
 
-On first run, the hub creates `~/.elasticclaw/hub.yaml`. You can also create it manually:
+On first run, ElasticClaw Server creates `~/.elasticclaw/hub.yaml`. You can also create it manually:
 
 ```yaml
 # ~/.elasticclaw/hub.yaml
 token: mytoken          # user API token
-claw_token: myclawtoken # claw auth token
+claw_token: myclawtoken # agent auth token
 ui_password: mypassword # web UI login password
 address: :8080
 
 # Optional: configure providers in Settings UI after first login
 ```
 
-Start the hub with token flags to auto-create the tenant:
+Start ElasticClaw Server with token flags to auto-create the tenant:
 ```bash
 ./bin/elasticclaw hub --token mytoken --claw-token myclawtoken --no-web-ui
 ```
@@ -81,7 +81,7 @@ No need to rebuild the web UI for Go changes.
 
 ### Iterating on the web UI
 
-Just save files — Next.js hot reloads automatically. No hub restart needed.
+Just save files. Next.js hot reloads automatically. No ElasticClaw Server restart needed.
 
 ### Building a release binary (with embedded web UI)
 
@@ -108,7 +108,7 @@ ELASTICCLAW_INSTALL_TESTS=1 make test-install  # actually spins Ubuntu container
 
 ### Working on the claw-bridge
 
-The claw-bridge runs on each VM and connects back to the hub. After changes:
+The claw-bridge runs on each VM and connects back to ElasticClaw Server. After changes:
 
 ```bash
 make build-bridge-linux
@@ -123,7 +123,7 @@ Set `bridge_image: ttl.sh/marc/claw-bridge:1w` in hub.yaml to use your dev bridg
 ```
 cmd/                    CLI entry points
 cmd/claw-bridge/        claw-bridge binary (runs on each VM)
-pkg/hub/server.go       Hub HTTP/WS server
+pkg/hub/server.go       ElasticClaw Server HTTP/WS server
 pkg/hub/bootstrap.go    Bootstrap script generation (pure functions)
 pkg/hub/settings.go     Settings API (GET/PATCH /api/settings)
 pkg/install/scripts.go  Install script generation (pure functions)
@@ -132,7 +132,7 @@ pkg/config/             Config loading/saving
 pkg/provider/           Provider implementations (Replicated, Daytona, Vercel)
 web/                    Next.js web UI (static export in prod)
 internal/webui/         Go embed package for the compiled web UI
-.elasticclaw/templates/ Claw templates (including the elasticclaw dev template)
+.elasticclaw/workspaces/ Workspace definitions
 ```
 
 ### CI
@@ -152,5 +152,5 @@ PRs for anything non-trivial. Direct push to main for obvious fixes.
 
 - `make build-release` fails? Make sure `npm` is in PATH. In nix shell, it's provided. Otherwise install Node.js.
 - Web UI shows blank page after `make build-release`? Likely `//go:embed all:out` issue — check that `internal/webui/out/_next/` exists after the build.
-- Hub says "web UI not built"? You need `make build-release`, not `make build`.
+- ElasticClaw Server says "web UI not built"? You need `make build-release`, not `make build`.
 - Tests fail after renaming something? Update `pkg/install/scripts_test.go` and `container_test.go`.

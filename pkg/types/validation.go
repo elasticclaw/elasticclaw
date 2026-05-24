@@ -195,9 +195,9 @@ func (w *WorkflowConfig) Validate() error {
 			return err
 		}
 	}
-	for i, job := range w.Jobs {
-		if strings.TrimSpace(job.ID) == "" {
-			return fmt.Errorf("workflow %q: jobs[%d].id is required", w.Name, i)
+	for i, stage := range w.Stages {
+		if strings.TrimSpace(stage.ID) == "" {
+			return fmt.Errorf("workflow %q: stages[%d].id is required", w.Name, i)
 		}
 	}
 	return nil

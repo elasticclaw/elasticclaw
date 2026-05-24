@@ -19,18 +19,18 @@ var (
 
 var createCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new claw",
-	Long: `Resolve a template and provision a new claw via the hub.
+	Short: "Create a new agent",
+	Long: `Resolve a template and provision a new agent via ElasticClaw Server.
 
 With --source auto (default), the template is looked up in order:
   ./.elasticclaw/templates/<name>/       (repo-local)
   ~/.elasticclaw/templates/<name>/       (global cache)
   public registry                         (downloaded into the cache)
-  hub-pushed templates                    (via 'elasticclaw template push')
+  server-pushed templates                 (via 'elasticclaw template push')
 
 Use --source local to restrict resolution to the filesystem/registry, or
---source hub to force using a hub-pushed template (useful when a local
-template shares a name with a hub-pushed one).
+--source hub to force using a server-pushed template (useful when a local
+template shares a name with a server-pushed one).
 
 The resolved template must contain elasticclaw-config.yaml specifying the provider.
 
@@ -54,7 +54,7 @@ func init() {
 	createCmd.Deprecated = "templates are deprecated; use workspace push and workflow trigger instead"
 	rootCmd.AddCommand(createCmd)
 
-	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
+	createCmd.Flags().StringVarP(&createName, "name", "n", "", "agent name (required)")
 	createCmd.MarkFlagRequired("name")
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
 	createCmd.MarkFlagRequired("template")
@@ -102,7 +102,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			break
 		}
 		if createSource == "local" {
-			return fmt.Errorf("template %q not found locally: %w (use --source hub to pull from hub)", createTemplate, resolveErr)
+			return fmt.Errorf("template %q not found locally: %w (use --source hub to pull from ElasticClaw Server)", createTemplate, resolveErr)
 		}
 		// auto: fall through to hub
 		tmplCfg, files, err = loadHubTemplate(client, createTemplate)
@@ -146,11 +146,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// POST to hub
 	claw, err := client.CreateClaw(context.Background(), createName, createTemplate, tmplCfg, files, env)
 	if err != nil {
-		return fmt.Errorf("hub error: %w", err)
+		return fmt.Errorf("server error: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("✓ Claw provisioning started\n")
+	fmt.Printf("✓ Agent provisioning started\n")
 	fmt.Printf("  ID:       %s\n", claw.ID)
 	fmt.Printf("  Name:     %s\n", claw.Name)
 	fmt.Printf("  Template: %s\n", claw.Template)

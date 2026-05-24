@@ -29,13 +29,13 @@ This command prepares the working directory for 'elasticclaw create'.
 Two paths to init:
 
   # Path 1: Init in a cloned template repo
-  git clone github.com/acme/support-claw
-  cd support-claw
+  git clone github.com/acme/support-agent
+  cd support-agent
   elasticclaw init
 
   # Path 2: Init from scratch pointing at remote template
   mkdir my-agents && cd my-agents
-  elasticclaw init --template github.com/acme/support-claw
+  elasticclaw init --template github.com/acme/support-agent
 
 What it does:
   1. Pulls/clones template to local cache (.elasticclaw/template/)
@@ -51,7 +51,7 @@ func init() {
 	initCmd.Deprecated = "template init is deprecated; use workspace create instead"
 	rootCmd.AddCommand(initCmd)
 
-	initCmd.Flags().StringVarP(&initTemplate, "template", "t", "", "template source (e.g., github.com/acme/support-claw)")
+	initCmd.Flags().StringVarP(&initTemplate, "template", "t", "", "template source (e.g., github.com/acme/support-agent)")
 	initCmd.Flags().BoolVar(&initUpgrade, "upgrade", false, "refresh template to latest version")
 }
 
@@ -75,7 +75,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			templateSource = "."
 			fmt.Println("Found elasticclaw.yaml in current directory")
 		} else {
-			return fmt.Errorf("no template specified and no elasticclaw.yaml found\n\nUsage:\n  elasticclaw init --template github.com/acme/support-claw")
+			return fmt.Errorf("no template specified and no elasticclaw.yaml found\n\nUsage:\n  elasticclaw init --template github.com/acme/support-agent")
 		}
 	}
 

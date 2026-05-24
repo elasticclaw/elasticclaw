@@ -27,7 +27,7 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
         <div className="space-y-2">
           <h1 className="text-2xl font-bold">Connect to Hub</h1>
           <p className="text-sm text-muted-foreground">
-            Enter your ElasticClaw Hub URL and authentication token to get started.
+            Enter your ElasticClaw Server URL and authentication token to get started.
           </p>
         </div>
 

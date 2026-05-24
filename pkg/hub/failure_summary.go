@@ -98,7 +98,7 @@ func sanitizeFailureDetails(raw string) string {
 func fallbackFailureSummary(clawID, sanitizedReason string) string {
 	var b strings.Builder
 	b.WriteString("Agent stopped unexpectedly.\n\n")
-	b.WriteString("Summary: ElasticClaw could not complete the claw run. The hub could not produce an LLM summary, so this is a sanitized fallback.\n\n")
+	b.WriteString("Summary: ElasticClaw could not complete the agent run. ElasticClaw Server could not produce an LLM summary, so this is a sanitized fallback.\n\n")
 	if sanitizedReason != "" {
 		b.WriteString("Most relevant sanitized detail:\n")
 		b.WriteString("```text\n")
@@ -106,7 +106,7 @@ func fallbackFailureSummary(clawID, sanitizedReason string) string {
 		b.WriteString("\n```\n\n")
 	}
 	if len(clawID) >= 8 {
-		b.WriteString(fmt.Sprintf("Claw: `%s`\n", clawID[:8]))
+		b.WriteString(fmt.Sprintf("Agent: `%s`\n", clawID[:8]))
 	}
 	return clampFailureComment(b.String())
 }

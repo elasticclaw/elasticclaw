@@ -1,13 +1,13 @@
 # elasticclaw-web
 
-Web UI for [ElasticClaw](https://github.com/elasticclaw/elasticclaw) — a real-time dashboard for managing and chatting with AI agent claws.
+Web UI for [ElasticClaw](https://github.com/elasticclaw/elasticclaw) — a real-time dashboard for managing and chatting with sandboxed agents.
 
 ## What it does
 
-- **Board view** — all running claws at a glance, each as a card with live status, streaming indicator, and inline chat
+- **Board view** — all running agents at a glance, each as a card with live status, streaming indicator, and inline chat
 - **Conversation view** — full chat interface with markdown rendering, streaming typewriter effect, and context window usage
-- **Spawn + kill** — provision new claws from templates, kill them when done
-- **Real-time** — WebSocket connection to the hub; new messages, streaming chunks, and status changes appear instantly
+- **Spawn + kill** — provision new agents from workspaces and workflows, kill them when done
+- **Real-time** — WebSocket connection to ElasticClaw Server; new messages, streaming chunks, and status changes appear instantly
 
 ## Running locally
 
@@ -16,7 +16,7 @@ Web UI for [ElasticClaw](https://github.com/elasticclaw/elasticclaw) — a real-
 ```bash
 cd web
 cp .env.example .env.local
-# Edit .env.local with your hub URL, token, and a UI password
+# Edit .env.local with your ElasticClaw Server URL, token, and a UI password
 npm install
 npm run dev
 ```
@@ -28,29 +28,29 @@ Then open http://localhost:3000 and enter the value of `ELASTICCLAW_UI_TOKEN` as
 | Variable | Description |
 |---|---|
 | `ELASTICCLAW_UI_TOKEN` | Password for the web UI login page |
-| `ELASTICCLAW_HUB_URL` | URL of your running elasticclaw hub |
-| `ELASTICCLAW_HUB_TOKEN` | Your hub user token (from `~/.elasticclaw/config.yaml`) |
+| `ELASTICCLAW_HUB_URL` | URL of your running ElasticClaw Server |
+| `ELASTICCLAW_HUB_TOKEN` | Your server user token (from `~/.elasticclaw/config.yaml`) |
 
 ### From Docker
 
 ```bash
 docker run -p 3000:3000 \
   -e ELASTICCLAW_UI_TOKEN=your-password \
-  -e ELASTICCLAW_HUB_URL=http://your-hub:18788 \
+  -e ELASTICCLAW_HUB_URL=http://your-server:18788 \
   -e ELASTICCLAW_HUB_TOKEN=your-token \
   marc/elasticclaw-web:latest
 ```
 
 ### Without env vars
 
-Leave `NEXT_PUBLIC_HUB_URL` unset and the app shows a setup screen on first load. Enter your hub URL and token there — they're saved to localStorage.
+Leave `NEXT_PUBLIC_HUB_URL` unset and the app shows a setup screen on first load. Enter your ElasticClaw Server URL and token there. They are saved to localStorage.
 
 ## Configuration
 
 | Variable | Description |
 |---|---|
-| `NEXT_PUBLIC_HUB_URL` | ElasticClaw hub URL, e.g. `http://localhost:8080` |
-| `NEXT_PUBLIC_HUB_TOKEN` | Operator token from your hub config |
+| `NEXT_PUBLIC_HUB_URL` | ElasticClaw Server URL, e.g. `http://localhost:8080` |
+| `NEXT_PUBLIC_HUB_TOKEN` | Operator token from your server config |
 
 ## Releases
 
@@ -60,5 +60,5 @@ Docker images are published to `ghcr.io/elasticclaw/elasticclaw-web` on every se
 
 - Next.js 16, React 19, TypeScript
 - Tailwind CSS v4 + shadcn/ui
-- WebSocket for real-time hub events
+- WebSocket for real-time server events
 - `react-markdown` + `remark-gfm` for message rendering

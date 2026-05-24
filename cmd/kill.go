@@ -11,8 +11,8 @@ import (
 )
 
 var killCmd = &cobra.Command{
-	Use:   "kill <claw-id-or-name>",
-	Short: "Disconnect and remove a claw from the hub",
+	Use:   "kill <agent-id-or-name>",
+	Short: "Disconnect and remove an agent from ElasticClaw Server",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runKill,
 }
@@ -47,6 +47,6 @@ func runKill(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("kill failed: %w", err)
 	}
 
-	fmt.Printf("✓ Claw %s killed\n", target)
+	fmt.Printf("✓ Agent %s killed\n", target)
 	return nil
 }

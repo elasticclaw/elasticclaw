@@ -216,7 +216,7 @@ func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 					Repositories: []string{"testorg/testrepo"},
 					States:       []string{"open"},
 				},
-				Jobs: []types.WorkflowJob{
+				Stages: []types.WorkflowStage{
 					{
 						ID:    "working",
 						Label: "Working",

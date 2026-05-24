@@ -16,8 +16,8 @@ import (
 
 // DoctorCheck is a single diagnostic check result.
 type DoctorCheck struct {
-	Category    string     `json:"category"`              // "auth", "models", "sandboxes", "factories", "integrations", "mcp", "templates"
-	Severity    string     `json:"severity"`              // "critical", "warning", "info"
+	Category    string     `json:"category"` // "auth", "models", "sandboxes", "factories", "integrations", "mcp", "templates"
+	Severity    string     `json:"severity"` // "critical", "warning", "info"
 	Title       string     `json:"title"`
 	Description string     `json:"description"`
 	OK          bool       `json:"ok"`
@@ -156,7 +156,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "models",
 			Severity:    "critical",
 			Title:       "No LLM keys configured",
-			Description: "At least one LLM key is required for claws to function.",
+			Description: "At least one LLM key is required for agents to function.",
 			OK:          false,
 			FixAction: &FixAction{
 				Type:   "navigate",
@@ -428,7 +428,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 			Category:    "factories",
 			Severity:    "info",
 			Title:       "No factories configured",
-			Description: "No factories are configured. Factory-based claw creation is disabled.",
+			Description: "No factories are configured. Factory-based agent creation is disabled.",
 			OK:          true,
 		})
 		return checks
@@ -567,11 +567,11 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		for envName, secretRef := range f.SecretRefs {
 			if !secretNames[secretRef] {
 				checks = append(checks, DoctorCheck{
-					Category: "factories",
-					Severity: "warning",
-					Title:    fmt.Sprintf("Factory %q secret_refs references missing secret", f.Name),
+					Category:    "factories",
+					Severity:    "warning",
+					Title:       fmt.Sprintf("Factory %q secret_refs references missing secret", f.Name),
 					Description: fmt.Sprintf("Factory %q secret_refs maps %q to secret %q which is not in the secrets map.", f.Name, envName, secretRef),
-					OK: false,
+					OK:          false,
 					FixAction: &FixAction{
 						Type:   "navigate",
 						Target: "/settings/secrets",
@@ -621,7 +621,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 				Category:    "factories",
 				Severity:    "warning",
 				Title:       fmt.Sprintf("Overlapping factory triggers: %s", strings.Join(names, ", ")),
-				Description: fmt.Sprintf("Factories %s all trigger on the same event (integration=%s, workspace=%s, trigger=%s). This will create duplicate claws.", strings.Join(names, ", "), key.integration, key.workspace, key.trigger),
+				Description: fmt.Sprintf("Factories %s all trigger on the same event (integration=%s, workspace=%s, trigger=%s). This will create duplicate agents.", strings.Join(names, ", "), key.integration, key.workspace, key.trigger),
 				OK:          false,
 				FixAction: &FixAction{
 					Type:   "navigate",
@@ -686,7 +686,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 					Category:    "templates",
 					Severity:    "warning",
 					Title:       fmt.Sprintf("Template %q missing elasticclaw-config.yaml", name),
-					Description: fmt.Sprintf("Template %q does not contain an elasticclaw-config.yaml file. This may cause issues when creating claws.", name),
+					Description: fmt.Sprintf("Template %q does not contain an elasticclaw-config.yaml file. This may cause issues when creating agents.", name),
 					OK:          false,
 					FixAction: &FixAction{
 						Type:   "navigate",
@@ -1130,7 +1130,7 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "hub",
 			Severity:    "info",
 			Title:       "Low concurrency limit with multiple factories",
-			Description: fmt.Sprintf("Max concurrent claws is 1 but %d factories are configured. Most factory-created claws will queue as pending.", factoryCount),
+			Description: fmt.Sprintf("Max concurrent agents is 1 but %d factories are configured. Most factory-created agents will queue as pending.", factoryCount),
 			OK:          false,
 			FixAction: &FixAction{
 				Type:   "navigate",
@@ -1143,7 +1143,7 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "hub",
 			Severity:    "info",
 			Title:       "Hub settings look good",
-			Description: fmt.Sprintf("Max concurrent claws is %d with %d factories configured.", cfg.MaxConcurrentClaws, factoryCount),
+			Description: fmt.Sprintf("Max concurrent agents is %d with %d factories configured.", cfg.MaxConcurrentClaws, factoryCount),
 			OK:          true,
 		})
 	}
