@@ -118,23 +118,16 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 // an empty string on success, or a human-readable reason on failure.
 func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body []byte, sig string) string {
 	workspaceSecretCount := 0
-
 	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "github-issues") {
 		workspaceSecretCount++
 		if verifyGitHubHMAC(body, sig, secret) {
 			return ""
 		}
 	}
-	if workspaceName != "" {
-		if workspaceSecretCount > 0 {
-			return fmt.Sprintf("signature did not match any configured workspace webhook secret (%d checked)", workspaceSecretCount)
-		}
-		return ""
+	if workspaceSecretCount > 0 {
+		return fmt.Sprintf("signature did not match any configured workspace webhook secret (%d checked)", workspaceSecretCount)
 	}
-	if sig == "" {
-		return "missing X-Hub-Signature-256 header"
-	}
-	return fmt.Sprintf("signature mismatch (checked %d workspace github-issues webhook secret(s))", workspaceSecretCount)
+	return ""
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {

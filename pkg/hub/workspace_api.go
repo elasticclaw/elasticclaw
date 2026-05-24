@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
@@ -347,7 +348,10 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 func (s *Server) resolveWorkflowConfig(workspaceName, workflowName string) (*types.WorkspaceConfig, *types.WorkflowConfig, bool, error) {
 	workspace, err := loadExternalWorkspace(workspaceName)
 	if err != nil {
-		return nil, nil, false, nil
+		if os.IsNotExist(err) {
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, err
 	}
 	for _, workflow := range workspace.Workflows {
 		if workflow != nil && strings.EqualFold(workflow.Name, workflowName) {

@@ -33,6 +33,13 @@ func FactoryCmd() *cobra.Command {
 	return cmd
 }
 
+func init() {
+	cmd := FactoryCmd()
+	cmd.Hidden = true
+	cmd.Deprecated = "factories are deprecated; use workflows instead"
+	rootCmd.AddCommand(cmd)
+}
+
 // ── factory create ────────────────────────────────────────────────────────────
 
 func factoryCreateCmd() *cobra.Command {

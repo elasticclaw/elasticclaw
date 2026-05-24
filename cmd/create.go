@@ -50,6 +50,10 @@ var (
 )
 
 func init() {
+	createCmd.Hidden = true
+	createCmd.Deprecated = "templates are deprecated; use workspace push and workflow trigger instead"
+	rootCmd.AddCommand(createCmd)
+
 	createCmd.Flags().StringVarP(&createName, "name", "n", "", "claw name (required)")
 	createCmd.MarkFlagRequired("name")
 	createCmd.Flags().StringVarP(&createTemplate, "template", "t", "", "template name (required)")
