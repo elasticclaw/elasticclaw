@@ -480,9 +480,6 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
-	if err := removeExternalWorkflowFiles(workflowDir); err != nil {
-		return err
-	}
 	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
@@ -500,22 +497,6 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		}
 		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
-		}
-	}
-	return nil
-}
-
-func removeExternalWorkflowFiles(workflowDir string) error {
-	entries, err := os.ReadDir(workflowDir)
-	if err != nil {
-		return fmt.Errorf("read workflows dir: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
-			continue
-		}
-		if err := os.Remove(filepath.Join(workflowDir, entry.Name())); err != nil {
-			return fmt.Errorf("remove stale workflow %s: %w", entry.Name(), err)
 		}
 	}
 	return nil

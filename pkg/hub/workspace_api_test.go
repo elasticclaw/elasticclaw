@@ -91,8 +91,16 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer test-token")
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("stale workflow status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("existing workflow status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows/second", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second workflow detail status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
 
