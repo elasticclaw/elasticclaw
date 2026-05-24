@@ -3,14 +3,14 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
-import { fetchWorkspaces, type Workspace } from "@/lib/api"
+import { fetchWorkspaces, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -203,8 +203,9 @@ export default function SettingsSectionPage() {
     ],
     // Configuration
     [
-      { id: "secrets", label: "Secrets", icon: Lock },
       { id: "workspaces", label: "Workspaces", icon: LayoutTemplate },
+      { id: "workflows", label: "Workflows", icon: GitBranch },
+      { id: "secrets", label: "Secrets", icon: Lock },
     ],
     // Access
     [
@@ -286,6 +287,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "workspaces" && (
             <WorkspacesSection />
+          )}
+          {section === "workflows" && (
+            <WorkflowsSection />
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} />
@@ -2150,6 +2154,92 @@ function WorkspacesSection() {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function WorkflowsSection() {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      setWorkspaces(await fetchWorkspaces())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load workflows")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const workflows = workspaces.flatMap((workspace) =>
+    (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
+  )
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Workflows</h2>
+          <p className="text-sm text-muted-foreground">
+            Workflows define triggers and runtime behavior within a workspace.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
+          Refresh
+        </Button>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading && workflows.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workflows…</p>
+      ) : workflows.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workflows configured.</p>
+      ) : (
+        <div className="border border-border rounded-lg divide-y divide-border">
+          {workflows.map((workflow) => (
+            <WorkflowSummaryRow key={`${workflow.workspaceName}/${workflow.name}`} workflow={workflow} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
+  return (
+    <div className="px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium truncate">{workflow.name}</p>
+          <p className="text-xs text-muted-foreground truncate">
+            {workflow.workspaceName} · {workflow.integration || "manual"}
+            {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {workflow.enableManualTrigger && (
+            <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
+          )}
+          <span className={cn(
+            "text-xs px-2 py-0.5 rounded",
+            workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
+          )}>
+            {workflow.enabled ? "enabled" : "paused"}
+          </span>
+        </div>
+      </div>
     </div>
   )
 }

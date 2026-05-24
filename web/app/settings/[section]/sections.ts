@@ -5,6 +5,7 @@ export const VALID_SECTIONS = [
   "authentication",
   "issue-trackers",
   "workspaces",
+  "workflows",
   "secrets",
   "ai-config",
   "mcp-servers",
