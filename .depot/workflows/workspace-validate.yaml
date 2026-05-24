@@ -1,0 +1,36 @@
+name: Validate ElasticClaw Workspace
+
+on:
+  pull_request:
+    paths:
+      - '.elasticclaw/**'
+
+jobs:
+  validate:
+    name: Validate workspace and workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workspace (elasticclaw)
+        uses: elasticclaw/actions/publish-workspace@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          path: .elasticclaw/workspaces/elasticclaw
+          dry-run: true
+
+      - name: Validate workflow (github-issue)
+        uses: elasticclaw/actions/publish-workflow@main
+        with:
+          hub-endpoint: https://factory.elasticclaw.ai
+          token: ${{ secrets.ELASTICCLAW_TOKEN }}
+          workspace: elasticclaw
+          path: .elasticclaw/workflows/github-issue.yaml
+          dry-run: true
+
+      # Intentionally not validating .elasticclaw/workflows/linear-story.yaml yet.
+      # The Linear workflow is local test config until its server-side tracker setup is ready.
