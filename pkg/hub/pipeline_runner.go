@@ -654,11 +654,10 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) {
-	if current := s.getPipelineStage(clawID); current == stage.ID {
+	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return
 	}
-	s.setPipelineStage(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, ctx)
 
