@@ -11,6 +11,7 @@ on:
 jobs:
   publish:
     name: Publish to ElasticClaw Factory
+    if: ${{ false }} # Temporarily disabled while workspace/workflow publishing is being rebuilt.
     runs-on: ubuntu-latest
     permissions:
       contents: read
