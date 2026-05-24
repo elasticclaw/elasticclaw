@@ -115,6 +115,18 @@ interface SettingsData {
   maxConcurrentClaws?: number
 }
 
+function githubOwnerFromAppURL(url?: string): string {
+  if (!url) return ""
+  try {
+    const parsed = new URL(url)
+    const orgMatch = parsed.pathname.match(/^\/organizations\/([^/]+)\/settings\/apps\//)
+    if (orgMatch?.[1]) return orgMatch[1]
+  } catch {
+    return ""
+  }
+  return ""
+}
+
 interface ConcurrencyGroup {
   name: string
   limit: number
@@ -1900,6 +1912,7 @@ interface TrackerItem {
 
 function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string }) {
   const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
+  const [githubOwnerHint, setGithubOwnerHint] = useState("")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const hubUrl = getHubUrl()
@@ -1930,6 +1943,23 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   useEffect(() => {
     loadTrackers()
   }, [loadTrackers])
+
+  useEffect(() => {
+    if (!selectedWorkspace) return
+    async function loadGitHubOwnerHint() {
+      try {
+        const res = await fetch(`${hubUrl}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/github-apps`, { headers: { Authorization: `Bearer ${authToken()}` } })
+        if (!res.ok) return
+        const data = await res.json()
+        const apps = (data.githubApps || []) as WorkspaceGitHubAppView[]
+        const hinted = apps.map(app => app.installation || githubOwnerFromAppURL(app.url)).find(Boolean)
+        setGithubOwnerHint(hinted || "")
+      } catch {
+        setGithubOwnerHint("")
+      }
+    }
+    loadGitHubOwnerHint()
+  }, [hubUrl, selectedWorkspace])
 
   // Unified modal state
   const [showModal, setShowModal] = useState(false)
@@ -2033,13 +2063,23 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
     ? <span className="text-[#F4603C]">⚡</span>
     : <Github className="size-4" />
 
-  const githubIssuesTokenUrl = "https://github.com/settings/personal-access-tokens/new?name=ElasticClaw%20GitHub%20Issues&description=Allows%20ElasticClaw%20to%20read%20and%20update%20GitHub%20issues&expires_in=90&issues=write&metadata=read"
+  const githubIssuesTokenParams = new URLSearchParams({
+    name: "ElasticClaw GitHub Issues",
+    description: "Allows ElasticClaw to read and update GitHub issues",
+    expires_in: "90",
+    issues: "write",
+    metadata: "read",
+  })
+  if (githubOwnerHint) {
+    githubIssuesTokenParams.set("target_name", githubOwnerHint)
+  }
+  const githubIssuesTokenUrl = `https://github.com/settings/personal-access-tokens/new?${githubIssuesTokenParams.toString()}`
   const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
     ? <>Use a Linear API key from <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a>.</>
     : (modalMode === "add" ? modalType : editType) === "shortcut"
     ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
-    ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. Select the repo or org owner, then grant repository access to the repos this workspace watches.</>
+    ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. {githubOwnerHint ? <>The link starts with <code>{githubOwnerHint}</code> as the resource owner. </> : null}Grant repository access to the repos this workspace watches.</>
     : null
   const activeTrackerType = modalMode === "add" ? modalType : editType
   const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
