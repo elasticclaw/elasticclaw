@@ -102,6 +102,31 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("second workflow detail status = %d, body = %s", rr.Code, rr.Body.String())
 	}
+
+	body = `{"workflows":[{"name":"Bugfix","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("case-variant workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow list status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var workflows []WorkflowView
+	if err := json.Unmarshal(rr.Body.Bytes(), &workflows); err != nil {
+		t.Fatalf("decode workflows: %v", err)
+	}
+	if len(workflows) != 2 {
+		t.Fatalf("workflow count = %d, want 2: %#v", len(workflows), workflows)
+	}
 }
 
 func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
