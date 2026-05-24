@@ -245,15 +245,15 @@ export default function SettingsSectionPage() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
-          <div className="relative mb-2">
-            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-8 -translate-y-1/2 items-center justify-center rounded-md bg-primary text-sm font-semibold text-primary-foreground">
+          <div className="relative mb-1">
+            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
               {selectedWorkspaceInitial}
             </div>
             <select
               aria-label="Workspace"
               value={selectedWorkspace}
               onChange={(event) => setSelectedWorkspace(event.target.value)}
-              className="h-12 w-full appearance-none rounded-lg border border-border bg-background pl-14 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:border-primary focus:ring-2 focus:ring-primary/20"
+              className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
             >
               {workspaces.length === 0 ? (
                 <option value="default">default</option>
@@ -268,10 +268,12 @@ export default function SettingsSectionPage() {
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
               <div key={group.label}>
-                {groupIdx > 0 && <div className="my-3 border-t border-border/50" />}
-                <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                  {group.label}
-                </p>
+                {groupIdx > 0 && <div className="h-5" />}
+                {groupIdx > 0 && (
+                  <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                    {group.label}
+                  </p>
+                )}
                 {group.items.map(({ id, label, icon: Icon }) => (
                   <Link
                     key={id}
