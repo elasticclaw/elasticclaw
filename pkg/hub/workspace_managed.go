@@ -220,8 +220,16 @@ func findWorkspaceIssueTracker(workspace, trackerType, name string) (workspaceIs
 		return workspaceIssueTracker{}, false
 	}
 	find := func(values map[string]workspaceIssueTracker) (workspaceIssueTracker, bool) {
+		if name == "" {
+			if len(values) != 1 {
+				return workspaceIssueTracker{}, false
+			}
+			for _, tracker := range values {
+				return tracker, true
+			}
+		}
 		for trackerName, tracker := range values {
-			if name == "" || strings.EqualFold(trackerName, name) {
+			if strings.EqualFold(trackerName, name) {
 				return tracker, true
 			}
 		}

@@ -230,6 +230,9 @@ func githubIssuesTriggerRepos(factory *types.FactoryConfig) []string {
 }
 
 func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
+	if workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil && len(workflow.Trigger.GitHubIssues.Repositories) > 0 {
+		return workflow.Trigger.GitHubIssues.Repositories
+	}
 	if workflow.Trigger != nil && len(workflow.Trigger.Repositories) > 0 {
 		return workflow.Trigger.Repositories
 	}
@@ -309,10 +312,20 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 }
 
 func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
-	if trigger == nil || trigger.Type != "github_issues" {
+	if trigger == nil {
 		return false
 	}
-	switch trigger.Event {
+	if trigger.GitHubIssues != nil {
+		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
+	}
+	if trigger.Type != "github_issues" {
+		return false
+	}
+	return githubIssuesWorkflowSourceMatches(trigger.Event, trigger.States, trigger.Labels, trigger.Labelers, payload, currentStatus, issueLabels)
+}
+
+func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
+	switch event {
 	case "issue_labeled":
 		if payload.Action != "labeled" {
 			return false
@@ -340,9 +353,9 @@ func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload 
 	default:
 		return false
 	}
-	if len(trigger.States) > 0 {
+	if len(states) > 0 {
 		stateMatched := false
-		for _, state := range trigger.States {
+		for _, state := range states {
 			if strings.EqualFold(currentStatus, state) {
 				stateMatched = true
 				break
@@ -352,13 +365,13 @@ func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload 
 			return false
 		}
 	}
-	for _, required := range trigger.Labels {
+	for _, required := range labels {
 		if !issueLabels[strings.ToLower(required)] {
 			return false
 		}
 	}
-	if len(trigger.Labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
-		for _, labeler := range trigger.Labelers {
+	if len(labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+		for _, labeler := range labelers {
 			if labeler == "*" || strings.EqualFold(labeler, payload.Sender.Login) {
 				return true
 			}

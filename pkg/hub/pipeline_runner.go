@@ -600,7 +600,7 @@ issueResolved:
 		}
 		scToken := s.resolveShortcutTokenForPipeline(ctx)
 		if scToken == "" {
-			log.Printf("[pipeline] %s: no Shortcut token for tracker %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+			log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
 			return
 		}
 		if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
@@ -635,7 +635,7 @@ issueResolved:
 		// Linear issue
 		linearToken := s.resolveLinearTokenForPipeline(ctx)
 		if linearToken == "" {
-			log.Printf("[pipeline] %s: no Linear token for tracker %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+			log.Printf("[pipeline] %s: no Linear token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
 			return
 		}
 		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
