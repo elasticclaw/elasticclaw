@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -471,7 +472,52 @@ func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existin
 	} else {
 		delete(values, "webhook_secrets")
 	}
-	return yaml.Marshal(values)
+	return marshalOrderedYAML(values, []string{
+		"schema_version",
+		"name",
+		"provider",
+		"nix",
+		"docker",
+		"repositories",
+		"env",
+	})
+}
+
+func marshalOrderedYAML(values map[string]interface{}, order []string) ([]byte, error) {
+	seen := map[string]bool{}
+	root := &yaml.Node{Kind: yaml.MappingNode}
+	for _, key := range order {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		if err := appendYAMLMapEntry(root, key, value); err != nil {
+			return nil, err
+		}
+		seen[key] = true
+	}
+	var rest []string
+	for key := range values {
+		if !seen[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		if err := appendYAMLMapEntry(root, key, values[key]); err != nil {
+			return nil, err
+		}
+	}
+	return yaml.Marshal(root)
+}
+
+func appendYAMLMapEntry(root *yaml.Node, key string, value interface{}) error {
+	var node yaml.Node
+	if err := node.Encode(value); err != nil {
+		return err
+	}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, &node)
+	return nil
 }
 
 func deleteExternalWorkspace(name string) error {

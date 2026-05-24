@@ -14,6 +14,7 @@ import (
 type WorkspaceView struct {
 	Name      string          `json:"name"`
 	Source    string          `json:"source"`
+	Config    string          `json:"config,omitempty"`
 	Access    WorkspaceAccess `json:"access"`
 	Workflows []WorkflowView  `json:"workflows"`
 }
@@ -254,6 +255,7 @@ func workspaceToView(workspace *types.WorkspaceConfig) WorkspaceView {
 	return WorkspaceView{
 		Name:   workspace.Name,
 		Source: "workspace",
+		Config: workspace.Files["elasticclaw-config.yaml"],
 		Access: WorkspaceAccess{
 			Repositories:   append([]types.GitHubRepoAccess(nil), workspace.Repositories...),
 			Env:            workspaceEnvNames(workspace.Env),

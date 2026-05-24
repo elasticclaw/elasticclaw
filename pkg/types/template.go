@@ -346,6 +346,19 @@ type WorkspaceEnvVar struct {
 	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"`
 }
 
+func (v WorkspaceEnvVar) MarshalYAML() (interface{}, error) {
+	if v.Secret == "" {
+		return v.Value, nil
+	}
+	return struct {
+		Secret string `yaml:"secret,omitempty"`
+		Value  string `yaml:"value,omitempty"`
+	}{
+		Secret: v.Secret,
+		Value:  v.Value,
+	}, nil
+}
+
 func (e *WorkspaceEnv) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.MappingNode {
 		return fmt.Errorf("env: expected a map")

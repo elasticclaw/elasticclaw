@@ -272,6 +272,7 @@ export interface Workflow {
 export interface Workspace {
   name: string
   source: string
+  config?: string
   access: WorkspaceAccess
   workflows: Workflow[]
 }

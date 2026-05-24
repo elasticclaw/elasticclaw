@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
@@ -15,6 +15,17 @@ import { fetchWorkspaces, type RepositoryAccess, type Workspace, type Workflow }
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
 }
+
+const WORKSPACE_SECTIONS = new Set<Section>([
+  "workspaces",
+  "workflows",
+  "workspace-analytics",
+  "github",
+  "issue-trackers",
+  "webhooks",
+  "secrets",
+  "mcp-servers",
+])
 
 interface LLMKeyView {
   name: string
@@ -124,8 +135,16 @@ async function patchSettings(patch: object): Promise<void> {
 export default function SettingsSectionPage() {
   const params = useParams()
   const router = useRouter()
-  const rawSection = Array.isArray(params.section) ? params.section[0] : (params.section ?? "workspaces")
+  const parts = Array.isArray(params.parts) ? params.parts : []
+  const firstPart = parts[0] ?? ""
+  const secondPart = parts[1] ?? ""
+  const firstPartIsSection = isValidSection(firstPart)
+  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection
+  const rawSection = hasRouteWorkspace ? (secondPart || "workspaces") : (firstPart || "workspaces")
   const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
+  const rawWorkspace = hasRouteWorkspace ? firstPart : ""
+  const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
+  const routeHasOverviewSlug = hasRouteWorkspace && secondPart === "workspaces"
 
   // Redirect invalid sections to the workspace overview.
   useEffect(() => {
@@ -141,8 +160,9 @@ export default function SettingsSectionPage() {
   const [version, setVersion] = useState("")
   const [hubPublicUrl, setHubPublicUrl] = useState("")
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [selectedWorkspace, setSelectedWorkspace] = useState("default")
-  const selectedWorkspaceInitial = (selectedWorkspace.trim()[0] || "D").toUpperCase()
+  const [selectedWorkspace, setSelectedWorkspace] = useState("")
+  const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
+  const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
   const load = useCallback(async () => {
     try {
@@ -167,10 +187,29 @@ export default function SettingsSectionPage() {
     fetchWorkspaces()
       .then((data) => {
         setWorkspaces(data)
-        if (data.length > 0) setSelectedWorkspace((current) => data.some((workspace) => workspace.name === current) ? current : data[0].name)
+        setSelectedWorkspace((current) => {
+          if (data.length === 0) return ""
+          if (routeWorkspace && data.some((workspace) => workspace.name === routeWorkspace)) return routeWorkspace
+          return data.some((workspace) => workspace.name === current) ? current : data[0].name
+        })
       })
-      .catch(() => setWorkspaces([]))
-  }, [])
+      .catch(() => {
+        setWorkspaces([])
+        setSelectedWorkspace("")
+      })
+  }, [routeWorkspace])
+
+  useEffect(() => {
+    if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
+    const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
+      ? routeWorkspace
+      : selectedWorkspace || workspaces[0].name
+    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
+    const target = section === "workspaces" ? workspaceBase : `${workspaceBase}/${section}`
+    if ((!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug) {
+      router.replace(target)
+    }
+  }, [routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)
@@ -206,6 +245,7 @@ export default function SettingsSectionPage() {
       items: [
         { id: "workspaces", label: "Overview", icon: LayoutTemplate },
         { id: "workflows", label: "Workflows", icon: GitBranch },
+        { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
         { id: "github", label: "GitHub Apps", icon: Github },
         { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
         { id: "webhooks", label: "Webhooks", icon: Webhook },
@@ -219,6 +259,7 @@ export default function SettingsSectionPage() {
         { id: "runtimes", label: "Sandboxes", icon: Cpu },
         { id: "models", label: "Models", icon: Key },
         { id: "authentication", label: "Authentication", icon: Shield },
+        { id: "analytics", label: "Analytics", icon: BarChart3 },
         { id: "ai-config", label: "Configure with AI", icon: Sparkles },
       ],
     },
@@ -230,6 +271,19 @@ export default function SettingsSectionPage() {
       ],
     },
   ]
+  const settingsHref = (id: Section) => {
+    if (WORKSPACE_SECTIONS.has(id) && selectedWorkspace) {
+      const workspaceBase = `/settings/${encodeURIComponent(selectedWorkspace)}`
+      return id === "workspaces" ? workspaceBase : `${workspaceBase}/${id}`
+    }
+    return `/settings/${id}`
+  }
+  const selectWorkspace = (workspace: string) => {
+    setSelectedWorkspace(workspace)
+    const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
+    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
+    router.push(targetSection === "workspaces" ? workspaceBase : `${workspaceBase}/${targetSection}`)
+  }
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -252,11 +306,12 @@ export default function SettingsSectionPage() {
             <select
               aria-label="Workspace"
               value={selectedWorkspace}
-              onChange={(event) => setSelectedWorkspace(event.target.value)}
+              onChange={(event) => selectWorkspace(event.target.value)}
+              disabled={workspaces.length === 0}
               className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
             >
               {workspaces.length === 0 ? (
-                <option value="default">default</option>
+                <option value="">{selectedWorkspaceLabel}</option>
               ) : (
                 workspaces.map((workspace) => (
                   <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
@@ -277,7 +332,7 @@ export default function SettingsSectionPage() {
                 {group.items.map(({ id, label, icon: Icon }) => (
                   <Link
                     key={id}
-                    href={`/settings/${id}`}
+                    href={settingsHref(id)}
                     className={cn(
                       "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
                       section === id
@@ -325,6 +380,9 @@ export default function SettingsSectionPage() {
           {section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
+          {section === "workspace-analytics" && (
+            <AnalyticsSection selectedWorkspace={selectedWorkspace} />
+          )}
           {section === "secrets" && (
             <SecretsSection settings={settings} />
           )}
@@ -336,6 +394,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "webhooks" && (
             <WebhooksSection hubUrl={hubPublicUrl} selectedWorkspace={selectedWorkspace} />
+          )}
+          {section === "analytics" && (
+            <AnalyticsSection />
           )}
           {section === "doctor" && (
             <DoctorSection />
@@ -2122,19 +2183,6 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold mb-1">Workspace</h2>
-          <p className="text-sm text-muted-foreground">
-            This workspace groups workflows, repositories, and environment variables.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
-          Refresh
-        </Button>
-      </div>
-
       {error && (
         <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
           {error}
@@ -2144,61 +2192,16 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
       {loading && visibleWorkspaces.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspace…</p>
       ) : workspaces.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces configured.</p>
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces pushed yet.</p>
       ) : visibleWorkspaces.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspace named {selectedWorkspace} is configured.</p>
       ) : (
         <div className="space-y-4">
           {visibleWorkspaces.map((workspace) => (
-            <div key={workspace.name} className="border border-border rounded-lg p-4 space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold">{workspace.name}</h3>
-                  <p className="text-xs text-muted-foreground">
-                    {workspace.workflows.length} workflow{workspace.workflows.length === 1 ? "" : "s"} · {workspace.source}
-                  </p>
-                </div>
-                <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">
-                  {workspace.access.repositories?.length || 0} repos
-                </span>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <WorkspaceRepositoryList values={workspace.access.repositories || []} />
-                <WorkspaceAccessList title="Environment" values={workspace.access.env || []} />
-              </div>
-
-              <div className="space-y-2">
-                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Workflows</h4>
-                {workspace.workflows.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">No workflows in this workspace.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {workspace.workflows.map((workflow) => (
-                      <div key={workflow.name} className="border border-border rounded-md px-3 py-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium truncate">{workflow.name}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {workflow.integration}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {workflow.enableManualTrigger && (
-                              <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
-                            )}
-                            <span className={cn(
-                              "text-xs px-2 py-0.5 rounded",
-                              workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
-                            )}>
-                              {workflow.enabled ? "enabled" : "paused"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+            <div key={workspace.name} className="space-y-4">
+              <h2 className="text-base font-semibold">{workspace.name}</h2>
+              <div className="overflow-hidden rounded-md border border-border bg-muted/40">
+                <YamlHighlight code={workspace.config || "No elasticclaw-config.yaml content available."} />
               </div>
             </div>
           ))}
@@ -2290,6 +2293,128 @@ function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
           </span>
         </div>
       </div>
+    </div>
+  )
+}
+
+interface AnalyticsSummary {
+  factoryName: string
+  totalTriggers: number
+  successfulCreations: number
+  failedCreations: number
+  terminations: number
+  prOpened: number
+  prMerged: number
+  prClosed: number
+  doneSignals: number
+  errors: number
+  successRate: number
+  prMergeRate: number
+}
+
+function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string }) {
+  const [summaries, setSummaries] = useState<AnalyticsSummary[]>([])
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      const hubUrl = getHubUrl()
+      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const [analyticsRes, workspaceData] = await Promise.all([
+        fetch(`${hubUrl}/api/analytics/factories`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetchWorkspaces(),
+      ])
+      if (!analyticsRes.ok) throw new Error(await analyticsRes.text())
+      setSummaries(await analyticsRes.json())
+      setWorkspaces(workspaceData)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load analytics")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const scopedToWorkspace = selectedWorkspace !== undefined
+  const workflowNames = new Set(
+    scopedToWorkspace && selectedWorkspace
+      ? workspaces.find((workspace) => workspace.name === selectedWorkspace)?.workflows.map((workflow) => workflow.name) || []
+      : []
+  )
+  const visibleSummaries = scopedToWorkspace
+    ? summaries.filter((summary) => workflowNames.has(summary.factoryName))
+    : summaries
+  const totalTriggers = visibleSummaries.reduce((sum, item) => sum + item.totalTriggers, 0)
+  const successfulCreations = visibleSummaries.reduce((sum, item) => sum + item.successfulCreations, 0)
+  const failedCreations = visibleSummaries.reduce((sum, item) => sum + item.failedCreations, 0)
+  const prMerged = visibleSummaries.reduce((sum, item) => sum + item.prMerged, 0)
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Analytics</h2>
+          <p className="text-sm text-muted-foreground">
+            {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <RotateCcw className={cn("size-3.5 mr-1.5", loading && "animate-spin")} />
+          Refresh
+        </Button>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading analytics…</p>
+      ) : visibleSummaries.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No analytics yet.</p>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-4">
+            <AnalyticsMetric label="Triggers" value={totalTriggers} />
+            <AnalyticsMetric label="Created" value={successfulCreations} />
+            <AnalyticsMetric label="Failed" value={failedCreations} />
+            <AnalyticsMetric label="PRs merged" value={prMerged} />
+          </div>
+          <div className="border border-border rounded-lg divide-y divide-border">
+            {visibleSummaries.map((summary) => (
+              <div key={summary.factoryName} className="px-4 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{summary.factoryName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(0)}% create success · {summary.prMergeRate.toFixed(0)}% PR merge
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right text-xs text-muted-foreground">
+                    {summary.errors} errors
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function AnalyticsMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-xl font-semibold mt-1">{value}</p>
     </div>
   )
 }
