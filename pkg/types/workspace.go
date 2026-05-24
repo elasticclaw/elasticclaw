@@ -1,6 +1,10 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
 
 // WorkspaceConfig defines a persisted workspace. Workflows live beside this
 // file in external storage and are loaded into Workflows at API boundaries.
@@ -44,6 +48,25 @@ type WorkflowConfig struct {
 	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Stages              []WorkflowStage   `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+}
+
+// UnmarshalYAML rejects removed workflow keys so old workflow files fail loudly
+// instead of silently loading without runtime stages.
+func (w *WorkflowConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "jobs" {
+				return fmt.Errorf("workflow uses removed key %q; rename it to %q", "jobs", "stages")
+			}
+		}
+	}
+	type workflowConfig WorkflowConfig
+	var decoded workflowConfig
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*w = WorkflowConfig(decoded)
+	return nil
 }
 
 // WorkflowTrigger defines the event source and filters for a workflow.
