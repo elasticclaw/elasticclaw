@@ -2271,11 +2271,14 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                       </div>
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
-                        <div className="flex gap-2">
-                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
-                          <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
-                            Generate
-                          </Button>
+	                        <div className="flex gap-2">
+	                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
+	                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(webhookSecret, "github-secret")} disabled={!webhookSecret}>
+	                            {copiedSetup === "github-secret" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+	                          </Button>
+	                          <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+	                            Generate
+	                          </Button>
                         </div>
                         <p className="text-xs text-muted-foreground mt-1">Paste the same secret into the GitHub webhook Secret field.</p>
                       </div>
