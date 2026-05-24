@@ -1959,7 +1959,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
   const [copiedSetup, setCopiedSetup] = useState<string | null>(null)
-  const [githubSetupTab, setGithubSetupTab] = useState<"pat" | "webhook">("pat")
+  const [setupTab, setSetupTab] = useState<"token" | "webhook">("token")
   const [showAddMenu, setShowAddMenu] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -1977,7 +1977,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   }, [showAddMenu])
 
   const resetModal = () => {
-    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setGithubSetupTab("pat")
+    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setSetupTab("token")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -1993,6 +1993,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     setWebhookSecret("")
     setEditIdx(idx)
     setEditType(tracker.type)
+    setSetupTab("token")
     setModalMode("edit")
     setShowModal(true)
   }
@@ -2066,7 +2067,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   }
   const githubIssuesTokenUrl = `https://github.com/settings/personal-access-tokens/new?${githubIssuesTokenParams.toString()}`
   const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
-    ? <>Use a Linear API key from <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a>.</>
+    ? <>Use a Linear API key from <a href="https://linear.app/settings/account/security" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/account/security</a>.</>
     : (modalMode === "add" ? modalType : editType) === "shortcut"
     ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
@@ -2074,8 +2075,9 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     : null
   const activeTrackerType = modalMode === "add" ? modalType : editType
   const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
-  const githubIssuesWebhookBase = hubPublicUrl || hubUrl
-  const githubIssuesWebhookUrl = `${githubIssuesWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
+  const workspaceWebhookBase = hubPublicUrl || hubUrl
+  const linearWebhookUrl = `${workspaceWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/linear`
+  const githubIssuesWebhookUrl = `${workspaceWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
 
   function generateWebhookSecret() {
     const bytes = new Uint8Array(32)
@@ -2200,7 +2202,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
 
       {/* Unified Modal */}
       <Dialog open={showModal} onOpenChange={open => { setShowModal(open); if (!open) resetModal() }}>
-        <DialogContent className={cn("p-0 gap-0", activeTrackerType === "github-issues" ? "sm:max-w-5xl w-[min(1100px,calc(100vw-2rem))]" : "max-w-lg")}>
+        <DialogContent className={cn("p-0 gap-0", activeTrackerType === "github-issues" || activeTrackerType === "linear" ? "sm:max-w-5xl w-[min(1100px,calc(100vw-2rem))]" : "max-w-lg")}>
           <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
@@ -2209,43 +2211,51 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
             </div>
           </div>
           <div className="p-5 space-y-4">
-              {activeTrackerType === "github-issues" ? (
+              {activeTrackerType === "github-issues" || activeTrackerType === "linear" ? (
                 <div className="grid min-h-[420px] grid-cols-[240px_1fr]">
                   <div className="-ml-5 -my-5 border-r border-border p-4">
                     <div className="space-y-1">
                       <button
                         type="button"
-                        onClick={() => setGithubSetupTab("pat")}
+                        onClick={() => setSetupTab("token")}
                         className={cn(
                           "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                          githubSetupTab === "pat" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          setupTab === "token" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                         )}
                       >
-                        GitHub PAT
+                        {activeTrackerType === "github-issues" ? "GitHub PAT" : "API Token"}
                       </button>
                       <button
                         type="button"
-                        onClick={() => setGithubSetupTab("webhook")}
+                        onClick={() => setSetupTab("webhook")}
                         className={cn(
                           "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                          githubSetupTab === "webhook" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          setupTab === "webhook" ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                         )}
                       >
-                        Webhook
+                        {activeTrackerType === "github-issues" ? "Webhook" : "Webhook Secret"}
                       </button>
                     </div>
                   </div>
                   <div className="pl-5">
-                    <p className="text-sm text-muted-foreground">Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
-                    {githubSetupTab === "pat" ? (
+                    <p className="text-sm text-muted-foreground">
+                      {activeTrackerType === "github-issues"
+                        ? "Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens."
+                        : "Connect Linear for this workspace. The API key lets ElasticClaw read issues and move them between statuses."}
+                    </p>
+                    {setupTab === "token" ? (
                     <div className="mt-4 space-y-4">
                       <div>
-                        <h4 className="text-sm font-medium">GitHub PAT</h4>
-                        <p className="text-xs text-muted-foreground mt-1">Used by ElasticClaw to read and update issues.</p>
+                        <h4 className="text-sm font-medium">{activeTrackerType === "github-issues" ? "GitHub PAT" : "Linear API Token"}</h4>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {activeTrackerType === "github-issues"
+                            ? "Used by ElasticClaw to read and update issues."
+                            : "Used by ElasticClaw to read Linear issues and move them between statuses."}
+                        </p>
                       </div>
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                        <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder="GitHub Issues API token" />
+                        <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(activeTrackerType)} API token`} />
                         {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
                       </div>
                     </div>
@@ -2253,38 +2263,43 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                     <div className="mt-4 space-y-4">
                       <div>
                         <h4 className="text-sm font-medium">Webhook</h4>
-                        <p className="text-xs text-muted-foreground mt-1">Create a repo or org webhook for Issues events.</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {activeTrackerType === "github-issues"
+                            ? "Create a repo or org webhook for Issues events."
+                            : "Create a Linear webhook for Issue events, then paste its signing secret below if you configured one."}
+                        </p>
                       </div>
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">Payload URL</label>
                         <div className="flex gap-2">
-                          <Input readOnly value={githubIssuesWebhookUrl} className="h-9 text-xs font-mono" />
-                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(githubIssuesWebhookUrl, "github-url")}>
-                            {copiedSetup === "github-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                          <Input readOnly value={activeTrackerType === "github-issues" ? githubIssuesWebhookUrl : linearWebhookUrl} className="h-9 text-xs font-mono" />
+                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(activeTrackerType === "github-issues" ? githubIssuesWebhookUrl : linearWebhookUrl, `${activeTrackerType}-url`)}>
+                            {copiedSetup === `${activeTrackerType}-url` ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                           </Button>
                         </div>
                       </div>
                       <div>
-                        <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret</label>
-	                        <div className="flex gap-2">
-	                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
-	                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(webhookSecret, "github-secret")} disabled={!webhookSecret}>
-	                            {copiedSetup === "github-secret" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-	                          </Button>
-	                          <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
-	                            Generate
-	                          </Button>
+                        <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
+                        <div className="flex gap-2">
+                          <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret" />
+                          <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(webhookSecret, `${activeTrackerType}-secret`)} disabled={!webhookSecret}>
+                            {copiedSetup === `${activeTrackerType}-secret` ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                          </Button>
+                          {activeTrackerType === "github-issues" && (
+                            <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+                              Generate
+                            </Button>
+                          )}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">Paste the same secret into the GitHub webhook Secret field.</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {activeTrackerType === "github-issues"
+                            ? "Paste the same secret into the GitHub webhook Secret field."
+                            : "Copy the signing secret from the Linear webhook settings and paste it here. Leave blank only if you intentionally want unsigned Linear webhooks."}
+                        </p>
                       </div>
                     </div>
                     )}
                   </div>
-                </div>
-              ) : activeTrackerType === "linear" ? (
-                <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>Connect Linear for this workspace. The API key lets ElasticClaw read issues and move them between statuses.</p>
-                  <p>Create a Linear webhook using the Linear URL from the Webhooks page. Subscribe to Issue events, then paste the same signing secret below if you configured one.</p>
                 </div>
               ) : activeTrackerType === "shortcut" ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
@@ -2296,7 +2311,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   Connect {trackerTypeLabel(activeTrackerType)} for this workspace.
                 </p>
               )}
-              {activeTrackerType !== "github-issues" && (
+              {activeTrackerType !== "github-issues" && activeTrackerType !== "linear" && (
                 <>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
@@ -2314,9 +2329,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {activeTrackerType === "linear"
-                    ? "Copy the signing secret from the Linear webhook settings and paste it here. Leave blank only if you intentionally want unsigned Linear webhooks."
-                    : activeTrackerType === "shortcut"
+                  {activeTrackerType === "shortcut"
                     ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
                     : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
                 </p>
