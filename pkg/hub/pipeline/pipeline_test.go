@@ -49,6 +49,31 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseMoveIssueObject(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      move_issue:
+        status: "Agent Needs Review"
+        issue_id: "{{.Inputs.issue_id}}"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	stage := p.EntryStage()
+	if stage == nil {
+		t.Fatal("expected entry stage")
+	}
+	if stage.OnEnter.MoveIssue.Status != "Agent Needs Review" {
+		t.Fatalf("status = %q, want Agent Needs Review", stage.OnEnter.MoveIssue.Status)
+	}
+	if stage.OnEnter.MoveIssue.IssueID != "{{.Inputs.issue_id}}" {
+		t.Fatalf("issue_id = %q, want template", stage.OnEnter.MoveIssue.IssueID)
+	}
+}
+
 func TestEntryStage(t *testing.T) {
 	p, _ := pipeline.Parse([]byte(sampleYAML))
 	entry := p.EntryStage()

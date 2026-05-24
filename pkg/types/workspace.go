@@ -48,12 +48,45 @@ type WorkflowConfig struct {
 
 // WorkflowTrigger defines the event source and filters for a workflow.
 type WorkflowTrigger struct {
+	GitHubIssues *GitHubIssuesWorkflowTrigger `yaml:"github_issues,omitempty" json:"githubIssues,omitempty"`
+	Linear       *LinearWorkflowTrigger       `yaml:"linear,omitempty" json:"linear,omitempty"`
+	Shortcut     *ShortcutWorkflowTrigger     `yaml:"shortcut,omitempty" json:"shortcut,omitempty"`
+
 	Type         string   `yaml:"type" json:"type"`
+	Event        string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Workspace    string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	Team         string   `yaml:"team,omitempty" json:"team,omitempty"`
+	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	States       []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels       []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Labelers     []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
+	AssignedTo   string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+}
+
+type GitHubIssuesWorkflowTrigger struct {
 	Event        string   `yaml:"event,omitempty" json:"event,omitempty"`
 	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
 	States       []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels       []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Labelers     []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
+	AssignedTo   string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+}
+
+type LinearWorkflowTrigger struct {
+	Event      string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Workspace  string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	Team       string   `yaml:"team,omitempty" json:"team,omitempty"`
+	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+}
+
+type ShortcutWorkflowTrigger struct {
+	Event      string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Workspace  string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
 }
 
 // WorkflowJob is one step in a workflow state machine. It intentionally mirrors

@@ -204,31 +204,122 @@ func (w *WorkflowConfig) Validate() error {
 }
 
 func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) error {
-	if trigger.Type == "" {
-		return fmt.Errorf("workflow %q: trigger.type is required", workflowName)
+	nestedCount := 0
+	if trigger.GitHubIssues != nil {
+		nestedCount++
 	}
-	switch trigger.Type {
-	case "github_issues":
-	default:
-		return fmt.Errorf("workflow %q: invalid trigger.type %q (must be github_issues)", workflowName, trigger.Type)
+	if trigger.Linear != nil {
+		nestedCount++
 	}
+	if trigger.Shortcut != nil {
+		nestedCount++
+	}
+	if nestedCount > 0 {
+		if trigger.Type != "" {
+			return fmt.Errorf("workflow %q: trigger cannot combine source keys with trigger.type", workflowName)
+		}
+		if nestedCount > 1 {
+			return fmt.Errorf("workflow %q: trigger must define exactly one source", workflowName)
+		}
+		if trigger.GitHubIssues != nil {
+			return validateGitHubIssuesWorkflowTrigger(workflowName, trigger.GitHubIssues)
+		}
+		if trigger.Linear != nil {
+			return validateLinearWorkflowTrigger(workflowName, trigger.Linear)
+		}
+		if trigger.Shortcut != nil {
+			return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
+		}
+	}
+	return validateLegacyWorkflowTrigger(workflowName, trigger)
+}
+
+func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIssuesWorkflowTrigger) error {
 	if trigger.Event == "" {
-		return fmt.Errorf("workflow %q: trigger.event is required", workflowName)
+		return fmt.Errorf("workflow %q: trigger.github_issues.event is required", workflowName)
 	}
 	switch trigger.Event {
 	case "issue_labeled", "issue_opened", "issue_reopened", "issue_edited", "issue_assigned", "issue_unassigned":
 	default:
-		return fmt.Errorf("workflow %q: invalid trigger.event %q", workflowName, trigger.Event)
+		return fmt.Errorf("workflow %q: invalid trigger.github_issues.event %q", workflowName, trigger.Event)
 	}
 	for i, repo := range trigger.Repositories {
 		if repo == "" {
-			return fmt.Errorf("workflow %q: trigger.repositories[%d] cannot be empty", workflowName, i)
+			return fmt.Errorf("workflow %q: trigger.github_issues.repositories[%d] cannot be empty", workflowName, i)
 		}
 		if !validRepoSelector(repo) {
-			return fmt.Errorf("workflow %q: trigger.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
+			return fmt.Errorf("workflow %q: trigger.github_issues.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
 		}
 	}
 	return nil
+}
+
+func validateLinearWorkflowTrigger(workflowName string, trigger *LinearWorkflowTrigger) error {
+	if trigger.Event == "" {
+		return fmt.Errorf("workflow %q: trigger.linear.event is required", workflowName)
+	}
+	switch trigger.Event {
+	case "status", "status_changed", "issue_status_changed":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.linear.event %q", workflowName, trigger.Event)
+	}
+	if len(trigger.States) == 0 {
+		return fmt.Errorf("workflow %q: trigger.linear.states must include at least one status", workflowName)
+	}
+	for i, state := range trigger.States {
+		if strings.TrimSpace(state) == "" {
+			return fmt.Errorf("workflow %q: trigger.linear.states[%d] cannot be empty", workflowName, i)
+		}
+	}
+	return nil
+}
+
+func validateShortcutWorkflowTrigger(workflowName string, trigger *ShortcutWorkflowTrigger) error {
+	if trigger.Event == "" {
+		return fmt.Errorf("workflow %q: trigger.shortcut.event is required", workflowName)
+	}
+	switch trigger.Event {
+	case "status", "status_changed", "story_status_changed":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.shortcut.event %q", workflowName, trigger.Event)
+	}
+	if len(trigger.States) == 0 {
+		return fmt.Errorf("workflow %q: trigger.shortcut.states must include at least one status", workflowName)
+	}
+	for i, state := range trigger.States {
+		if strings.TrimSpace(state) == "" {
+			return fmt.Errorf("workflow %q: trigger.shortcut.states[%d] cannot be empty", workflowName, i)
+		}
+	}
+	return nil
+}
+
+func validateLegacyWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) error {
+	if trigger.Type == "" {
+		return fmt.Errorf("workflow %q: trigger must define one source", workflowName)
+	}
+	switch trigger.Type {
+	case "github_issues":
+		return validateGitHubIssuesWorkflowTrigger(workflowName, &GitHubIssuesWorkflowTrigger{
+			Event:        trigger.Event,
+			Repositories: trigger.Repositories,
+			States:       trigger.States,
+			Labels:       trigger.Labels,
+			Labelers:     trigger.Labelers,
+			AssignedTo:   trigger.AssignedTo,
+		})
+	case "linear":
+		return validateLinearWorkflowTrigger(workflowName, &LinearWorkflowTrigger{
+			Event:      trigger.Event,
+			Workspace:  trigger.Workspace,
+			Team:       trigger.Team,
+			States:     trigger.States,
+			Labels:     trigger.Labels,
+			AssignedTo: trigger.AssignedTo,
+		})
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.type %q (must be one of: github_issues, linear)", workflowName, trigger.Type)
+	}
 }
 
 func validRepoSelector(repo string) bool {
