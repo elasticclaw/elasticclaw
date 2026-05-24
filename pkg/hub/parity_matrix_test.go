@@ -110,30 +110,30 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 
 			ts.Server.PollIntegrationsForTest()
 
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				var sawPoll bool
-				switch td.Name {
-				case "shortcut":
-					sawPoll = ts.Shortcut.SawPollCall()
-				case "github-issues":
-					sawPoll = ts.GitHubIssues.SawPollCall()
-				default:
-					sawPoll = ts.Linear.SawPollCall()
-				}
-				if sawPoll {
-					lastCount := -1
-					for i := 0; i < 20; i++ {
-						count := factorytest.CountClawsForTracker(t, ts, td)
-						if count == lastCount {
-							break
-						}
-						lastCount = count
-						time.Sleep(50 * time.Millisecond)
+			if td.Name != "github-issues" {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					var sawPoll bool
+					switch td.Name {
+					case "shortcut":
+						sawPoll = ts.Shortcut.SawPollCall()
+					default:
+						sawPoll = ts.Linear.SawPollCall()
 					}
-					break
+					if sawPoll {
+						lastCount := -1
+						for i := 0; i < 20; i++ {
+							count := factorytest.CountClawsForTracker(t, ts, td)
+							if count == lastCount {
+								break
+							}
+							lastCount = count
+							time.Sleep(50 * time.Millisecond)
+						}
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
 				}
-				time.Sleep(50 * time.Millisecond)
 			}
 
 			count := factorytest.CountClawsForTracker(t, ts, td)

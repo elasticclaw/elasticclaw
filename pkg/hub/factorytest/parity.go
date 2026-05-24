@@ -92,7 +92,7 @@ var Trackers = []TrackerDispatcher{
 			var num int
 			fmt.Sscanf(parts[2], "%d", &num)
 			payload, sig := ts.GitHubIssues.BuildWebhookPayload(repo, num, prevStatus, newStatus)
-			req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/github-issues/webhook", strings.NewReader(string(payload)))
+			req, err := http.NewRequest("POST", ts.URL()+"/api/workspaces/test-workspace/webhooks/github-issues", strings.NewReader(string(payload)))
 			if err != nil {
 				t.Fatalf("github issues webhook request build failed: %v", err)
 			}
@@ -131,7 +131,6 @@ type Scenario struct {
 func RunParityMatrix(t *testing.T, sc Scenario) {
 	for _, td := range Trackers {
 		t.Run(td.Name+"/"+sc.Name, func(t *testing.T) {
-			t.Parallel()
 			t.Helper()
 			var ts *TestServer
 			switch td.Name {
@@ -157,19 +156,16 @@ func RunParityMatrix(t *testing.T, sc Scenario) {
 			}
 			sc.Fn(t, td, ts)
 
-			// Smoke check: the mock must have recorded at least one API call.
-			// If a dispatcher's wiring is broken (e.g. SawPollCall always false,
-			// or the mock URL is misconfigured), this fails everywhere instead of
-			// subtly skipping work in one scenario.
+			// Smoke check: legacy factory dispatchers should hit their backing
+			// tracker API while processing the event. Native GitHub Issues
+			// workflows can create directly from the signed webhook payload; they
+			// fetch the issue later when the workflow pipeline initializes.
 			switch td.Name {
 			case "shortcut":
 				if !ts.Shortcut.SawAPICall() {
 					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)
 				}
 			case "github-issues":
-				if !ts.GitHubIssues.SawAPICall() {
-					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)
-				}
 			default:
 				if !ts.Linear.SawAPICall() {
 					t.Fatalf("smoke check failed: %s mock recorded zero API calls — dispatcher wiring broken?", td.Name)

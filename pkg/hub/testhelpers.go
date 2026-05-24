@@ -62,6 +62,37 @@ func NewTestServerWithConfig(t interface {
 	return s, db
 }
 
+// SaveWorkspaceForTest writes a workspace and its workflows through the same
+// external storage path used by the hub.
+func SaveWorkspaceForTest(t interface {
+	Helper()
+	Fatalf(string, ...interface{})
+}, workspace *types.WorkspaceConfig, workflows []*types.WorkflowConfig) {
+	t.Helper()
+	if err := saveExternalWorkspace(workspace); err != nil {
+		t.Fatalf("save workspace: %v", err)
+	}
+	if len(workflows) > 0 {
+		if err := saveExternalWorkflows(workspace.Name, workflows); err != nil {
+			t.Fatalf("save workflows: %v", err)
+		}
+	}
+}
+
+// SaveWorkspaceIssueTrackerForTest writes a workspace-managed issue tracker.
+func SaveWorkspaceIssueTrackerForTest(t interface {
+	Helper()
+	Fatalf(string, ...interface{})
+}, workspace, trackerType, name, token, webhookSecret string) {
+	t.Helper()
+	if err := saveWorkspaceIssueTracker(workspace, trackerType, name, workspaceIssueTracker{
+		Token:         token,
+		WebhookSecret: webhookSecret,
+	}); err != nil {
+		t.Fatalf("save workspace issue tracker: %v", err)
+	}
+}
+
 // Handler returns the server's HTTP handler (mux). Must be called after setupRoutes.
 func (s *Server) Handler() http.Handler {
 	return s.mux
