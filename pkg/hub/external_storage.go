@@ -318,19 +318,9 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		return nil, err
 	}
 	dir := filepath.Join(workspacesDir(), name)
-	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
-	data, err := os.ReadFile(configPath)
+	workspace, err := loadExternalWorkspaceConfig(name)
 	if err != nil {
-		legacyPath := filepath.Join(dir, "workspace.yaml")
-		data, err = os.ReadFile(legacyPath)
-		if err != nil {
-			return nil, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
-		}
-		configPath = legacyPath
-	}
-	var workspace types.WorkspaceConfig
-	if err := yaml.Unmarshal(data, &workspace); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+		return nil, err
 	}
 	if workspace.Name == "" {
 		workspace.Name = name
@@ -366,6 +356,25 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		workspace.Workflows = append(workspace.Workflows, &workflow)
 	}
 	return &workspace, nil
+}
+
+func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
+	dir := filepath.Join(workspacesDir(), name)
+	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		legacyPath := filepath.Join(dir, "workspace.yaml")
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			return types.WorkspaceConfig{}, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
+		}
+		configPath = legacyPath
+	}
+	var workspace types.WorkspaceConfig
+	if err := yaml.Unmarshal(data, &workspace); err != nil {
+		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+	return workspace, nil
 }
 
 func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
@@ -473,7 +482,7 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := validateName(workspaceName); err != nil {
 		return err
 	}
-	if _, err := loadExternalWorkspace(workspaceName); err != nil {
+	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
 		return err
 	}
 	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")

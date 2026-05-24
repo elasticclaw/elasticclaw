@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,7 +39,8 @@ func TestWorkspacesEndpointReturnsPersistedWorkspacesOnly(t *testing.T) {
 }
 
 func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
-	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
 	body := `{"workspaces":[{"name":"engineering","repositories":["elasticclaw/elasticclaw"],"secrets":["openai_api_key"]}]}`
@@ -126,6 +129,21 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	}
 	if len(workflows) != 2 {
 		t.Fatalf("workflow count = %d, want 2: %#v", len(workflows), workflows)
+	}
+
+	staleWorkflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", "bugfix.yaml")
+	if err := os.WriteFile(staleWorkflowPath, []byte("schema_version: v1\nname: bugfix\njobs:\n  - id: old\n"), 0640); err != nil {
+		t.Fatalf("write stale workflow: %v", err)
+	}
+
+	body = `{"workflows":[{"name":"bugfix","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("repair workflow push status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
 
