@@ -382,7 +382,7 @@ export default function SettingsSectionPage() {
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "issue-trackers" && (
-            <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} />
+            <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} />
           )}
           {section === "workspaces" && (
             <WorkspacesSection selectedWorkspace={selectedWorkspace} />
@@ -1899,7 +1899,7 @@ interface TrackerItem {
   tokenSet: boolean
 }
 
-function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string }) {
+function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubPublicUrl }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string; hubPublicUrl: string }) {
   const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
   const [githubOwnerHint, setGithubOwnerHint] = useState("")
   const [loading, setLoading] = useState(true)
@@ -2079,7 +2079,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
     : null
   const activeTrackerType = modalMode === "add" ? modalType : editType
   const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
-  const githubIssuesWebhookUrl = `${hubUrl}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
+  const githubIssuesWebhookBase = hubPublicUrl || hubUrl
+  const githubIssuesWebhookUrl = `${githubIssuesWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
 
   function generateWebhookSecret() {
     const bytes = new Uint8Array(32)
