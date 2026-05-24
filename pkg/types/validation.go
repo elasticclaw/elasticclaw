@@ -169,7 +169,7 @@ func (w *WorkflowConfig) Validate() error {
 		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: replicated, daytona, exedev)", w.Name, w.Provider)
 	}
 	if w.Trigger != nil {
-		if err := validateGitHubTrigger(w.Name, w.Trigger); err != nil {
+		if err := validateWorkflowTrigger(w.Name, w.Trigger); err != nil {
 			return err
 		}
 	}
@@ -192,6 +192,39 @@ func (w *WorkflowConfig) Validate() error {
 	for i, input := range w.Inputs {
 		if err := validateFactoryInput(w.Name, i, input); err != nil {
 			return err
+		}
+	}
+	for i, job := range w.Jobs {
+		if strings.TrimSpace(job.ID) == "" {
+			return fmt.Errorf("workflow %q: jobs[%d].id is required", w.Name, i)
+		}
+	}
+	return nil
+}
+
+func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) error {
+	if trigger.Type == "" {
+		return fmt.Errorf("workflow %q: trigger.type is required", workflowName)
+	}
+	switch trigger.Type {
+	case "github_issues":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.type %q (must be github_issues)", workflowName, trigger.Type)
+	}
+	if trigger.Event == "" {
+		return fmt.Errorf("workflow %q: trigger.event is required", workflowName)
+	}
+	switch trigger.Event {
+	case "issue_labeled", "issue_opened", "issue_reopened", "issue_edited", "issue_assigned", "issue_unassigned":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.event %q", workflowName, trigger.Event)
+	}
+	for i, repo := range trigger.Repositories {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: trigger.repositories[%d] cannot be empty", workflowName, i)
+		}
+		if !strings.HasSuffix(repo, "/*") && !repoRegex.MatchString(repo) {
+			return fmt.Errorf("workflow %q: trigger.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
 		}
 	}
 	return nil

@@ -19,6 +19,7 @@ type WorkspaceConfig struct {
 type WorkflowConfig struct {
 	SchemaVersion       string            `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
 	Name                string            `yaml:"name" json:"name"`
+	RawConfig           string            `yaml:"-" json:"rawConfig,omitempty"`
 	Enabled             *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Integration         string            `yaml:"integration,omitempty" json:"integration,omitempty"`
 	Workspace           string            `yaml:"workspace,omitempty" json:"workspace,omitempty"`
@@ -40,7 +41,30 @@ type WorkflowConfig struct {
 	EnableManualTrigger bool              `yaml:"enable_manual_trigger,omitempty" json:"enable_manual_trigger,omitempty"`
 	Repos               []string          `yaml:"repos,omitempty" json:"repos,omitempty"`
 	TriggerRepos        []string          `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
-	Trigger             *GitHubTrigger    `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	Jobs                []WorkflowJob     `yaml:"jobs,omitempty" json:"jobs,omitempty"`
+	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+}
+
+// WorkflowTrigger defines the event source and filters for a workflow.
+type WorkflowTrigger struct {
+	Type         string   `yaml:"type" json:"type"`
+	Event        string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	States       []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels       []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Labelers     []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
+}
+
+// WorkflowJob is one step in a workflow state machine. It intentionally mirrors
+// the persisted pipeline stage shape without making pkg/types depend on hub.
+type WorkflowJob struct {
+	ID       string                   `yaml:"id" json:"id"`
+	Label    string                   `yaml:"label,omitempty" json:"label,omitempty"`
+	Entry    bool                     `yaml:"entry,omitempty" json:"entry,omitempty"`
+	Terminal bool                     `yaml:"terminal,omitempty" json:"terminal,omitempty"`
+	Triggers []map[string]interface{} `yaml:"triggers,omitempty" json:"triggers,omitempty"`
+	OnEnter  map[string]interface{}   `yaml:"on_enter,omitempty" json:"onEnter,omitempty"`
 }
 
 func (w *WorkspaceConfig) Validate() error {

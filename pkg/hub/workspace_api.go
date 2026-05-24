@@ -165,6 +165,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
 			return
 		}
+		if err := types.NormalizeWorkflowConfig(workflow); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := workflow.Validate(); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return

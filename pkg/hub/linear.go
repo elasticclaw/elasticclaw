@@ -1341,15 +1341,8 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
-			for _, tag := range tags {
-				if strings.HasPrefix(tag, "factory:") {
-					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range factories {
-						if factory.Name == factoryName {
-							return factory
-						}
-					}
-				}
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
 			}
 		}
 	}
@@ -1357,15 +1350,8 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
-			for _, tag := range tags {
-				if strings.HasPrefix(tag, "factory:") {
-					factoryName := strings.TrimPrefix(tag, "factory:")
-					for _, factory := range factories {
-						if factory.Name == factoryName {
-							return factory
-						}
-					}
-				}
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
 			}
 		}
 	}
@@ -1393,6 +1379,25 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 		if factory.Team == "" || strings.EqualFold(factory.Team, teamKey) {
 			return factory
 		}
+	}
+	return nil
+}
+
+func (s *Server) factoryFromTags(tags []string, factories []*types.FactoryConfig) *types.FactoryConfig {
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "factory:") {
+			continue
+		}
+		factoryName := strings.TrimPrefix(tag, "factory:")
+		for _, factory := range factories {
+			if factory.Name == factoryName {
+				return factory
+			}
+		}
+	}
+	workspaceName, workflowName := workflowTags(tags)
+	if workspaceName != "" && workflowName != "" {
+		return s.workflowPipelineFactory(workspaceName, workflowName)
 	}
 	return nil
 }

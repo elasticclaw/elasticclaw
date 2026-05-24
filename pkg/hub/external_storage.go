@@ -356,6 +356,13 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		if err := yaml.Unmarshal(data, &workflow); err != nil {
 			return nil, fmt.Errorf("parse workflow %s: %w", e.Name(), err)
 		}
+		workflow.RawConfig = string(data)
+		if workflow.Name == "" {
+			workflow.Name = strings.TrimSuffix(e.Name(), ".yaml")
+		}
+		if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+			return nil, fmt.Errorf("normalize workflow %s: %w", e.Name(), err)
+		}
 		workspace.Workflows = append(workspace.Workflows, &workflow)
 	}
 	return &workspace, nil
@@ -466,9 +473,13 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		if err := validateName(workflow.Name); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
 		}
-		data, err := yaml.Marshal(workflow)
-		if err != nil {
-			return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
+		data := []byte(workflow.RawConfig)
+		if len(strings.TrimSpace(string(data))) == 0 {
+			var err error
+			data, err = yaml.Marshal(workflow)
+			if err != nil {
+				return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
+			}
 		}
 		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)

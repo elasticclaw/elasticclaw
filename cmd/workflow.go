@@ -234,8 +234,12 @@ func readWorkflowFiles(paths []string) ([]*types.WorkflowConfig, error) {
 		if err := yaml.Unmarshal(data, &workflow); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
+		workflow.RawConfig = string(data)
 		if workflow.Name == "" {
 			workflow.Name = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(path), ".yaml"), ".yml")
+		}
+		if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+			return nil, fmt.Errorf("normalize %s: %w", path, err)
 		}
 		workflows = append(workflows, &workflow)
 	}

@@ -22,7 +22,6 @@ const WORKSPACE_SECTIONS = new Set<Section>([
   "workspace-analytics",
   "github",
   "issue-trackers",
-  "webhooks",
   "secrets",
   "mcp-servers",
 ])
@@ -258,7 +257,6 @@ export default function SettingsSectionPage() {
         { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
         { id: "github", label: "GitHub Apps", icon: Github },
         { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-        { id: "webhooks", label: "Webhooks", icon: Webhook },
         { id: "secrets", label: "Secrets", icon: Lock },
         { id: "mcp-servers", label: "MCP Servers", icon: Zap },
       ],
@@ -401,9 +399,6 @@ export default function SettingsSectionPage() {
           )}
           {section === "ai-config" && (
             <AIConfigSection />
-          )}
-          {section === "webhooks" && (
-            <WebhooksSection hubUrl={hubPublicUrl} selectedWorkspace={selectedWorkspace} />
           )}
           {section === "analytics" && (
             <AnalyticsSection />

@@ -523,6 +523,9 @@ func githubIssuesTriggerRepos(factory *types.FactoryConfig) []string {
 }
 
 func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
+	if workflow.Trigger != nil && len(workflow.Trigger.Repositories) > 0 {
+		return workflow.Trigger.Repositories
+	}
 	if len(workflow.TriggerRepos) > 0 {
 		return workflow.TriggerRepos
 	}
@@ -542,53 +545,120 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 			if !githubRepoMatches(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow)) {
 				continue
 			}
-			if len(workflow.Labels) > 0 {
-				allMatch := true
-				for _, required := range workflow.Labels {
-					if !issueLabels[strings.ToLower(required)] {
-						allMatch = false
-						break
-					}
-				}
-				if !allMatch {
-					continue
-				}
-			}
-			if len(workflow.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
-				allowed := false
-				for _, labeler := range workflow.AllowedLabelers {
-					if strings.EqualFold(labeler, payload.Sender.Login) {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					continue
-				}
-			}
 			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
 				continue
 			}
 
-			triggerStatus := workflow.TriggerStatus
-			if triggerStatus == "" {
-				triggerStatus = "open"
-			}
-			triggerMatched := strings.EqualFold(currentStatus, triggerStatus) || issueLabels[strings.ToLower(triggerStatus)]
-			previousMatched := previousStatus != "" && strings.EqualFold(previousStatus, triggerStatus)
-			if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
-				previousMatched = previousLabels[strings.ToLower(triggerStatus)]
-			}
-			if triggerMatched && !previousMatched {
-				matched = true
-				log.Printf("[workflow:%s/%s] GitHub issue %s entered trigger %q — creating claw", workspace.Name, workflow.Name, issueID, triggerStatus)
-				if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
-					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+			if workflow.Trigger != nil {
+				if !githubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
+					continue
 				}
+			} else {
+				if len(workflow.Labels) > 0 {
+					allMatch := true
+					for _, required := range workflow.Labels {
+						if !issueLabels[strings.ToLower(required)] {
+							allMatch = false
+							break
+						}
+					}
+					if !allMatch {
+						continue
+					}
+				}
+				if len(workflow.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+					allowed := false
+					for _, labeler := range workflow.AllowedLabelers {
+						if strings.EqualFold(labeler, payload.Sender.Login) {
+							allowed = true
+							break
+						}
+					}
+					if !allowed {
+						continue
+					}
+				}
+				triggerStatus := workflow.TriggerStatus
+				if triggerStatus == "" {
+					triggerStatus = "open"
+				}
+				triggerMatched := strings.EqualFold(currentStatus, triggerStatus) || issueLabels[strings.ToLower(triggerStatus)]
+				previousMatched := previousStatus != "" && strings.EqualFold(previousStatus, triggerStatus)
+				if !previousMatched && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+					previousMatched = previousLabels[strings.ToLower(triggerStatus)]
+				}
+				if !triggerMatched || previousMatched {
+					continue
+				}
+			}
+			matched = true
+			log.Printf("[workflow:%s/%s] GitHub issue %s matched workflow trigger — creating claw", workspace.Name, workflow.Name, issueID)
+			if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
+				log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
 			}
 		}
 	}
 	return matched
+}
+
+func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
+	if trigger == nil || trigger.Type != "github_issues" {
+		return false
+	}
+	switch trigger.Event {
+	case "issue_labeled":
+		if payload.Action != "labeled" {
+			return false
+		}
+	case "issue_opened":
+		if payload.Action != "opened" {
+			return false
+		}
+	case "issue_reopened":
+		if payload.Action != "reopened" {
+			return false
+		}
+	case "issue_edited":
+		if payload.Action != "edited" {
+			return false
+		}
+	case "issue_assigned":
+		if payload.Action != "assigned" {
+			return false
+		}
+	case "issue_unassigned":
+		if payload.Action != "unassigned" {
+			return false
+		}
+	default:
+		return false
+	}
+	if len(trigger.States) > 0 {
+		stateMatched := false
+		for _, state := range trigger.States {
+			if strings.EqualFold(currentStatus, state) {
+				stateMatched = true
+				break
+			}
+		}
+		if !stateMatched {
+			return false
+		}
+	}
+	for _, required := range trigger.Labels {
+		if !issueLabels[strings.ToLower(required)] {
+			return false
+		}
+	}
+	if len(trigger.Labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
+		for _, labeler := range trigger.Labelers {
+			if labeler == "*" || strings.EqualFold(labeler, payload.Sender.Login) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func assignedToMatches(filter, assignee string) bool {

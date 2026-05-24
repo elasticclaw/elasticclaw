@@ -728,5 +728,48 @@ func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string
 			}
 		}
 	}
+	workspaceName, workflowName := workflowTags(tags)
+	if workspaceName != "" && workflowName != "" {
+		if factory := s.workflowPipelineFactory(workspaceName, workflowName); factory != nil {
+			return factory, issueID
+		}
+	}
 	return nil, issueID
+}
+
+func workflowTags(tags []string) (string, string) {
+	var workspaceName, workflowName string
+	for _, tag := range tags {
+		switch {
+		case strings.HasPrefix(tag, "workspace:"):
+			workspaceName = strings.TrimPrefix(tag, "workspace:")
+		case strings.HasPrefix(tag, "workflow:"):
+			workflowName = strings.TrimPrefix(tag, "workflow:")
+		}
+	}
+	return workspaceName, workflowName
+}
+
+func (s *Server) workflowPipelineFactory(workspaceName, workflowName string) *types.FactoryConfig {
+	workspace, err := loadExternalWorkspace(workspaceName)
+	if err != nil {
+		return nil
+	}
+	for _, workflow := range workspace.Workflows {
+		if workflow == nil || !strings.EqualFold(workflow.Name, workflowName) {
+			continue
+		}
+		return &types.FactoryConfig{
+			Name:             "workflow:" + workspace.Name + "/" + workflow.Name,
+			Integration:      workflow.Integration,
+			Workspace:        workspace.Name,
+			PipelineYAML:     workflow.PipelineYAML,
+			SecretRefs:       workflow.SecretRefs,
+			Labels:           workflow.Labels,
+			TriggerRepos:     workflow.TriggerRepos,
+			AllowedLabelers:  workflow.AllowedLabelers,
+			ConcurrencyGroup: workflow.ConcurrencyGroup,
+		}
+	}
+	return nil
 }
