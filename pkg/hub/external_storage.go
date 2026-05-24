@@ -455,8 +455,22 @@ func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existin
 		values["schema_version"] = "v1"
 	}
 	values["repositories"] = workspace.Repositories
-	values["secrets"] = workspace.Secrets
-	values["webhook_secrets"] = workspace.WebhookSecrets
+	if len(workspace.Env) > 0 {
+		values["env"] = workspace.Env
+	} else if _, ok := values["env"]; !ok {
+		values["env"] = map[string]string{}
+	}
+	delete(values, "github")
+	if len(workspace.Secrets) > 0 {
+		values["secrets"] = workspace.Secrets
+	} else {
+		delete(values, "secrets")
+	}
+	if len(workspace.WebhookSecrets) > 0 {
+		values["webhook_secrets"] = workspace.WebhookSecrets
+	} else {
+		delete(values, "webhook_secrets")
+	}
 	return yaml.Marshal(values)
 }
 

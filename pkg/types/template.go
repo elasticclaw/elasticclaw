@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -73,15 +74,16 @@ func (k *LLMKeyConfig) EnvVarName() string {
 type TemplateConfig struct {
 	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	SchemaVersion  string            `yaml:"schema_version,omitempty"`
-	Name           string            `yaml:"name,omitempty"`
-	Repositories   []string          `yaml:"repositories,omitempty"`
-	WebhookSecrets []string          `yaml:"webhook_secrets,omitempty"`
-	Provider       string            `yaml:"provider"`
-	Resources      TemplateResources `yaml:"resources,omitempty"`
-	InstanceType   string            `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
-	Image          string            `yaml:"image,omitempty"`
-	TTL            string            `yaml:"ttl,omitempty"`
+	SchemaVersion  string               `yaml:"schema_version,omitempty"`
+	Name           string               `yaml:"name,omitempty"`
+	Repositories   RepositoryAccessList `yaml:"repositories,omitempty"`
+	Env            WorkspaceEnv         `yaml:"env,omitempty"`
+	WebhookSecrets []string             `yaml:"webhook_secrets,omitempty"`
+	Provider       string               `yaml:"provider"`
+	Resources      TemplateResources    `yaml:"resources,omitempty"`
+	InstanceType   string               `yaml:"instance_type,omitempty"` // e.g. r1.large for Replicated
+	Image          string               `yaml:"image,omitempty"`
+	TTL            string               `yaml:"ttl,omitempty"`
 	// DefaultModel overrides the hub-level default model for this template.
 	// Format: provider/model, e.g. anthropic/claude-opus-4-5
 	DefaultModel string `yaml:"default_model,omitempty"`
@@ -270,6 +272,106 @@ type GitHubAppConfig struct {
 type GitHubRepoAccess struct {
 	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo"
 	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+}
+
+// RepositoryAccessList accepts the current object form:
+//
+//	repositories:
+//	  - repo: owner/repo
+//	    permissions: write
+//
+// and the earlier shorthand form:
+//
+//	repositories:
+//	  - owner/repo
+type RepositoryAccessList []GitHubRepoAccess
+
+func (l *RepositoryAccessList) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("repositories: expected a list")
+	}
+	out := make([]GitHubRepoAccess, 0, len(value.Content))
+	for i, item := range value.Content {
+		switch item.Kind {
+		case yaml.ScalarNode:
+			out = append(out, GitHubRepoAccess{Repo: strings.TrimSpace(item.Value), Permissions: "read"})
+		case yaml.MappingNode:
+			var repo GitHubRepoAccess
+			if err := item.Decode(&repo); err != nil {
+				return fmt.Errorf("repositories[%d]: %w", i, err)
+			}
+			if repo.Permissions == "" {
+				repo.Permissions = "read"
+			}
+			out = append(out, repo)
+		default:
+			return fmt.Errorf("repositories[%d]: expected repo string or {repo, permissions}", i)
+		}
+	}
+	*l = out
+	return nil
+}
+
+func (l *RepositoryAccessList) UnmarshalJSON(data []byte) error {
+	var raw []interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	out := make([]GitHubRepoAccess, 0, len(raw))
+	for i, item := range raw {
+		switch v := item.(type) {
+		case string:
+			out = append(out, GitHubRepoAccess{Repo: strings.TrimSpace(v), Permissions: "read"})
+		case map[string]interface{}:
+			repo, _ := v["repo"].(string)
+			permissions, _ := v["permissions"].(string)
+			if permissions == "" {
+				permissions = "read"
+			}
+			out = append(out, GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions})
+		default:
+			return fmt.Errorf("repositories[%d]: expected repo string or {repo, permissions}", i)
+		}
+	}
+	*l = out
+	return nil
+}
+
+// WorkspaceEnv maps environment variable names to either inline values or hub
+// secret references.
+type WorkspaceEnv map[string]WorkspaceEnvVar
+
+type WorkspaceEnvVar struct {
+	Value  string `yaml:"value,omitempty" json:"value,omitempty"`
+	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"`
+}
+
+func (e *WorkspaceEnv) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("env: expected a map")
+	}
+	out := WorkspaceEnv{}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := strings.TrimSpace(value.Content[i].Value)
+		if key == "" {
+			return fmt.Errorf("env: variable name cannot be empty")
+		}
+		valNode := value.Content[i+1]
+		switch valNode.Kind {
+		case yaml.ScalarNode:
+			out[key] = WorkspaceEnvVar{Value: valNode.Value}
+		case yaml.MappingNode:
+			var envVar WorkspaceEnvVar
+			if err := valNode.Decode(&envVar); err != nil {
+				return fmt.Errorf("env.%s: %w", key, err)
+			}
+			out[key] = envVar
+		default:
+			return fmt.Errorf("env.%s: expected value or {value, secret}", key)
+		}
+	}
+	*e = out
+	return nil
 }
 
 // GitHubTemplateConfig specifies GitHub access needed by a template.

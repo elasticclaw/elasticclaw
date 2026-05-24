@@ -238,8 +238,14 @@ export interface WorkflowInput {
   max?: number
 }
 
+export interface RepositoryAccess {
+  repo: string
+  permissions?: string
+}
+
 export interface WorkspaceAccess {
-  repositories?: string[]
+  repositories?: RepositoryAccess[]
+  env?: string[]
   secrets?: string[]
   webhookSecrets?: string[]
 }

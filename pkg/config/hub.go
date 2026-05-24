@@ -211,6 +211,11 @@ func ParseTemplateConfig(data []byte) (*types.TemplateConfig, error) {
 			}
 		}
 	}
+	for i, r := range cfg.Repositories {
+		if r.Repo == "" {
+			return nil, fmt.Errorf("elasticclaw-config.yaml: repositories[%d] is missing 'repo' field", i)
+		}
+	}
 	return cfg, nil
 }
 
@@ -241,6 +246,11 @@ func LoadTemplateConfig(templateDir string) (*types.TemplateConfig, error) {
 			if r.Repo == "" {
 				return nil, fmt.Errorf("elasticclaw-config.yaml: github.repos[%d] is missing 'repo' field (e.g. repo: owner/repo)", i)
 			}
+		}
+	}
+	for i, r := range cfg.Repositories {
+		if r.Repo == "" {
+			return nil, fmt.Errorf("elasticclaw-config.yaml: repositories[%d] is missing 'repo' field (e.g. repo: owner/repo)", i)
 		}
 	}
 	return cfg, nil

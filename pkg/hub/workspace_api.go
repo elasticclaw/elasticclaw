@@ -21,9 +21,10 @@ type WorkspaceView struct {
 // WorkspaceAccess is the maximum access available to workflows in a workspace.
 // Values are names or repo selectors only; secret values are never exposed.
 type WorkspaceAccess struct {
-	Repositories   []string `json:"repositories"`
-	Secrets        []string `json:"secrets"`
-	WebhookSecrets []string `json:"webhookSecrets"`
+	Repositories   []types.GitHubRepoAccess `json:"repositories"`
+	Env            []string                 `json:"env"`
+	Secrets        []string                 `json:"secrets"`
+	WebhookSecrets []string                 `json:"webhookSecrets"`
 }
 
 // WorkflowView is a workflow-shaped projection of a legacy factory.
@@ -254,12 +255,22 @@ func workspaceToView(workspace *types.WorkspaceConfig) WorkspaceView {
 		Name:   workspace.Name,
 		Source: "workspace",
 		Access: WorkspaceAccess{
-			Repositories:   append([]string(nil), workspace.Repositories...),
+			Repositories:   append([]types.GitHubRepoAccess(nil), workspace.Repositories...),
+			Env:            workspaceEnvNames(workspace.Env),
 			Secrets:        append([]string(nil), workspace.Secrets...),
 			WebhookSecrets: append([]string(nil), workspace.WebhookSecrets...),
 		},
 		Workflows: workflows,
 	}
+}
+
+func workspaceEnvNames(env types.WorkspaceEnv) []string {
+	names := make([]string, 0, len(env))
+	for name := range env {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func workflowToView(workspaceName string, workflow *types.WorkflowConfig) WorkflowView {

@@ -5,13 +5,14 @@ import "fmt"
 // WorkspaceConfig defines a persisted workspace. Workflows live beside this
 // file in external storage and are loaded into Workflows at API boundaries.
 type WorkspaceConfig struct {
-	SchemaVersion  string            `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
-	Name           string            `yaml:"name" json:"name"`
-	Repositories   []string          `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	Secrets        []string          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
-	WebhookSecrets []string          `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
-	Workflows      []*WorkflowConfig `yaml:"-" json:"workflows,omitempty"`
-	Files          map[string]string `yaml:"-" json:"files,omitempty"`
+	SchemaVersion  string               `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
+	Name           string               `yaml:"name" json:"name"`
+	Repositories   RepositoryAccessList `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	Env            WorkspaceEnv         `yaml:"env,omitempty" json:"env,omitempty"`
+	Secrets        []string             `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+	WebhookSecrets []string             `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
+	Workflows      []*WorkflowConfig    `yaml:"-" json:"workflows,omitempty"`
+	Files          map[string]string    `yaml:"-" json:"files,omitempty"`
 }
 
 // WorkflowConfig is the persisted workflow schema.
@@ -48,6 +49,9 @@ func (w *WorkspaceConfig) Validate() error {
 	}
 	if w.Name == "" {
 		return fmt.Errorf("workspace name is required")
+	}
+	if err := validateRepositoryAccessList("repositories", w.Repositories); err != nil {
+		return fmt.Errorf("workspace %q: %w", w.Name, err)
 	}
 	for _, workflow := range w.Workflows {
 		if workflow == nil {

@@ -38,9 +38,10 @@ type workspaceCLIView struct {
 }
 
 type workspaceAccessView struct {
-	Repositories   []string `json:"repositories"`
-	Secrets        []string `json:"secrets"`
-	WebhookSecrets []string `json:"webhookSecrets"`
+	Repositories   []types.GitHubRepoAccess `json:"repositories"`
+	Env            []string                 `json:"env"`
+	Secrets        []string                 `json:"secrets"`
+	WebhookSecrets []string                 `json:"webhookSecrets"`
 }
 
 func workspaceCreateCmd() *cobra.Command {
@@ -70,8 +71,7 @@ func runWorkspaceCreate(name string) error {
 name: %s
 
 repositories: []
-secrets: []
-webhook_secrets: []
+env: {}
 
 provider: replicated
 
@@ -87,11 +87,16 @@ provider: replicated
 # tags: ["backend"]
 # color: teal
 
-# Optional tool and repository access:
-# github:
-#   repos:
-#     - repo: owner/repo
-#       permissions: write
+# Optional repository access:
+# repositories:
+#   - repo: owner/repo
+#     permissions: write
+#
+# Optional workspace environment:
+# env:
+#   NODE_ENV: development
+#   OPENAI_API_KEY:
+#     secret: openai_api_key
 
 # Optional environment secrets:
 # secret_refs:

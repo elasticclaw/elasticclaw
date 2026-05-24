@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
-import { fetchWorkspaces, type Workspace, type Workflow } from "@/lib/api"
+import { fetchWorkspaces, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -2126,7 +2126,7 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
         <div>
           <h2 className="text-base font-semibold mb-1">Workspace</h2>
           <p className="text-sm text-muted-foreground">
-            This workspace groups workflows, repositories, and secret names.
+            This workspace groups workflows, repositories, and environment variables.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -2163,10 +2163,9 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
                 </span>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-3">
-                <WorkspaceAccessList title="Repositories" values={workspace.access.repositories || []} />
-                <WorkspaceAccessList title="Secrets" values={workspace.access.secrets || []} />
-                <WorkspaceAccessList title="Webhook Secrets" values={workspace.access.webhookSecrets || []} />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <WorkspaceRepositoryList values={workspace.access.repositories || []} />
+                <WorkspaceAccessList title="Environment" values={workspace.access.env || []} />
               </div>
 
               <div className="space-y-2">
@@ -2291,6 +2290,29 @@ function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
           </span>
         </div>
       </div>
+    </div>
+  )
+}
+
+function WorkspaceRepositoryList({ values }: { values: RepositoryAccess[] }) {
+  return (
+    <div className="space-y-1">
+      <h4 className="text-xs font-medium text-muted-foreground">Repositories</h4>
+      {values.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70">None</p>
+      ) : (
+        <div className="space-y-1">
+          {values.slice(0, 4).map((value) => (
+            <div key={value.repo} className="flex items-center justify-between gap-2 text-xs bg-muted px-2 py-1 rounded">
+              <code className="truncate">{value.repo}</code>
+              <span className="shrink-0 text-muted-foreground">{value.permissions || "read"}</span>
+            </div>
+          ))}
+          {values.length > 4 && (
+            <p className="text-xs text-muted-foreground">+{values.length - 4} more</p>
+          )}
+        </div>
+      )}
     </div>
   )
 }

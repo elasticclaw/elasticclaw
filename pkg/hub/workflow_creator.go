@@ -105,6 +105,16 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 	}
 	if tmplCfg != nil {
+		for envName, envVar := range tmplCfg.Env {
+			if envVar.Secret != "" {
+				if val, ok := hubSecrets[envVar.Secret]; ok {
+					env[envName] = val
+					resolvedSecrets[envName] = "workspace env secret"
+				}
+				continue
+			}
+			env[envName] = envVar.Value
+		}
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := hubSecrets[secretRef]; ok {
 				env[envName] = val
@@ -141,7 +151,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if tmplCfg.Docker {
 			dockerEnabled = 1
 		}
-		if tmplCfg.GitHub != nil {
+		if len(tmplCfg.Repositories) > 0 {
+			githubRepos = append([]types.GitHubRepoAccess(nil), tmplCfg.Repositories...)
+		} else if tmplCfg.GitHub != nil {
 			githubRepos = tmplCfg.GitHub.Repos
 		}
 		if tmplCfg.Linear != nil {

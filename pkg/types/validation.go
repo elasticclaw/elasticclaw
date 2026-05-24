@@ -274,6 +274,21 @@ func validateExternalTrigger(factoryName string, trigger *ExternalTrigger) error
 	return nil
 }
 
+func validateRepositoryAccessList(field string, repos []GitHubRepoAccess) error {
+	for i, repo := range repos {
+		if repo.Repo == "" {
+			return fmt.Errorf("%s[%d]: repo is required", field, i)
+		}
+		if !repoRegex.MatchString(repo.Repo) {
+			return fmt.Errorf("%s[%d]: invalid repo format %q (expected owner/repo)", field, i, repo.Repo)
+		}
+		if repo.Permissions != "" && repo.Permissions != "read" && repo.Permissions != "write" {
+			return fmt.Errorf("%s[%d]: invalid permissions %q (must be read or write)", field, i, repo.Permissions)
+		}
+	}
+	return nil
+}
+
 // Validate validates a TemplateConfig and returns an error if invalid.
 func (t *TemplateConfig) Validate() error {
 	if t == nil {
@@ -293,18 +308,14 @@ func (t *TemplateConfig) Validate() error {
 		return fmt.Errorf("invalid color %q", t.Color)
 	}
 
+	if err := validateRepositoryAccessList("repositories", t.Repositories); err != nil {
+		return err
+	}
+
 	// Validate GitHub repos if provided
 	if t.GitHub != nil {
-		for i, repo := range t.GitHub.Repos {
-			if repo.Repo == "" {
-				return fmt.Errorf("github.repos[%d]: repo is required", i)
-			}
-			if !repoRegex.MatchString(repo.Repo) {
-				return fmt.Errorf("github.repos[%d]: invalid repo format %q (expected owner/repo)", i, repo.Repo)
-			}
-			if repo.Permissions != "" && repo.Permissions != "read" && repo.Permissions != "write" {
-				return fmt.Errorf("github.repos[%d]: invalid permissions %q (must be read or write)", i, repo.Permissions)
-			}
+		if err := validateRepositoryAccessList("github.repos", t.GitHub.Repos); err != nil {
+			return err
 		}
 	}
 
