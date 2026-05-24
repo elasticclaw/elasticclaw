@@ -157,8 +157,11 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 		}
 		req.Type = strings.TrimSpace(req.Type)
 		req.Workspace = strings.TrimSpace(req.Workspace)
-		if req.Type == "" || req.Workspace == "" {
-			http.Error(w, "type and workspace required", http.StatusBadRequest)
+		if req.Workspace == "" {
+			req.Workspace = workspaceName
+		}
+		if req.Type == "" {
+			http.Error(w, "type required", http.StatusBadRequest)
 			return
 		}
 		if req.Token == "" {

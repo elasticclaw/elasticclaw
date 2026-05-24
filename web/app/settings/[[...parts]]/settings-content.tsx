@@ -1937,7 +1937,6 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   const [modalType, setModalType] = useState<TrackerType>("linear")
   const [editIdx, setEditIdx] = useState<number | null>(null)
   const [editType, setEditType] = useState<TrackerType>("linear")
-  const [workspace, setWorkspace] = useState("")
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
   const [showAddMenu, setShowAddMenu] = useState(false)
@@ -1957,7 +1956,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   }, [showAddMenu])
 
   const resetModal = () => {
-    setWorkspace(""); setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
+    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -1969,7 +1968,6 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   }
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
-    setWorkspace(tracker.workspace)
     setToken("")
     setWebhookSecret("")
     setEditIdx(idx)
@@ -1979,16 +1977,16 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   }
 
   async function saveTracker() {
-    if (!workspace.trim()) return
     if (modalMode === "add" && !token.trim()) return
 
     const type = modalMode === "add" ? modalType : editType
+    const trackerWorkspace = selectedWorkspace
     const originalWorkspace = modalMode === "edit" && editIdx !== null ? allTrackers[editIdx]?.workspace : ""
     setError("")
     const res = await fetch(`${hubUrl}${issueTrackersPath}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${authToken()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type, workspace: workspace.trim(), originalWorkspace, token: token.trim(), webhookSecret: webhookSecret.trim() }),
+      body: JSON.stringify({ type, workspace: trackerWorkspace, originalWorkspace, token: token.trim(), webhookSecret: webhookSecret.trim() }),
     })
     if (!res.ok) {
       setError(await res.text())
@@ -2026,8 +2024,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
   }
 
   const modalTitle = modalMode === "add"
-    ? `Add ${trackerTypeLabel(modalType)} workspace`
-    : `Edit ${trackerTypeLabel(editType)} — ${workspace}`
+    ? `Add ${trackerTypeLabel(modalType)}`
+    : `Edit ${trackerTypeLabel(editType)}`
 
   const modalIcon = (modalMode === "add" ? modalType : editType) === "linear"
     ? <Zap className="size-4" />
@@ -2035,11 +2033,22 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
     ? <span className="text-[#F4603C]">⚡</span>
     : <Github className="size-4" />
 
+  const githubIssuesTokenUrl = "https://github.com/settings/personal-access-tokens/new?name=ElasticClaw%20GitHub%20Issues&description=Allows%20ElasticClaw%20to%20read%20and%20update%20GitHub%20issues&expires_in=90&issues=write&metadata=read"
   const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
-    ? <>Create a token at <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a></>
+    ? <>Use a Linear API key from <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/api</a>.</>
+    : (modalMode === "add" ? modalType : editType) === "shortcut"
+    ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
-    ? <>Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline">github.com/settings/tokens</a> with <code>repo</code> and <code>issues</code> scopes</>
+    ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. Select the repo or org owner, then grant repository access to the repos this workspace watches.</>
     : null
+  const activeTrackerType = modalMode === "add" ? modalType : editType
+  const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
+
+  function generateWebhookSecret() {
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    setWebhookSecret(Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""))
+  }
 
   return (
     <div className="space-y-6">
@@ -2050,7 +2059,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
         {/* Summary badges */}
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-            {allTrackers.length} workspace{allTrackers.length !== 1 ? "s" : ""} connected
+            {allTrackers.length} tracker{allTrackers.length !== 1 ? "s" : ""} connected
           </span>
           {linear.length > 0 && (
             <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Linear: {linear.length}</span>
@@ -2160,23 +2169,50 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
             </div>
           </div>
           <div className="p-5 space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Connect a {trackerTypeLabel(modalMode === "add" ? modalType : editType)} workspace to sync issues.
-              </p>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Workspace label</label>
-                <Input value={workspace} onChange={e => setWorkspace(e.target.value)} className="h-9 text-sm" placeholder="e.g. my-company" />
-                <p className="text-xs text-muted-foreground mt-1">A friendly name to identify this workspace</p>
-              </div>
+              {activeTrackerType === "github-issues" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens.</p>
+                  <p>Create a webhook in either an org or a repo, depending on the scope you want. Use the GitHub Issues webhook URL from the Webhooks page, subscribe to Issues events, and paste the same secret below.</p>
+                </div>
+              ) : activeTrackerType === "linear" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect Linear for this workspace. The API key lets ElasticClaw read issues and move them between statuses.</p>
+                  <p>Create a Linear webhook using the Linear URL from the Webhooks page. Subscribe to Issue events, then paste the same signing secret below if you configured one.</p>
+                </div>
+              ) : activeTrackerType === "shortcut" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect Shortcut for this workspace. The API token lets ElasticClaw read stories and update workflow states.</p>
+                  <p>Create a Shortcut webhook using the Shortcut URL from the Webhooks page. If Shortcut signs the payload with a secret, paste that same secret below.</p>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Connect {trackerTypeLabel(activeTrackerType)} for this workspace.
+                </p>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
-                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(modalMode === "add" ? modalType : editType)} API token`} />
+                <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(activeTrackerType)} API token`} />
                 {tokenHint && <p className="text-xs text-muted-foreground mt-1">{tokenHint}</p>}
               </div>
               <div>
-                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret <span className="text-muted-foreground/60">(optional)</span></label>
-                <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
-                <p className="text-xs text-muted-foreground mt-1">Used to verify incoming webhook signatures. Leave blank to keep existing.</p>
+                <label className="text-xs text-muted-foreground mb-1 block">Webhook Secret {activeTrackerType === "github-issues" ? null : <span className="text-muted-foreground/60">(optional)</span>}</label>
+                <div className="flex gap-2">
+                  <Input type="password" value={webhookSecret} onChange={e => setWebhookSecret(e.target.value)} className="h-9 text-sm" placeholder="Webhook secret for signature verification" />
+                  {canGenerateWebhookSecret && (
+                    <Button type="button" size="sm" variant="outline" onClick={generateWebhookSecret}>
+                      Generate
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {activeTrackerType === "github-issues"
+                    ? "Generate one here, then paste it into the GitHub webhook Secret field. Repo webhooks are best for one repository; org webhooks cover many repositories."
+                    : activeTrackerType === "linear"
+                    ? "Copy the signing secret from the Linear webhook settings and paste it here. Leave blank only if you intentionally want unsigned Linear webhooks."
+                    : activeTrackerType === "shortcut"
+                    ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
+                    : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
+                </p>
               </div>
             </div>
             <div className="flex items-center justify-between px-5 py-4 border-t border-border">
@@ -2187,8 +2223,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
               )}
               <div className="flex items-center gap-2 ml-auto">
                 <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetModal() }}>Cancel</Button>
-                <Button size="sm" disabled={saving || !workspace.trim() || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
-                  {modalMode === "add" ? "Add workspace" : "Save changes"}
+                <Button size="sm" disabled={saving || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
+                  {modalMode === "add" ? "Add tracker" : "Save changes"}
                 </Button>
               </div>
             </div>
