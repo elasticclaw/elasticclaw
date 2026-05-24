@@ -53,6 +53,9 @@ func TestServeWebUIMapsWorkspaceSettingsRoutesToStaticPlaceholder(t *testing.T) 
 		{path: "/settings/elasticclaw/issue-trackers", want: "workspace-issue-trackers"},
 		{path: "/settings/elasticclaw/workspace-analytics", want: "workspace-analytics"},
 		{path: "/settings/workflows", want: "legacy-workflows"},
+		{path: "/settings/elasticclaw/nonexistent", want: "root"},
+		{path: "/settings/elasticclaw/runtimes", want: "root"},
+		{path: "/settings/elasticclaw/issue-trackers/extra", want: "root"},
 	}
 
 	for _, tt := range tests {
