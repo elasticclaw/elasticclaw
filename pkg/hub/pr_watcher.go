@@ -179,7 +179,6 @@ func (s *Server) pollAllPRs() {
 
 	token := s.resolveGitHubToken()
 	if token == "" {
-		log.Printf("[pr-watcher] poll: no GitHub token, skipping %d PRs", len(prs))
 		return
 	}
 
