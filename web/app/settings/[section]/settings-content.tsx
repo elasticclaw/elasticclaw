@@ -124,13 +124,13 @@ async function patchSettings(patch: object): Promise<void> {
 export default function SettingsSectionPage() {
   const params = useParams()
   const router = useRouter()
-  const rawSection = Array.isArray(params.section) ? params.section[0] : (params.section ?? "runtimes")
-  const section: Section = isValidSection(rawSection) ? rawSection : "runtimes"
+  const rawSection = Array.isArray(params.section) ? params.section[0] : (params.section ?? "workspaces")
+  const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
 
-  // Redirect invalid sections to runtimes
+  // Redirect invalid sections to the workspace overview.
   useEffect(() => {
     if (!isValidSection(rawSection)) {
-      router.replace("/settings/runtimes")
+      router.replace("/settings/workspaces")
     }
   }, [rawSection, router])
 
@@ -140,6 +140,8 @@ export default function SettingsSectionPage() {
   const [success, setSuccess] = useState("")
   const [version, setVersion] = useState("")
   const [hubPublicUrl, setHubPublicUrl] = useState("")
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [selectedWorkspace, setSelectedWorkspace] = useState("default")
 
   const load = useCallback(async () => {
     try {
@@ -158,6 +160,15 @@ export default function SettingsSectionPage() {
       .then((r) => r.json())
       .then((d) => { setVersion(d.version || "unknown"); setHubPublicUrl(d.hubUrl || "") })
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    fetchWorkspaces()
+      .then((data) => {
+        setWorkspaces(data)
+        if (data.length > 0) setSelectedWorkspace((current) => data.some((workspace) => workspace.name === current) ? current : data[0].name)
+      })
+      .catch(() => setWorkspaces([]))
   }, [])
 
   async function save(patch: object): Promise<boolean> {
@@ -188,38 +199,35 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const navGroups: { id: Section; label: string; icon: React.ElementType }[][] = [
-    // Infrastructure
-    [
-      { id: "runtimes", label: "Sandboxes", icon: Cpu },
-      { id: "models", label: "Models", icon: Key },
-    ],
-    // Integrations
-    [
-      { id: "github", label: "GitHub Apps", icon: Github },
-      { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-      { id: "mcp-servers", label: "MCP Servers", icon: Zap },
-      { id: "webhooks", label: "Webhooks", icon: Webhook },
-    ],
-    // Configuration
-    [
-      { id: "workspaces", label: "Workspaces", icon: LayoutTemplate },
-      { id: "workflows", label: "Workflows", icon: GitBranch },
-      { id: "secrets", label: "Secrets", icon: Lock },
-    ],
-    // Access
-    [
-      { id: "authentication", label: "Authentication", icon: Shield },
-    ],
-    // AI Assistant
-    [
-      { id: "ai-config", label: "Configure with AI", icon: Sparkles },
-    ],
-    // Diagnostics
-    [
-      { id: "doctor", label: "Doctor", icon: Stethoscope },
-      { id: "troubleshoot", label: "Troubleshoot", icon: Wrench },
-    ],
+  const navGroups: { label: string; items: { id: Section; label: string; icon: React.ElementType }[] }[] = [
+    {
+      label: "Workspace",
+      items: [
+        { id: "workspaces", label: "Overview", icon: LayoutTemplate },
+        { id: "workflows", label: "Workflows", icon: GitBranch },
+        { id: "github", label: "GitHub Apps", icon: Github },
+        { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
+        { id: "webhooks", label: "Webhooks", icon: Webhook },
+        { id: "secrets", label: "Secrets", icon: Lock },
+        { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+      ],
+    },
+    {
+      label: "System",
+      items: [
+        { id: "runtimes", label: "Sandboxes", icon: Cpu },
+        { id: "models", label: "Models", icon: Key },
+        { id: "authentication", label: "Authentication", icon: Shield },
+        { id: "ai-config", label: "Configure with AI", icon: Sparkles },
+      ],
+    },
+    {
+      label: "Diagnostics",
+      items: [
+        { id: "doctor", label: "Doctor", icon: Stethoscope },
+        { id: "troubleshoot", label: "Troubleshoot", icon: Wrench },
+      ],
+    },
   ]
 
   return (
@@ -229,7 +237,23 @@ export default function SettingsSectionPage() {
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
           <ChevronLeft className="size-4" />
         </Button>
-        <h1 className="text-lg font-semibold">Settings</h1>
+        <h1 className="text-lg font-semibold">Configure</h1>
+        <div className="ml-4 flex items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Workspace</span>
+          <select
+            value={selectedWorkspace}
+            onChange={(event) => setSelectedWorkspace(event.target.value)}
+            className="h-9 min-w-44 rounded-md border border-border bg-background px-3 text-sm font-medium outline-none focus:border-primary"
+          >
+            {workspaces.length === 0 ? (
+              <option value="default">default</option>
+            ) : (
+              workspaces.map((workspace) => (
+                <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+              ))
+            )}
+          </select>
+        </div>
         {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
@@ -238,9 +262,12 @@ export default function SettingsSectionPage() {
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
-              <div key={groupIdx}>
-                {groupIdx > 0 && <div className="my-2 border-t border-border/50" />}
-                {group.map(({ id, label, icon: Icon }) => (
+              <div key={group.label}>
+                {groupIdx > 0 && <div className="my-3 border-t border-border/50" />}
+                <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                  {group.label}
+                </p>
+                {group.items.map(({ id, label, icon: Icon }) => (
                   <Link
                     key={id}
                     href={`/settings/${id}`}
@@ -286,10 +313,10 @@ export default function SettingsSectionPage() {
             <IntegrationsSection settings={settings} onSave={save} saving={saving} />
           )}
           {section === "workspaces" && (
-            <WorkspacesSection />
+            <WorkspacesSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "workflows" && (
-            <WorkflowsSection />
+            <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} />
@@ -2052,7 +2079,7 @@ function WebhooksSection({ hubUrl }: { hubUrl: string }) {
   )
 }
 
-function WorkspacesSection() {
+function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -2071,13 +2098,15 @@ function WorkspacesSection() {
 
   useEffect(() => { load() }, [load])
 
+  const visibleWorkspaces = workspaces.filter((workspace) => workspace.name === selectedWorkspace)
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold mb-1">Workspaces</h2>
+          <h2 className="text-base font-semibold mb-1">Workspace</h2>
           <p className="text-sm text-muted-foreground">
-            Workspaces group workflows, repositories, and secret names.
+            This workspace groups workflows, repositories, and secret names.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -2092,13 +2121,13 @@ function WorkspacesSection() {
         </div>
       )}
 
-      {loading && workspaces.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspaces…</p>
-      ) : workspaces.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspaces configured.</p>
+      {loading && visibleWorkspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workspace…</p>
+      ) : visibleWorkspaces.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workspace named {selectedWorkspace} is configured.</p>
       ) : (
         <div className="space-y-4">
-          {workspaces.map((workspace) => (
+          {visibleWorkspaces.map((workspace) => (
             <div key={workspace.name} className="border border-border rounded-lg p-4 space-y-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2158,7 +2187,7 @@ function WorkspacesSection() {
   )
 }
 
-function WorkflowsSection() {
+function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -2179,7 +2208,7 @@ function WorkflowsSection() {
 
   const workflows = workspaces.flatMap((workspace) =>
     (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
-  )
+  ).filter((workflow) => workflow.workspaceName === selectedWorkspace)
 
   return (
     <div className="space-y-6">
@@ -2187,7 +2216,7 @@ function WorkflowsSection() {
         <div>
           <h2 className="text-base font-semibold mb-1">Workflows</h2>
           <p className="text-sm text-muted-foreground">
-            Workflows define triggers and runtime behavior within a workspace.
+            Workflows define triggers and runtime behavior within this workspace.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
