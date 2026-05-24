@@ -87,29 +87,9 @@ func (p *GitHubTokenProvider) appJWT() (string, error) {
 // one whose account owns at least one of the repos. If repos is empty, returns
 // the first installation found.
 func (p *GitHubTokenProvider) FindInstallationForRepos(ctx context.Context, repos []string) (int64, error) {
-	appJWT, err := p.appJWT()
+	installations, err := p.ListInstallations(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("sign app jwt: %w", err)
-	}
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app/installations?per_page=100", nil)
-	req.Header.Set("Authorization", "Bearer "+appJWT)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("github list installations: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("github list installations: status %d", resp.StatusCode)
-	}
-
-	var installations []githubInstallation
-	if err := json.NewDecoder(resp.Body).Decode(&installations); err != nil {
-		return 0, fmt.Errorf("decode installations: %w", err)
+		return 0, err
 	}
 	if len(installations) == 0 {
 		return 0, fmt.Errorf("no installations found for GitHub App %d — install the App on your org or repo first", p.cfg.AppID)
@@ -134,6 +114,34 @@ func (p *GitHubTokenProvider) FindInstallationForRepos(ctx context.Context, repo
 
 	// Fallback: return first installation and let the token request fail with a clear error
 	return installations[0].ID, nil
+}
+
+func (p *GitHubTokenProvider) ListInstallations(ctx context.Context) ([]githubInstallation, error) {
+	appJWT, err := p.appJWT()
+	if err != nil {
+		return nil, fmt.Errorf("sign app jwt: %w", err)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app/installations?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github list installations: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github list installations: status %d", resp.StatusCode)
+	}
+
+	var installations []githubInstallation
+	if err := json.NewDecoder(resp.Body).Decode(&installations); err != nil {
+		return nil, fmt.Errorf("decode installations: %w", err)
+	}
+	return installations, nil
 }
 
 // RepoAccess is a repo + permission level used when minting tokens.

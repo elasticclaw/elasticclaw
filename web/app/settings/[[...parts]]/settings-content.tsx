@@ -56,6 +56,7 @@ interface WorkspaceGitHubAppView {
   appId: number
   url?: string
   installation?: string
+  installations?: string[]
   private_key_set?: boolean
   privateKeySet?: boolean
 }
@@ -113,18 +114,6 @@ interface SettingsData {
   }
   concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
-}
-
-function githubOwnerFromAppURL(url?: string): string {
-  if (!url) return ""
-  try {
-    const parsed = new URL(url)
-    const orgMatch = parsed.pathname.match(/^\/organizations\/([^/]+)\/settings\/apps\//)
-    if (orgMatch?.[1]) return orgMatch[1]
-  } catch {
-    return ""
-  }
-  return ""
 }
 
 interface ConcurrencyGroup {
@@ -1952,8 +1941,13 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace }: { 
         if (!res.ok) return
         const data = await res.json()
         const apps = (data.githubApps || []) as WorkspaceGitHubAppView[]
-        const hinted = apps.map(app => app.installation || githubOwnerFromAppURL(app.url)).find(Boolean)
-        setGithubOwnerHint(hinted || "")
+        const owners = new Set<string>()
+        for (const app of apps) {
+          for (const owner of app.installations || []) {
+            if (owner) owners.add(owner)
+          }
+        }
+        setGithubOwnerHint(owners.size === 1 ? Array.from(owners)[0] : "")
       } catch {
         setGithubOwnerHint("")
       }

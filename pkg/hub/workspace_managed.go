@@ -51,11 +51,12 @@ type workspaceGitHubApp struct {
 }
 
 type workspaceGitHubAppView struct {
-	Name          string `json:"name"`
-	AppID         int64  `json:"appId"`
-	URL           string `json:"url,omitempty"`
-	Installation  string `json:"installation,omitempty"`
-	PrivateKeySet bool   `json:"private_key_set"`
+	Name          string   `json:"name"`
+	AppID         int64    `json:"appId"`
+	URL           string   `json:"url,omitempty"`
+	Installation  string   `json:"installation,omitempty"`
+	Installations []string `json:"installations,omitempty"`
+	PrivateKeySet bool     `json:"private_key_set"`
 }
 
 func workspaceManagedDir(workspace string) string {

@@ -3,7 +3,10 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 type workspaceSecretUpsertRequest struct {
@@ -78,6 +81,7 @@ func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Re
 			http.Error(w, "list github apps: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		enrichWorkspaceGitHubAppInstallations(r, apps, workspace)
 		jsonOK(w, map[string][]workspaceGitHubAppView{"githubApps": apps})
 	case http.MethodPut, http.MethodPost:
 		var req workspaceGitHubAppUpsertRequest
@@ -124,6 +128,43 @@ func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Re
 		jsonOK(w, map[string]string{"deleted": name})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func enrichWorkspaceGitHubAppInstallations(r *http.Request, views []workspaceGitHubAppView, workspace string) {
+	apps, err := loadWorkspaceGitHubApps(workspace)
+	if err != nil {
+		return
+	}
+	for i := range views {
+		app, ok := apps[views[i].Name]
+		if !ok || app.PrivateKeyPEM == "" || app.AppID == 0 {
+			continue
+		}
+		provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{
+			AppID:         app.AppID,
+			URL:           app.URL,
+			PrivateKeyPEM: app.PrivateKeyPEM,
+		})
+		if err != nil {
+			continue
+		}
+		installations, err := provider.ListInstallations(r.Context())
+		if err != nil {
+			continue
+		}
+		owners := make([]string, 0, len(installations))
+		seen := map[string]bool{}
+		for _, installation := range installations {
+			owner := strings.TrimSpace(installation.Account.Login)
+			if owner == "" || seen[strings.ToLower(owner)] {
+				continue
+			}
+			seen[strings.ToLower(owner)] = true
+			owners = append(owners, owner)
+		}
+		sort.Strings(owners)
+		views[i].Installations = owners
 	}
 }
 
