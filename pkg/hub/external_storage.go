@@ -480,15 +480,16 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
-	if err := removeExternalWorkflowFiles(workflowDir); err != nil {
-		return err
-	}
 	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
 		}
 		if err := validateName(workflow.Name); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
+		}
+		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
+		if err := removeCaseVariantWorkflowFiles(workflowDir, workflow.Name, targetPath); err != nil {
+			return err
 		}
 		data := []byte(workflow.RawConfig)
 		if len(strings.TrimSpace(string(data))) == 0 {
@@ -498,14 +499,14 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 				return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
 			}
 		}
-		if err := os.WriteFile(filepath.Join(workflowDir, workflow.Name+".yaml"), data, 0640); err != nil {
+		if err := os.WriteFile(targetPath, data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
 		}
 	}
 	return nil
 }
 
-func removeExternalWorkflowFiles(workflowDir string) error {
+func removeCaseVariantWorkflowFiles(workflowDir, workflowName, targetPath string) error {
 	entries, err := os.ReadDir(workflowDir)
 	if err != nil {
 		return fmt.Errorf("read workflows dir: %w", err)
@@ -514,8 +515,12 @@ func removeExternalWorkflowFiles(workflowDir string) error {
 		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
 			continue
 		}
-		if err := os.Remove(filepath.Join(workflowDir, entry.Name())); err != nil {
-			return fmt.Errorf("remove stale workflow %s: %w", entry.Name(), err)
+		path := filepath.Join(workflowDir, entry.Name())
+		name := strings.TrimSuffix(entry.Name(), ".yaml")
+		if strings.EqualFold(name, workflowName) && path != targetPath {
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("remove stale workflow %s: %w", entry.Name(), err)
+			}
 		}
 	}
 	return nil
