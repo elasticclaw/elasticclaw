@@ -392,6 +392,20 @@ func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceC
 	return matched, nil
 }
 
+func filterWorkflowWorkspacesByName(workspaces []*types.WorkspaceConfig, workspaceName string) []*types.WorkspaceConfig {
+	workspaceName = strings.TrimSpace(workspaceName)
+	if workspaceName == "" {
+		return workspaces
+	}
+	filtered := make([]*types.WorkspaceConfig, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		if workspace != nil && strings.EqualFold(workspace.Name, workspaceName) {
+			filtered = append(filtered, workspace)
+		}
+	}
+	return filtered
+}
+
 func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 	if workspace == nil || workspace.Name == "" {
 		return fmt.Errorf("workspace name required")

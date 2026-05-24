@@ -110,7 +110,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	go s.processGitHubIssuesEvent(payload)
+	go s.processGitHubIssuesEvent(workspaceName, payload)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -142,12 +142,13 @@ func verifyGitHubHMAC(body []byte, sig, secret string) bool {
 	return hmac.Equal([]byte(sig), []byte(expected))
 }
 
-func (s *Server) processGitHubIssuesEvent(payload githubIssuesWebhookPayload) {
+func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIssuesWebhookPayload) {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
 
 	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("github-issues")
+	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
 	if len(workflowWorkspaces) == 0 {
 		log.Printf("[github-issues-webhook] no workflows configured — nothing to do")
 		return
