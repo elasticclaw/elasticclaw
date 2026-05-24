@@ -101,7 +101,7 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processLinearEvent(payload)
+	go s.processLinearEvent(strings.TrimSpace(r.PathValue("workspace")), payload)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -218,8 +218,9 @@ func (s *Server) validateLinearSignature(workspaceName string, body []byte, sig 
 	return true // no secrets configured
 }
 
-func (s *Server) processLinearEvent(payload linearWebhookPayload) {
+func (s *Server) processLinearEvent(workspaceName string, payload linearWebhookPayload) {
 	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("linear")
+	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
 	_ = s.processLinearWorkflowEvent(workflowWorkspaces, payload)
 
 	factories := s.resolveFactories()
