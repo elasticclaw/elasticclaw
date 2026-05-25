@@ -3,17 +3,16 @@
 This package contains PR-gated end-to-end tests for real tracker delivery and
 provider provisioning.
 
-The default test is a contract check and does not contact external services:
+The first E2E path runs against real services:
 
-```sh
-go test ./test/e2e
+```text
+Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
 ```
 
-External tests run only when `ELASTICCLAW_E2E=1` is set. The first enabled path
-starts the current ElasticClaw binary, exposes it through the supplied public
-URL, configures a workspace-scoped GitHub Issues tracker, creates a real issue
-in the fixture repository, and asserts that exactly one noop-backed agent is
-created from the webhook.
+It creates a workspace and workflow with the ElasticClaw CLI, configures a
+workspace GitHub App with the CLI, configures the GitHub Issues tracker through
+the server API, creates a real GitHub issue that asks for a dad joke, labels it,
+then waits for one Daytona-backed agent to connect and reply.
 
 ## Fixture Repo
 
@@ -23,21 +22,29 @@ The dedicated fixture repository is:
 elasticclaw/e2e-fixtures
 ```
 
-The suite creates per-run issues, labels, webhooks, workspaces, and workflows
-using a run id. Cleanup closes the issue, removes the webhook, and removes the
-workspace even when the test fails.
+The suite creates per-run issues, labels, webhooks, workspaces, workflows, and
+agents using a run id. Cleanup closes the issue, removes the webhook, removes
+the workspace, and kills the agent.
 
 ## Depot CI Environment
 
-Required for external GitHub Issues E2E:
+Required secrets:
 
 ```text
-ELASTICCLAW_E2E=1
-ELASTICCLAW_E2E_BIN=/path/to/elasticclaw
-ELASTICCLAW_E2E_PUBLIC_URL=https://example.ngrok.app
-ELASTICCLAW_E2E_GITHUB_TOKEN=...
+ELASTICCLAW_E2E_GITHUB_TOKEN
+ELASTICCLAW_E2E_GITHUB_APP_ID
+ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY
+DAYTONA_API_KEY
+FIREWORKS_API_KEY
+NGROK_AUTHTOKEN
+```
+
+Optional vars:
+
+```text
 ELASTICCLAW_E2E_GITHUB_REPO=elasticclaw/e2e-fixtures
-ELASTICCLAW_E2E_RUN_ID=pr-123-1-sha
+ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
+ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
 ```
 
 The GitHub token needs access to the fixture repo with:
@@ -47,6 +54,9 @@ Issues: read/write
 Metadata: read
 Webhooks: read/write
 ```
+
+The GitHub App must be installed on the fixture repo and have repository
+contents permissions sufficient for ElasticClaw to mint a checkout token.
 
 ## Planned Matrix
 
@@ -59,4 +69,5 @@ shortcut: webhook, polling recovery, duplicate prevention
 exedev: provisioning reaches agent connected
 daytona: provisioning reaches agent connected and repositories clone
 replicated: provisioning reaches agent connected and repositories clone
+models: Fireworks Kimi, plus additional production models
 ```

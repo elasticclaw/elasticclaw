@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,53 +18,55 @@ import (
 )
 
 const (
-	userToken  = "e2e-user-token"
-	agentToken = "e2e-agent-token"
+	userToken      = "e2e-user-token"
+	agentToken     = "e2e-agent-token"
+	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
+	defaultFixture = "elasticclaw/e2e-fixtures"
 )
 
-func TestE2EEnvironmentContract(t *testing.T) {
-	cfg := githubIssuesWorkflow("elasticclaw/e2e-fixtures", "agent-ready")
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("github issues workflow fixture is invalid: %v", err)
-	}
+func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	if os.Getenv("ELASTICCLAW_E2E") != "1" {
-		t.Skip("set ELASTICCLAW_E2E=1 to run external E2E tests")
-	}
-	requiredEnv(t,
-		"ELASTICCLAW_E2E_BIN",
-		"ELASTICCLAW_E2E_PUBLIC_URL",
-		"ELASTICCLAW_E2E_GITHUB_TOKEN",
-		"ELASTICCLAW_E2E_GITHUB_REPO",
-	)
-}
-
-func TestGitHubIssuesWebhookNoop(t *testing.T) {
-	if os.Getenv("ELASTICCLAW_E2E") != "1" {
-		t.Skip("set ELASTICCLAW_E2E=1 to run external E2E tests")
+		t.Skip("set ELASTICCLAW_E2E=1 to run the real Daytona/GitHub Issues E2E test")
 	}
 
-	bin := requiredEnv(t, "ELASTICCLAW_E2E_BIN")
-	publicURL := strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/")
-	githubToken := requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN")
-	repo := requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_REPO")
+	env := e2eEnv{
+		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
+		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
+		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
+		GitHubToken:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN"),
+		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
+		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
+		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
+		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
+		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
+		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
+		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
+		RunID:               e2eRunID(),
+	}
 
-	runID := e2eRunID()
-	workspaceName := "e2e-" + runID
-	workflowName := "github-issues-" + runID
-	labelName := "agent-ready-" + runID
-	webhookSecret := "github-issues-secret-" + runID
-
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 
-	hub := startHub(ctx, t, bin, publicURL)
-	gh := githubClient{token: githubToken, repo: repo}
+	workspaceName := "e2e-" + env.RunID
+	workflowName := "github-issues-" + env.RunID
+	labelName := "agent-ready-" + env.RunID
+	webhookSecret := "github-issues-secret-" + env.RunID
 
+	hub := startHub(ctx, t, env)
+	root := writeWorkspaceFixture(t, env, workspaceName, workflowName, labelName)
+	keyPath := writeGitHubAppPrivateKey(t, root, env.GitHubAppPrivateKey)
+
+	gh := githubClient{token: env.GitHubToken, repo: env.GitHubRepo}
 	var hookID int64
 	var issueNumber int
+	var agentID string
 	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cleanupCancel()
+		if agentID != "" {
+			_ = hub.deleteAgent(cleanupCtx, agentID)
+		}
 		if issueNumber != 0 {
 			_ = gh.closeIssue(cleanupCtx, issueNumber)
 		}
@@ -75,17 +76,43 @@ func TestGitHubIssuesWebhookNoop(t *testing.T) {
 		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
 	})
 
-	hub.pushWorkspace(ctx, t, workspaceName, repo)
-	hub.pushWorkflow(ctx, t, workspaceName, githubIssuesWorkflowForRun(workflowName, repo, labelName, runID))
-	hub.putIssueTracker(ctx, t, workspaceName, "github-issues", "default", githubToken, webhookSecret)
+	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
+	runCLI(ctx, t, root, env, "github-app", "create", "e2e",
+		"--workspace", workspaceName,
+		"--app-id", env.GitHubAppID,
+		"--url", env.GitHubAppURL,
+		"--installation", env.GitHubInstallation,
+		"--private-key-file", keyPath,
+	)
+	hub.putIssueTracker(ctx, t, workspaceName, "github-issues", "default", env.GitHubToken, webhookSecret)
+	runCLI(ctx, t, root, env, "workflow", "push", "--workspace", workspaceName, filepath.Join(root, ".elasticclaw", "workflows", "github-issues.yaml"))
 
-	hookID = gh.createHook(ctx, t, publicURL+"/api/workspaces/"+workspaceName+"/webhooks/github-issues", webhookSecret)
+	hookID = gh.createHook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/github-issues", webhookSecret)
 	gh.ensureLabel(ctx, t, labelName)
-	issueNumber = gh.createIssue(ctx, t, "ElasticClaw E2E "+runID, "Created by ElasticClaw E2E run "+runID)
+	issueNumber = gh.createIssue(ctx, t, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.")
 	gh.addLabel(ctx, t, issueNumber, labelName)
 
-	wantName := repo + "/" + fmt.Sprint(issueNumber)
-	waitForExactlyOneAgent(ctx, t, hub, wantName)
+	agentName := env.GitHubRepo + "/" + fmt.Sprint(issueNumber)
+	agentID = waitForOneAgent(ctx, t, hub, agentName)
+	waitForAgentStatus(ctx, t, hub, agentID, "connected")
+	waitForAgentReply(ctx, t, hub, agentID)
+	assertNoPullRequestCreated(ctx, t, gh, issueNumber)
+}
+
+type e2eEnv struct {
+	Bin                 string
+	HubAddr             string
+	PublicURL           string
+	GitHubToken         string
+	GitHubRepo          string
+	GitHubAppID         string
+	GitHubAppURL        string
+	GitHubInstallation  string
+	GitHubAppPrivateKey string
+	DaytonaAPIKey       string
+	FireworksAPIKey     string
+	Model               string
+	RunID               string
 }
 
 type hubProcess struct {
@@ -95,17 +122,13 @@ type hubProcess struct {
 	logPath string
 }
 
-func startHub(ctx context.Context, t *testing.T, bin, publicURL string) *hubProcess {
+func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 	t.Helper()
-	addr := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_HUB_ADDR"))
-	if addr == "" {
-		addr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	}
-	baseURL := "http://" + addr
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "hub.yaml")
 	dbPath := filepath.Join(dir, "hub.db")
 	logPath := filepath.Join(dir, "hub.log")
+	baseURL := "http://" + env.HubAddr
 
 	config := fmt.Sprintf(`schema_version: v1
 url: %s
@@ -113,10 +136,17 @@ public_url: %s
 token: %s
 claw_token: %s
 providers:
-  noop:
-    type: noop
-default_model: test/noop
-`, baseURL, publicURL, userToken, agentToken)
+  daytona:
+    type: daytona
+    api_key: %q
+default_model: %s
+llm_keys:
+  - name: fireworks
+    provider: fireworks
+    api_key: %q
+    default: true
+    default_model: %s
+`, baseURL, env.PublicURL, userToken, agentToken, env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
@@ -126,10 +156,11 @@ default_model: test/noop
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	cmd := exec.CommandContext(ctx, bin, "hub", "--addr", addr, "--db", dbPath, "--no-web-ui")
+	cmd := exec.CommandContext(ctx, env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
-		"ELASTICCLAW_NOOP_PROVIDER=1",
+		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
+		"FIREWORKS_API_KEY="+env.FireworksAPIKey,
 		"HOME="+dir,
 	)
 	cmd.Stdout = logFile
@@ -153,7 +184,7 @@ default_model: test/noop
 
 func waitForHub(ctx context.Context, t *testing.T, hub *hubProcess) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, hub.baseURL+"/api/claws", nil)
 		req.Header.Set("Authorization", "Bearer "+hub.token)
@@ -169,31 +200,92 @@ func waitForHub(ctx context.Context, t *testing.T, hub *hubProcess) {
 	t.Fatalf("hub did not become ready at %s", hub.baseURL)
 }
 
-func (h *hubProcess) pushWorkspace(ctx context.Context, t *testing.T, workspaceName, repo string) {
+func writeWorkspaceFixture(t *testing.T, env e2eEnv, workspaceName, workflowName, labelName string) string {
 	t.Helper()
-	body := map[string]interface{}{
-		"workspaces": []map[string]interface{}{{
-			"schemaVersion": "v1",
-			"name":          workspaceName,
-			"repositories": []map[string]string{{
-				"repo":        repo,
-				"permissions": "write",
-			}},
-			"files": map[string]string{
-				"elasticclaw-config.yaml": fmt.Sprintf("schema_version: v1\nname: %s\nprovider: noop\nrepositories:\n  - repo: %s\n    permissions: write\n", workspaceName, repo),
-				"AGENTS.md":               "You are an ElasticClaw E2E test agent.\n",
-				"TOOLS.md":                "Use the available tools conservatively.\n",
-				"CONTEXT.md":              "This is an automated E2E test workspace.\n",
-			},
-		}},
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, ".elasticclaw", "workspaces", workspaceName)
+	workflowDir := filepath.Join(root, ".elasticclaw", "workflows")
+	if err := os.MkdirAll(workspaceDir, 0750); err != nil {
+		t.Fatalf("mkdir workspace fixture: %v", err)
 	}
-	h.api(ctx, t, http.MethodPost, "/api/workspaces", body, nil)
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		t.Fatalf("mkdir workflow fixture: %v", err)
+	}
+	writeFile(t, filepath.Join(workspaceDir, "elasticclaw-config.yaml"), fmt.Sprintf(`schema_version: v1
+name: %s
+provider: daytona
+repositories:
+  - repo: %s
+    permissions: write
+`, workspaceName, env.GitHubRepo))
+	writeFile(t, filepath.Join(workspaceDir, "AGENTS.md"), "You are an ElasticClaw E2E agent. Keep responses concise.\n")
+	writeFile(t, filepath.Join(workspaceDir, "TOOLS.md"), "Use tools only when the issue asks for them.\n")
+	writeFile(t, filepath.Join(workspaceDir, "CONTEXT.md"), "This is an ElasticClaw E2E test. Follow the GitHub issue exactly.\n")
+	writeFile(t, filepath.Join(workflowDir, "github-issues.yaml"), fmt.Sprintf(`schema_version: v1
+name: %s
+
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - %s
+    states:
+      - open
+    labels:
+      - %s
+    labelers:
+      - "*"
+
+concurrency_group: %s
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      remove_labels:
+        - %s
+      add_labels:
+        - agent-working-%s
+      inject: |
+        Issue: {{.Issue.Identifier}} - {{.Issue.Title}}
+        URL: {{.Issue.URL}}
+
+        Do exactly what this issue asks.
+        Do not create a pull request.
+`, workflowName, env.GitHubRepo, labelName, "e2e-"+env.RunID, labelName, env.RunID))
+	return root
 }
 
-func (h *hubProcess) pushWorkflow(ctx context.Context, t *testing.T, workspaceName string, workflow *types.WorkflowConfig) {
+func writeGitHubAppPrivateKey(t *testing.T, root, privateKey string) string {
 	t.Helper()
-	body := map[string]interface{}{"workflows": []*types.WorkflowConfig{workflow}}
-	h.api(ctx, t, http.MethodPost, "/api/workspaces/"+workspaceName+"/workflows", body, nil)
+	path := filepath.Join(root, "github-app.pem")
+	writeFile(t, path, privateKey)
+	return path
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func runCLI(ctx context.Context, t *testing.T, workdir string, env e2eEnv, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, env.Bin, args...)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(),
+		"ELASTICCLAW_HUB_URL=http://"+env.HubAddr,
+		"ELASTICCLAW_CLAW_TOKEN="+userToken,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("elasticclaw %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+	}
 }
 
 func (h *hubProcess) putIssueTracker(ctx context.Context, t *testing.T, workspaceName, trackerType, name, token, webhookSecret string) {
@@ -222,11 +314,33 @@ func (h *hubProcess) deleteWorkspace(ctx context.Context, workspaceName string) 
 	return nil
 }
 
+func (h *hubProcess) deleteAgent(ctx context.Context, agentID string) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, h.baseURL+"/api/claws/"+agentID, nil)
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete agent: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
 func (h *hubProcess) listAgents(ctx context.Context, t *testing.T) []types.Claw {
 	t.Helper()
-	var claws []types.Claw
-	h.api(ctx, t, http.MethodGet, "/api/claws", nil, &claws)
-	return claws
+	var agents []types.Claw
+	h.api(ctx, t, http.MethodGet, "/api/claws", nil, &agents)
+	return agents
+}
+
+func (h *hubProcess) listMessages(ctx context.Context, t *testing.T, agentID string) []types.HubMessage {
+	t.Helper()
+	var messages []types.HubMessage
+	h.api(ctx, t, http.MethodGet, "/api/messages/"+agentID, nil, &messages)
+	return messages
 }
 
 func (h *hubProcess) api(ctx context.Context, t *testing.T, method, path string, body interface{}, out interface{}) {
@@ -263,19 +377,21 @@ func (h *hubProcess) api(ctx context.Context, t *testing.T, method, path string,
 	}
 }
 
-func waitForExactlyOneAgent(ctx context.Context, t *testing.T, hub *hubProcess, name string) {
+func waitForOneAgent(ctx context.Context, t *testing.T, hub *hubProcess, name string) string {
 	t.Helper()
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		claws := hub.listAgents(ctx, t)
+		agents := hub.listAgents(ctx, t)
 		count := 0
-		for _, claw := range claws {
-			if claw.Name == name {
+		var id string
+		for _, agent := range agents {
+			if agent.Name == name {
 				count++
+				id = agent.ID
 			}
 		}
 		if count == 1 {
-			return
+			return id
 		}
 		if count > 1 {
 			t.Fatalf("found %d agents named %s, want exactly 1", count, name)
@@ -283,6 +399,38 @@ func waitForExactlyOneAgent(ctx context.Context, t *testing.T, hub *hubProcess, 
 		time.Sleep(2 * time.Second)
 	}
 	t.Fatalf("timed out waiting for one agent named %s", name)
+	return ""
+}
+
+func waitForAgentStatus(ctx context.Context, t *testing.T, hub *hubProcess, agentID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(12 * time.Minute)
+	for time.Now().Before(deadline) {
+		var agent types.Claw
+		hub.api(ctx, t, http.MethodGet, "/api/claws/"+agentID, nil, &agent)
+		if string(agent.Status) == want {
+			return
+		}
+		if agent.Status == "error" {
+			t.Fatalf("agent %s entered error state", agentID)
+		}
+		time.Sleep(5 * time.Second)
+	}
+	t.Fatalf("timed out waiting for agent %s status %q", agentID, want)
+}
+
+func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agentID string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Minute)
+	for time.Now().Before(deadline) {
+		for _, msg := range hub.listMessages(ctx, t, agentID) {
+			if msg.Role == "claw" && strings.TrimSpace(msg.Content) != "" {
+				return
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	t.Fatalf("timed out waiting for agent %s to reply", agentID)
 }
 
 type githubClient struct {
@@ -368,6 +516,19 @@ func (g githubClient) closeIssue(ctx context.Context, issueNumber int) error {
 	return nil
 }
 
+func assertNoPullRequestCreated(ctx context.Context, t *testing.T, gh githubClient, issueNumber int) {
+	t.Helper()
+	var events []struct {
+		Event string `json:"event"`
+	}
+	gh.api(ctx, t, http.MethodGet, fmt.Sprintf("issues/%d/events", issueNumber), nil, &events)
+	for _, event := range events {
+		if event.Event == "cross-referenced" {
+			t.Fatalf("issue %d has a cross-reference event; agent may have opened a PR despite instructions", issueNumber)
+		}
+	}
+}
+
 func (g githubClient) api(ctx context.Context, t *testing.T, method, path string, body interface{}, out interface{}) {
 	t.Helper()
 	var reader io.Reader
@@ -407,54 +568,20 @@ func (g githubClient) api(ctx context.Context, t *testing.T, method, path string
 	}
 }
 
-func githubIssuesWorkflow(repo, label string) *types.WorkflowConfig {
-	return githubIssuesWorkflowForRun("github-issues", repo, label, "contract")
-}
-
-func githubIssuesWorkflowForRun(name, repo, label, runID string) *types.WorkflowConfig {
-	return &types.WorkflowConfig{
-		SchemaVersion:    "v1",
-		Name:             name,
-		Integration:      "github-issues",
-		ConcurrencyGroup: "e2e-" + runID,
-		Trigger: &types.WorkflowTrigger{
-			GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
-				Event:        "issue_labeled",
-				Repositories: []string{repo},
-				States:       []string{"open"},
-				Labels:       []string{label},
-				Labelers:     []string{"*"},
-			},
-		},
-		Stages: []types.WorkflowStage{{
-			ID:    "working",
-			Label: "Working",
-			Entry: true,
-			OnEnter: map[string]interface{}{
-				"inject": "E2E issue {{.Issue.Identifier}} {{.Issue.URL}}\n",
-			},
-		}},
-	}
-}
-
-func requiredEnv(t *testing.T, names ...string) string {
+func requiredEnv(t *testing.T, name string) string {
 	t.Helper()
-	var first string
-	var missing []string
-	for _, name := range names {
-		value := strings.TrimSpace(os.Getenv(name))
-		if value == "" {
-			missing = append(missing, name)
-			continue
-		}
-		if first == "" {
-			first = value
-		}
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		t.Fatalf("missing required env: %s", name)
 	}
-	if len(missing) > 0 {
-		t.Fatalf("missing required env: %s", strings.Join(missing, ", "))
+	return value
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
 	}
-	return first
+	return fallback
 }
 
 func e2eRunID() string {
@@ -482,14 +609,4 @@ func sanitizeID(value string) string {
 		out = out[:48]
 	}
 	return strings.Trim(out, "-")
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
