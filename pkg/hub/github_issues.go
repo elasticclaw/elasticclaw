@@ -872,6 +872,13 @@ func (s *Server) resolveGitHubIssuesTokenForFactory(factory *types.FactoryConfig
 	return ""
 }
 
+func (s *Server) resolveGitHubIssuesTokenForWorkflow(workspaceName string, workflow *types.WorkflowConfig) string {
+	if tracker, ok := findWorkspaceIssueTracker(workspaceName, "github-issues", workflow.Workspace); ok {
+		return tracker.Token
+	}
+	return ""
+}
+
 func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 	i := payload.Issue
 	var b strings.Builder

@@ -33,16 +33,19 @@ type IssueState struct {
 // move_issue parity tests in a future phase).
 type MockGitHubIssues struct {
 	*httptest.Server
-	mu      sync.Mutex
-	Issues  map[string]IssueState // key: "owner/repo#number"
-	Calls   []string
+	mu            sync.Mutex
+	Issues        map[string]IssueState // key: "owner/repo#number"
+	IssueEvents   map[string][]map[string]interface{}
+	Calls         []string
+	AuthHeaders   []string
 	WebhookSecret string
 }
 
 func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 	t.Helper()
 	m := &MockGitHubIssues{
-		Issues: make(map[string]IssueState),
+		Issues:      make(map[string]IssueState),
+		IssueEvents: make(map[string][]map[string]interface{}),
 	}
 	mux := http.NewServeMux()
 
@@ -63,12 +66,24 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 
 		m.mu.Lock()
 		m.Calls = append(m.Calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
+		m.AuthHeaders = append(m.AuthHeaders, r.Header.Get("Authorization"))
 		m.mu.Unlock()
 
 		// issues endpoint
 		if strings.HasPrefix(rest, "issues") {
-			// Single issue fetch: /repos/{owner}/{repo}/issues/{number}
 			parts2 := strings.Split(rest, "/")
+			if len(parts2) == 3 && parts2[0] == "issues" && parts2[2] == "events" {
+				var num int
+				fmt.Sscanf(parts2[1], "%d", &num)
+				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
+				m.mu.Lock()
+				events := append([]map[string]interface{}(nil), m.IssueEvents[key]...)
+				m.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(events)
+				return
+			}
+			// Single issue fetch: /repos/{owner}/{repo}/issues/{number}
 			if len(parts2) == 2 && parts2[0] == "issues" {
 				var num int
 				fmt.Sscanf(parts2[1], "%d", &num)
@@ -123,6 +138,12 @@ func (m *MockGitHubIssues) SetIssue(repo string, number int, state IssueState) {
 	m.Issues[fmt.Sprintf("%s#%d", repo, number)] = state
 }
 
+func (m *MockGitHubIssues) SetIssueEvents(repo string, number int, events []map[string]interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.IssueEvents[fmt.Sprintf("%s#%d", repo, number)] = append([]map[string]interface{}(nil), events...)
+}
+
 func (m *MockGitHubIssues) SetIssueState(repo string, number int, state string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -168,6 +189,18 @@ func (m *MockGitHubIssues) SawAPICall() bool {
 	return len(m.Calls) > 0
 }
 
+func (m *MockGitHubIssues) AuthHeaderCount(header string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, got := range m.AuthHeaders {
+		if got == header {
+			count++
+		}
+	}
+	return count
+}
+
 // BuildWebhookPayload returns a JSON webhook payload and the X-Hub-Signature-256
 // for the given issue state transition.
 //
@@ -196,16 +229,16 @@ func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevStat
 	payload := map[string]interface{}{
 		"action": action,
 		"issue": map[string]interface{}{
-			"id":         number,
-			"number":     number,
-			"title":      issue.Title,
-			"body":       issue.Body,
-			"html_url":   fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
-			"state":      newState,
+			"id":           number,
+			"number":       number,
+			"title":        issue.Title,
+			"body":         issue.Body,
+			"html_url":     fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
+			"state":        newState,
 			"state_reason": "",
-			"labels":     labelsToNameMaps(issue.Labels),
-			"assignee":   nil,
-			"user":       map[string]interface{}{"login": "testuser", "type": "User"},
+			"labels":       labelsToNameMaps(issue.Labels),
+			"assignee":     nil,
+			"user":         map[string]interface{}{"login": "testuser", "type": "User"},
 		},
 		"repository": map[string]interface{}{
 			"full_name": repo,

@@ -16,8 +16,9 @@ import (
 
 // startIntegrationPoller launches the background polling goroutine that queries
 // each configured integration's API every 30 seconds to detect missed webhook
-// events. It evaluates factory filters against current state and creates claws
-// when the matching factory has not already claimed that external trigger.
+// events. It evaluates factory/workflow filters against current state and
+// creates agents when the matching trigger has not already claimed that
+// external item.
 func (s *Server) startIntegrationPoller() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -28,15 +29,27 @@ func (s *Server) startIntegrationPoller() {
 	}()
 }
 
-// pollTick queries all four integration platforms for recently updated items
-// and processes any trigger transitions that webhooks may have missed.
+// pollTick queries integration platforms for recently updated items and
+// processes any trigger transitions that webhooks may have missed.
 func (s *Server) pollTick() {
 	now := time.Now().UTC()
 	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
 
 	factories := s.resolveFactories()
-	if len(factories) == 0 {
-		log.Printf("[poll] tick: no factories configured")
+	linearWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("linear")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load linear workflows: %v", err)
+	}
+	shortcutWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("shortcut")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load shortcut workflows: %v", err)
+	}
+	githubIssueWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("github-issues")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load github-issues workflows: %v", err)
+	}
+	if len(factories) == 0 && len(linearWorkflowWorkspaces) == 0 && len(shortcutWorkflowWorkspaces) == 0 && len(githubIssueWorkflowWorkspaces) == 0 {
+		log.Printf("[poll] tick: no factories or workflows configured")
 		return
 	}
 
@@ -48,20 +61,31 @@ func (s *Server) pollTick() {
 	if integrations != nil && len(integrations.Linear) > 0 {
 		s.pollLinear(factories, integrations.Linear, since)
 	}
+	if len(linearWorkflowWorkspaces) > 0 {
+		s.pollLinearWorkflows(linearWorkflowWorkspaces, since)
+	}
 
 	// === SHORTCUT ===
 	if integrations != nil && len(integrations.Shortcut) > 0 {
 		s.pollShortcut(factories, integrations.Shortcut, since)
+	}
+	if len(shortcutWorkflowWorkspaces) > 0 {
+		s.pollShortcutWorkflows(shortcutWorkflowWorkspaces, since)
 	}
 
 	// === GITHUB ISSUES ===
 	if integrations != nil && len(integrations.GitHubIssues) > 0 {
 		s.pollGitHubIssues(factories, integrations.GitHubIssues, since)
 	}
+	if len(githubIssueWorkflowWorkspaces) > 0 {
+		s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, since)
+	}
 
 	// === GITHUB PRs ===
 	// Use factories with integration=="github" to discover repos
-	s.pollGitHubPRs(factories, since)
+	if len(factories) > 0 {
+		s.pollGitHubPRs(factories, since)
+	}
 }
 
 // ── LINEAR POLLER ───────────────────────────────────────────────────────────
@@ -107,6 +131,44 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 
 		for _, issue := range issues {
 			s.processLinearPollItem(issue, wsFactories, ws)
+		}
+	}
+}
+
+type linearWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+}
+
+func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+	tokenTargets := map[string][]linearWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "linear" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+			if token == "" {
+				log.Printf("[poll-linear] workflow %s/%s: no Linear token configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			tokenTargets[token] = append(tokenTargets[token], linearWorkflowPollTarget{workspace: workspace, workflow: workflow})
+		}
+	}
+	for token, targets := range tokenTargets {
+		issues, err := s.queryLinearIssues(token, since)
+		if err != nil {
+			log.Printf("[poll-linear] workflow query failed: %v", err)
+			continue
+		}
+		for _, issue := range issues {
+			s.processLinearWorkflowPollItem(issue, targets)
 		}
 	}
 }
@@ -286,6 +348,52 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 	}
 }
 
+func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []linearWorkflowPollTarget) {
+	entityID := issue.Identifier
+	currentStatus := issue.State.Name
+	currentLabels := make(map[string]bool)
+	for _, l := range issue.Labels {
+		currentLabels[strings.ToLower(l.Name)] = true
+	}
+	currentAssignee := ""
+	if issue.Assignee != nil {
+		currentAssignee = issue.Assignee.Name
+	}
+	payload := s.buildLinearPollPayload(issue)
+
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		if workflow.Team != "" && !strings.EqualFold(workflow.Team, issue.Team.Key) {
+			continue
+		}
+		if workflow.TriggerStatus == "" || !strings.EqualFold(currentStatus, workflow.TriggerStatus) {
+			continue
+		}
+		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
+			continue
+		}
+		labelsMatched := true
+		for _, required := range workflow.Labels {
+			if !currentLabels[strings.ToLower(required)] {
+				labelsMatched = false
+				break
+			}
+		}
+		if !labelsMatched {
+			continue
+		}
+
+		log.Printf("[workflow:%s/%s] Linear issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, entityID)
+		if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, entityID, err)
+		}
+	}
+}
+
 func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayload {
 	var payload linearWebhookPayload
 	payload.Action = "update"
@@ -375,6 +483,12 @@ type shortcutPollStory struct {
 	OwnerIDs []string `json:"owner_ids"`
 }
 
+type shortcutWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+	token     string
+}
+
 func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory, error) {
 	body := map[string]interface{}{
 		"updated_at_start": since,
@@ -400,6 +514,44 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 		return nil, fmt.Errorf("parse shortcut response: %w", err)
 	}
 	return stories, nil
+}
+
+func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+	tokenTargets := map[string][]shortcutWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "shortcut" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			token := s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
+			if token == "" {
+				log.Printf("[poll-shortcut] workflow %s/%s: no Shortcut token configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			tokenTargets[token] = append(tokenTargets[token], shortcutWorkflowPollTarget{workspace: workspace, workflow: workflow, token: token})
+		}
+	}
+	for token, targets := range tokenTargets {
+		stories, err := s.queryShortcutStories(token, since)
+		if err != nil {
+			log.Printf("[poll-shortcut] workflow query failed: %v", err)
+			continue
+		}
+		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+		if len(stateNameMap) == 0 {
+			log.Printf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
+			continue
+		}
+		for _, story := range stories {
+			s.processShortcutWorkflowPollItem(story, targets, token, stateNameMap)
+		}
+	}
 }
 
 func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
@@ -476,6 +628,71 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 	}
 }
 
+func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, targets []shortcutWorkflowPollTarget, token string, stateNameMap map[int64]string) {
+	storyID := fmt.Sprintf("sc-%d", story.ID)
+	currentStateName := stateNameMap[story.WorkflowStateID]
+	if currentStateName == "" {
+		currentStateName = strconv.FormatInt(story.WorkflowStateID, 10)
+	}
+	currentLabels := make(map[string]bool)
+	for _, l := range story.Labels {
+		currentLabels[strings.ToLower(l.Name)] = true
+	}
+	currentAssignee := ""
+	needsAssignee := false
+	for _, target := range targets {
+		if target.workflow != nil && target.workflow.AssignedTo != "" {
+			needsAssignee = true
+			break
+		}
+	}
+	if needsAssignee && len(story.OwnerIDs) > 0 {
+		data, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
+		if err == nil {
+			if name, ok := data["mention_name"].(string); ok && name != "" {
+				currentAssignee = name
+			} else if name, ok := data["name"].(string); ok && name != "" {
+				currentAssignee = name
+			}
+		}
+	}
+	action := shortcutAction{
+		ID:          story.ID,
+		EntityType:  "story",
+		Action:      "update",
+		Name:        story.Name,
+		AppURL:      story.AppURL,
+		Description: story.Description,
+	}
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		if workflow.TriggerStatus == "" || !strings.EqualFold(currentStateName, workflow.TriggerStatus) {
+			continue
+		}
+		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
+			continue
+		}
+		labelsMatched := true
+		for _, required := range workflow.Labels {
+			if !currentLabels[strings.ToLower(required)] {
+				labelsMatched = false
+				break
+			}
+		}
+		if !labelsMatched {
+			continue
+		}
+		log.Printf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
+		if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "poll"); err != nil {
+			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, storyID, err)
+		}
+	}
+}
+
 // ── GITHUB ISSUES POLLER ────────────────────────────────────────────────────
 
 func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs []*types.GitHubIssuesIntegrationConfig, since string) {
@@ -531,6 +748,71 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 
 		for _, issue := range issues {
 			s.processGitHubIssuesPollItem(issue, repoFactories, repo, token, base)
+		}
+	}
+}
+
+type githubIssueWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+	token     string
+}
+
+func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+	type repoTokenKey struct {
+		repo  string
+		token string
+	}
+	repoTargets := map[repoTokenKey][]githubIssueWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "github-issues" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+			if token == "" {
+				log.Printf("[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			for _, repo := range githubIssuesWorkflowTriggerRepos(workflow) {
+				if repo == "" {
+					continue
+				}
+				if strings.HasSuffix(repo, "/*") {
+					log.Printf("[poll-github-issues] workflow %s/%s: repository %q is an org wildcard; polling requires exact owner/repo entries", workspace.Name, workflow.Name, repo)
+					continue
+				}
+				key := repoTokenKey{repo: repo, token: token}
+				repoTargets[key] = append(repoTargets[key], githubIssueWorkflowPollTarget{
+					workspace: workspace,
+					workflow:  workflow,
+					token:     token,
+				})
+			}
+		}
+	}
+
+	base := s.githubBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	for key, targets := range repoTargets {
+		if key.token == "" {
+			continue
+		}
+		issues, err := s.queryGitHubIssues(key.repo, key.token, since, base)
+		if err != nil {
+			log.Printf("[poll-github-issues] workflow query failed for repo %q: %v", key.repo, err)
+			continue
+		}
+		for _, issue := range issues {
+			s.processGitHubIssueWorkflowPollItem(issue, targets, key.repo, key.token, base)
 		}
 	}
 }
@@ -723,9 +1005,206 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 	}
 }
 
+func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, targets []githubIssueWorkflowPollTarget, repo, token, base string) {
+	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
+	currentStatus := issue.State
+	issueLabels := githubIssuesPollLabels(issue)
+	assignee := ""
+	if issue.Assignee != nil {
+		assignee = issue.Assignee.Login
+	}
+	var events []githubIssueEvent
+	if githubIssueWorkflowPollNeedsLabelerEvents(targets) {
+		var err error
+		events, err = s.queryGitHubIssueEvents(repo, token, base, issue.Number)
+		if err != nil {
+			log.Printf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
+		}
+	}
+
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		payload, ok := buildGitHubIssuesWorkflowPollPayload(issue, repo, workflow, currentStatus, issueLabels, assignee, events)
+		if !ok {
+			continue
+		}
+		if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
+		}
+	}
+}
+
+func githubIssuesPollLabels(issue githubIssuesPollItem) map[string]bool {
+	labels := map[string]bool{}
+	for _, label := range issue.Labels {
+		labels[strings.ToLower(label.Name)] = true
+	}
+	return labels
+}
+
+func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo string, workflow *types.WorkflowConfig, currentStatus string, issueLabels map[string]bool, assignee string, events []githubIssueEvent) (githubIssuesWebhookPayload, bool) {
+	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, githubIssuesWorkflowPollAction(workflow))
+	if payload.Action == "" {
+		return payload, false
+	}
+	if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+		return payload, false
+	}
+	if payload.Action == "labeled" {
+		labelName, ok := githubIssuesWorkflowPollLabel(workflow, issueLabels)
+		if !ok {
+			return payload, false
+		}
+		labeler, ok := githubIssuesWorkflowPollLabeler(workflow, labelName, events)
+		if !ok {
+			return payload, false
+		}
+		payload.Label = &struct {
+			Name string `json:"name"`
+		}{Name: labelName}
+		if labeler != "" {
+			payload.Sender.Login = labeler
+		}
+	}
+	if workflow.Trigger != nil {
+		if !githubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
+			return payload, false
+		}
+		return payload, true
+	}
+	if len(workflow.Labels) > 0 {
+		for _, required := range workflow.Labels {
+			if !issueLabels[strings.ToLower(required)] {
+				return payload, false
+			}
+		}
+	}
+	triggerStatus := workflow.TriggerStatus
+	if triggerStatus == "" {
+		triggerStatus = "open"
+	}
+	if !strings.EqualFold(currentStatus, triggerStatus) && !issueLabels[strings.ToLower(triggerStatus)] {
+		return payload, false
+	}
+	return payload, true
+}
+
+func githubIssuesWorkflowPollAction(workflow *types.WorkflowConfig) string {
+	event := ""
+	if workflow != nil && workflow.Trigger != nil {
+		if workflow.Trigger.GitHubIssues != nil {
+			event = workflow.Trigger.GitHubIssues.Event
+		} else if workflow.Trigger.Type == "github_issues" {
+			event = workflow.Trigger.Event
+		}
+	}
+	switch event {
+	case "issue_labeled":
+		return "labeled"
+	case "issue_opened":
+		return "opened"
+	case "issue_reopened":
+		return "reopened"
+	case "issue_edited":
+		return "edited"
+	case "issue_assigned":
+		return "assigned"
+	case "issue_unassigned":
+		return "unassigned"
+	case "":
+		return "opened"
+	default:
+		return ""
+	}
+}
+
+func githubIssuesWorkflowPollLabel(workflow *types.WorkflowConfig, issueLabels map[string]bool) (string, bool) {
+	if workflow != nil && workflow.Trigger != nil {
+		var labels []string
+		if workflow.Trigger.GitHubIssues != nil {
+			labels = workflow.Trigger.GitHubIssues.Labels
+		} else if workflow.Trigger.Type == "github_issues" {
+			labels = workflow.Trigger.Labels
+		}
+		for _, label := range labels {
+			if issueLabels[strings.ToLower(label)] {
+				return label, true
+			}
+		}
+	}
+	for label := range issueLabels {
+		return label, true
+	}
+	return "", false
+}
+
+func githubIssueWorkflowPollNeedsLabelerEvents(targets []githubIssueWorkflowPollTarget) bool {
+	for _, target := range targets {
+		for _, labeler := range githubIssuesWorkflowPollLabelers(target.workflow) {
+			labeler = strings.TrimSpace(labeler)
+			if labeler != "" && labeler != "*" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func githubIssuesWorkflowPollLabelers(workflow *types.WorkflowConfig) []string {
+	if workflow == nil {
+		return nil
+	}
+	if workflow.Trigger != nil {
+		if workflow.Trigger.GitHubIssues != nil {
+			return workflow.Trigger.GitHubIssues.Labelers
+		}
+		if workflow.Trigger.Type == "github_issues" {
+			return workflow.Trigger.Labelers
+		}
+	}
+	return workflow.AllowedLabelers
+}
+
+func githubIssuesWorkflowPollLabeler(workflow *types.WorkflowConfig, labelName string, events []githubIssueEvent) (string, bool) {
+	labelers := githubIssuesWorkflowPollLabelers(workflow)
+	needsSpecificLabeler := false
+	for _, labeler := range labelers {
+		labeler = strings.TrimSpace(labeler)
+		if labeler != "" && labeler != "*" {
+			needsSpecificLabeler = true
+			break
+		}
+	}
+	if !needsSpecificLabeler {
+		return "", true
+	}
+	for _, event := range events {
+		if event.Event != "labeled" || event.Label == nil {
+			continue
+		}
+		if !strings.EqualFold(event.Label.Name, labelName) {
+			continue
+		}
+		for _, labeler := range labelers {
+			if strings.EqualFold(strings.TrimSpace(labeler), event.Actor.Login) {
+				return event.Actor.Login, true
+			}
+		}
+	}
+	return "", false
+}
+
 func (s *Server) buildGitHubIssuesPollPayload(issue githubIssuesPollItem, repo string) githubIssuesWebhookPayload {
+	return buildGitHubIssuesPollPayloadForAction(issue, repo, "opened")
+}
+
+func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, action string) githubIssuesWebhookPayload {
 	var payload githubIssuesWebhookPayload
-	payload.Action = "opened" // synthetic action for polling
+	payload.Action = action
 	payload.Issue.Number = issue.Number
 	payload.Issue.Title = issue.Title
 	payload.Issue.Body = issue.Body
@@ -744,6 +1223,7 @@ func (s *Server) buildGitHubIssuesPollPayload(issue githubIssuesPollItem, repo s
 		}{Login: issue.Assignee.Login}
 	}
 	payload.Repository.FullName = repo
+	payload.Sender.Login = issue.User.Login
 	return payload
 }
 
