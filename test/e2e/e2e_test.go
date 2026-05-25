@@ -42,6 +42,10 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
 		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
 		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
+		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
+		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
+		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
 		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
@@ -133,6 +137,10 @@ type e2eEnv struct {
 	GitHubAppURL        string
 	GitHubInstallation  string
 	GitHubAppPrivateKey string
+	LinearAPIKey        string
+	LinearTeamKey       string
+	LinearTriggerState  string
+	LinearInitialState  string
 	DaytonaAPIKey       string
 	FireworksAPIKey     string
 	BridgeBinary        string
@@ -542,12 +550,16 @@ func destroyDaytonaSandboxByID(ctx context.Context, t *testing.T, env e2eEnv, sa
 	if err != nil {
 		t.Fatalf("create Daytona provider for E2E sandbox cleanup: %v", err)
 	}
-	if err := provider.Destroy(ctx, sandboxID, false); err != nil && !isBenignDaytonaDeleteError(err) {
-		t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
-	}
-
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
+		if err := provider.Destroy(ctx, sandboxID, false); err != nil {
+			if isBenignDaytonaDeleteError(err) {
+				return
+			}
+			if !isRetryableDaytonaDeleteError(err) && time.Now().After(deadline) {
+				t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
+			}
+		}
 		status, err := provider.Status(ctx, sandboxID)
 		if err != nil {
 			if isBenignDaytonaDeleteError(err) {
@@ -571,6 +583,13 @@ func isBenignDaytonaDeleteError(err error) bool {
 		strings.Contains(msg, "destroy") ||
 		strings.Contains(msg, "delet") ||
 		strings.Contains(msg, "terminat")
+}
+
+func isRetryableDaytonaDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status 409") ||
+		strings.Contains(msg, "modified by another operation") ||
+		strings.Contains(msg, "conflict")
 }
 
 type githubClient struct {
