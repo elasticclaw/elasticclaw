@@ -392,22 +392,12 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		}
 		return &pipelineRunResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
 	case "replicated":
-		if sshHost == "" || sshPort == 0 || sshUser == "" {
-			return nil, fmt.Errorf("replicated agent has no SSH connection details")
-		}
-		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand)
+		return nil, fmt.Errorf("workflow run actions are not supported for replicated agents until SSH host keys are verified")
 	case "noop":
 		return &pipelineRunResult{ExitCode: 0, Stdout: "noop provider skipped workflow command"}, nil
 	default:
 		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
 	}
-}
-
-func (s *Server) executeReplicatedPipelineRun(user, host, command string) (*pipelineRunResult, error) {
-	if err := s.sshRun(user, host, command); err != nil {
-		return &pipelineRunResult{ExitCode: 1, Stderr: err.Error()}, err
-	}
-	return &pipelineRunResult{ExitCode: 0}, nil
 }
 
 func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResult, err error) string {
