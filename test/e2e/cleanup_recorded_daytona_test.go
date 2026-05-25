@@ -36,16 +36,18 @@ func TestCleanupRecordedDaytonaSandboxes(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	for _, id := range ids {
-		if err := provider.Destroy(ctx, id, false); err != nil && !isBenignDaytonaDeleteError(err) {
-			t.Fatalf("delete recorded Daytona sandbox %s: %v", id, err)
-		}
-	}
-
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
 		remaining := make([]string, 0, len(ids))
 		for _, id := range ids {
+			if err := provider.Destroy(ctx, id, false); err != nil {
+				if isBenignDaytonaDeleteError(err) {
+					continue
+				}
+				if !isRetryableDaytonaDeleteError(err) && time.Now().After(deadline) {
+					t.Fatalf("delete recorded Daytona sandbox %s: %v", id, err)
+				}
+			}
 			status, err := provider.Status(ctx, id)
 			if err != nil {
 				if isBenignDaytonaDeleteError(err) {
