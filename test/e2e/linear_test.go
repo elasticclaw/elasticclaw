@@ -45,7 +45,7 @@ func TestDaytonaLinearWorkflowE2E(t *testing.T) {
 
 	workspaceName := "e2e-linear-" + env.RunID
 	workflowName := "linear-" + env.RunID
-	webhookSecret := ""
+	webhookSecret := "linear-e2e-secret-" + env.RunID
 
 	cleanupDaytonaE2ESandboxes(ctx, t, env)
 	hub := startHub(ctx, t, env)
@@ -87,6 +87,7 @@ func TestDaytonaLinearWorkflowE2E(t *testing.T) {
 	})
 
 	team := linear.teamByKey(ctx, t, env.LinearTeamKey)
+	linear.deleteE2EWebhooks(ctx, t)
 	triggerStateID := team.stateID(t, env.LinearTriggerState)
 	initialStateID := team.initialStateID(t, env.LinearInitialState, env.LinearTriggerState)
 
@@ -101,7 +102,7 @@ func TestDaytonaLinearWorkflowE2E(t *testing.T) {
 	hub.putIssueTracker(ctx, t, workspaceName, "linear", "default", env.LinearAPIKey, webhookSecret)
 	runCLI(ctx, t, root, env, "workflow", "push", "--workspace", workspaceName, filepath.Join(root, ".elasticclaw", "workflows", "linear.yaml"))
 
-	webhookID = linear.createWebhook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/linear", team.ID)
+	webhookID = linear.createWebhook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/linear", team.ID, webhookSecret)
 	issue := linear.createIssue(ctx, t, team.ID, initialStateID, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.\n\nElasticClaw E2E run: "+env.RunID)
 	issueID = issue.ID
 	issueIdentifier = issue.Identifier
@@ -247,7 +248,7 @@ func (team linearTeam) initialStateID(t *testing.T, requested, trigger string) s
 	return ""
 }
 
-func (c linearClient) createWebhook(ctx context.Context, t *testing.T, url, teamID string) string {
+func (c linearClient) createWebhook(ctx context.Context, t *testing.T, url, teamID, secret string) string {
 	t.Helper()
 	var out struct {
 		Data struct {
@@ -263,6 +264,7 @@ func (c linearClient) createWebhook(ctx context.Context, t *testing.T, url, team
 		"input": map[string]interface{}{
 			"url":           url,
 			"teamId":        teamID,
+			"secret":        secret,
 			"resourceTypes": []string{"Issue"},
 		},
 	}
@@ -276,6 +278,32 @@ func (c linearClient) createWebhook(ctx context.Context, t *testing.T, url, team
 		t.Fatalf("Linear webhookCreate did not return a webhook id")
 	}
 	return out.Data.WebhookCreate.Webhook.ID
+}
+
+func (c linearClient) deleteE2EWebhooks(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var out struct {
+		Data struct {
+			Webhooks struct {
+				Nodes []struct {
+					ID  string `json:"id"`
+					URL string `json:"url"`
+				} `json:"nodes"`
+			} `json:"webhooks"`
+		} `json:"data"`
+	}
+	c.graphql(ctx, t, `query {
+  webhooks {
+    nodes { id url }
+  }
+}`, nil, &out)
+	for _, webhook := range out.Data.Webhooks.Nodes {
+		if strings.Contains(webhook.URL, "/api/workspaces/e2e-linear-") && strings.HasSuffix(webhook.URL, "/webhooks/linear") {
+			if err := c.deleteWebhook(ctx, webhook.ID); err != nil {
+				t.Fatalf("delete stale Linear E2E webhook %s: %v", webhook.ID, err)
+			}
+		}
+	}
 }
 
 func (c linearClient) deleteWebhook(ctx context.Context, id string) error {
