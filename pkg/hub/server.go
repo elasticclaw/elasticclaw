@@ -2788,24 +2788,32 @@ gh auth status`
 }
 
 func recordE2EDaytonaSandboxID(sandboxID string) {
-	path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE"))
-	if path == "" || strings.TrimSpace(sandboxID) == "" {
+	recordE2EProviderID("Daytona sandbox", "ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE", sandboxID)
+}
+
+func recordE2EReplicatedVMID(vmID string) {
+	recordE2EProviderID("Replicated VM", "ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE", vmID)
+}
+
+func recordE2EProviderID(label, envName, id string) {
+	path := strings.TrimSpace(os.Getenv(envName))
+	if path == "" || strings.TrimSpace(id) == "" {
 		return
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
-			log.Printf("[e2e] record Daytona sandbox id: mkdir %s: %v", dir, err)
+			log.Printf("[e2e] record %s id: mkdir %s: %v", label, dir, err)
 			return
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		log.Printf("[e2e] record Daytona sandbox id: open %s: %v", path, err)
+		log.Printf("[e2e] record %s id: open %s: %v", label, path, err)
 		return
 	}
 	defer f.Close()
-	if _, err := fmt.Fprintln(f, sandboxID); err != nil {
-		log.Printf("[e2e] record Daytona sandbox id: write %s: %v", path, err)
+	if _, err := fmt.Fprintln(f, id); err != nil {
+		log.Printf("[e2e] record %s id: write %s: %v", label, path, err)
 	}
 }
 
@@ -3200,6 +3208,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
+	recordE2EReplicatedVMID(vmID)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	_, _ = s.db.Exec(
