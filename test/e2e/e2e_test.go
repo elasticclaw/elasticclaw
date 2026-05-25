@@ -42,6 +42,10 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
 		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
 		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
+		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
+		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
+		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
 		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
@@ -133,6 +137,10 @@ type e2eEnv struct {
 	GitHubAppURL        string
 	GitHubInstallation  string
 	GitHubAppPrivateKey string
+	LinearAPIKey        string
+	LinearTeamKey       string
+	LinearTriggerState  string
+	LinearInitialState  string
 	DaytonaAPIKey       string
 	FireworksAPIKey     string
 	BridgeBinary        string

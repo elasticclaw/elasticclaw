@@ -9,6 +9,8 @@ on:
       - 'pkg/hub/bootstrap.go'
       - 'pkg/hub/github.go'
       - 'pkg/hub/github_issues.go'
+      - 'pkg/hub/integration_poller.go'
+      - 'pkg/hub/linear.go'
       - 'pkg/hub/pipeline_runner.go'
       - 'pkg/hub/server.go'
       - 'pkg/hub/workspace*.go'
@@ -21,9 +23,19 @@ on:
 
 jobs:
   daytona-github-issues:
-    name: Daytona + GitHub Issues
+    name: Daytona + ${{ matrix.name }}
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GitHub Issues
+            slug: github
+            test: TestDaytonaGitHubIssuesWorkflowE2E
+          - name: Linear
+            slug: linear
+            test: TestDaytonaLinearWorkflowE2E
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
@@ -35,8 +47,12 @@ jobs:
       ELASTICCLAW_E2E_GITHUB_APP_URL: ${{ vars.ELASTICCLAW_E2E_GITHUB_APP_URL }}
       ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION: ${{ vars.ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION }}
       ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY }}
+      ELASTICCLAW_E2E_LINEAR_API_KEY: ${{ secrets.ELASTICCLAW_E2E_LINEAR_API_KEY }}
+      ELASTICCLAW_E2E_LINEAR_TEAM_KEY: ${{ vars.ELASTICCLAW_E2E_LINEAR_TEAM_KEY }}
+      ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE: ${{ vars.ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE || 'Todo' }}
+      ELASTICCLAW_E2E_LINEAR_INITIAL_STATE: ${{ vars.ELASTICCLAW_E2E_LINEAR_INITIAL_STATE }}
       ELASTICCLAW_E2E_MODEL: fireworks/accounts/fireworks/models/kimi-k2p6
-      ELASTICCLAW_E2E_RUN_ID: pr-${{ github.event.pull_request.number || github.run_number }}-${{ github.run_attempt }}-${{ github.sha }}
+      ELASTICCLAW_E2E_RUN_ID: pr-${{ github.event.pull_request.number || github.run_number }}-${{ github.run_attempt }}-${{ matrix.slug }}-${{ github.sha }}
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
       NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
@@ -102,8 +118,8 @@ jobs:
           cat ngrok.log
           exit 1
 
-      - name: Run Daytona GitHub Issues E2E
-        run: go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
+      - name: Run Daytona ${{ matrix.name }} E2E
+        run: go test -tags e2e -v ./test/e2e -run "${{ matrix.test }}" -count=1 -timeout 30m
 
       - name: Cleanup Daytona sandbox
         if: always()
