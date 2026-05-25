@@ -27,6 +27,7 @@ const (
 	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
 	defaultFixture = "elasticclaw/e2e-fixtures"
 	daytonaPrefix  = "ec-e2e-"
+	maxRunIDLen    = 32
 )
 
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
@@ -769,8 +770,8 @@ func sanitizeID(value string) string {
 	if out == "" {
 		return "run"
 	}
-	if len(out) > 48 {
-		out = out[:48]
+	if len(out) > maxRunIDLen {
+		out = out[:maxRunIDLen]
 	}
 	return strings.Trim(out, "-")
 }
