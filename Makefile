@@ -55,14 +55,17 @@ test-parity: ## Run parity matrix integration tests (all trackers)
 e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 	@command -v ngrok >/dev/null 2>&1 || (echo "ngrok is required for make e2e" && exit 1)
 	@command -v python3 >/dev/null 2>&1 || (echo "python3 is required for make e2e" && exit 1)
+	@test -n "$$NGROK_AUTHTOKEN" || (echo "NGROK_AUTHTOKEN is required for make e2e" && exit 1)
 	@set -e; \
 	HUB_ADDR="$${ELASTICCLAW_E2E_HUB_ADDR:-127.0.0.1:8080}"; \
 	HUB_PORT="$${HUB_ADDR##*:}"; \
 	NGROK_LOG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.log)"; \
+	NGROK_CONFIG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.yml)"; \
+	printf 'version: "3"\n' > "$$NGROK_CONFIG"; \
 	echo "Starting random ephemeral ngrok tunnel for localhost:$$HUB_PORT"; \
-	ngrok http "$$HUB_PORT" --log stdout > "$$NGROK_LOG" 2>&1 & \
+	ngrok http "$$HUB_PORT" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
 	NGROK_PID="$$!"; \
-	trap 'kill "$$NGROK_PID" >/dev/null 2>&1 || true; rm -f "$$NGROK_LOG"' EXIT INT TERM; \
+	trap 'kill "$$NGROK_PID" >/dev/null 2>&1 || true; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG"' EXIT INT TERM; \
 	echo "Waiting for ngrok tunnel on localhost:$$HUB_PORT..."; \
 	for i in $$(seq 1 30); do \
 		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"; \

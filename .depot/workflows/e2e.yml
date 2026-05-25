@@ -39,12 +39,12 @@ jobs:
         run: |
           curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar -xz
           sudo mv ngrok /usr/local/bin/ngrok
-          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
 
       - name: Start ngrok
         run: |
           echo "Starting random ephemeral ngrok tunnel for localhost:8080"
-          ngrok http 8080 --log stdout > ngrok.log 2>&1 &
+          printf 'version: "3"\n' > ngrok.yml
+          ngrok http 8080 --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
           echo "$!" > ngrok.pid
           for i in $(seq 1 30); do
             url="$(curl -fsS http://127.0.0.1:4040/api/tunnels | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
@@ -81,3 +81,4 @@ jobs:
           path: |
             ngrok.log
             ngrok.pid
+            ngrok.yml
