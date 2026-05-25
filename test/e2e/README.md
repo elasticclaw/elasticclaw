@@ -27,7 +27,7 @@ The suite creates per-run issues, labels, webhooks, workspaces, and workflows
 using a run id. Cleanup closes the issue, removes the webhook, and removes the
 workspace even when the test fails.
 
-## CI Environment
+## Depot CI Environment
 
 Required for external GitHub Issues E2E:
 
