@@ -8,6 +8,8 @@ type Claw struct {
 	TenantID        string         `json:"tenant_id" db:"tenant_id"`
 	Name            string         `json:"name" db:"name"`
 	Template        string         `json:"template" db:"template"`
+	Provider        string         `json:"provider,omitempty" db:"provider"`
+	ProviderID      string         `json:"provider_id,omitempty" db:"provider_id"`
 	Status          InstanceStatus `json:"status" db:"status"`
 	LastSeen        time.Time      `json:"last_seen" db:"last_seen"`
 	CreatedAt       time.Time      `json:"created_at" db:"created_at"`

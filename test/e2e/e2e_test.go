@@ -5,7 +5,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
-	_ "modernc.org/sqlite"
 )
 
 const (
@@ -73,14 +71,23 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
+		var providerID string
 		if agentID != "" {
-			providerID := hub.agentProviderID(cleanupCtx, t, agentID)
+			providerID = hub.agentProviderID(cleanupCtx, t, agentID)
 			_ = hub.deleteAgent(cleanupCtx, agentID)
-			if providerID != "" {
-				destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
-			}
 		}
+		if providerID != "" {
+			destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
+		}
+	})
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cleanupCancel()
 		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
+	})
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cleanupCancel()
 		if issueNumber != 0 {
 			_ = gh.closeIssue(cleanupCtx, issueNumber)
 		}
@@ -140,7 +147,6 @@ type hubProcess struct {
 	token   string
 	cmd     *exec.Cmd
 	logPath string
-	dbPath  string
 }
 
 func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
@@ -178,7 +184,7 @@ llm_keys:
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	cmd := exec.CommandContext(ctx, env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
+	cmd := exec.Command(env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
@@ -193,7 +199,7 @@ llm_keys:
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start hub: %v", err)
 	}
-	hub := &hubProcess{baseURL: baseURL, token: userToken, cmd: cmd, logPath: logPath, dbPath: dbPath}
+	hub := &hubProcess{baseURL: baseURL, token: userToken, cmd: cmd, logPath: logPath}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -356,23 +362,31 @@ func (h *hubProcess) deleteAgent(ctx context.Context, agentID string) error {
 
 func (h *hubProcess) agentProviderID(ctx context.Context, t *testing.T, agentID string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", h.dbPath+"?_time_format=sqlite&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/api/claws/"+agentID, nil)
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("open E2E hub db for provider cleanup: %v", err)
-	}
-	defer db.Close()
-	var provider, providerID string
-	err = db.QueryRowContext(ctx, `SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ?`, agentID).Scan(&provider, &providerID)
-	if err == sql.ErrNoRows {
+		t.Logf("read agent provider id: %v", err)
 		return ""
 	}
-	if err != nil {
-		t.Fatalf("read E2E agent provider id: %v", err)
-	}
-	if provider != "daytona" {
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
 		return ""
 	}
-	return providerID
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		t.Logf("read agent provider id: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return ""
+	}
+	var agent types.Claw
+	if err := json.NewDecoder(resp.Body).Decode(&agent); err != nil {
+		t.Logf("decode agent provider id: %v", err)
+		return ""
+	}
+	if agent.Provider != "daytona" {
+		return ""
+	}
+	return agent.ProviderID
 }
 
 func (h *hubProcess) listAgents(ctx context.Context, t *testing.T) []types.Claw {
