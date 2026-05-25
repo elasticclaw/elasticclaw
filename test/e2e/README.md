@@ -36,10 +36,9 @@ make e2e
 
 `make e2e` builds `bin/elasticclaw`, starts a random ephemeral ngrok tunnel for
 `ELASTICCLAW_E2E_HUB_ADDR` or `127.0.0.1:8080` using a temporary ngrok config,
-sets `ELASTICCLAW_E2E=1`, and runs the same real Daytona + GitHub Issues test
-that Depot CI runs. The make target kills ngrok and removes the temporary ngrok
-config when the test exits. It assumes the required secrets below are already
-exported in your shell.
+and runs the same real Daytona + GitHub Issues test that Depot CI runs. The
+make target kills ngrok and removes the temporary ngrok config when the test
+exits. It assumes the required secrets below are already exported in your shell.
 
 ## Depot CI Environment
 

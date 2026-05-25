@@ -72,11 +72,10 @@ e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 		if [ -n "$$ELASTICCLAW_E2E_PUBLIC_URL" ]; then \
 			case "$$ELASTICCLAW_E2E_PUBLIC_URL" in *://elasticclaw.ngrok.app*) echo "Refusing shared ngrok domain: $$ELASTICCLAW_E2E_PUBLIC_URL"; exit 1;; esac; \
 			echo "ngrok: $$ELASTICCLAW_E2E_PUBLIC_URL"; \
-			ELASTICCLAW_E2E=1 \
 			ELASTICCLAW_E2E_BIN="$(CURDIR)/bin/elasticclaw" \
 			ELASTICCLAW_E2E_HUB_ADDR="$$HUB_ADDR" \
 			ELASTICCLAW_E2E_PUBLIC_URL="$$ELASTICCLAW_E2E_PUBLIC_URL" \
-			go test -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m; \
+			go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m; \
 			exit "$$?"; \
 		fi; \
 		sleep 1; \

@@ -10,7 +10,6 @@ jobs:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 35
     env:
-      ELASTICCLAW_E2E: "1"
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
@@ -64,7 +63,7 @@ jobs:
           exit 1
 
       - name: Run Daytona GitHub Issues E2E
-        run: go test -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
+        run: go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
 
       - name: Stop ngrok
         if: always()

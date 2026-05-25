@@ -1,3 +1,5 @@
+//go:build e2e
+
 package e2e
 
 import (
@@ -25,10 +27,6 @@ const (
 )
 
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
-	if os.Getenv("ELASTICCLAW_E2E") != "1" {
-		t.Skip("set ELASTICCLAW_E2E=1 to run the real Daytona/GitHub Issues E2E test")
-	}
-
 	env := e2eEnv{
 		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
 		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
