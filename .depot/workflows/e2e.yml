@@ -82,7 +82,7 @@ jobs:
 
       - name: Start ngrok
         run: |
-          NGROK_HOST="ec-${GITHUB_SHA:0:12}-${GITHUB_RUN_ATTEMPT}-$(date +%s).ngrok-free.app"
+          NGROK_HOST="ec-${GITHUB_SHA:0:12}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}-$(date +%s).ngrok-free.app"
           NGROK_API_ADDR="127.0.0.1:4049"
           echo "Creating temporary ngrok reserved domain https://$NGROK_HOST"
           ngrok api reserved-domains create \
