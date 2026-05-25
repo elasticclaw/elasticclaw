@@ -15,12 +15,13 @@ import (
 )
 
 type workflowCreateOptions struct {
-	inputs         map[string]string
-	workspaceFiles map[string]string
-	clawName       string
-	githubIssueID  string
-	linearIssueID  string
-	reason         string
+	inputs          map[string]string
+	workspaceFiles  map[string]string
+	clawName        string
+	githubIssueID   string
+	linearIssueID   string
+	shortcutStoryID string
+	reason          string
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
@@ -218,6 +219,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 	if opts.linearIssueID != "" {
 		_, _ = s.db.Exec(`UPDATE claws SET linear_issue_id=? WHERE id=?`, opts.linearIssueID, clawID)
+	}
+	if opts.shortcutStoryID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
 	}
 
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)

@@ -715,6 +715,61 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	return nil
 }
 
+func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, action shortcutAction, storyID, reason string) error {
+	var existing string
+	_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&existing)
+	if existing != "" {
+		log.Printf("[workflow:%s/%s] Shortcut story %s already has active claw %s", workspace.Name, workflow.Name, storyID, existing[:8])
+		return nil
+	}
+
+	triggerKey := factoryTriggerKey("shortcut", storyID)
+	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
+	claimed, err := s.claimFactoryTrigger(triggerOwner, "shortcut", triggerKey, reason, map[string]string{
+		"story_id":  storyID,
+		"source":    reason,
+		"workspace": workspace.Name,
+		"workflow":  workflow.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("claim workflow trigger: %w", err)
+	}
+	if !claimed {
+		log.Printf("[workflow:%s/%s] Shortcut story %s already has an active trigger claim", workspace.Name, workflow.Name, storyID)
+		return nil
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(triggerOwner, "shortcut", triggerKey)
+		}
+	}()
+
+	templateFiles := cloneStringMap(workspace.Files)
+	templateFiles["CONTEXT.md"] = buildShortcutContext(action, storyID)
+
+	clawName := storyID
+	if workflow.NamePattern != "" {
+		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", storyID)
+	}
+
+	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		workspaceFiles:  templateFiles,
+		clawName:        clawName,
+		shortcutStoryID: storyID,
+		reason:          reason,
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete workflow trigger: %w", err)
+	}
+	claimOpen = false
+	return nil
+}
+
 func buildShortcutContext(action shortcutAction, storyID string) string {
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")

@@ -429,6 +429,28 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return nil
 	}
 
+	triggerKey := factoryTriggerKey("linear", issueID)
+	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
+	claimed, err := s.claimFactoryTrigger(triggerOwner, "linear", triggerKey, reason, map[string]string{
+		"issue_id":  issueID,
+		"source":    reason,
+		"workspace": workspace.Name,
+		"workflow":  workflow.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("claim workflow trigger: %w", err)
+	}
+	if !claimed {
+		log.Printf("[workflow:%s/%s] Linear issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
+		return nil
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(triggerOwner, "linear", triggerKey)
+		}
+	}()
+
 	templateFiles := cloneStringMap(workspace.Files)
 	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
 
@@ -447,6 +469,11 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	if err != nil {
 		return err
 	}
+	if err := s.completeFactoryTrigger(triggerOwner, "linear", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete workflow trigger: %w", err)
+	}
+	claimOpen = false
 	if !isPending && workflow.WorkingStatus != "" {
 		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
 			if err := s.moveLinearIssueOnServer(token, issueID, workflow.WorkingStatus); err != nil {
@@ -627,6 +654,13 @@ func (s *Server) resolveLinearTokenForFactory(factory *types.FactoryConfig) stri
 
 func (s *Server) resolveLinearTokenForWorkflow(workspaceName string, workflow *types.WorkflowConfig) string {
 	if tracker, ok := findWorkspaceIssueTracker(workspaceName, "linear", workflow.Workspace); ok {
+		return tracker.Token
+	}
+	return ""
+}
+
+func (s *Server) resolveShortcutTokenForWorkflow(workspaceName string, workflow *types.WorkflowConfig) string {
+	if tracker, ok := findWorkspaceIssueTracker(workspaceName, "shortcut", workflow.Workspace); ok {
 		return tracker.Token
 	}
 	return ""

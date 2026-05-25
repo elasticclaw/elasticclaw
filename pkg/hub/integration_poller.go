@@ -36,11 +36,19 @@ func (s *Server) pollTick() {
 	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
 
 	factories := s.resolveFactories()
+	linearWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("linear")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load linear workflows: %v", err)
+	}
+	shortcutWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("shortcut")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load shortcut workflows: %v", err)
+	}
 	githubIssueWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("github-issues")
 	if err != nil {
 		log.Printf("[poll] tick: failed to load github-issues workflows: %v", err)
 	}
-	if len(factories) == 0 && len(githubIssueWorkflowWorkspaces) == 0 {
+	if len(factories) == 0 && len(linearWorkflowWorkspaces) == 0 && len(shortcutWorkflowWorkspaces) == 0 && len(githubIssueWorkflowWorkspaces) == 0 {
 		log.Printf("[poll] tick: no factories or workflows configured")
 		return
 	}
@@ -53,10 +61,16 @@ func (s *Server) pollTick() {
 	if integrations != nil && len(integrations.Linear) > 0 {
 		s.pollLinear(factories, integrations.Linear, since)
 	}
+	if len(linearWorkflowWorkspaces) > 0 {
+		s.pollLinearWorkflows(linearWorkflowWorkspaces, since)
+	}
 
 	// === SHORTCUT ===
 	if integrations != nil && len(integrations.Shortcut) > 0 {
 		s.pollShortcut(factories, integrations.Shortcut, since)
+	}
+	if len(shortcutWorkflowWorkspaces) > 0 {
+		s.pollShortcutWorkflows(shortcutWorkflowWorkspaces, since)
 	}
 
 	// === GITHUB ISSUES ===
@@ -117,6 +131,44 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 
 		for _, issue := range issues {
 			s.processLinearPollItem(issue, wsFactories, ws)
+		}
+	}
+}
+
+type linearWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+}
+
+func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+	tokenTargets := map[string][]linearWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "linear" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+			if token == "" {
+				log.Printf("[poll-linear] workflow %s/%s: no Linear token configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			tokenTargets[token] = append(tokenTargets[token], linearWorkflowPollTarget{workspace: workspace, workflow: workflow})
+		}
+	}
+	for token, targets := range tokenTargets {
+		issues, err := s.queryLinearIssues(token, since)
+		if err != nil {
+			log.Printf("[poll-linear] workflow query failed: %v", err)
+			continue
+		}
+		for _, issue := range issues {
+			s.processLinearWorkflowPollItem(issue, targets)
 		}
 	}
 }
@@ -296,6 +348,52 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 	}
 }
 
+func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []linearWorkflowPollTarget) {
+	entityID := issue.Identifier
+	currentStatus := issue.State.Name
+	currentLabels := make(map[string]bool)
+	for _, l := range issue.Labels {
+		currentLabels[strings.ToLower(l.Name)] = true
+	}
+	currentAssignee := ""
+	if issue.Assignee != nil {
+		currentAssignee = issue.Assignee.Name
+	}
+	payload := s.buildLinearPollPayload(issue)
+
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		if workflow.Team != "" && !strings.EqualFold(workflow.Team, issue.Team.Key) {
+			continue
+		}
+		if workflow.TriggerStatus == "" || !strings.EqualFold(currentStatus, workflow.TriggerStatus) {
+			continue
+		}
+		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
+			continue
+		}
+		labelsMatched := true
+		for _, required := range workflow.Labels {
+			if !currentLabels[strings.ToLower(required)] {
+				labelsMatched = false
+				break
+			}
+		}
+		if !labelsMatched {
+			continue
+		}
+
+		log.Printf("[workflow:%s/%s] Linear issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, entityID)
+		if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, entityID, err)
+		}
+	}
+}
+
 func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayload {
 	var payload linearWebhookPayload
 	payload.Action = "update"
@@ -385,6 +483,12 @@ type shortcutPollStory struct {
 	OwnerIDs []string `json:"owner_ids"`
 }
 
+type shortcutWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+	token     string
+}
+
 func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory, error) {
 	body := map[string]interface{}{
 		"updated_at_start": since,
@@ -410,6 +514,44 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 		return nil, fmt.Errorf("parse shortcut response: %w", err)
 	}
 	return stories, nil
+}
+
+func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+	tokenTargets := map[string][]shortcutWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "shortcut" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			token := s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
+			if token == "" {
+				log.Printf("[poll-shortcut] workflow %s/%s: no Shortcut token configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			tokenTargets[token] = append(tokenTargets[token], shortcutWorkflowPollTarget{workspace: workspace, workflow: workflow, token: token})
+		}
+	}
+	for token, targets := range tokenTargets {
+		stories, err := s.queryShortcutStories(token, since)
+		if err != nil {
+			log.Printf("[poll-shortcut] workflow query failed: %v", err)
+			continue
+		}
+		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+		if len(stateNameMap) == 0 {
+			log.Printf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
+			continue
+		}
+		for _, story := range stories {
+			s.processShortcutWorkflowPollItem(story, targets, token, stateNameMap)
+		}
+	}
 }
 
 func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
@@ -482,6 +624,71 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 		} else {
 			log.Printf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
 			s.logFactoryEvent(factory.Name, storyID, story.Name, "", currentStateName, "claw_created", "", "poll")
+		}
+	}
+}
+
+func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, targets []shortcutWorkflowPollTarget, token string, stateNameMap map[int64]string) {
+	storyID := fmt.Sprintf("sc-%d", story.ID)
+	currentStateName := stateNameMap[story.WorkflowStateID]
+	if currentStateName == "" {
+		currentStateName = strconv.FormatInt(story.WorkflowStateID, 10)
+	}
+	currentLabels := make(map[string]bool)
+	for _, l := range story.Labels {
+		currentLabels[strings.ToLower(l.Name)] = true
+	}
+	currentAssignee := ""
+	needsAssignee := false
+	for _, target := range targets {
+		if target.workflow != nil && target.workflow.AssignedTo != "" {
+			needsAssignee = true
+			break
+		}
+	}
+	if needsAssignee && len(story.OwnerIDs) > 0 {
+		data, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
+		if err == nil {
+			if name, ok := data["mention_name"].(string); ok && name != "" {
+				currentAssignee = name
+			} else if name, ok := data["name"].(string); ok && name != "" {
+				currentAssignee = name
+			}
+		}
+	}
+	action := shortcutAction{
+		ID:          story.ID,
+		EntityType:  "story",
+		Action:      "update",
+		Name:        story.Name,
+		AppURL:      story.AppURL,
+		Description: story.Description,
+	}
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		if workflow.TriggerStatus == "" || !strings.EqualFold(currentStateName, workflow.TriggerStatus) {
+			continue
+		}
+		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
+			continue
+		}
+		labelsMatched := true
+		for _, required := range workflow.Labels {
+			if !currentLabels[strings.ToLower(required)] {
+				labelsMatched = false
+				break
+			}
+		}
+		if !labelsMatched {
+			continue
+		}
+		log.Printf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
+		if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "poll"); err != nil {
+			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, storyID, err)
 		}
 	}
 }
