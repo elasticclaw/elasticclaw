@@ -550,12 +550,16 @@ func destroyDaytonaSandboxByID(ctx context.Context, t *testing.T, env e2eEnv, sa
 	if err != nil {
 		t.Fatalf("create Daytona provider for E2E sandbox cleanup: %v", err)
 	}
-	if err := provider.Destroy(ctx, sandboxID, false); err != nil && !isBenignDaytonaDeleteError(err) {
-		t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
-	}
-
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
+		if err := provider.Destroy(ctx, sandboxID, false); err != nil {
+			if isBenignDaytonaDeleteError(err) {
+				return
+			}
+			if !isRetryableDaytonaDeleteError(err) && time.Now().After(deadline) {
+				t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
+			}
+		}
 		status, err := provider.Status(ctx, sandboxID)
 		if err != nil {
 			if isBenignDaytonaDeleteError(err) {
@@ -579,6 +583,13 @@ func isBenignDaytonaDeleteError(err error) bool {
 		strings.Contains(msg, "destroy") ||
 		strings.Contains(msg, "delet") ||
 		strings.Contains(msg, "terminat")
+}
+
+func isRetryableDaytonaDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status 409") ||
+		strings.Contains(msg, "modified by another operation") ||
+		strings.Contains(msg, "conflict")
 }
 
 type githubClient struct {
