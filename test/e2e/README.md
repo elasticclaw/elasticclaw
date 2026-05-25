@@ -26,6 +26,19 @@ The suite creates per-run issues, labels, webhooks, workspaces, workflows, and
 agents using a run id. Cleanup closes the issue, removes the webhook, removes
 the workspace, and kills the agent.
 
+## Local Run
+
+Start ngrok for the hub port, then run:
+
+```sh
+export ELASTICCLAW_E2E_PUBLIC_URL=https://example.ngrok.app
+make e2e
+```
+
+`make e2e` builds `bin/elasticclaw`, sets `ELASTICCLAW_E2E=1`, and runs the
+same real Daytona + GitHub Issues test that Depot CI runs. It assumes the
+required secrets below are already exported in your shell.
+
 ## Depot CI Environment
 
 Required secrets:

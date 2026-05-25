@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -51,6 +51,13 @@ test-factory: ## Run factory integration tests
 
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
+
+e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
+	@test -n "$$ELASTICCLAW_E2E_PUBLIC_URL" || (echo "ELASTICCLAW_E2E_PUBLIC_URL is required (start ngrok and export its https URL)" && exit 1)
+	ELASTICCLAW_E2E=1 \
+	ELASTICCLAW_E2E_BIN="$(CURDIR)/bin/elasticclaw" \
+	ELASTICCLAW_E2E_HUB_ADDR="$${ELASTICCLAW_E2E_HUB_ADDR:-127.0.0.1:8080}" \
+	go test -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
 
 # Run only bootstrap unit tests (fast, no infra needed)
 test-bootstrap:
