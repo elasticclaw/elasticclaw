@@ -196,6 +196,40 @@ func TestGitHubIssuesWorkspaceWebhookIsIdempotentForSameIssue(t *testing.T) {
 	}
 }
 
+func TestGitHubIssuesWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueLabeledWorkflowFixture(t, "workspace-a")
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{
+		Title:  "Test Issue",
+		Body:   "Test body",
+		State:  "open",
+		Labels: []string{"agent-ready"},
+	})
+
+	s.PollIntegrationsForTest()
+	s.PollIntegrationsForTest()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&count); err != nil {
+		t.Fatalf("count claws: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("poll created %d claws for the same GitHub issue, want 1", count)
+	}
+}
+
 func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 	t.Helper()
 	hub.SaveWorkspaceForTest(t,
@@ -227,6 +261,42 @@ func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 		}},
 	)
 	hub.SaveWorkspaceIssueTrackerForTest(t, workspace, "github-issues", "default", "test-github-issues-token", secret)
+}
+
+func saveGitHubIssueLabeledWorkflowFixture(t *testing.T, workspace string) {
+	t.Helper()
+	hub.SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          workspace,
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: " + workspace + "\nprovider: noop\n",
+				"CONTEXT.md":              "Test context\n",
+			},
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion: "v1",
+			Name:          "test-workflow",
+			Trigger: &types.WorkflowTrigger{
+				GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+					Event:        "issue_labeled",
+					Repositories: []string{"testorg/testrepo"},
+					States:       []string{"open"},
+					Labels:       []string{"agent-ready"},
+					Labelers:     []string{"*"},
+				},
+			},
+			Stages: []types.WorkflowStage{{
+				ID:    "working",
+				Label: "Working",
+				Entry: true,
+				OnEnter: map[string]interface{}{
+					"inject": "Read your CONTEXT.md and start working on the issue.\n",
+				},
+			}},
+		}},
+	)
+	hub.SaveWorkspaceIssueTrackerForTest(t, workspace, "github-issues", "default", "test-github-issues-token", "")
 }
 
 func hmacSHA256(body []byte, secret string) string {
