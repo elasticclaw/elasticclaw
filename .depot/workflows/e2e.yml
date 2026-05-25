@@ -213,7 +213,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daytona-github-issues-e2e
+          name: daytona-${{ matrix.slug }}-e2e
           path: |
             ngrok.log
             ngrok.pid
