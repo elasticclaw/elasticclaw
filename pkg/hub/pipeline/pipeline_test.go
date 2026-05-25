@@ -74,6 +74,34 @@ stages:
 	}
 }
 
+func TestParseRunAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: pre_commit
+    on_enter:
+      run:
+        command: clawpatch ci --format json --output .elasticclaw/clawpatch/report.json
+        continue_on_error: true
+        timeout: 15m
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(p.Stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(p.Stages))
+	}
+	run := p.Stages[0].OnEnter.Run
+	if run.Command != "clawpatch ci --format json --output .elasticclaw/clawpatch/report.json" {
+		t.Fatalf("command = %q", run.Command)
+	}
+	if !run.ContinueOnError {
+		t.Fatal("expected continue_on_error")
+	}
+	if run.Timeout != "15m" {
+		t.Fatalf("timeout = %q, want 15m", run.Timeout)
+	}
+}
+
 func TestEntryStage(t *testing.T) {
 	p, _ := pipeline.Parse([]byte(sampleYAML))
 	entry := p.EntryStage()

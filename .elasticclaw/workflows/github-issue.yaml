@@ -30,6 +30,22 @@ stages:
 
         Read the issue and CONTEXT.md and start working on the issue.
         Narrate your progress as you go. Keep me updated.
+        When implementation is complete and before committing, say [READY_TO_COMMIT].
+
+  - id: pre_commit
+    label: Pre-Commit Checks
+    triggers:
+      - message_contains: "[READY_TO_COMMIT]"
+    on_enter:
+      run:
+        command: mkdir -p .elasticclaw/clawpatch && clawpatch ci --format json --output .elasticclaw/clawpatch/report.json
+        continue_on_error: true
+        timeout: 15m
+      inject: |
+        Review the clawpatch report at .elasticclaw/clawpatch/report.json.
+        Fix issues you agree with.
+        Do not commit .elasticclaw/clawpatch files.
+        When fixes are complete, create the final commit and PR, then say [DONE].
 
   - id: pr_opened
     label: PR Opened
