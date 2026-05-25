@@ -76,6 +76,7 @@ e2e: build-dev build-bridge-linux ## Run the real Daytona + GitHub Issues E2E su
 	ngrok api reserved-domains create --api-key "$$NGROK_API_KEY" --domain "$$NGROK_HOST" --description "ElasticClaw E2E temporary tunnel" --metadata "elasticclaw-e2e" > "$$NGROK_DOMAIN_JSON"; \
 	NGROK_DOMAIN_ID="$$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < "$$NGROK_DOMAIN_JSON")"; \
 	if [ -z "$$NGROK_DOMAIN_ID" ]; then cat "$$NGROK_DOMAIN_JSON"; echo "ngrok reserved domain create did not return an id"; exit 1; fi; \
+	sleep 5; \
 	echo "Starting ngrok tunnel https://$$NGROK_HOST for localhost:$$HUB_PORT"; \
 	ngrok http "$$HUB_PORT" --url "https://$$NGROK_HOST" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
 	NGROK_PID="$$!"; \

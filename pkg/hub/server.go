@@ -269,10 +269,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	if bridgePath := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"); bridgePath != "" {
+	if bridgePath, bridgeToken := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"), os.Getenv("ELASTICCLAW_E2E_BRIDGE_TOKEN"); bridgePath != "" && bridgeToken != "" {
 		mux.HandleFunc("/__elasticclaw_e2e/claw-bridge-linux-amd64", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if r.URL.Query().Get("token") != bridgeToken {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			http.ServeFile(w, r, bridgePath)
@@ -1022,7 +1026,11 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Provision asynchronously so the HTTP request returns quickly
 	// Use a stable short ID as the provider-side name so renaming the claw
 	// doesn't require a provider API call.
-	req.ProviderName = "ec-" + clawID[:8]
+	providerNamePrefix := strings.TrimSpace(os.Getenv("ELASTICCLAW_PROVIDER_NAME_PREFIX"))
+	if providerNamePrefix == "" {
+		providerNamePrefix = "ec-"
+	}
+	req.ProviderName = providerNamePrefix + clawID[:8]
 	go func() {
 		log.Printf("Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
 		ctx := context.Background()

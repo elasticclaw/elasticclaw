@@ -39,9 +39,9 @@ jobs:
           GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
       - name: Install ngrok
-        run: |
-          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar -xz
-          sudo mv ngrok /usr/local/bin/ngrok
+        uses: ngrok/setup-ngrok@v1
+        with:
+          authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
 
       - name: Start ngrok
         run: |
@@ -61,6 +61,7 @@ jobs:
             echo "ngrok reserved domain create did not return an id"
             exit 1
           fi
+          sleep 5
           echo "Starting ngrok tunnel https://$NGROK_HOST for localhost:8080"
           printf 'version: "3"\n' > ngrok.yml
           ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &

@@ -40,12 +40,14 @@ with the current git SHA and timestamp, starts a tunnel for
 `ELASTICCLAW_E2E_HUB_ADDR` or `127.0.0.1:8080` using a temporary ngrok config,
 and runs the same real Daytona + GitHub Issues test that Depot CI runs. The
 test server serves the locally built connector through the ngrok tunnel so PR
-runs do not depend on a pre-published release artifact. The make target refuses
-the shared
-`elasticclaw.ngrok.app` domain, then kills the ngrok agent it started, deletes
-the temporary reserved domain, and removes the temporary ngrok config when the
-test exits. It assumes the required secrets below are already exported in your
-shell.
+runs do not depend on a pre-published release artifact. The E2E server protects
+that connector route with a per-run token in the download URL. The make target
+refuses the shared `elasticclaw.ngrok.app` domain, then kills the ngrok agent it
+started, deletes the temporary reserved domain, and removes the temporary ngrok
+config when the test exits. The test also deletes any Daytona sandboxes whose
+names start with `ec-e2e-` before and after the run, so use a Daytona API key
+dedicated to E2E. It assumes the required secrets below are already exported in
+your shell.
 
 ## Depot CI Environment
 

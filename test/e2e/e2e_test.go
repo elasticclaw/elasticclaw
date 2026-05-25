@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -25,9 +26,11 @@ const (
 	agentToken     = "e2e-agent-token"
 	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
 	defaultFixture = "elasticclaw/e2e-fixtures"
+	daytonaPrefix  = "ec-e2e-"
 )
 
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
+	runID := e2eRunID()
 	env := e2eEnv{
 		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
 		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
@@ -41,8 +44,10 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
+		BridgeToken:         "bridge-" + runID,
+		DaytonaPrefix:       daytonaPrefix,
 		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
-		RunID:               e2eRunID(),
+		RunID:               runID,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
@@ -53,6 +58,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	labelName := "agent-ready-" + env.RunID
 	webhookSecret := "github-issues-secret-" + env.RunID
 
+	cleanupDaytonaE2ESandboxes(ctx, t, env)
 	hub := startHub(ctx, t, env)
 	root := writeWorkspaceFixture(t, env, workspaceName, workflowName, labelName)
 	keyPath := writeGitHubAppPrivateKey(t, root, env.GitHubAppPrivateKey)
@@ -62,11 +68,12 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	var issueNumber int
 	var agentID string
 	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
 		if agentID != "" {
 			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
+		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
 		if issueNumber != 0 {
 			_ = gh.closeIssue(cleanupCtx, issueNumber)
 		}
@@ -115,6 +122,8 @@ type e2eEnv struct {
 	DaytonaAPIKey       string
 	FireworksAPIKey     string
 	BridgeBinary        string
+	BridgeToken         string
+	DaytonaPrefix       string
 	Model               string
 	RunID               string
 }
@@ -151,7 +160,7 @@ llm_keys:
     api_key: %q
     default: true
     default_model: %s
-`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64", env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
+`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64?token="+url.QueryEscape(env.BridgeToken), env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
@@ -167,6 +176,8 @@ llm_keys:
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
 		"FIREWORKS_API_KEY="+env.FireworksAPIKey,
 		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
+		"ELASTICCLAW_E2E_BRIDGE_TOKEN="+env.BridgeToken,
+		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.DaytonaPrefix,
 		"HOME="+dir,
 	)
 	cmd.Stdout = logFile
@@ -439,6 +450,57 @@ func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agent
 	t.Fatalf("timed out waiting for agent %s to reply", agentID)
 }
 
+func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
+	t.Helper()
+	provider, err := daytonaProvider.New(map[string]interface{}{"api_key": env.DaytonaAPIKey})
+	if err != nil {
+		t.Fatalf("create Daytona provider for E2E cleanup: %v", err)
+	}
+
+	deleteMatching := func() (int, error) {
+		instances, err := provider.List(ctx)
+		if err != nil {
+			return 0, err
+		}
+		matching := 0
+		for _, instance := range instances {
+			if !strings.HasPrefix(instance.Name, env.DaytonaPrefix) {
+				continue
+			}
+			matching++
+			if err := provider.Destroy(ctx, instance.ID, false); err != nil {
+				if !isBenignDaytonaDeleteError(err) {
+					return matching, fmt.Errorf("delete Daytona E2E sandbox %s (%s): %w", instance.Name, instance.ID, err)
+				}
+			}
+		}
+		return matching, nil
+	}
+
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		matching, err := deleteMatching()
+		if err != nil {
+			t.Fatalf("cleanup Daytona E2E sandboxes: %v", err)
+		}
+		if matching == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for Daytona E2E sandboxes with prefix %q to terminate", env.DaytonaPrefix)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func isBenignDaytonaDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "destroy") ||
+		strings.Contains(msg, "delet") ||
+		strings.Contains(msg, "terminat")
+}
+
 type githubClient struct {
 	token string
 	repo  string
@@ -623,7 +685,7 @@ func assertNoPullRequestCreated(ctx context.Context, t *testing.T, gh githubClie
 	var events []struct {
 		Event string `json:"event"`
 	}
-	gh.api(ctx, t, http.MethodGet, fmt.Sprintf("issues/%d/events", issueNumber), nil, &events)
+	gh.api(ctx, t, http.MethodGet, fmt.Sprintf("issues/%d/timeline", issueNumber), nil, &events)
 	for _, event := range events {
 		if event.Event == "cross-referenced" {
 			t.Fatalf("issue %d has a cross-reference event; agent may have opened a PR despite instructions", issueNumber)
