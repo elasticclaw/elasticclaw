@@ -2,6 +2,21 @@ name: E2E
 
 on:
   pull_request:
+    paths:
+      - '.depot/workflows/e2e.yml'
+      - 'Makefile'
+      - 'cmd/claw-bridge/**'
+      - 'pkg/hub/bootstrap.go'
+      - 'pkg/hub/github.go'
+      - 'pkg/hub/github_issues.go'
+      - 'pkg/hub/pipeline_runner.go'
+      - 'pkg/hub/server.go'
+      - 'pkg/hub/workspace*.go'
+      - 'pkg/provider/daytona/**'
+      - 'pkg/types/**'
+      - 'test/e2e/**'
+      - 'go.mod'
+      - 'go.sum'
   workflow_dispatch:
 
 jobs:
@@ -12,6 +27,7 @@ jobs:
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
+      ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE: ${{ github.workspace }}/e2e-daytona-sandbox-ids
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
       ELASTICCLAW_E2E_GITHUB_REPO: ${{ vars.ELASTICCLAW_E2E_GITHUB_REPO || 'elasticclaw/e2e-fixtures' }}
@@ -51,9 +67,7 @@ jobs:
       - name: Start ngrok
         run: |
           NGROK_HOST="ec-${GITHUB_SHA:0:12}-${GITHUB_RUN_ATTEMPT}-$(date +%s).ngrok-free.app"
-          echo "Stopping existing ngrok agents so this job owns the tunnel"
-          pkill -x ngrok >/dev/null 2>&1 || true
-          sleep 1
+          NGROK_API_ADDR="127.0.0.1:4049"
           echo "Creating temporary ngrok reserved domain https://$NGROK_HOST"
           ngrok api reserved-domains create \
             --api-key "$NGROK_API_KEY" \
@@ -68,11 +82,11 @@ jobs:
           fi
           sleep 5
           echo "Starting ngrok tunnel https://$NGROK_HOST for localhost:8080"
-          printf 'version: "3"\n' > ngrok.yml
+          printf 'version: "3"\nagent:\n  web_addr: "%s"\n' "$NGROK_API_ADDR" > ngrok.yml
           ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
           echo "$!" > ngrok.pid
           for i in $(seq 1 30); do
-            url="$(curl -fsS http://127.0.0.1:4040/api/tunnels | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
+            url="$(curl -fsS "http://$NGROK_API_ADDR/api/tunnels" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
             if [ -n "$url" ]; then
               case "$url" in
                 *://elasticclaw.ngrok.app*)
@@ -90,6 +104,10 @@ jobs:
 
       - name: Run Daytona GitHub Issues E2E
         run: go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
+
+      - name: Cleanup Daytona sandbox
+        if: always()
+        run: go test -tags e2e -v ./test/e2e -run TestCleanupRecordedDaytonaSandboxes -count=1 -timeout 6m
 
       - name: Stop ngrok
         if: always()
@@ -112,3 +130,4 @@ jobs:
             ngrok.yml
             ngrok-domain.json
             ngrok-domain-id
+            e2e-daytona-sandbox-ids

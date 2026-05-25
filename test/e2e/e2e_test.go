@@ -71,10 +71,23 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
+		var providerID string
 		if agentID != "" {
+			providerID = hub.agentProviderID(cleanupCtx, t, agentID)
 			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
+		if providerID != "" {
+			destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
+		}
+	})
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cleanupCancel()
 		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
+	})
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cleanupCancel()
 		if issueNumber != 0 {
 			_ = gh.closeIssue(cleanupCtx, issueNumber)
 		}
@@ -171,7 +184,7 @@ llm_keys:
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	cmd := exec.CommandContext(ctx, env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
+	cmd := exec.Command(env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
@@ -347,6 +360,35 @@ func (h *hubProcess) deleteAgent(ctx context.Context, agentID string) error {
 	return nil
 }
 
+func (h *hubProcess) agentProviderID(ctx context.Context, t *testing.T, agentID string) string {
+	t.Helper()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/api/claws/"+agentID, nil)
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Logf("read agent provider id: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ""
+	}
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		t.Logf("read agent provider id: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return ""
+	}
+	var agent types.Claw
+	if err := json.NewDecoder(resp.Body).Decode(&agent); err != nil {
+		t.Logf("decode agent provider id: %v", err)
+		return ""
+	}
+	if agent.Provider != "daytona" {
+		return ""
+	}
+	return agent.ProviderID
+}
+
 func (h *hubProcess) listAgents(ctx context.Context, t *testing.T) []types.Claw {
 	t.Helper()
 	var agents []types.Claw
@@ -489,6 +531,35 @@ func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for Daytona E2E sandboxes with prefix %q to terminate", env.DaytonaPrefix)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func destroyDaytonaSandboxByID(ctx context.Context, t *testing.T, env e2eEnv, sandboxID string) {
+	t.Helper()
+	provider, err := daytonaProvider.New(map[string]interface{}{"api_key": env.DaytonaAPIKey})
+	if err != nil {
+		t.Fatalf("create Daytona provider for E2E sandbox cleanup: %v", err)
+	}
+	if err := provider.Destroy(ctx, sandboxID, false); err != nil && !isBenignDaytonaDeleteError(err) {
+		t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		status, err := provider.Status(ctx, sandboxID)
+		if err != nil {
+			if isBenignDaytonaDeleteError(err) {
+				return
+			}
+			t.Fatalf("check Daytona E2E sandbox %s deletion: %v", sandboxID, err)
+		}
+		if status == types.StatusNotFound {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for Daytona E2E sandbox %s to terminate; status=%s", sandboxID, status)
 		}
 		time.Sleep(5 * time.Second)
 	}

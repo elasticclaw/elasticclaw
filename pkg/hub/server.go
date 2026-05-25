@@ -775,7 +775,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -799,7 +799,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus); err != nil {
 			continue
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
@@ -1240,9 +1240,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -2266,6 +2266,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		return fmt.Errorf("daytona create: %w", err)
 	}
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
+	recordE2EDaytonaSandboxID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
@@ -2784,6 +2785,28 @@ gh auth status`
 
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
+}
+
+func recordE2EDaytonaSandboxID(sandboxID string) {
+	path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE"))
+	if path == "" || strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			log.Printf("[e2e] record Daytona sandbox id: mkdir %s: %v", dir, err)
+			return
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		log.Printf("[e2e] record Daytona sandbox id: open %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, sandboxID); err != nil {
+		log.Printf("[e2e] record Daytona sandbox id: write %s: %v", path, err)
+	}
 }
 
 func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName string) error {
