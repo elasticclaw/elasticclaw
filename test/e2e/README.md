@@ -28,16 +28,16 @@ the workspace, and kills the agent.
 
 ## Local Run
 
-Start ngrok for the hub port, then run:
+Run:
 
 ```sh
-export ELASTICCLAW_E2E_PUBLIC_URL=https://example.ngrok.app
 make e2e
 ```
 
-`make e2e` builds `bin/elasticclaw`, sets `ELASTICCLAW_E2E=1`, and runs the
-same real Daytona + GitHub Issues test that Depot CI runs. It assumes the
-required secrets below are already exported in your shell.
+`make e2e` builds `bin/elasticclaw`, starts ngrok for
+`ELASTICCLAW_E2E_HUB_ADDR` or `127.0.0.1:8080`, sets `ELASTICCLAW_E2E=1`, and
+runs the same real Daytona + GitHub Issues test that Depot CI runs. It assumes
+the required secrets below are already exported in your shell.
 
 ## Depot CI Environment
 
