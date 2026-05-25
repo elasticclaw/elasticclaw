@@ -18,6 +18,7 @@ import (
 	"time"
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	replicatedProvider "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -27,33 +28,21 @@ const (
 	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
 	defaultFixture = "elasticclaw/e2e-fixtures"
 	daytonaPrefix  = "ec-e2e-"
+	cmxPrefix      = "ec-e2e-cmx-"
 	maxRunIDLen    = 32
 )
 
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
+	runGitHubIssuesWorkflowE2E(t, "daytona")
+}
+
+func TestReplicatedGitHubIssuesWorkflowE2E(t *testing.T) {
+	runGitHubIssuesWorkflowE2E(t, "replicated")
+}
+
+func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
 	runID := e2eRunID()
-	env := e2eEnv{
-		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
-		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
-		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
-		GitHubToken:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN"),
-		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
-		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
-		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
-		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
-		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
-		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
-		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
-		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
-		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
-		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
-		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
-		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
-		BridgeToken:         "bridge-" + runID,
-		DaytonaPrefix:       daytonaPrefix,
-		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
-		RunID:               runID,
-	}
+	env := newE2EEnv(t, runID, sandboxProvider)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -63,7 +52,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	labelName := "agent-ready-" + env.RunID
 	webhookSecret := "github-issues-secret-" + env.RunID
 
-	cleanupDaytonaE2ESandboxes(ctx, t, env)
+	cleanupProvider(ctx, t, env)
 	hub := startHub(ctx, t, env)
 	root := writeWorkspaceFixture(t, env, workspaceName, workflowName, labelName)
 	keyPath := writeGitHubAppPrivateKey(t, root, env.GitHubAppPrivateKey)
@@ -75,19 +64,19 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
-		var providerID string
+		var provider, providerID string
 		if agentID != "" {
-			providerID = hub.agentProviderID(cleanupCtx, t, agentID)
+			provider, providerID = hub.agentProvider(cleanupCtx, t, agentID)
 			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
 		if providerID != "" {
-			destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
+			destroyProviderInstanceByID(cleanupCtx, t, env, provider, providerID)
 		}
 	})
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
-		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
+		cleanupProvider(cleanupCtx, t, env)
 	})
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -131,6 +120,7 @@ type e2eEnv struct {
 	Bin                 string
 	HubAddr             string
 	PublicURL           string
+	SandboxProvider     string
 	GitHubToken         string
 	GitHubRepo          string
 	GitHubAppID         string
@@ -142,12 +132,55 @@ type e2eEnv struct {
 	LinearTriggerState  string
 	LinearInitialState  string
 	DaytonaAPIKey       string
+	ReplicatedToken     string
+	ReplicatedAPIURL    string
+	ReplicatedType      string
+	ReplicatedTTL       string
 	FireworksAPIKey     string
 	BridgeBinary        string
 	BridgeToken         string
-	DaytonaPrefix       string
+	ProviderPrefix      string
 	Model               string
 	RunID               string
+}
+
+func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
+	t.Helper()
+	env := e2eEnv{
+		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
+		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
+		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
+		SandboxProvider:     sandboxProvider,
+		GitHubToken:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN"),
+		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
+		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
+		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
+		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
+		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
+		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
+		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
+		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
+		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
+		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
+		BridgeToken:         "bridge-" + runID,
+		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
+		RunID:               runID,
+	}
+	switch sandboxProvider {
+	case "daytona":
+		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
+		env.ProviderPrefix = daytonaPrefix
+	case "replicated":
+		env.ReplicatedToken = requiredEnv(t, "REPLICATED_API_TOKEN")
+		env.ReplicatedAPIURL = os.Getenv("ELASTICCLAW_E2E_REPLICATED_API_URL")
+		env.ReplicatedType = envOrDefault("ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE", "r1.small")
+		env.ReplicatedTTL = envOrDefault("ELASTICCLAW_E2E_REPLICATED_TTL", "1h")
+		env.ProviderPrefix = cmxPrefix
+	default:
+		t.Fatalf("unsupported E2E sandbox provider %q", sandboxProvider)
+	}
+	return env
 }
 
 type hubProcess struct {
@@ -165,6 +198,25 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 	logPath := filepath.Join(dir, "hub.log")
 	baseURL := "http://" + env.HubAddr
 
+	providerConfig := ""
+	switch env.SandboxProvider {
+	case "daytona":
+		providerConfig = fmt.Sprintf(`  daytona:
+    type: daytona
+    api_key: %q
+`, env.DaytonaAPIKey)
+	case "replicated":
+		providerConfig = fmt.Sprintf(`  replicated:
+    type: replicated
+    token: %q
+    default_instance_type: %q
+    default_ttl: %q
+`, env.ReplicatedToken, env.ReplicatedType, env.ReplicatedTTL)
+		if env.ReplicatedAPIURL != "" {
+			providerConfig += fmt.Sprintf("    api_url: %q\n", env.ReplicatedAPIURL)
+		}
+	}
+
 	config := fmt.Sprintf(`schema_version: v1
 url: %s
 public_url: %s
@@ -172,9 +224,7 @@ token: %s
 claw_token: %s
 bridge_image: %s
 providers:
-  daytona:
-    type: daytona
-    api_key: %q
+%s
 default_model: %s
 llm_keys:
   - name: fireworks
@@ -182,7 +232,7 @@ llm_keys:
     api_key: %q
     default: true
     default_model: %s
-`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64?token="+url.QueryEscape(env.BridgeToken), env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
+`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64?token="+url.QueryEscape(env.BridgeToken), providerConfig, env.Model, env.FireworksAPIKey, env.Model)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
@@ -199,7 +249,7 @@ llm_keys:
 		"FIREWORKS_API_KEY="+env.FireworksAPIKey,
 		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
 		"ELASTICCLAW_E2E_BRIDGE_TOKEN="+env.BridgeToken,
-		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.DaytonaPrefix,
+		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.ProviderPrefix,
 		"HOME="+dir,
 	)
 	cmd.Stdout = logFile
@@ -252,11 +302,11 @@ func writeWorkspaceFixture(t *testing.T, env e2eEnv, workspaceName, workflowName
 	}
 	writeFile(t, filepath.Join(workspaceDir, "elasticclaw-config.yaml"), fmt.Sprintf(`schema_version: v1
 name: %s
-provider: daytona
+provider: %s
 repositories:
   - repo: %s
     permissions: write
-`, workspaceName, env.GitHubRepo))
+`, workspaceName, env.SandboxProvider, env.GitHubRepo))
 	writeFile(t, filepath.Join(workspaceDir, "AGENTS.md"), "You are an ElasticClaw E2E agent. Keep responses concise.\n")
 	writeFile(t, filepath.Join(workspaceDir, "TOOLS.md"), "Use tools only when the issue asks for them.\n")
 	writeFile(t, filepath.Join(workspaceDir, "CONTEXT.md"), "This is an ElasticClaw E2E test. Follow the GitHub issue exactly.\n")
@@ -368,33 +418,30 @@ func (h *hubProcess) deleteAgent(ctx context.Context, agentID string) error {
 	return nil
 }
 
-func (h *hubProcess) agentProviderID(ctx context.Context, t *testing.T, agentID string) string {
+func (h *hubProcess) agentProvider(ctx context.Context, t *testing.T, agentID string) (string, string) {
 	t.Helper()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/api/claws/"+agentID, nil)
 	req.Header.Set("Authorization", "Bearer "+h.token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Logf("read agent provider id: %v", err)
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return ""
+		return "", ""
 	}
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
 		t.Logf("read agent provider id: %s: %s", resp.Status, strings.TrimSpace(string(data)))
-		return ""
+		return "", ""
 	}
 	var agent types.Claw
 	if err := json.NewDecoder(resp.Body).Decode(&agent); err != nil {
 		t.Logf("decode agent provider id: %v", err)
-		return ""
+		return "", ""
 	}
-	if agent.Provider != "daytona" {
-		return ""
-	}
-	return agent.ProviderID
+	return agent.Provider, agent.ProviderID
 }
 
 func (h *hubProcess) listAgents(ctx context.Context, t *testing.T) []types.Claw {
@@ -501,6 +548,34 @@ func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agent
 	t.Fatalf("timed out waiting for agent %s to reply", agentID)
 }
 
+func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {
+	t.Helper()
+	switch env.SandboxProvider {
+	case "daytona":
+		cleanupDaytonaE2ESandboxes(ctx, t, env)
+	case "replicated":
+		// Replicated CMX has no broad sweep here; recorded VM IDs and direct
+		// agent cleanup handle VMs created by this run, with CMX TTL as backup.
+		return
+	default:
+		t.Fatalf("unsupported E2E sandbox provider %q", env.SandboxProvider)
+	}
+}
+
+func destroyProviderInstanceByID(ctx context.Context, t *testing.T, env e2eEnv, provider, providerID string) {
+	t.Helper()
+	switch provider {
+	case "daytona":
+		destroyDaytonaSandboxByID(ctx, t, env, providerID)
+	case "replicated":
+		destroyReplicatedVMByID(ctx, t, env, providerID)
+	case "":
+		return
+	default:
+		t.Logf("no E2E cleanup handler for provider %q instance %q", provider, providerID)
+	}
+}
+
 func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
 	t.Helper()
 	provider, err := daytonaProvider.New(map[string]interface{}{"api_key": env.DaytonaAPIKey})
@@ -515,7 +590,7 @@ func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
 		}
 		matching := 0
 		for _, instance := range instances {
-			if !strings.HasPrefix(instance.Name, env.DaytonaPrefix) {
+			if !strings.HasPrefix(instance.Name, env.ProviderPrefix) {
 				continue
 			}
 			matching++
@@ -538,7 +613,7 @@ func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for Daytona E2E sandboxes with prefix %q to terminate", env.DaytonaPrefix)
+			t.Fatalf("timed out waiting for Daytona E2E sandboxes with prefix %q to terminate", env.ProviderPrefix)
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -577,6 +652,36 @@ func destroyDaytonaSandboxByID(ctx context.Context, t *testing.T, env e2eEnv, sa
 	}
 }
 
+func destroyReplicatedVMByID(ctx context.Context, t *testing.T, env e2eEnv, vmID string) {
+	t.Helper()
+	provider, err := replicatedProvider.New(replicatedProvider.Config{
+		Token:       env.ReplicatedToken,
+		APIURL:      env.ReplicatedAPIURL,
+		DefaultType: env.ReplicatedType,
+		DefaultTTL:  env.ReplicatedTTL,
+	})
+	if err != nil {
+		t.Fatalf("create Replicated provider for E2E VM cleanup: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		if err := provider.Destroy(ctx, vmID, false); err != nil {
+			if isBenignReplicatedDeleteError(err) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("delete Replicated E2E VM %s: %v", vmID, err)
+			}
+		} else {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
 func isBenignDaytonaDeleteError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
@@ -590,6 +695,14 @@ func isRetryableDaytonaDeleteError(err error) bool {
 	return strings.Contains(msg, "status 409") ||
 		strings.Contains(msg, "modified by another operation") ||
 		strings.Contains(msg, "conflict")
+}
+
+func isBenignReplicatedDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "404") ||
+		strings.Contains(msg, "terminated") ||
+		strings.Contains(msg, "delet")
 }
 
 type githubClient struct {

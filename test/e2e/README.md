@@ -42,22 +42,25 @@ Run one suite:
 ```sh
 make e2e-github
 make e2e-linear
+make e2e-replicated-github
+make e2e-replicated-linear
 ```
 
 The make targets build `bin/elasticclaw` and `bin/claw-bridge-linux-amd64`,
 create a temporary reserved ngrok domain named with the current git SHA and
 timestamp, start a tunnel for
 `ELASTICCLAW_E2E_HUB_ADDR` or `127.0.0.1:8080` using a temporary ngrok config,
-and run the same real Daytona tests that Depot CI runs. The
+and run the same real provider tests that Depot CI runs. The
 test server serves the locally built connector through the ngrok tunnel so PR
 runs do not depend on a pre-published release artifact. The E2E server protects
 that connector route with a per-run token in the download URL. The make target
 refuses the shared `elasticclaw.ngrok.app` domain, then kills the ngrok agent it
 started, deletes the temporary reserved domain, and removes the temporary ngrok
 config when the test exits. The test deletes any Daytona sandboxes whose names
-start with `ec-e2e-` before and after the run. It also records any sandbox IDs
-created during the run and the make cleanup path runs an explicit finalizer for
-those IDs even when the main test fails. Use a Daytona API key dedicated to E2E.
+start with `ec-e2e-` before and after the run. It also records any Daytona
+sandbox IDs and Replicated CMX VM IDs created during the run, and the make
+cleanup path runs explicit finalizers for those IDs even when the main test
+fails. Use dedicated Daytona and Replicated API credentials for E2E.
 It assumes the required secrets below are already exported in your shell.
 
 ## Depot CI Environment
@@ -71,6 +74,7 @@ ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY
 ELASTICCLAW_E2E_LINEAR_API_KEY
 ELASTICCLAW_E2E_LINEAR_TEAM_KEY
 DAYTONA_API_KEY
+REPLICATED_API_TOKEN
 FIREWORKS_API_KEY
 NGROK_AUTHTOKEN
 NGROK_API_KEY
@@ -84,6 +88,9 @@ ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
 ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
 ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE=Todo
 ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
+ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
+ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
+ELASTICCLAW_E2E_REPLICATED_TTL=1h
 ```
 
 The GitHub token needs access to the fixture repo with:

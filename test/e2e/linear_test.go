@@ -17,28 +17,18 @@ import (
 )
 
 func TestDaytonaLinearWorkflowE2E(t *testing.T) {
+	runLinearWorkflowE2E(t, "daytona")
+}
+
+func TestReplicatedLinearWorkflowE2E(t *testing.T) {
+	runLinearWorkflowE2E(t, "replicated")
+}
+
+func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 	runID := e2eRunID()
-	env := e2eEnv{
-		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
-		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
-		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
-		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
-		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
-		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
-		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
-		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
-		LinearAPIKey:        requiredEnv(t, "ELASTICCLAW_E2E_LINEAR_API_KEY"),
-		LinearTeamKey:       requiredEnv(t, "ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
-		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
-		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
-		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
-		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
-		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
-		BridgeToken:         "bridge-" + runID,
-		DaytonaPrefix:       daytonaPrefix,
-		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
-		RunID:               runID,
-	}
+	env := newE2EEnv(t, runID, sandboxProvider)
+	env.LinearAPIKey = requiredEnv(t, "ELASTICCLAW_E2E_LINEAR_API_KEY")
+	env.LinearTeamKey = requiredEnv(t, "ELASTICCLAW_E2E_LINEAR_TEAM_KEY")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -47,7 +37,7 @@ func TestDaytonaLinearWorkflowE2E(t *testing.T) {
 	workflowName := "linear-" + env.RunID
 	webhookSecret := "linear-e2e-secret-" + env.RunID
 
-	cleanupDaytonaE2ESandboxes(ctx, t, env)
+	cleanupProvider(ctx, t, env)
 	hub := startHub(ctx, t, env)
 	root := writeLinearWorkspaceFixture(t, env, workspaceName, workflowName)
 	keyPath := writeGitHubAppPrivateKey(t, root, env.GitHubAppPrivateKey)
@@ -60,19 +50,19 @@ func TestDaytonaLinearWorkflowE2E(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
-		var providerID string
+		var provider, providerID string
 		if agentID != "" {
-			providerID = hub.agentProviderID(cleanupCtx, t, agentID)
+			provider, providerID = hub.agentProvider(cleanupCtx, t, agentID)
 			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
 		if providerID != "" {
-			destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
+			destroyProviderInstanceByID(cleanupCtx, t, env, provider, providerID)
 		}
 	})
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
-		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
+		cleanupProvider(cleanupCtx, t, env)
 	})
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -126,11 +116,11 @@ func writeLinearWorkspaceFixture(t *testing.T, env e2eEnv, workspaceName, workfl
 	}
 	writeFile(t, filepath.Join(workspaceDir, "elasticclaw-config.yaml"), fmt.Sprintf(`schema_version: v1
 name: %s
-provider: daytona
+provider: %s
 repositories:
   - repo: %s
     permissions: write
-`, workspaceName, env.GitHubRepo))
+`, workspaceName, env.SandboxProvider, env.GitHubRepo))
 	writeFile(t, filepath.Join(workspaceDir, "AGENTS.md"), "You are an ElasticClaw E2E agent. Keep responses concise.\n")
 	writeFile(t, filepath.Join(workspaceDir, "TOOLS.md"), "Use tools only when the issue asks for them.\n")
 	writeFile(t, filepath.Join(workspaceDir, "CONTEXT.md"), "This is an ElasticClaw Linear E2E test. Follow the Linear issue exactly.\n")
