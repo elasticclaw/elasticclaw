@@ -293,7 +293,7 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 		}
 
 		instances = append(instances, &types.Instance{
-			Name:     sandbox.ID,
+			Name:     sandbox.Name,
 			ID:       sandbox.ID,
 			Provider: "daytona",
 			Status:   status,

@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -51,6 +51,53 @@ test-factory: ## Run factory integration tests
 
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
+
+e2e: build-dev build-bridge-linux ## Run the real Daytona + GitHub Issues E2E suite
+	@command -v ngrok >/dev/null 2>&1 || (echo "ngrok is required for make e2e" && exit 1)
+	@command -v python3 >/dev/null 2>&1 || (echo "python3 is required for make e2e" && exit 1)
+	@test -n "$$NGROK_AUTHTOKEN" || (echo "NGROK_AUTHTOKEN is required for make e2e" && exit 1)
+	@test -n "$$NGROK_API_KEY" || (echo "NGROK_API_KEY is required for make e2e so temporary reserved domains can be created and deleted" && exit 1)
+	@set -e; \
+	HUB_ADDR="$${ELASTICCLAW_E2E_HUB_ADDR:-127.0.0.1:8080}"; \
+	HUB_PORT="$${HUB_ADDR##*:}"; \
+	NGROK_LOG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.log)"; \
+	NGROK_CONFIG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.yml)"; \
+	NGROK_DOMAIN_JSON="$$(mktemp -t elasticclaw-ngrok-domain.XXXXXX.json)"; \
+	NGROK_PID=""; \
+	NGROK_DOMAIN_ID=""; \
+	printf 'version: "3"\n' > "$$NGROK_CONFIG"; \
+	cleanup() { code="$$?"; if [ -n "$$NGROK_PID" ]; then kill "$$NGROK_PID" >/dev/null 2>&1 || true; fi; if [ -n "$$NGROK_DOMAIN_ID" ]; then ngrok api reserved-domains delete "$$NGROK_DOMAIN_ID" --api-key "$$NGROK_API_KEY" >/dev/null 2>&1 || true; fi; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG" "$$NGROK_DOMAIN_JSON"; exit "$$code"; }; \
+	trap cleanup EXIT INT TERM; \
+	echo "Stopping existing ngrok agents so make e2e owns the tunnel"; \
+	pkill -x ngrok >/dev/null 2>&1 || true; \
+	sleep 1; \
+	NGROK_HOST="ec-$$(git rev-parse --short HEAD 2>/dev/null || echo dev)-$$(date +%s).ngrok-free.app"; \
+	echo "Creating temporary ngrok reserved domain https://$$NGROK_HOST"; \
+	ngrok api reserved-domains create --api-key "$$NGROK_API_KEY" --domain "$$NGROK_HOST" --description "ElasticClaw E2E temporary tunnel" --metadata "elasticclaw-e2e" > "$$NGROK_DOMAIN_JSON"; \
+	NGROK_DOMAIN_ID="$$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < "$$NGROK_DOMAIN_JSON")"; \
+	if [ -z "$$NGROK_DOMAIN_ID" ]; then cat "$$NGROK_DOMAIN_JSON"; echo "ngrok reserved domain create did not return an id"; exit 1; fi; \
+	sleep 5; \
+	echo "Starting ngrok tunnel https://$$NGROK_HOST for localhost:$$HUB_PORT"; \
+	ngrok http "$$HUB_PORT" --url "https://$$NGROK_HOST" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
+	NGROK_PID="$$!"; \
+	echo "Waiting for ngrok tunnel on localhost:$$HUB_PORT..."; \
+	for i in $$(seq 1 30); do \
+		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"; \
+		if [ -n "$$ELASTICCLAW_E2E_PUBLIC_URL" ]; then \
+			case "$$ELASTICCLAW_E2E_PUBLIC_URL" in *://elasticclaw.ngrok.app*) echo "Refusing shared ngrok domain: $$ELASTICCLAW_E2E_PUBLIC_URL"; exit 1;; esac; \
+			echo "ngrok: $$ELASTICCLAW_E2E_PUBLIC_URL"; \
+			ELASTICCLAW_E2E_BIN="$(CURDIR)/bin/elasticclaw" \
+			ELASTICCLAW_E2E_BRIDGE_BINARY="$(CURDIR)/bin/claw-bridge-linux-amd64" \
+			ELASTICCLAW_E2E_HUB_ADDR="$$HUB_ADDR" \
+			ELASTICCLAW_E2E_PUBLIC_URL="$$ELASTICCLAW_E2E_PUBLIC_URL" \
+			go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m; \
+			exit "$$?"; \
+		fi; \
+		sleep 1; \
+	done; \
+	cat "$$NGROK_LOG"; \
+	echo "ngrok did not report a public https tunnel"; \
+	exit 1
 
 # Run only bootstrap unit tests (fast, no infra needed)
 test-bootstrap:
