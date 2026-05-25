@@ -11,6 +11,7 @@ jobs:
     timeout-minutes: 35
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
+      ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
       ELASTICCLAW_E2E_GITHUB_REPO: ${{ vars.ELASTICCLAW_E2E_GITHUB_REPO || 'elasticclaw/e2e-fixtures' }}
@@ -33,7 +34,9 @@ jobs:
           cache: true
 
       - name: Build ElasticClaw
-        run: go build -o bin/elasticclaw .
+        run: |
+          go build -o bin/elasticclaw .
+          GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
       - name: Install ngrok
         run: |

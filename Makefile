@@ -52,7 +52,7 @@ test-factory: ## Run factory integration tests
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
 
-e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
+e2e: build-dev build-bridge-linux ## Run the real Daytona + GitHub Issues E2E suite
 	@command -v ngrok >/dev/null 2>&1 || (echo "ngrok is required for make e2e" && exit 1)
 	@command -v python3 >/dev/null 2>&1 || (echo "python3 is required for make e2e" && exit 1)
 	@test -n "$$NGROK_AUTHTOKEN" || (echo "NGROK_AUTHTOKEN is required for make e2e" && exit 1)
@@ -86,6 +86,7 @@ e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 			case "$$ELASTICCLAW_E2E_PUBLIC_URL" in *://elasticclaw.ngrok.app*) echo "Refusing shared ngrok domain: $$ELASTICCLAW_E2E_PUBLIC_URL"; exit 1;; esac; \
 			echo "ngrok: $$ELASTICCLAW_E2E_PUBLIC_URL"; \
 			ELASTICCLAW_E2E_BIN="$(CURDIR)/bin/elasticclaw" \
+			ELASTICCLAW_E2E_BRIDGE_BINARY="$(CURDIR)/bin/claw-bridge-linux-amd64" \
 			ELASTICCLAW_E2E_HUB_ADDR="$$HUB_ADDR" \
 			ELASTICCLAW_E2E_PUBLIC_URL="$$ELASTICCLAW_E2E_PUBLIC_URL" \
 			go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m; \

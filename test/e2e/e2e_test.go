@@ -39,6 +39,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
 		DaytonaAPIKey:       requiredEnv(t, "DAYTONA_API_KEY"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
+		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
 		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
 		RunID:               e2eRunID(),
 	}
@@ -110,6 +111,7 @@ type e2eEnv struct {
 	GitHubAppPrivateKey string
 	DaytonaAPIKey       string
 	FireworksAPIKey     string
+	BridgeBinary        string
 	Model               string
 	RunID               string
 }
@@ -134,6 +136,7 @@ url: %s
 public_url: %s
 token: %s
 claw_token: %s
+bridge_image: %s
 providers:
   daytona:
     type: daytona
@@ -145,7 +148,7 @@ llm_keys:
     api_key: %q
     default: true
     default_model: %s
-`, baseURL, env.PublicURL, userToken, agentToken, env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
+`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64", env.DaytonaAPIKey, env.Model, env.FireworksAPIKey, env.Model)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
@@ -160,6 +163,7 @@ llm_keys:
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
 		"FIREWORKS_API_KEY="+env.FireworksAPIKey,
+		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
 		"HOME="+dir,
 	)
 	cmd.Stdout = logFile
