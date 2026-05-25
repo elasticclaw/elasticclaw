@@ -98,10 +98,27 @@ func TestCleanupRecordedReplicatedVMs(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	for _, id := range ids {
-		if err := provider.Destroy(ctx, id, false); err != nil && !isBenignReplicatedDeleteError(err) {
-			t.Fatalf("delete recorded Replicated VM %s: %v", id, err)
+	deadline := time.Now().Add(4 * time.Minute)
+	for {
+		remaining := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if err := provider.Destroy(ctx, id, false); err != nil {
+				if isBenignReplicatedDeleteError(err) {
+					continue
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("delete recorded Replicated VM %s: %v", id, err)
+				}
+				remaining = append(remaining, id)
+			}
 		}
+		if len(remaining) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for recorded Replicated VMs to terminate: %s", strings.Join(remaining, ", "))
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
 

@@ -287,12 +287,17 @@ func (c linearClient) deleteE2EWebhooks(ctx context.Context, t *testing.T) {
     nodes { id url }
   }
 }`, nil, &out)
+	var deleteErr error
 	for _, webhook := range out.Data.Webhooks.Nodes {
 		if strings.Contains(webhook.URL, "/api/workspaces/e2e-linear-") && strings.HasSuffix(webhook.URL, "/webhooks/linear") {
 			if err := c.deleteWebhook(ctx, webhook.ID); err != nil {
-				t.Fatalf("delete stale Linear E2E webhook %s: %v", webhook.ID, err)
+				t.Logf("delete stale Linear E2E webhook %s: %v", webhook.ID, err)
+				deleteErr = err
 			}
 		}
+	}
+	if deleteErr != nil {
+		t.Fatalf("one or more stale Linear E2E webhooks could not be deleted")
 	}
 }
 
