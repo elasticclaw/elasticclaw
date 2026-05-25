@@ -80,6 +80,15 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at)`)
 
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ssh_known_hosts (
+		host          TEXT PRIMARY KEY,
+		key_type      TEXT NOT NULL,
+		key_data      TEXT NOT NULL,
+		fingerprint   TEXT NOT NULL,
+		first_seen_at DATETIME NOT NULL,
+		last_seen_at  DATETIME NOT NULL
+	)`)
+
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_triggers (
 		id             TEXT PRIMARY KEY,
 		factory_name   TEXT NOT NULL,
@@ -249,6 +258,15 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at);
+
+	CREATE TABLE IF NOT EXISTS ssh_known_hosts (
+		host          TEXT PRIMARY KEY,
+		key_type      TEXT NOT NULL,
+		key_data      TEXT NOT NULL,
+		fingerprint   TEXT NOT NULL,
+		first_seen_at DATETIME NOT NULL,
+		last_seen_at  DATETIME NOT NULL
+	);
 
 	CREATE TABLE IF NOT EXISTS factory_events (
 		id           TEXT PRIMARY KEY,

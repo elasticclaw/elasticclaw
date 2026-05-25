@@ -4161,7 +4161,7 @@ func (s *Server) sshRun(user, host, script string) error {
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
 
@@ -4203,7 +4203,7 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
 	client, err := gossh.Dial("tcp", host, sshCfg)
@@ -4284,7 +4284,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	sshCfg := &gossh.ClientConfig{
 		User:            sshUser,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(fmt.Sprintf("%s:%d", sshHost, sshPort)),
 		Timeout:         30 * time.Second,
 	}
 	sshAddr := fmt.Sprintf("%s:%d", sshHost, sshPort)
