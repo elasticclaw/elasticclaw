@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +70,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		if issueNumber != 0 {
 			_ = gh.closeIssue(cleanupCtx, issueNumber)
 		}
+		_ = gh.deleteLabel(cleanupCtx, labelName)
 		if hookID != 0 {
 			_ = gh.deleteHook(cleanupCtx, hookID)
 		}
@@ -76,6 +78,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	})
 
 	gh.deleteE2EHooks(ctx, t)
+	gh.cleanupE2EIssuesAndLabels(ctx, t)
 	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
 	runCLI(ctx, t, root, env, "github-app", "create", "e2e",
 		"--workspace", workspaceName,
@@ -89,7 +92,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 
 	hookID = gh.createHook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/github-issues", webhookSecret)
 	gh.ensureLabel(ctx, t, labelName)
-	issueNumber = gh.createIssue(ctx, t, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.")
+	issueNumber = gh.createIssue(ctx, t, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.\n\nElasticClaw E2E run: "+env.RunID)
 	gh.addLabel(ctx, t, issueNumber, labelName)
 
 	agentName := env.GitHubRepo + "/" + fmt.Sprint(issueNumber)
@@ -495,11 +498,89 @@ func (g githubClient) deleteHook(ctx context.Context, hookID int64) error {
 	return nil
 }
 
+func (g githubClient) cleanupE2EIssuesAndLabels(ctx context.Context, t *testing.T) {
+	t.Helper()
+	g.closeE2EIssues(ctx, t)
+	g.deleteE2ELabels(ctx, t)
+}
+
+func (g githubClient) closeE2EIssues(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var issues []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	g.api(ctx, t, http.MethodGet, "issues?state=open&per_page=100", nil, &issues)
+	for _, issue := range issues {
+		if !isE2EIssue(issue.Title, issue.Body, issue.Labels) {
+			continue
+		}
+		if err := g.closeIssue(ctx, issue.Number); err != nil {
+			t.Fatalf("close orphaned E2E issue %d: %v", issue.Number, err)
+		}
+	}
+}
+
+func isE2EIssue(title, body string, labels []struct {
+	Name string `json:"name"`
+}) bool {
+	if strings.EqualFold(strings.TrimSpace(title), "Tell a dad joke. Do not make a PR.") {
+		return true
+	}
+	if strings.Contains(body, "ElasticClaw E2E") {
+		return true
+	}
+	for _, label := range labels {
+		if strings.HasPrefix(label.Name, "agent-ready-") {
+			return true
+		}
+	}
+	return false
+}
+
+func (g githubClient) deleteE2ELabels(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var labels []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	g.api(ctx, t, http.MethodGet, "labels?per_page=100", nil, &labels)
+	for _, label := range labels {
+		if !strings.HasPrefix(label.Name, "agent-ready-") && label.Description != "ElasticClaw E2E trigger label" {
+			continue
+		}
+		if err := g.deleteLabel(ctx, label.Name); err != nil {
+			t.Fatalf("delete orphaned E2E label %q: %v", label.Name, err)
+		}
+	}
+}
+
 func (g githubClient) ensureLabel(ctx context.Context, t *testing.T, label string) {
 	t.Helper()
 	body := map[string]string{"name": label, "color": "0e8a16", "description": "ElasticClaw E2E trigger label"}
 	var out map[string]interface{}
 	g.api(ctx, t, http.MethodPost, "labels", body, &out)
+}
+
+func (g githubClient) deleteLabel(ctx context.Context, label string) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("https://api.github.com/repos/%s/labels/%s", g.repo, url.PathEscape(label)), nil)
+	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete label: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 func (g githubClient) createIssue(ctx context.Context, t *testing.T, title, bodyText string) int {
