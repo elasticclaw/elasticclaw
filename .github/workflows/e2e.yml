@@ -1,0 +1,72 @@
+name: E2E
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: E2E contract
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build ElasticClaw
+        run: go build -o bin/elasticclaw .
+      - name: Validate E2E fixtures
+        run: go test ./test/e2e -run TestE2EEnvironmentContract -count=1
+
+  github-issues:
+    name: GitHub Issues webhook E2E
+    runs-on: depot-ubuntu-24.04
+    if: ${{ vars.ELASTICCLAW_E2E_ENABLED == '1' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    timeout-minutes: 15
+    env:
+      ELASTICCLAW_E2E: "1"
+      ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
+      ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
+      ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
+      ELASTICCLAW_E2E_GITHUB_REPO: ${{ vars.ELASTICCLAW_E2E_GITHUB_REPO || 'elasticclaw/e2e-fixtures' }}
+      ELASTICCLAW_E2E_RUN_ID: pr-${{ github.event.pull_request.number || github.run_number }}-${{ github.run_attempt }}-${{ github.sha }}
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build ElasticClaw
+        run: go build -o bin/elasticclaw .
+      - name: Install ngrok
+        run: |
+          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar -xz
+          sudo mv ngrok /usr/local/bin/ngrok
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+      - name: Start ngrok
+        run: |
+          ngrok http 8080 --log stdout > ngrok.log 2>&1 &
+          for i in $(seq 1 30); do
+            url="$(curl -fsS http://127.0.0.1:4040/api/tunnels | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
+            if [ -n "$url" ]; then
+              echo "ELASTICCLAW_E2E_PUBLIC_URL=$url" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat ngrok.log
+          exit 1
+      - name: Run GitHub Issues E2E
+        run: go test -v ./test/e2e -run TestGitHubIssuesWebhookNoop -count=1
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-issues-e2e
+          path: |
+            ngrok.log
