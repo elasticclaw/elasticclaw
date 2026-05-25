@@ -759,7 +759,11 @@ type githubIssueWorkflowPollTarget struct {
 }
 
 func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) {
-	repoTargets := map[string][]githubIssueWorkflowPollTarget{}
+	type repoTokenKey struct {
+		repo  string
+		token string
+	}
+	repoTargets := map[repoTokenKey][]githubIssueWorkflowPollTarget{}
 	for _, workspace := range workspaces {
 		if workspace == nil {
 			continue
@@ -784,7 +788,8 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 					log.Printf("[poll-github-issues] workflow %s/%s: repository %q is an org wildcard; polling requires exact owner/repo entries", workspace.Name, workflow.Name, repo)
 					continue
 				}
-				repoTargets[repo] = append(repoTargets[repo], githubIssueWorkflowPollTarget{
+				key := repoTokenKey{repo: repo, token: token}
+				repoTargets[key] = append(repoTargets[key], githubIssueWorkflowPollTarget{
 					workspace: workspace,
 					workflow:  workflow,
 					token:     token,
@@ -797,24 +802,17 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	for repo, targets := range repoTargets {
-		token := ""
-		for _, target := range targets {
-			if target.token != "" {
-				token = target.token
-				break
-			}
-		}
-		if token == "" {
+	for key, targets := range repoTargets {
+		if key.token == "" {
 			continue
 		}
-		issues, err := s.queryGitHubIssues(repo, token, since, base)
+		issues, err := s.queryGitHubIssues(key.repo, key.token, since, base)
 		if err != nil {
-			log.Printf("[poll-github-issues] workflow query failed for repo %q: %v", repo, err)
+			log.Printf("[poll-github-issues] workflow query failed for repo %q: %v", key.repo, err)
 			continue
 		}
 		for _, issue := range issues {
-			s.processGitHubIssueWorkflowPollItem(issue, targets, repo)
+			s.processGitHubIssueWorkflowPollItem(issue, targets, key.repo, key.token, base)
 		}
 	}
 }
@@ -1007,13 +1005,21 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 	}
 }
 
-func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, targets []githubIssueWorkflowPollTarget, repo string) {
+func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, targets []githubIssueWorkflowPollTarget, repo, token, base string) {
 	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
 	currentStatus := issue.State
 	issueLabels := githubIssuesPollLabels(issue)
 	assignee := ""
 	if issue.Assignee != nil {
 		assignee = issue.Assignee.Login
+	}
+	var events []githubIssueEvent
+	if githubIssueWorkflowPollNeedsLabelerEvents(targets) {
+		var err error
+		events, err = s.queryGitHubIssueEvents(repo, token, base, issue.Number)
+		if err != nil {
+			log.Printf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
+		}
 	}
 
 	for _, target := range targets {
@@ -1022,11 +1028,10 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 		if workspace == nil || workflow == nil {
 			continue
 		}
-		payload, ok := buildGitHubIssuesWorkflowPollPayload(issue, repo, workflow, currentStatus, issueLabels, assignee)
+		payload, ok := buildGitHubIssuesWorkflowPollPayload(issue, repo, workflow, currentStatus, issueLabels, assignee, events)
 		if !ok {
 			continue
 		}
-		log.Printf("[workflow:%s/%s] GitHub issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, issueID)
 		if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
 			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
 		}
@@ -1041,7 +1046,7 @@ func githubIssuesPollLabels(issue githubIssuesPollItem) map[string]bool {
 	return labels
 }
 
-func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo string, workflow *types.WorkflowConfig, currentStatus string, issueLabels map[string]bool, assignee string) (githubIssuesWebhookPayload, bool) {
+func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo string, workflow *types.WorkflowConfig, currentStatus string, issueLabels map[string]bool, assignee string, events []githubIssueEvent) (githubIssuesWebhookPayload, bool) {
 	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, githubIssuesWorkflowPollAction(workflow))
 	if payload.Action == "" {
 		return payload, false
@@ -1054,9 +1059,16 @@ func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo strin
 		if !ok {
 			return payload, false
 		}
+		labeler, ok := githubIssuesWorkflowPollLabeler(workflow, labelName, events)
+		if !ok {
+			return payload, false
+		}
 		payload.Label = &struct {
 			Name string `json:"name"`
 		}{Name: labelName}
+		if labeler != "" {
+			payload.Sender.Login = labeler
+		}
 	}
 	if workflow.Trigger != nil {
 		if !githubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
@@ -1126,6 +1138,62 @@ func githubIssuesWorkflowPollLabel(workflow *types.WorkflowConfig, issueLabels m
 	}
 	for label := range issueLabels {
 		return label, true
+	}
+	return "", false
+}
+
+func githubIssueWorkflowPollNeedsLabelerEvents(targets []githubIssueWorkflowPollTarget) bool {
+	for _, target := range targets {
+		for _, labeler := range githubIssuesWorkflowPollLabelers(target.workflow) {
+			labeler = strings.TrimSpace(labeler)
+			if labeler != "" && labeler != "*" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func githubIssuesWorkflowPollLabelers(workflow *types.WorkflowConfig) []string {
+	if workflow == nil {
+		return nil
+	}
+	if workflow.Trigger != nil {
+		if workflow.Trigger.GitHubIssues != nil {
+			return workflow.Trigger.GitHubIssues.Labelers
+		}
+		if workflow.Trigger.Type == "github_issues" {
+			return workflow.Trigger.Labelers
+		}
+	}
+	return workflow.AllowedLabelers
+}
+
+func githubIssuesWorkflowPollLabeler(workflow *types.WorkflowConfig, labelName string, events []githubIssueEvent) (string, bool) {
+	labelers := githubIssuesWorkflowPollLabelers(workflow)
+	needsSpecificLabeler := false
+	for _, labeler := range labelers {
+		labeler = strings.TrimSpace(labeler)
+		if labeler != "" && labeler != "*" {
+			needsSpecificLabeler = true
+			break
+		}
+	}
+	if !needsSpecificLabeler {
+		return "", true
+	}
+	for _, event := range events {
+		if event.Event != "labeled" || event.Label == nil {
+			continue
+		}
+		if !strings.EqualFold(event.Label.Name, labelName) {
+			continue
+		}
+		for _, labeler := range labelers {
+			if strings.EqualFold(strings.TrimSpace(labeler), event.Actor.Login) {
+				return event.Actor.Login, true
+			}
+		}
 	}
 	return "", false
 }
