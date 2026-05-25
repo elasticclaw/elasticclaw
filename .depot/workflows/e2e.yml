@@ -22,9 +22,83 @@ on:
   workflow_dispatch:
 
 jobs:
+  unit:
+    name: Unit tests
+    runs-on: depot-ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache: true
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Bootstrap script tests (with shellcheck)
+        run: go test -v ./pkg/hub/ -run TestBootstrap
+
+      - name: Factory integration tests
+        run: make test-factory
+
+      - name: Parity matrix tests
+        run: make test-parity
+
+      - name: Install script tests (with shellcheck)
+        run: go test -v ./pkg/install/ -run Test
+
+      - name: Install container integration test
+        run: ELASTICCLAW_INSTALL_TESTS=1 go test -tags integration -v ./pkg/install/ -run TestInstall_Container -timeout 5m
+
+  build:
+    name: Build
+    runs-on: depot-ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache: true
+
+      - name: Build hub + CLI
+        run: make build
+
+      - name: Build claw-bridge (linux)
+        run: make build-bridge-linux
+
+  web:
+    name: Web UI build
+    runs-on: depot-ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: web
+
+      - name: Build (static export)
+        run: npm run build
+        working-directory: web
+
   daytona-github-issues:
     name: Daytona + ${{ matrix.name }}
     runs-on: depot-ubuntu-24.04
+    needs:
+      - unit
+      - build
+      - web
     timeout-minutes: 35
     strategy:
       fail-fast: false
