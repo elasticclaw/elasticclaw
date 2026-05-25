@@ -15,7 +15,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 // githubIssueDetails holds the fields we fetch for pipeline template rendering.
@@ -396,7 +395,7 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		if sshHost == "" || sshPort == 0 || sshUser == "" {
 			return nil, fmt.Errorf("replicated agent has no SSH connection details")
 		}
-		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand, timeout)
+		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand)
 	case "noop":
 		return &pipelineRunResult{ExitCode: 0, Stdout: "noop provider skipped workflow command"}, nil
 	default:
@@ -404,53 +403,11 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 	}
 }
 
-func (s *Server) executeReplicatedPipelineRun(user, host, command string, timeout time.Duration) (*pipelineRunResult, error) {
-	sshCfg := &gossh.ClientConfig{
-		User:            user,
-		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
+func (s *Server) executeReplicatedPipelineRun(user, host, command string) (*pipelineRunResult, error) {
+	if err := s.sshRun(user, host, command); err != nil {
+		return &pipelineRunResult{ExitCode: 1, Stderr: err.Error()}, err
 	}
-	client, err := gossh.Dial("tcp", host, sshCfg)
-	if err != nil {
-		return nil, fmt.Errorf("ssh dial %s: %w", host, err)
-	}
-	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("ssh session: %w", err)
-	}
-	defer sess.Close()
-
-	done := make(chan struct {
-		out []byte
-		err error
-	}, 1)
-	go func() {
-		out, err := sess.CombinedOutput("bash -lc " + checkpointShellQuote(command))
-		done <- struct {
-			out []byte
-			err error
-		}{out: out, err: err}
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case res := <-done:
-		exitCode := 0
-		if res.err != nil {
-			exitCode = 1
-			if exitErr, ok := res.err.(*gossh.ExitError); ok {
-				exitCode = exitErr.ExitStatus()
-			}
-		}
-		result := &pipelineRunResult{ExitCode: exitCode, Stdout: string(res.out)}
-		return result, res.err
-	case <-timer.C:
-		_ = client.Close()
-		return nil, fmt.Errorf("command timed out after %s", timeout)
-	}
+	return &pipelineRunResult{ExitCode: 0}, nil
 }
 
 func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResult, err error) string {
