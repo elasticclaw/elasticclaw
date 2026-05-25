@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -72,7 +74,11 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cleanupCancel()
 		if agentID != "" {
+			providerID := hub.agentProviderID(cleanupCtx, t, agentID)
 			_ = hub.deleteAgent(cleanupCtx, agentID)
+			if providerID != "" {
+				destroyDaytonaSandboxByID(cleanupCtx, t, env, providerID)
+			}
 		}
 		cleanupDaytonaE2ESandboxes(cleanupCtx, t, env)
 		if issueNumber != 0 {
@@ -134,6 +140,7 @@ type hubProcess struct {
 	token   string
 	cmd     *exec.Cmd
 	logPath string
+	dbPath  string
 }
 
 func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
@@ -186,7 +193,7 @@ llm_keys:
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start hub: %v", err)
 	}
-	hub := &hubProcess{baseURL: baseURL, token: userToken, cmd: cmd, logPath: logPath}
+	hub := &hubProcess{baseURL: baseURL, token: userToken, cmd: cmd, logPath: logPath, dbPath: dbPath}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -347,6 +354,27 @@ func (h *hubProcess) deleteAgent(ctx context.Context, agentID string) error {
 	return nil
 }
 
+func (h *hubProcess) agentProviderID(ctx context.Context, t *testing.T, agentID string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", h.dbPath+"?_time_format=sqlite&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open E2E hub db for provider cleanup: %v", err)
+	}
+	defer db.Close()
+	var provider, providerID string
+	err = db.QueryRowContext(ctx, `SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ?`, agentID).Scan(&provider, &providerID)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read E2E agent provider id: %v", err)
+	}
+	if provider != "daytona" {
+		return ""
+	}
+	return providerID
+}
+
 func (h *hubProcess) listAgents(ctx context.Context, t *testing.T) []types.Claw {
 	t.Helper()
 	var agents []types.Claw
@@ -489,6 +517,35 @@ func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for Daytona E2E sandboxes with prefix %q to terminate", env.DaytonaPrefix)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func destroyDaytonaSandboxByID(ctx context.Context, t *testing.T, env e2eEnv, sandboxID string) {
+	t.Helper()
+	provider, err := daytonaProvider.New(map[string]interface{}{"api_key": env.DaytonaAPIKey})
+	if err != nil {
+		t.Fatalf("create Daytona provider for E2E sandbox cleanup: %v", err)
+	}
+	if err := provider.Destroy(ctx, sandboxID, false); err != nil && !isBenignDaytonaDeleteError(err) {
+		t.Fatalf("delete Daytona E2E sandbox %s: %v", sandboxID, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		status, err := provider.Status(ctx, sandboxID)
+		if err != nil {
+			if isBenignDaytonaDeleteError(err) {
+				return
+			}
+			t.Fatalf("check Daytona E2E sandbox %s deletion: %v", sandboxID, err)
+		}
+		if status == types.StatusNotFound {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for Daytona E2E sandbox %s to terminate; status=%s", sandboxID, status)
 		}
 		time.Sleep(5 * time.Second)
 	}
