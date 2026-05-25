@@ -43,10 +43,18 @@ jobs:
 
       - name: Start ngrok
         run: |
+          echo "Starting random ephemeral ngrok tunnel for localhost:8080"
           ngrok http 8080 --log stdout > ngrok.log 2>&1 &
+          echo "$!" > ngrok.pid
           for i in $(seq 1 30); do
             url="$(curl -fsS http://127.0.0.1:4040/api/tunnels | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
             if [ -n "$url" ]; then
+              case "$url" in
+                *://elasticclaw.ngrok.app*)
+                  echo "Refusing shared ngrok domain: $url"
+                  exit 1
+                  ;;
+              esac
               echo "ELASTICCLAW_E2E_PUBLIC_URL=$url" >> "$GITHUB_ENV"
               exit 0
             fi
@@ -58,6 +66,13 @@ jobs:
       - name: Run Daytona GitHub Issues E2E
         run: go test -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
 
+      - name: Stop ngrok
+        if: always()
+        run: |
+          if [ -f ngrok.pid ]; then
+            kill "$(cat ngrok.pid)" >/dev/null 2>&1 || true
+          fi
+
       - name: Upload E2E artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,3 +80,4 @@ jobs:
           name: daytona-github-issues-e2e
           path: |
             ngrok.log
+            ngrok.pid

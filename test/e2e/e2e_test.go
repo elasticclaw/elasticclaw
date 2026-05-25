@@ -76,6 +76,7 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
 	})
 
+	gh.deleteE2EHooks(ctx, t)
 	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
 	runCLI(ctx, t, root, env, "github-app", "create", "e2e",
 		"--workspace", workspaceName,
@@ -456,6 +457,24 @@ func (g githubClient) createHook(ctx context.Context, t *testing.T, url, secret 
 	}
 	g.api(ctx, t, http.MethodPost, "hooks", body, &out)
 	return out.ID
+}
+
+func (g githubClient) deleteE2EHooks(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var hooks []struct {
+		ID     int64 `json:"id"`
+		Config struct {
+			URL string `json:"url"`
+		} `json:"config"`
+	}
+	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
+	for _, hook := range hooks {
+		if strings.Contains(hook.Config.URL, "/api/workspaces/") && strings.HasSuffix(hook.Config.URL, "/webhooks/github-issues") {
+			if err := g.deleteHook(ctx, hook.ID); err != nil {
+				t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
+			}
+		}
+	}
 }
 
 func (g githubClient) deleteHook(ctx context.Context, hookID int64) error {

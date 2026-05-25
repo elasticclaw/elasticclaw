@@ -59,6 +59,7 @@ e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 	HUB_ADDR="$${ELASTICCLAW_E2E_HUB_ADDR:-127.0.0.1:8080}"; \
 	HUB_PORT="$${HUB_ADDR##*:}"; \
 	NGROK_LOG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.log)"; \
+	echo "Starting random ephemeral ngrok tunnel for localhost:$$HUB_PORT"; \
 	ngrok http "$$HUB_PORT" --log stdout > "$$NGROK_LOG" 2>&1 & \
 	NGROK_PID="$$!"; \
 	trap 'kill "$$NGROK_PID" >/dev/null 2>&1 || true; rm -f "$$NGROK_LOG"' EXIT INT TERM; \
@@ -66,6 +67,7 @@ e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 	for i in $$(seq 1 30); do \
 		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"; \
 		if [ -n "$$ELASTICCLAW_E2E_PUBLIC_URL" ]; then \
+			case "$$ELASTICCLAW_E2E_PUBLIC_URL" in *://elasticclaw.ngrok.app*) echo "Refusing shared ngrok domain: $$ELASTICCLAW_E2E_PUBLIC_URL"; exit 1;; esac; \
 			echo "ngrok: $$ELASTICCLAW_E2E_PUBLIC_URL"; \
 			ELASTICCLAW_E2E=1 \
 			ELASTICCLAW_E2E_BIN="$(CURDIR)/bin/elasticclaw" \
