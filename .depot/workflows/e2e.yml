@@ -39,9 +39,14 @@ jobs:
           GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
       - name: Install ngrok
-        uses: ngrok/setup-ngrok@v1
-        with:
-          authtoken: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+          ngrok version
 
       - name: Start ngrok
         run: |
