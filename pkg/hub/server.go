@@ -2266,6 +2266,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		return fmt.Errorf("daytona create: %w", err)
 	}
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
+	recordE2EDaytonaSandboxID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
@@ -2784,6 +2785,28 @@ gh auth status`
 
 	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
 	return nil
+}
+
+func recordE2EDaytonaSandboxID(sandboxID string) {
+	path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE"))
+	if path == "" || strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			log.Printf("[e2e] record Daytona sandbox id: mkdir %s: %v", dir, err)
+			return
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		log.Printf("[e2e] record Daytona sandbox id: open %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, sandboxID); err != nil {
+		log.Printf("[e2e] record Daytona sandbox id: write %s: %v", path, err)
+	}
 }
 
 func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName string) error {

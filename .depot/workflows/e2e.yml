@@ -27,6 +27,7 @@ jobs:
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
+      ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE: ${{ github.workspace }}/e2e-daytona-sandbox-ids
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
       ELASTICCLAW_E2E_GITHUB_REPO: ${{ vars.ELASTICCLAW_E2E_GITHUB_REPO || 'elasticclaw/e2e-fixtures' }}
@@ -104,6 +105,10 @@ jobs:
       - name: Run Daytona GitHub Issues E2E
         run: go test -tags e2e -v ./test/e2e -run TestDaytonaGitHubIssuesWorkflowE2E -count=1 -timeout 30m
 
+      - name: Cleanup Daytona sandbox
+        if: always()
+        run: go test -tags e2e -v ./test/e2e -run TestCleanupRecordedDaytonaSandboxes -count=1 -timeout 6m
+
       - name: Stop ngrok
         if: always()
         run: |
@@ -125,3 +130,4 @@ jobs:
             ngrok.yml
             ngrok-domain.json
             ngrok-domain-id
+            e2e-daytona-sandbox-ids
