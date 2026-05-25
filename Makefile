@@ -56,16 +56,29 @@ e2e: build-dev ## Run the real Daytona + GitHub Issues E2E suite
 	@command -v ngrok >/dev/null 2>&1 || (echo "ngrok is required for make e2e" && exit 1)
 	@command -v python3 >/dev/null 2>&1 || (echo "python3 is required for make e2e" && exit 1)
 	@test -n "$$NGROK_AUTHTOKEN" || (echo "NGROK_AUTHTOKEN is required for make e2e" && exit 1)
+	@test -n "$$NGROK_API_KEY" || (echo "NGROK_API_KEY is required for make e2e so temporary reserved domains can be created and deleted" && exit 1)
 	@set -e; \
 	HUB_ADDR="$${ELASTICCLAW_E2E_HUB_ADDR:-127.0.0.1:8080}"; \
 	HUB_PORT="$${HUB_ADDR##*:}"; \
 	NGROK_LOG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.log)"; \
 	NGROK_CONFIG="$$(mktemp -t elasticclaw-ngrok.XXXXXX.yml)"; \
+	NGROK_DOMAIN_JSON="$$(mktemp -t elasticclaw-ngrok-domain.XXXXXX.json)"; \
+	NGROK_PID=""; \
+	NGROK_DOMAIN_ID=""; \
 	printf 'version: "3"\n' > "$$NGROK_CONFIG"; \
-	echo "Starting random ephemeral ngrok tunnel for localhost:$$HUB_PORT"; \
-	ngrok http "$$HUB_PORT" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
+	cleanup() { code="$$?"; if [ -n "$$NGROK_PID" ]; then kill "$$NGROK_PID" >/dev/null 2>&1 || true; fi; if [ -n "$$NGROK_DOMAIN_ID" ]; then ngrok api reserved-domains delete "$$NGROK_DOMAIN_ID" --api-key "$$NGROK_API_KEY" >/dev/null 2>&1 || true; fi; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG" "$$NGROK_DOMAIN_JSON"; exit "$$code"; }; \
+	trap cleanup EXIT INT TERM; \
+	echo "Stopping existing ngrok agents so make e2e owns the tunnel"; \
+	pkill -x ngrok >/dev/null 2>&1 || true; \
+	sleep 1; \
+	NGROK_HOST="ec-$$(git rev-parse --short HEAD 2>/dev/null || echo dev)-$$(date +%s).ngrok-free.app"; \
+	echo "Creating temporary ngrok reserved domain https://$$NGROK_HOST"; \
+	ngrok api reserved-domains create --api-key "$$NGROK_API_KEY" --domain "$$NGROK_HOST" --description "ElasticClaw E2E temporary tunnel" --metadata "elasticclaw-e2e" > "$$NGROK_DOMAIN_JSON"; \
+	NGROK_DOMAIN_ID="$$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < "$$NGROK_DOMAIN_JSON")"; \
+	if [ -z "$$NGROK_DOMAIN_ID" ]; then cat "$$NGROK_DOMAIN_JSON"; echo "ngrok reserved domain create did not return an id"; exit 1; fi; \
+	echo "Starting ngrok tunnel https://$$NGROK_HOST for localhost:$$HUB_PORT"; \
+	ngrok http "$$HUB_PORT" --url "https://$$NGROK_HOST" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
 	NGROK_PID="$$!"; \
-	trap 'kill "$$NGROK_PID" >/dev/null 2>&1 || true; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG"' EXIT INT TERM; \
 	echo "Waiting for ngrok tunnel on localhost:$$HUB_PORT..."; \
 	for i in $$(seq 1 30); do \
 		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"; \

@@ -23,6 +23,7 @@ jobs:
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
       NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      NGROK_API_KEY: ${{ secrets.NGROK_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,9 +42,25 @@ jobs:
 
       - name: Start ngrok
         run: |
-          echo "Starting random ephemeral ngrok tunnel for localhost:8080"
+          NGROK_HOST="ec-${GITHUB_SHA:0:12}-${GITHUB_RUN_ATTEMPT}-$(date +%s).ngrok-free.app"
+          echo "Stopping existing ngrok agents so this job owns the tunnel"
+          pkill -x ngrok >/dev/null 2>&1 || true
+          sleep 1
+          echo "Creating temporary ngrok reserved domain https://$NGROK_HOST"
+          ngrok api reserved-domains create \
+            --api-key "$NGROK_API_KEY" \
+            --domain "$NGROK_HOST" \
+            --description "ElasticClaw E2E temporary tunnel" \
+            --metadata "elasticclaw-e2e" > ngrok-domain.json
+          python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < ngrok-domain.json > ngrok-domain-id
+          if [ ! -s ngrok-domain-id ]; then
+            cat ngrok-domain.json
+            echo "ngrok reserved domain create did not return an id"
+            exit 1
+          fi
+          echo "Starting ngrok tunnel https://$NGROK_HOST for localhost:8080"
           printf 'version: "3"\n' > ngrok.yml
-          ngrok http 8080 --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
+          ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
           echo "$!" > ngrok.pid
           for i in $(seq 1 30); do
             url="$(curl -fsS http://127.0.0.1:4040/api/tunnels | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
@@ -71,6 +88,9 @@ jobs:
           if [ -f ngrok.pid ]; then
             kill "$(cat ngrok.pid)" >/dev/null 2>&1 || true
           fi
+          if [ -s ngrok-domain-id ]; then
+            ngrok api reserved-domains delete "$(cat ngrok-domain-id)" --api-key "$NGROK_API_KEY" >/dev/null 2>&1 || true
+          fi
 
       - name: Upload E2E artifacts
         if: always()
@@ -81,3 +101,5 @@ jobs:
             ngrok.log
             ngrok.pid
             ngrok.yml
+            ngrok-domain.json
+            ngrok-domain-id
