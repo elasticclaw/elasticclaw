@@ -120,7 +120,13 @@ except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
 agent_defaults = config.setdefault('agents', {}).setdefault('defaults', {})
-agent_defaults['model'] = model
+fallbacks = []
+if model == 'fireworks/accounts/fireworks/models/kimi-k2p6':
+    fallbacks = ['fireworks/accounts/fireworks/routers/kimi-k2p5-turbo']
+if fallbacks:
+    agent_defaults['model'] = {'primary': model, 'fallbacks': fallbacks}
+else:
+    agent_defaults['model'] = model
 agent_models = agent_defaults.get('models')
 if isinstance(agent_models, dict):
     for key in list(agent_models.keys()):
@@ -131,6 +137,11 @@ if isinstance(agent_models, dict):
 models = config.get('models')
 if isinstance(models, dict) and any(k in models for k in ('providers', 'routers', 'mode')):
     config.pop('models', None)
+auth = config.setdefault('auth', {})
+cooldowns = auth.setdefault('cooldowns', {})
+cooldowns.setdefault('rateLimitedProfileRotations', 2)
+cooldowns.setdefault('overloadedProfileRotations', 2)
+cooldowns.setdefault('overloadedBackoffMs', 15000)
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')

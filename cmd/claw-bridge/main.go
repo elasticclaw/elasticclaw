@@ -1207,6 +1207,9 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
+	if os.Getenv("OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS") == "" {
+		os.Setenv("OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS", "0")
+	}
 
 	home, _ := os.UserHomeDir()
 	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
@@ -1315,7 +1318,7 @@ func configureOpenClaw() error {
 		defaultModelJSON, _ := json.Marshal(defaultModel)
 		gatewayPasswordJSON, _ := json.Marshal(gatewayPassword)
 
-		// Minimal fallback: just set model + gateway auth.
+		// Minimal fallback: just set model, retry cooldowns, and gateway auth.
 		configPy = fmt.Sprintf(`python3 <<'PYEOF'
 import json, os, sys
 path = os.path.expanduser('~/.openclaw/openclaw.json')
@@ -1324,7 +1327,20 @@ try:
         config = json.load(f)
 except:
     config = {}
-config.setdefault('agents', {}).setdefault('defaults', {})['model'] = %s
+model = %s
+agent_defaults = config.setdefault('agents', {}).setdefault('defaults', {})
+fallbacks = []
+if model == 'fireworks/accounts/fireworks/models/kimi-k2p6':
+    fallbacks = ['fireworks/accounts/fireworks/routers/kimi-k2p5-turbo']
+if fallbacks:
+    agent_defaults['model'] = {'primary': model, 'fallbacks': fallbacks}
+else:
+    agent_defaults['model'] = model
+auth = config.setdefault('auth', {})
+cooldowns = auth.setdefault('cooldowns', {})
+cooldowns.setdefault('rateLimitedProfileRotations', 2)
+cooldowns.setdefault('overloadedProfileRotations', 2)
+cooldowns.setdefault('overloadedBackoffMs', 15000)
 config.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = %s
@@ -1367,6 +1383,9 @@ func startGateway() (*exec.Cmd, error) {
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
+	if os.Getenv("OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS") == "" {
+		os.Setenv("OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS", "0")
+	}
 	if gatewayPassword := os.Getenv("ELASTICCLAW_GATEWAY_PASSWORD"); gatewayPassword != "" {
 		os.Setenv("OPENCLAW_GATEWAY_PASSWORD", gatewayPassword)
 	}

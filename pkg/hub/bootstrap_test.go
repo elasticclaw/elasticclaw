@@ -300,7 +300,8 @@ func TestBuildOpenClawProviderConfig_DoesNotWriteLegacyProviderCatalog(t *testin
 
 	snippet := buildOpenClawProviderConfig(keys, "openai-main")
 
-	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
+	assertContains(t, snippet, "agent_defaults['model'] = {'primary': model, 'fallbacks': fallbacks}", "sets fallback-capable default model")
+	assertContains(t, snippet, "cooldowns.setdefault('rateLimitedProfileRotations', 2)", "configures rate-limit cooldowns")
 	assertContains(t, snippet, "config.pop('models', None)", "removes legacy top-level models catalog")
 	assertNotContains(t, snippet, "providers.update", "does not write legacy provider catalog")
 	assertNotContains(t, snippet, "'fireworks': {", "does not write fireworks provider entry")
@@ -314,7 +315,7 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
-	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
+	assertContains(t, snippet, "agent_defaults['model'] = {'primary': model, 'fallbacks': fallbacks}", "sets fallback-capable default model")
 	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
 	assertContains(t, snippet, "auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')", "writes Anthropic agent auth profile")
 	assertContains(t, snippet, "profiles['anthropic:default']", "adds Anthropic default auth profile")
@@ -327,7 +328,7 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 func TestBuildOpenClawProviderConfig_NoKeysStillPatchesDefaultModel(t *testing.T) {
 	snippet := buildOpenClawProviderConfig(nil, "")
 
-	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
+	assertContains(t, snippet, "agent_defaults['model'] = {'primary': model, 'fallbacks': fallbacks}", "sets fallback-capable default model")
 	assertContains(t, snippet, "config['gateway']['remote'] = {'password': gw_password}", "sets gateway remote password")
 	assertNotContains(t, snippet, "providers.update", "does not add provider config without keys")
 }
@@ -419,8 +420,16 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	if !ok {
 		t.Fatalf("agents.defaults missing or wrong type: %#v", agents["defaults"])
 	}
-	if defaults["model"] != "fireworks/accounts/fireworks/models/kimi-k2p6" {
-		t.Fatalf("default model not patched: %#v", defaults["model"])
+	model, ok := defaults["model"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("default model missing fallback object: %#v", defaults["model"])
+	}
+	if model["primary"] != "fireworks/accounts/fireworks/models/kimi-k2p6" {
+		t.Fatalf("default model primary not patched: %#v", model)
+	}
+	fallbacks, ok := model["fallbacks"].([]interface{})
+	if !ok || len(fallbacks) != 1 || fallbacks[0] != "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo" {
+		t.Fatalf("default model fallback not patched: %#v", model)
 	}
 	agentModels, ok := defaults["models"].(map[string]interface{})
 	if !ok {
@@ -431,6 +440,23 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	}
 	if _, ok := agentModels["fireworks/accounts/fireworks/models/kimi-k2p6"]; !ok {
 		t.Fatalf("non-stale k2p6 alias was removed: %#v", agentModels)
+	}
+	auth, ok := patched["auth"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("auth missing or wrong type: %#v", patched["auth"])
+	}
+	cooldowns, ok := auth["cooldowns"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("auth.cooldowns missing or wrong type: %#v", auth["cooldowns"])
+	}
+	if cooldowns["rateLimitedProfileRotations"] != float64(2) {
+		t.Fatalf("rate-limit cooldown not patched: %#v", cooldowns)
+	}
+	if cooldowns["overloadedProfileRotations"] != float64(2) {
+		t.Fatalf("overload cooldown not patched: %#v", cooldowns)
+	}
+	if cooldowns["overloadedBackoffMs"] != float64(15000) {
+		t.Fatalf("overload backoff not patched: %#v", cooldowns)
 	}
 }
 

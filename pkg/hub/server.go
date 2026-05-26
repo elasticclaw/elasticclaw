@@ -2490,6 +2490,7 @@ with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+export OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS="${OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS:-0}"
 export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
 # Phase 1: wait for HTTP server to be listening (quick)
 for i in $(seq 1 30); do

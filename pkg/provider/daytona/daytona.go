@@ -371,6 +371,6 @@ func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir
 }
 
 func buildStartOpenClawCommand(workdir string) string {
-	script := fmt.Sprintf("cd %s && { source ~/.openclaw/env 2>/dev/null || true; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null & }", shellQuote(workdir))
+	script := fmt.Sprintf("cd %s && { source ~/.openclaw/env 2>/dev/null || true; export OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS=\"${OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS:-0}\"; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null & }", shellQuote(workdir))
 	return fmt.Sprintf("bash -c %s", shellQuote(script))
 }

@@ -19,8 +19,11 @@ func TestBuildStartOpenClawCommandQuotesWorkdir(t *testing.T) {
 	if !strings.Contains(cmd, `cd '"'"'/tmp/a'"'"'"'"'"'"'"'"'; touch /tmp/pwned; #'"'"'"'"'"'"'"'"''"'"'`) {
 		t.Fatalf("workdir was not preserved as one quoted cd target: %s", cmd)
 	}
-	if !strings.Contains(cmd, "&& { source ~/.openclaw/env 2>/dev/null || true; setsid nohup") {
+	if !strings.Contains(cmd, "&& { source ~/.openclaw/env 2>/dev/null || true;") || !strings.Contains(cmd, "setsid nohup") {
 		t.Fatalf("gateway start is not guarded by successful cd: %s", cmd)
+	}
+	if !strings.Contains(cmd, `OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS="${OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS:-0}"`) {
+		t.Fatalf("gateway start does not default OpenClaw retry cap: %s", cmd)
 	}
 }
 
