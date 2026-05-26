@@ -27,7 +27,9 @@ func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 			Inject: "PR created. Watch for CI results and review comments.",
 		},
 	}
-	s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{})
+	if s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+		t.Fatalf("duplicate stage transition returned true")
+	}
 
 	var messageCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
@@ -62,14 +64,23 @@ func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	transitionCount := 0
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{})
+			if s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+				mu.Lock()
+				transitionCount++
+				mu.Unlock()
+			}
 		}()
 	}
 	wg.Wait()
+	if transitionCount != 1 {
+		t.Fatalf("concurrent stage transitions returned true %d times, want 1", transitionCount)
+	}
 
 	var messageCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {

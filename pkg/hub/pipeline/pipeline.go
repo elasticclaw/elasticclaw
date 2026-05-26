@@ -91,8 +91,18 @@ type MoveIssueAction struct {
 	IssueID string `yaml:"issue_id,omitempty"`
 }
 
+// RunAction executes a shell command in the agent workspace before the
+// remaining on_enter actions continue.
+type RunAction struct {
+	Command         string `yaml:"command"`
+	ContinueOnError bool   `yaml:"continue_on_error,omitempty"`
+	Timeout         string `yaml:"timeout,omitempty"`
+}
+
 // OnEnter holds the actions to run when entering a stage.
 type OnEnter struct {
+	// Run executes a command in the agent workspace.
+	Run RunAction `yaml:"run,omitempty"`
 	// Inject sends this message to the claw as a user message.
 	Inject string `yaml:"inject"`
 	// MoveIssue moves the associated Linear/Shortcut issue to this status name.
@@ -112,18 +122,20 @@ type OnEnter struct {
 func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	// Use a shadow type to avoid infinite recursion.
 	type rawOnEnter struct {
-		Inject       string            `yaml:"inject"`
-		MoveIssueRaw yaml.Node          `yaml:"move_issue"`
-		MergePR      bool              `yaml:"merge_pr,omitempty"`
-		CloseIssue   bool              `yaml:"close_issue,omitempty"`
-		AddLabels    []string          `yaml:"add_labels,omitempty"`
-		RemoveLabels []string          `yaml:"remove_labels,omitempty"`
+		Run          RunAction `yaml:"run,omitempty"`
+		Inject       string    `yaml:"inject"`
+		MoveIssueRaw yaml.Node `yaml:"move_issue"`
+		MergePR      bool      `yaml:"merge_pr,omitempty"`
+		CloseIssue   bool      `yaml:"close_issue,omitempty"`
+		AddLabels    []string  `yaml:"add_labels,omitempty"`
+		RemoveLabels []string  `yaml:"remove_labels,omitempty"`
 	}
 	var raw rawOnEnter
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
 
+	oe.Run = raw.Run
 	oe.Inject = raw.Inject
 	oe.MergePR = raw.MergePR
 	oe.CloseIssue = raw.CloseIssue

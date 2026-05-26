@@ -1035,7 +1035,7 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
 	client, err := gossh.Dial("tcp", host, sshCfg)

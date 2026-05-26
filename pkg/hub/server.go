@@ -4153,6 +4153,17 @@ func (w *syncedWriter) Write(p []byte) (n int, err error) {
 
 // sshRun connects to host via the hub's SSH identity and runs a script.
 func (s *Server) sshRun(user, host, script string) error {
+	output, err := s.sshRunWithTimeout(user, host, script, 0)
+	if err != nil {
+		return err
+	}
+	log.Printf("bootstrap output:\n%s", output)
+	return nil
+}
+
+// sshRunWithTimeout connects to host via the hub's SSH identity and runs a script.
+// A zero timeout waits for the remote command to finish.
+func (s *Server) sshRunWithTimeout(user, host, script string, timeout time.Duration) (string, error) {
 	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
 	pubKeyFP := gossh.FingerprintSHA256(s.identity.PrivateKey.PublicKey())
 	log.Printf("SSH attempting: user=%s host=%s key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
@@ -4161,19 +4172,19 @@ func (s *Server) sshRun(user, host, script string) error {
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
 
 	client, err := gossh.Dial("tcp", host, sshCfg)
 	if err != nil {
-		return fmt.Errorf("ssh dial %s: %w", host, err)
+		return "", fmt.Errorf("ssh dial %s: %w", host, err)
 	}
 	defer client.Close()
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("ssh session: %w", err)
+		return "", fmt.Errorf("ssh session: %w", err)
 	}
 	defer sess.Close()
 
@@ -4185,17 +4196,40 @@ func (s *Server) sshRun(user, host, script string) error {
 	sess.Stdout = syncWriter
 	sess.Stderr = syncWriter
 	sess.Stdin = strings.NewReader(script)
-	if err := sess.Run("/bin/bash"); err != nil {
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- sess.Run("/bin/bash")
+	}()
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case err := <-runDone:
+			if err != nil {
+				mu.Lock()
+				output := buf.String()
+				mu.Unlock()
+				return output, fmt.Errorf("ssh script failed: %w\noutput: %s", err, output)
+			}
+		case <-timer.C:
+			_ = sess.Close()
+			_ = client.Close()
+			mu.Lock()
+			output := buf.String()
+			mu.Unlock()
+			return output, fmt.Errorf("ssh script timed out after %s\noutput: %s", timeout, output)
+		}
+	} else if err := <-runDone; err != nil {
 		mu.Lock()
 		output := buf.String()
 		mu.Unlock()
-		return fmt.Errorf("ssh script failed: %w\noutput: %s", err, output)
+		return output, fmt.Errorf("ssh script failed: %w\noutput: %s", err, output)
 	}
 	mu.Lock()
 	output := buf.String()
 	mu.Unlock()
-	log.Printf("bootstrap output:\n%s", output)
-	return nil
+	return output, nil
 }
 
 // sshWriteFiles writes a map of filename->content to a remote directory via SSH.
@@ -4203,7 +4237,7 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
 	client, err := gossh.Dial("tcp", host, sshCfg)
@@ -4284,7 +4318,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	sshCfg := &gossh.ClientConfig{
 		User:            sshUser,
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		HostKeyCallback: s.sshHostKeyCallback(fmt.Sprintf("%s:%d", sshHost, sshPort)),
 		Timeout:         30 * time.Second,
 	}
 	sshAddr := fmt.Sprintf("%s:%d", sshHost, sshPort)

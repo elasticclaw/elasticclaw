@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -324,8 +325,113 @@ func (s *Server) resolveGitHubIssuesTokenForPipeline(ctx pipelineContext) string
 	return ""
 }
 
+const defaultPipelineRunTimeout = 10 * time.Minute
+
+type pipelineRunResult struct {
+	ExitCode int
+	Stdout   string
+	Stderr   string
+}
+
+func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunAction) (*pipelineRunResult, error) {
+	command := strings.TrimSpace(action.Command)
+	if command == "" {
+		return nil, nil
+	}
+	timeout := defaultPipelineRunTimeout
+	if strings.TrimSpace(action.Timeout) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(action.Timeout))
+		if err != nil {
+			return nil, fmt.Errorf("invalid run timeout %q: %w", action.Timeout, err)
+		}
+		timeout = parsed
+	}
+
+	var providerName, providerID, sshHost, sshUser string
+	var sshPort int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(ssh_host,''), COALESCE(ssh_port,0), COALESCE(ssh_user,'')
+		FROM claws WHERE id=?
+	`, clawID).Scan(&providerName, &providerID, &sshHost, &sshPort, &sshUser); err != nil {
+		return nil, fmt.Errorf("load agent provider: %w", err)
+	}
+	if providerID == "" {
+		return nil, fmt.Errorf("agent has no provider instance yet")
+	}
+
+	workspaceCommand := `cd "$HOME/.openclaw/workspace" && ` + command
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+30*time.Second)
+	defer cancel()
+
+	s.mu.RLock()
+	provCfg, ok := s.hubCfg.Providers[providerName]
+	s.mu.RUnlock()
+	if !ok && providerName != "noop" {
+		return nil, fmt.Errorf("provider %q is not configured", providerName)
+	}
+
+	switch providerName {
+	case "daytona":
+		p, err := newDaytonaProvider(provCfg)
+		if err != nil {
+			return nil, fmt.Errorf("daytona init: %w", err)
+		}
+		result, err := p.ExecWithTimeout(ctx, providerID, []string{workspaceCommand}, timeout)
+		if result == nil {
+			return nil, err
+		}
+		return &pipelineRunResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
+	case "exedev":
+		p, err := newExedevProvider(provCfg)
+		if err != nil {
+			return nil, fmt.Errorf("exedev init: %w", err)
+		}
+		result, err := p.Exec(ctx, providerID, []string{"bash", "-lc", workspaceCommand})
+		if result == nil {
+			return nil, err
+		}
+		return &pipelineRunResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
+	case "replicated":
+		if sshHost == "" || sshPort == 0 || sshUser == "" {
+			return nil, fmt.Errorf("replicated agent has no SSH connection details")
+		}
+		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand, timeout)
+	case "noop":
+		return &pipelineRunResult{ExitCode: 0, Stdout: "noop provider skipped workflow command"}, nil
+	default:
+		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
+	}
+}
+
+func (s *Server) executeReplicatedPipelineRun(user, host, command string, timeout time.Duration) (*pipelineRunResult, error) {
+	output, err := s.sshRunWithTimeout(user, host, command, timeout)
+	if err != nil {
+		return &pipelineRunResult{ExitCode: 1, Stderr: err.Error(), Stdout: output}, err
+	}
+	return &pipelineRunResult{ExitCode: 0, Stdout: output}, nil
+}
+
+func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResult, err error) string {
+	command := strings.TrimSpace(action.Command)
+	if command == "" {
+		command = "(empty command)"
+	}
+	details := ""
+	if result != nil {
+		details = strings.TrimSpace(result.Stdout + "\n" + result.Stderr)
+	}
+	if details == "" && err != nil {
+		details = err.Error()
+	}
+	if details == "" {
+		details = "no command output"
+	}
+	return fmt.Sprintf("Workflow command failed: `%s`\n\n%s", command, sanitizeBootstrapOutput(details))
+}
+
 // runOnEnter executes the on_enter actions for a given stage.
 //
+// - stage.OnEnter.Run: executes a command in the agent workspace
 // - stage.OnEnter.Inject: injects a user message into the claw
 // - stage.OnEnter.MoveIssue: moves the Linear/Shortcut issue to the named status
 //
@@ -333,6 +439,24 @@ func (s *Server) resolveGitHubIssuesTokenForPipeline(ctx pipelineContext) string
 // MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) {
 	issueID := ctx.IssueID
+	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
+		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
+		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
+		if err != nil || (result != nil && result.ExitCode != 0) {
+			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
+			if stage.OnEnter.Run.ContinueOnError {
+				log.Printf("[pipeline] %s; continuing because continue_on_error=true", msg)
+				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+			} else {
+				log.Printf("[pipeline] %s", msg)
+				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+				return
+			}
+		} else {
+			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
+		}
+	}
+
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
 
@@ -649,14 +773,14 @@ issueResolved:
 // transitionPipelineStage sets the claw's current pipeline stage and runs on_enter.
 // If the stage is terminal, it terminates the claw after running on_enter and
 // ensuring any injected message is delivered (waits if agent is streaming).
-func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
-	s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
+func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) bool {
+	return s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
 }
 
-func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) {
+func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
-		return
+		return false
 	}
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, ctx)
@@ -701,6 +825,7 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 			go s.terminateVM(provider, providerID)
 		}
 	}
+	return true
 }
 
 // initializePipelineEntryIfNeeded transitions a claw into its entry pipeline stage
@@ -726,8 +851,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	s.transitionPipelineStageWithContext(clawID, *entry, ctx)
-	return strings.TrimSpace(entry.OnEnter.Inject) != ""
+	return s.transitionPipelineStageWithContext(clawID, *entry, ctx) && strings.TrimSpace(entry.OnEnter.Inject) != ""
 }
 
 // stopAgentWithReason is the centralized handler for unexpected agent termination.

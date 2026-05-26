@@ -44,6 +44,7 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 	linear := linearClient{token: env.LinearAPIKey}
 
 	var webhookID string
+	var labelID string
 	var issueID string
 	var issueIdentifier string
 	var agentID string
@@ -70,6 +71,9 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 		if issueID != "" {
 			_ = linear.archiveIssue(cleanupCtx, issueID)
 		}
+		if labelID != "" {
+			_ = linear.deleteLabel(cleanupCtx, labelID)
+		}
 		if webhookID != "" {
 			_ = linear.deleteWebhook(cleanupCtx, webhookID)
 		}
@@ -78,6 +82,9 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 
 	team := linear.teamByKey(ctx, t, env.LinearTeamKey)
 	linear.deleteE2EWebhooks(ctx, t)
+	labelName := "elasticclaw-e2e-" + env.RunID
+	linear.deleteLabelsByName(ctx, t, labelName)
+	labelID = linear.createLabel(ctx, t, team.ID, labelName)
 	triggerStateID := team.stateID(t, env.LinearTriggerState)
 	initialStateID := team.initialStateID(t, env.LinearInitialState, env.LinearTriggerState)
 
@@ -93,7 +100,7 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 	runCLI(ctx, t, root, env, "workflow", "push", "--workspace", workspaceName, filepath.Join(root, ".elasticclaw", "workflows", "linear.yaml"))
 
 	webhookID = linear.createWebhook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/linear", team.ID, webhookSecret)
-	issue := linear.createIssue(ctx, t, team.ID, initialStateID, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.\n\nElasticClaw E2E run: "+env.RunID)
+	issue := linear.createIssue(ctx, t, team.ID, initialStateID, labelID, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.\n\nElasticClaw E2E run: "+env.RunID)
 	issueID = issue.ID
 	issueIdentifier = issue.Identifier
 	linear.updateIssueState(ctx, t, issueID, triggerStateID)
@@ -133,6 +140,8 @@ trigger:
     team: %s
     states:
       - %s
+    labels:
+      - %s
 
 concurrency_group: e2e-linear-%s
 
@@ -147,7 +156,7 @@ stages:
 
         Do exactly what this issue asks.
         Do not create a pull request.
-`, workflowName, env.LinearTeamKey, env.LinearTriggerState, env.RunID))
+`, workflowName, env.LinearTeamKey, env.LinearTriggerState, "elasticclaw-e2e-"+env.RunID, env.RunID))
 	return root
 }
 
@@ -308,7 +317,76 @@ func (c linearClient) deleteWebhook(ctx context.Context, id string) error {
 }`, map[string]interface{}{"id": id}, &out)
 }
 
-func (c linearClient) createIssue(ctx context.Context, t *testing.T, teamID, stateID, title, description string) linearIssue {
+func (c linearClient) createLabel(ctx context.Context, t *testing.T, teamID, name string) string {
+	t.Helper()
+	var out struct {
+		Data struct {
+			IssueLabelCreate struct {
+				Success bool `json:"success"`
+				Label   struct {
+					ID string `json:"id"`
+				} `json:"issueLabel"`
+			} `json:"issueLabelCreate"`
+		} `json:"data"`
+	}
+	vars := map[string]interface{}{
+		"input": map[string]interface{}{
+			"teamId": teamID,
+			"name":   name,
+			"color":  "#5E6AD2",
+		},
+	}
+	c.graphql(ctx, t, `mutation($input: IssueLabelCreateInput!) {
+  issueLabelCreate(input: $input) {
+    success
+    issueLabel { id }
+  }
+}`, vars, &out)
+	if !out.Data.IssueLabelCreate.Success || out.Data.IssueLabelCreate.Label.ID == "" {
+		t.Fatalf("Linear issueLabelCreate did not return a label id")
+	}
+	return out.Data.IssueLabelCreate.Label.ID
+}
+
+func (c linearClient) deleteLabelsByName(ctx context.Context, t *testing.T, name string) {
+	t.Helper()
+	var out struct {
+		Data struct {
+			IssueLabels struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"issueLabels"`
+		} `json:"data"`
+	}
+	c.graphql(ctx, t, `query {
+  issueLabels {
+    nodes { id name }
+  }
+}`, nil, &out)
+	var deleteErr error
+	for _, label := range out.Data.IssueLabels.Nodes {
+		if label.Name == name {
+			if err := c.deleteLabel(ctx, label.ID); err != nil {
+				t.Logf("delete stale Linear E2E label %s: %v", label.ID, err)
+				deleteErr = err
+			}
+		}
+	}
+	if deleteErr != nil {
+		t.Fatalf("one or more Linear E2E labels named %q could not be deleted", name)
+	}
+}
+
+func (c linearClient) deleteLabel(ctx context.Context, id string) error {
+	var out map[string]interface{}
+	return c.graphqlNoFatal(ctx, `mutation($id: String!) {
+  issueLabelDelete(id: $id) { success }
+}`, map[string]interface{}{"id": id}, &out)
+}
+
+func (c linearClient) createIssue(ctx context.Context, t *testing.T, teamID, stateID, labelID, title, description string) linearIssue {
 	t.Helper()
 	var out struct {
 		Data struct {
@@ -326,6 +404,7 @@ func (c linearClient) createIssue(ctx context.Context, t *testing.T, teamID, sta
 		"input": map[string]interface{}{
 			"teamId":      teamID,
 			"stateId":     stateID,
+			"labelIds":    []string{labelID},
 			"title":       title,
 			"description": description,
 		},
