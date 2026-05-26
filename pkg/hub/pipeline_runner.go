@@ -773,14 +773,14 @@ issueResolved:
 // transitionPipelineStage sets the claw's current pipeline stage and runs on_enter.
 // If the stage is terminal, it terminates the claw after running on_enter and
 // ensuring any injected message is delivered (waits if agent is streaming).
-func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) {
-	s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
+func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) bool {
+	return s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
 }
 
-func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) {
+func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
-		return
+		return false
 	}
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, ctx)
@@ -825,6 +825,7 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 			go s.terminateVM(provider, providerID)
 		}
 	}
+	return true
 }
 
 // initializePipelineEntryIfNeeded transitions a claw into its entry pipeline stage
@@ -850,8 +851,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	s.transitionPipelineStageWithContext(clawID, *entry, ctx)
-	return strings.TrimSpace(entry.OnEnter.Inject) != ""
+	return s.transitionPipelineStageWithContext(clawID, *entry, ctx) && strings.TrimSpace(entry.OnEnter.Inject) != ""
 }
 
 // stopAgentWithReason is the centralized handler for unexpected agent termination.
