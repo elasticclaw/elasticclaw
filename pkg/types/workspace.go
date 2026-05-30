@@ -71,19 +71,9 @@ func (w *WorkflowConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // WorkflowTrigger defines the event source and filters for a workflow.
 type WorkflowTrigger struct {
-	GitHubIssues *GitHubIssuesWorkflowTrigger `yaml:"github_issues,omitempty" json:"githubIssues,omitempty"`
+	GitHubIssues *GitHubIssuesWorkflowTrigger `yaml:"github_issues,omitempty" json:"github_issues,omitempty"`
 	Linear       *LinearWorkflowTrigger       `yaml:"linear,omitempty" json:"linear,omitempty"`
 	Shortcut     *ShortcutWorkflowTrigger     `yaml:"shortcut,omitempty" json:"shortcut,omitempty"`
-
-	Type         string   `yaml:"type" json:"type"`
-	Event        string   `yaml:"event,omitempty" json:"event,omitempty"`
-	Workspace    string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
-	Team         string   `yaml:"team,omitempty" json:"team,omitempty"`
-	Repositories []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	States       []string `yaml:"states,omitempty" json:"states,omitempty"`
-	Labels       []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	Labelers     []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
-	AssignedTo   string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
 }
 
 type GitHubIssuesWorkflowTrigger struct {
@@ -92,7 +82,7 @@ type GitHubIssuesWorkflowTrigger struct {
 	States       []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels       []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Labelers     []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
-	AssignedTo   string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+	AssignedTo   string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 }
 
 type LinearWorkflowTrigger struct {
@@ -101,7 +91,7 @@ type LinearWorkflowTrigger struct {
 	Team       string   `yaml:"team,omitempty" json:"team,omitempty"`
 	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 }
 
 type ShortcutWorkflowTrigger struct {
@@ -109,7 +99,7 @@ type ShortcutWorkflowTrigger struct {
 	Workspace  string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
 	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assignedTo,omitempty"`
+	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 }
 
 // WorkflowStage is one step in a workflow state machine. It intentionally mirrors

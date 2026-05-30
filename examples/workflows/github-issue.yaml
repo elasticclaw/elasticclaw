@@ -1,0 +1,83 @@
+schema_version: v1
+name: github-issue
+
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - example-org/example-repo
+    states:
+      - open
+    labels:
+      - todo
+    labelers:
+      - "example-user"
+
+concurrency_group: example-github-issue
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      remove_labels:
+        - todo
+      add_labels:
+        - working
+      inject: |
+        Issue: {{.Issue.Identifier}} - {{.Issue.Title}}
+        URL: {{.Issue.URL}}
+
+        Read the issue and README.md, then start working on the issue.
+        Narrate your progress as you go. Keep me updated.
+        When implementation is complete and before committing, say [READY_TO_COMMIT].
+
+  - id: pre_commit
+    label: Pre-Commit Checks
+    triggers:
+      - message_contains: "[READY_TO_COMMIT]"
+    on_enter:
+      run:
+        command: make test
+        continue_on_error: true
+        timeout: 15m
+      inject: |
+        Review the pre-commit check output.
+        Fix issues you agree with.
+        When fixes are complete, create the final commit and PR, then say [DONE].
+
+  - id: pr_opened
+    label: PR Opened
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      add_labels:
+        - "in review"
+      remove_labels:
+        - working
+      inject: |
+        PR created. Watch for CI results and review comments.
+
+  - id: merged
+    label: Merged
+    on_enter:
+      add_labels:
+        - done
+      remove_labels:
+        - "in review"
+    triggers:
+      - pr_merged: {}
+    terminal: true
+
+  - id: closed_no_merge
+    label: Closed Without Merge
+    triggers:
+      - pr_closed: {}
+    on_enter:
+      add_labels:
+        - wontfix
+      remove_labels:
+        - inreview
+      inject: |
+        PR was closed without merging. Terminate the agent.
+    terminal: true

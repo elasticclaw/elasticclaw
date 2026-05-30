@@ -8,12 +8,13 @@ import (
 
 func TestGitHubIssuesWorkflowTriggerMatchesLabelEvent(t *testing.T) {
 	trigger := &types.WorkflowTrigger{
-		Type:         "github_issues",
-		Event:        "issue_labeled",
-		Repositories: []string{"elasticclaw/elasticclaw"},
-		States:       []string{"open"},
-		Labels:       []string{"agent-ready"},
-		Labelers:     []string{"*"},
+		GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+			Event:        "issue_labeled",
+			Repositories: []string{"elasticclaw/elasticclaw"},
+			States:       []string{"open"},
+			Labels:       []string{"agent-ready"},
+			Labelers:     []string{"*"},
+		},
 	}
 	var payload githubIssuesWebhookPayload
 	payload.Action = "labeled"

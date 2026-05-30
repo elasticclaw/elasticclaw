@@ -233,9 +233,6 @@ func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
 	if workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil && len(workflow.Trigger.GitHubIssues.Repositories) > 0 {
 		return workflow.Trigger.GitHubIssues.Repositories
 	}
-	if workflow.Trigger != nil && len(workflow.Trigger.Repositories) > 0 {
-		return workflow.Trigger.Repositories
-	}
 	if len(workflow.TriggerRepos) > 0 {
 		return workflow.TriggerRepos
 	}
@@ -318,10 +315,7 @@ func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload 
 	if trigger.GitHubIssues != nil {
 		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
 	}
-	if trigger.Type != "github_issues" {
-		return false
-	}
-	return githubIssuesWorkflowSourceMatches(trigger.Event, trigger.States, trigger.Labels, trigger.Labelers, payload, currentStatus, issueLabels)
+	return false
 }
 
 func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
