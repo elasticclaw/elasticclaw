@@ -163,8 +163,61 @@ stages:
 	if err == nil {
 		t.Fatal("Validate() expected error for legacy flat trigger")
 	}
-	if !strings.Contains(err.Error(), "trigger must define exactly one source") {
-		t.Fatalf("Validate() error = %v, want exactly one source", err)
+	want := `workflow "github-issue": trigger must define exactly one source`
+	if err.Error() != want {
+		t.Fatalf("Validate() error = %v, want %s", err, want)
+	}
+}
+
+func TestWorkflowV1TriggerSourceCountError(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "no source",
+			yaml: `
+schema_version: v1
+name: github-issue
+trigger: {}
+stages:
+  - id: working
+    entry: true
+`,
+		},
+		{
+			name: "multiple sources",
+			yaml: `
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+  linear:
+    event: status_changed
+    states:
+      - Todo
+stages:
+  - id: working
+    entry: true
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var workflow WorkflowConfig
+			if err := yaml.Unmarshal([]byte(tt.yaml), &workflow); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := workflow.Validate()
+			if err == nil {
+				t.Fatal("Validate() expected error")
+			}
+			want := `workflow "github-issue": trigger must define exactly one source`
+			if err.Error() != want {
+				t.Fatalf("Validate() error = %v, want %s", err, want)
+			}
+		})
 	}
 }
 
