@@ -211,10 +211,11 @@ func NewTestServerWithGitHubIssues(t *testing.T) *TestServer {
 				SchemaVersion: "v1",
 				Name:          "test-workflow",
 				Trigger: &types.WorkflowTrigger{
-					Type:         "github_issues",
-					Event:        "issue_edited",
-					Repositories: []string{"testorg/testrepo"},
-					States:       []string{"open"},
+					GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+						Event:        "issue_edited",
+						Repositories: []string{"testorg/testrepo"},
+						States:       []string{"open"},
+					},
 				},
 				Stages: []types.WorkflowStage{
 					{

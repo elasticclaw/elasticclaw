@@ -48,34 +48,6 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			if len(workflow.Trigger.Shortcut.States) > 0 {
 				workflow.TriggerStatus = workflow.Trigger.Shortcut.States[0]
 			}
-		default:
-			switch workflow.Trigger.Type {
-			case "github_issues":
-				workflow.Integration = "github-issues"
-				workflow.TriggerRepos = append([]string(nil), workflow.Trigger.Repositories...)
-				workflow.Labels = append([]string(nil), workflow.Trigger.Labels...)
-				workflow.AllowedLabelers = nil
-				for _, labeler := range workflow.Trigger.Labelers {
-					if labeler == "*" {
-						continue
-					}
-					workflow.AllowedLabelers = append(workflow.AllowedLabelers, labeler)
-				}
-				if len(workflow.Trigger.States) > 0 {
-					workflow.TriggerStatus = workflow.Trigger.States[0]
-				} else if len(workflow.Trigger.Labels) > 0 {
-					workflow.TriggerStatus = workflow.Trigger.Labels[0]
-				}
-			case "linear":
-				workflow.Integration = "linear"
-				workflow.Workspace = workflow.Trigger.Workspace
-				workflow.Team = workflow.Trigger.Team
-				workflow.Labels = append([]string(nil), workflow.Trigger.Labels...)
-				workflow.AssignedTo = workflow.Trigger.AssignedTo
-				if len(workflow.Trigger.States) > 0 {
-					workflow.TriggerStatus = workflow.Trigger.States[0]
-				}
-			}
 		}
 	}
 	if len(workflow.Stages) > 0 {

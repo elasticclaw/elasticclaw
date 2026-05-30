@@ -318,10 +318,11 @@ func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 			SchemaVersion: "v1",
 			Name:          "test-workflow",
 			Trigger: &types.WorkflowTrigger{
-				Type:         "github_issues",
-				Event:        "issue_reopened",
-				Repositories: []string{"testorg/testrepo"},
-				States:       []string{"open"},
+				GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+					Event:        "issue_reopened",
+					Repositories: []string{"testorg/testrepo"},
+					States:       []string{"open"},
+				},
 			},
 			Stages: []types.WorkflowStage{{
 				ID:    "working",

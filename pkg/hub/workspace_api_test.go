@@ -147,6 +147,50 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	}
 }
 
+func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering","repositories":["elasticclaw/elasticclaw"]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"github-issue","trigger":{"github_issues":{"event":"issue_labeled","repositories":["autoci-ai/autoci"],"states":["open"],"labels":["todo"],"labelers":["marccampbell"]}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	workspace, err := loadExternalWorkspace("engineering")
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	if len(workspace.Workflows) != 1 {
+		t.Fatalf("workflow count = %d, want 1", len(workspace.Workflows))
+	}
+	trigger := workspace.Workflows[0].Trigger
+	if trigger == nil || trigger.GitHubIssues == nil {
+		t.Fatalf("github_issues trigger not preserved: %#v", trigger)
+	}
+	if got := trigger.GitHubIssues.Labelers; len(got) != 1 || got[0] != "marccampbell" {
+		t.Fatalf("labelers = %#v, want marccampbell", got)
+	}
+	if workspace.Workflows[0].Integration != "github-issues" {
+		t.Fatalf("integration = %q, want github-issues", workspace.Workflows[0].Integration)
+	}
+}
+
 func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")

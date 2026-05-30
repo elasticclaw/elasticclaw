@@ -1098,8 +1098,6 @@ func githubIssuesWorkflowPollAction(workflow *types.WorkflowConfig) string {
 	if workflow != nil && workflow.Trigger != nil {
 		if workflow.Trigger.GitHubIssues != nil {
 			event = workflow.Trigger.GitHubIssues.Event
-		} else if workflow.Trigger.Type == "github_issues" {
-			event = workflow.Trigger.Event
 		}
 	}
 	switch event {
@@ -1127,8 +1125,6 @@ func githubIssuesWorkflowPollLabel(workflow *types.WorkflowConfig, issueLabels m
 		var labels []string
 		if workflow.Trigger.GitHubIssues != nil {
 			labels = workflow.Trigger.GitHubIssues.Labels
-		} else if workflow.Trigger.Type == "github_issues" {
-			labels = workflow.Trigger.Labels
 		}
 		for _, label := range labels {
 			if issueLabels[strings.ToLower(label)] {
@@ -1161,9 +1157,6 @@ func githubIssuesWorkflowPollLabelers(workflow *types.WorkflowConfig) []string {
 	if workflow.Trigger != nil {
 		if workflow.Trigger.GitHubIssues != nil {
 			return workflow.Trigger.GitHubIssues.Labelers
-		}
-		if workflow.Trigger.Type == "github_issues" {
-			return workflow.Trigger.Labelers
 		}
 	}
 	return workflow.AllowedLabelers
