@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -40,6 +42,37 @@ func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
+	}
+}
+
+func TestGitHubAPIDeleteLabelIgnoresMissingLabel(t *testing.T) {
+	var sawDelete bool
+	var handlerErr string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			handlerErr = "method = " + r.Method + ", want DELETE"
+			http.Error(w, handlerErr, http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Path != "/repos/elasticclaw/elasticclaw/issues/305/labels/agent-ready" {
+			handlerErr = "path = " + r.URL.Path
+			http.Error(w, handlerErr, http.StatusInternalServerError)
+			return
+		}
+		sawDelete = true
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Label does not exist","status":"404"}`))
+	}))
+	t.Cleanup(github.Close)
+
+	if err := githubAPIDeleteLabel(github.URL, "elasticclaw/elasticclaw", 305, "agent-ready", "test-token"); err != nil {
+		t.Fatalf("githubAPIDeleteLabel returned error for missing label: %v", err)
+	}
+	if handlerErr != "" {
+		t.Fatal(handlerErr)
+	}
+	if !sawDelete {
+		t.Fatal("test server did not receive DELETE")
 	}
 }
 

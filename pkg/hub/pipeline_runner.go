@@ -171,6 +171,9 @@ func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token st
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound && strings.Contains(string(respBody), "Label does not exist") {
+		return nil
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("github API DELETE %s: %d %s", path, resp.StatusCode, string(respBody))
 	}
