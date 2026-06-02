@@ -1,13 +1,13 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
-import { getAuthToken, clearAuthTokens } from "./auth-storage"
+import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
 
 // Token is resolved once and cached.
-// Priority: localStorage (set on login) > /api/hub-config (proxy to hub)
+// Priority: sessionStorage or an open-tab session sync > /api/hub-config (proxy to hub)
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
 
-export function resolveToken(): Promise<string> {
+export async function resolveToken(): Promise<string> {
   if (_token) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
 
@@ -17,9 +17,9 @@ export function resolveToken(): Promise<string> {
     return Promise.resolve(_token)
   }
 
-  // Check localStorage first (set by login page) — persists across tabs
+  // Check this tab first, then ask other currently open tabs for their session.
   // Prefer GitHub OAuth token over hub token when both exist
-  const authToken = getAuthToken()
+  const authToken = getAuthToken() || await requestAuthToken()
   if (authToken) {
     _token = authToken
     return Promise.resolve(_token)
@@ -30,7 +30,7 @@ export function resolveToken(): Promise<string> {
   const hubConfigUrl = hubUrl ? `${hubUrl}/api/hub-config` : "/api/hub-config"
 
   _tokenPromise = fetch(hubConfigUrl, {
-    headers: { Authorization: `Bearer ${getAuthToken() || ""}` }
+    headers: { Authorization: "Bearer " }
   })
     .then((r) => r.json())
     .then((d) => {
