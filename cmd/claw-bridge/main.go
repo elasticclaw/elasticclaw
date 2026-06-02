@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -607,11 +608,170 @@ type agentResult struct {
 	err  error
 }
 
+type agentActivity struct {
+	Kind    string `json:"kind"`
+	Stream  string `json:"stream,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Tool    string `json:"tool,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Command string `json:"command,omitempty"`
+	Path    string `json:"path,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 // inFlightState tracks a single in-progress agent turn.
 type inFlightState struct {
-	onChunk  func(string)
-	fullText strings.Builder
-	done     chan agentResult
+	onChunk             func(string)
+	onActivity          func(agentActivity)
+	fullText            strings.Builder
+	done                chan agentResult
+	mu                  sync.Mutex
+	activeTool          *agentActivity
+	activeToolStartedAt time.Time
+	lastToolPulseAt     time.Time
+	modelWaitStartedAt  time.Time
+	lastModelPulseAt    time.Time
+}
+
+func (inf *inFlightState) emitActivity(a agentActivity) {
+	if inf.onActivity != nil {
+		inf.onActivity(a)
+	}
+}
+
+func (inf *inFlightState) noteActivity(a agentActivity) {
+	if a.Kind != "tool" {
+		return
+	}
+	phase := strings.ToLower(strings.TrimSpace(a.Phase))
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	switch phase {
+	case "running", "start", "started", "in_progress":
+		copy := a
+		if inf.activeTool == nil || inf.activeTool.Tool != copy.Tool || inf.activeTool.Command != copy.Command || inf.activeTool.Path != copy.Path || inf.activeTool.URL != copy.URL {
+			inf.activeToolStartedAt = time.Now()
+			inf.lastToolPulseAt = time.Time{}
+		}
+		inf.activeTool = &copy
+		inf.modelWaitStartedAt = time.Time{}
+		inf.lastModelPulseAt = time.Time{}
+	case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+		inf.activeTool = nil
+		inf.activeToolStartedAt = time.Time{}
+		inf.lastToolPulseAt = time.Time{}
+		inf.modelWaitStartedAt = time.Now()
+		inf.lastModelPulseAt = time.Time{}
+	}
+}
+
+func (inf *inFlightState) noteAssistantChunk() {
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	inf.modelWaitStartedAt = time.Time{}
+	inf.lastModelPulseAt = time.Time{}
+}
+
+func (inf *inFlightState) toolProgressPulse() (agentActivity, bool) {
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	if inf.activeTool == nil || inf.activeToolStartedAt.IsZero() {
+		return agentActivity{}, false
+	}
+	now := time.Now()
+	elapsed := now.Sub(inf.activeToolStartedAt)
+	if elapsed < 90*time.Second {
+		return agentActivity{}, false
+	}
+	if !inf.lastToolPulseAt.IsZero() && now.Sub(inf.lastToolPulseAt) < 60*time.Second {
+		return agentActivity{}, false
+	}
+	inf.lastToolPulseAt = now
+	pulse := *inf.activeTool
+	pulse.Phase = "running"
+	pulse.Message = fmt.Sprintf("running for %s", formatActivityDuration(elapsed))
+	return pulse, true
+}
+
+func (inf *inFlightState) modelProgressPulse() (agentActivity, bool) {
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	if inf.activeTool != nil || inf.modelWaitStartedAt.IsZero() {
+		return agentActivity{}, false
+	}
+	now := time.Now()
+	elapsed := now.Sub(inf.modelWaitStartedAt)
+	if elapsed < 90*time.Second {
+		return agentActivity{}, false
+	}
+	if !inf.lastModelPulseAt.IsZero() && now.Sub(inf.lastModelPulseAt) < 60*time.Second {
+		return agentActivity{}, false
+	}
+	inf.lastModelPulseAt = now
+	return agentActivity{
+		Kind:    "model_started",
+		Message: fmt.Sprintf("waiting for %s", formatActivityDuration(elapsed)),
+	}, true
+}
+
+func cleanAgentActivity(a agentActivity) agentActivity {
+	a.Tool = sanitizeActivityText(a.Tool)
+	a.Detail = sanitizeActivityText(a.Detail)
+	a.Command = sanitizeActivityText(a.Command)
+	a.Path = sanitizeActivityText(a.Path)
+	a.URL = sanitizeActivityText(a.URL)
+	a.Message = sanitizeActivityText(a.Message)
+	a.Error = sanitizeActivityText(a.Error)
+	return a
+}
+
+func sanitizeActivityText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	replacers := []struct {
+		prefix string
+		value  string
+	}{
+		{"Bearer ", "Bearer [redacted]"},
+		{"token=", "token=[redacted]"},
+		{"access_token=", "access_token=[redacted]"},
+		{"api_key=", "api_key=[redacted]"},
+		{"OPENAI_API_KEY=", "OPENAI_API_KEY=[redacted]"},
+		{"ANTHROPIC_API_KEY=", "ANTHROPIC_API_KEY=[redacted]"},
+		{"FIREWORKS_API_KEY=", "FIREWORKS_API_KEY=[redacted]"},
+		{"GITHUB_TOKEN=", "GITHUB_TOKEN=[redacted]"},
+		{"GH_TOKEN=", "GH_TOKEN=[redacted]"},
+	}
+	for _, r := range replacers {
+		value = redactActivityPrefix(value, r.prefix, r.value)
+	}
+	if len(value) > 240 {
+		value = value[:237] + "..."
+	}
+	return value
+}
+
+func redactActivityPrefix(value, prefix, replacement string) string {
+	offset := 0
+	lowerPrefix := strings.ToLower(prefix)
+	for offset < len(value) {
+		idx := strings.Index(strings.ToLower(value[offset:]), lowerPrefix)
+		if idx < 0 {
+			break
+		}
+		start := offset + idx
+		end := start + len(prefix)
+		for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
+			end++
+		}
+		value = value[:start] + replacement + value[end:]
+		offset = start + len(replacement)
+	}
+	return value
 }
 
 // gatewaySession is a long-lived connection to the OpenClaw gateway that
@@ -866,11 +1026,23 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					Phase   string `json:"phase"`
 					Error   string `json:"error"`
 					Message string `json:"message"`
+					Tool    string `json:"tool"`
+					Name    string `json:"name"`
+					Command string `json:"command"`
+					Path    string `json:"path"`
+					URL     string `json:"url"`
+					URI     string `json:"uri"`
+					Meta    string `json:"meta"`
+					Status  string `json:"status"`
 				} `json:"data"`
 			}
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
 				continue
 			}
+			var rawAgentPayload struct {
+				Data map[string]interface{} `json:"data"`
+			}
+			_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
 			if agentPayload.SessionKey != gs.sessionKey {
 				continue
 			}
@@ -884,9 +1056,49 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 
 			if agentPayload.Stream == "assistant" && agentPayload.Data.Delta != "" {
 				inf.fullText.WriteString(agentPayload.Data.Delta)
+				inf.noteAssistantChunk()
 				if inf.onChunk != nil {
 					inf.onChunk(agentPayload.Data.Delta)
 				}
+			} else if agentPayload.Stream != "assistant" && agentPayload.Stream != "lifecycle" {
+				tool := agentPayload.Data.Tool
+				if tool == "" {
+					tool = agentPayload.Data.Name
+				}
+				kind := "activity"
+				switch {
+				case tool != "":
+					kind = "tool"
+				case strings.Contains(agentPayload.Stream, "tool"):
+					kind = "tool"
+				case strings.Contains(agentPayload.Stream, "diagnostic"):
+					kind = "diagnostic"
+				}
+				command := firstNonEmpty(
+					agentPayload.Data.Command,
+					nestedString(rawAgentPayload.Data, "command", "cmd", "shell_command", "shellCommand", "script", "argv", "input"),
+				)
+				path := firstNonEmpty(agentPayload.Data.Path, nestedString(rawAgentPayload.Data, "path", "file", "filename"))
+				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
+				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
+				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
+				activity := cleanAgentActivity(agentActivity{
+					Kind:    kind,
+					Stream:  agentPayload.Stream,
+					Phase:   agentPayload.Data.Phase,
+					Tool:    tool,
+					Detail:  detail,
+					Command: command,
+					Path:    path,
+					URL:     url,
+					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
+					Error:   agentPayload.Data.Error,
+				})
+				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
+					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
+				}
+				inf.noteActivity(activity)
+				inf.emitActivity(activity)
 			}
 			if agentPayload.Stream == "lifecycle" {
 				switch agentPayload.Data.Phase {
@@ -902,10 +1114,220 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 						msg = "agent lifecycle error"
 					}
 					log.Printf("[gateway] agent turn error: %s", msg)
+					inf.emitActivity(cleanAgentActivity(agentActivity{Kind: "session_error", Stream: "lifecycle", Phase: "error", Error: msg}))
 					inf.done <- agentResult{err: fmt.Errorf("%s", msg)}
 				}
 			}
 		}
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func resolveToolActivityDetail(tool, command, path, url, meta string, data map[string]interface{}) (string, string, string, string) {
+	detail := nestedString(data, "title", "summary", "description", "label", "display", "display_name", "displayName", "text")
+	cleanTool := strings.ToLower(strings.TrimSpace(tool))
+	cleanMeta := strings.TrimSpace(meta)
+	if cleanMeta == "" {
+		return command, path, url, detail
+	}
+	switch cleanTool {
+	case "exec", "bash":
+		if command == "" {
+			command = cleanMeta
+		}
+	case "read", "write", "edit", "attach", "memory_get":
+		if path == "" {
+			path = cleanMeta
+		}
+	case "web_fetch", "browser":
+		if url == "" && looksLikeURL(cleanMeta) {
+			url = cleanMeta
+		} else if detail == "" {
+			detail = cleanMeta
+		}
+	default:
+		if detail == "" {
+			detail = cleanMeta
+		}
+	}
+	return command, path, url, detail
+}
+
+func looksLikeURL(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+}
+
+func logMissingToolActivityDetail(stream, phase, tool string, data map[string]interface{}) {
+	log.Printf(
+		"[agent-activity] missing tool detail stream=%s phase=%s tool=%s keys=%s payload=%s",
+		sanitizeActivityText(stream),
+		sanitizeActivityText(phase),
+		sanitizeActivityText(tool),
+		strings.Join(sortedMapKeys(data), ","),
+		summarizeActivityPayload(data),
+	)
+}
+
+func sortedMapKeys(data map[string]interface{}) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, sanitizeActivityText(key))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func summarizeActivityPayload(data map[string]interface{}) string {
+	if len(data) == 0 {
+		return "{}"
+	}
+	cleaned := sanitizeActivityPayloadValue(data, 0)
+	bytes, err := json.Marshal(cleaned)
+	if err != nil {
+		return "{}"
+	}
+	return sanitizeActivityText(string(bytes))
+}
+
+func sanitizeActivityPayloadValue(value interface{}, depth int) interface{} {
+	if depth > 2 {
+		return "[nested]"
+	}
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(typed))
+		for key, child := range typed {
+			out[key] = sanitizeActivityPayloadValue(child, depth+1)
+		}
+		return out
+	case []interface{}:
+		limit := len(typed)
+		if limit > 4 {
+			limit = 4
+		}
+		out := make([]interface{}, 0, limit)
+		for _, child := range typed[:limit] {
+			out = append(out, sanitizeActivityPayloadValue(child, depth+1))
+		}
+		if len(typed) > limit {
+			out = append(out, fmt.Sprintf("... %d more", len(typed)-limit))
+		}
+		return out
+	case string:
+		return sanitizeActivityText(typed)
+	default:
+		return typed
+	}
+}
+
+func nestedString(data map[string]interface{}, keys ...string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		if value := nestedValueString(data[key], keys...); value != "" {
+			return value
+		}
+	}
+	for _, containerKey := range []string{"raw_params", "params", "input", "arguments", "args", "request", "item", "tool_call", "toolCall", "call", "details", "metadata", "payload"} {
+		if value := nestedContainerString(data[containerKey], keys...); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func nestedContainerString(value interface{}, keys ...string) string {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return nestedString(typed, keys...)
+	case []interface{}:
+		for _, item := range typed {
+			if value := nestedContainerString(item, keys...); value != "" {
+				return value
+			}
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if strings.HasPrefix(trimmed, "{") {
+			var nested map[string]interface{}
+			if err := json.Unmarshal([]byte(trimmed), &nested); err == nil {
+				return nestedString(nested, keys...)
+			}
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			var nested []interface{}
+			if err := json.Unmarshal([]byte(trimmed), &nested); err == nil {
+				return nestedContainerString(nested, keys...)
+			}
+		}
+	}
+	return ""
+}
+
+func nestedValueString(value interface{}, keys ...string) string {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return nestedString(typed, keys...)
+	case []interface{}:
+		var parts []string
+		for _, item := range typed {
+			if value := nestedValueString(item, keys...); value != "" {
+				parts = append(parts, value)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if strings.HasPrefix(trimmed, "{") {
+			var nested map[string]interface{}
+			if err := json.Unmarshal([]byte(trimmed), &nested); err == nil {
+				if value := nestedString(nested, keys...); value != "" {
+					return value
+				}
+			}
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			var nested []interface{}
+			if err := json.Unmarshal([]byte(trimmed), &nested); err == nil {
+				if value := nestedValueString(nested, keys...); value != "" {
+					return value
+				}
+			}
+		}
+		return trimmed
+	}
+	return stringFromUnknown(value)
+}
+
+func stringFromUnknown(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		var parts []string
+		for _, item := range typed {
+			if value := stringFromUnknown(item); value != "" {
+				parts = append(parts, value)
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, " "))
+	default:
+		return ""
 	}
 }
 
@@ -965,14 +1387,15 @@ func (gs *gatewaySession) setReady() {
 
 // SendMessage sends a user message to the persistent session, streams chunks
 // via onChunk, and returns the full response text.
-func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string)) (string, error) {
+func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	// Serialise: only one message in flight at a time
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
 
 	inf := &inFlightState{
-		onChunk: onChunk,
-		done:    make(chan agentResult, 1),
+		onChunk:    onChunk,
+		onActivity: onActivity,
+		done:       make(chan agentResult, 1),
 	}
 	gs.infMu.Lock()
 	gs.inFlight = inf
@@ -992,19 +1415,42 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		return "", fmt.Errorf("sessions.send: %w", err)
 	}
 	log.Printf("[gateway] message sent, streaming response...")
+	inf.mu.Lock()
+	inf.modelWaitStartedAt = time.Now()
+	inf.lastModelPulseAt = time.Time{}
+	inf.mu.Unlock()
+	inf.emitActivity(agentActivity{Kind: "model_started", Message: "Waiting on model response"})
 
 	// Wait for lifecycle/end from the read loop
-	select {
-	case result := <-inf.done:
-		if result.err != nil {
-			return "", result.err
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-inf.done:
+			if result.err != nil {
+				return "", result.err
+			}
+			// Refresh context usage after each turn (best-effort)
+			go gs.refreshContextUsage(context.Background())
+			return result.text, nil
+		case <-ticker.C:
+			if pulse, ok := inf.toolProgressPulse(); ok {
+				inf.emitActivity(cleanAgentActivity(pulse))
+			} else if pulse, ok := inf.modelProgressPulse(); ok {
+				inf.emitActivity(cleanAgentActivity(pulse))
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
 		}
-		// Refresh context usage after each turn (best-effort)
-		go gs.refreshContextUsage(context.Background())
-		return result.text, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
 	}
+}
+
+func formatActivityDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
 // ─── bootstrap mode ─────────────────────────────────────────────────────────
@@ -1986,6 +2432,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
+	writeActivity := func(connCtx context.Context, activity agentActivity) {
+		_ = wsjson.Write(connCtx, conn, hubMsg{
+			Type:    "agent_activity",
+			Payload: mustJSON(cleanAgentActivity(activity)),
+		})
+	}
+
 	// Replay any queued messages that arrived while we were disconnected
 	if queued := queue.drain(); len(queued) > 0 {
 		log.Printf("[bridge] replaying %d queued message(s)", len(queued))
@@ -1999,6 +2452,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 						Type:    "chunk",
 						Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
 					})
+				}, func(activity agentActivity) {
+					writeActivity(connCtx, activity)
 				})
 				if agentErr != nil {
 					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
@@ -2087,6 +2542,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 							"content": chunk,
 						}),
 					})
+				}, func(activity agentActivity) {
+					writeActivity(connCtx, activity)
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)

@@ -11,7 +11,7 @@ const nextConfig = {
   ...(isDev
     ? {
         async rewrites() {
-          const hubUrl = process.env.NEXT_PUBLIC_HUB_URL || process.env.HUB_URL || "http://localhost:8080"
+          const hubUrl = process.env.NEXT_PUBLIC_HUB_URL || process.env.ELASTICCLAW_HUB_URL || process.env.HUB_URL || "http://localhost:8080"
           return [
             {
               source: "/api/:path*",

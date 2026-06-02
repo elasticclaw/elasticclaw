@@ -63,7 +63,6 @@ export default function Home() {
   // Build merged messages:
   // - no chunks yet → append a "thinking" placeholder
   // - chunks flowing → append the partial typewriter text
-  // - chunks paused (tool call) → append text + a gap marker
   // - done → nothing (final message already in messages)
   const mergedMessages = useMemo((): Record<string, Message[]> => {
     const result: Record<string, Message[]> = { ...messages }
@@ -79,15 +78,6 @@ export default function Home() {
         }]
       } else {
         const msgs: Message[] = [...existing]
-        if (state.isPaused) {
-          // Gap separator for tool call
-          msgs.push({
-            id: `gap-${clawId}`,
-            role: "system" as const,
-            content: "__TOOL_GAP__",
-            timestamp: new Date(),
-          })
-        }
         if (state.text) {
           msgs.push({
             id: `streaming-${clawId}`,

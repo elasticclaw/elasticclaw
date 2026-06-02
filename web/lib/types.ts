@@ -27,13 +27,27 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub"
+  role: "user" | "claw" | "system" | "hub" | "activity"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
+  activity?: AgentActivity
   // API fields
   claw_id?: string
   tenant_id?: string
+}
+
+export interface AgentActivity {
+  kind: string
+  stream?: string
+  phase?: string
+  tool?: string
+  detail?: string
+  command?: string
+  path?: string
+  url?: string
+  message?: string
+  error?: string
 }
 
 // Raw API types
@@ -58,7 +72,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub"
+  role: "user" | "claw" | "hub" | "activity"
   content: string
   format?: string
   created_at: string

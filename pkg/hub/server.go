@@ -1163,7 +1163,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Look up provider info before deleting so we can terminate the VM
+		// Look up provider info before marking deleted so we can terminate the VM.
 		var provider, providerID string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
 
@@ -1208,17 +1208,17 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		s.checkpointBeforeTermination(clawID, "manual-kill")
-
-		// Delete messages first (FK constraint)
-		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
-		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
-		_, err := s.db.Exec(`DELETE FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
+		_, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
 		if err != nil {
-			log.Printf("kill: db delete error for claw %s: %v", clawID, err)
+			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
 			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 			return
 		}
+		// Notify dashboards before provider cleanup so the card disappears immediately.
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type:    "claw_status",
+			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+		})
 		// Disconnect WebSocket if online
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
@@ -1226,10 +1226,14 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			delete(s.claws, clawID)
 		}
 		s.mu.Unlock()
-		// Terminate the provider instance asynchronously
-		if providerID != "" {
-			go s.terminateVM(provider, providerID)
-		}
+		go func() {
+			s.checkpointBeforeTermination(clawID, "manual-kill")
+			if providerID != "" {
+				s.terminateVM(provider, providerID)
+			}
+			_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
+		}()
 		// Promote any pending claws now that a slot is free
 		go s.promotePendingClaws()
 		w.WriteHeader(http.StatusNoContent)
@@ -1240,7 +1244,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
 		clawID, tenantID,
 	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
@@ -1389,7 +1393,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if before != "" {
 		// Fetch older messages — return in ASC order after fetching DESC
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
 			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1397,7 +1401,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		)
 	} else if after != "" {
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
 			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at ASC LIMIT ?`,
@@ -1406,7 +1410,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Default: last N messages
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
 			 AND NOT (role = 'system' AND content IN (?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1421,7 +1425,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var msgs []types.HubMessage
 	for rows.Next() {
 		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
@@ -1762,6 +1766,24 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							cc.mu.Unlock()
 						}
 					}
+				}
+			} else if msg.Type == "agent_activity" {
+				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
+					createdAt := now()
+					activity["claw_id"] = clawID
+					activity["created_at"] = createdAt.Format(time.RFC3339Nano)
+					content := activityContent(activity)
+					if content != "" && !isUnhelpfulActivityContent(activity, content) {
+						format := "activity:" + string(payload)
+						_, _ = s.db.Exec(
+							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt,
+						)
+					}
+					s.broadcastToUsers(tenantID, types.WSMessage{
+						Type:    "agent_activity",
+						Payload: activity,
+					})
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side
@@ -2250,6 +2272,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
+	s.setBootstrapStatus(clawID, "Creating sandbox")
 	// Resolve snapshot: template snapshot > hub default_snapshot
 	snapshot := req.Snapshot
 	if snapshot == "" {
@@ -2300,9 +2323,10 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
-	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
+	s.setBootstrapStatus(clawID, "Preparing runtime")
 
 	exec := func(label string, timeout time.Duration, cmd string) error {
+		s.setBootstrapStatus(clawID, daytonaBootstrapStatusForStep(label))
 		const maxAttempts = 3
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -2348,21 +2372,26 @@ echo uninstalled`); err != nil {
 
 	const daytonaOpenClawVersion = "2026.5.20"
 	if err := exec("install openclaw", 3*time.Minute,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
-echo "npm=$NVM_DIR/current/bin/npm prefix=$PREFIX"; \
-sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
+NPM="$NVM_DIR/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
+echo "npm=$NPM prefix=$PREFIX"; \
+sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
 hash -r; \
 echo 'install done'`, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
+NPM="$NVM_DIR/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
 hash -r; \
 OPENCLAW_PATH="$(command -v openclaw || true)"; \
 OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(node -e "try{console.log(require('$NVM_DIR/current/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
+PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
 echo "openclaw path=$OPENCLAW_PATH"; \
 echo "openclaw version=$OPENCLAW_VERSION"; \
 echo "openclaw package_version=$PACKAGE_VERSION"; \
@@ -2413,6 +2442,7 @@ docker --version`); err != nil {
 	}
 
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
+	s.setBootstrapStatus(clawID, "Configuring OpenClaw")
 	var llmKeyNameDaytona string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
 	activeKeyNameDaytona := ""
@@ -2523,6 +2553,7 @@ exit 1`
 
 	// Step 3: Download claw-bridge now, but do not start it until the workspace,
 	// template files, and bootstrap gating are fully ready.
+	s.setBootstrapStatus(clawID, "Preparing workspace")
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
@@ -2550,6 +2581,7 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 
 	// Write template files (SOUL.md, AGENTS.md, etc.) to the workspace before
 	// the bridge starts so BOOTSTRAP.md and friends are present for the first turn.
+	s.setBootstrapStatus(clawID, "Preparing workspace")
 	var filesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var templateFiles map[string]string
@@ -2586,6 +2618,7 @@ ELASTICCLAW_EOF`,
 	}
 	hasGitHubApps := hasHubGitHubApps || hasWorkspaceGitHubApps
 	if hasGitHubApps {
+		s.setBootstrapStatus(clawID, "Preparing repository access")
 		// Use the hub directly during bootstrap. The bridge is intentionally not
 		// started yet so startup cannot race ahead of template file writes and
 		// bootstrap_ok gating.
@@ -2724,6 +2757,7 @@ gh auth status`
 			log.Printf("[daytona] verify gh auth done")
 
 			log.Printf("[daytona] cloning %d repositories for claw %s", len(repositories), clawID)
+			s.setBootstrapStatus(clawID, "Syncing repositories")
 			for i, repo := range repositories {
 				log.Printf("[daytona] repository[%d]: %s", i, repo.Repo)
 			}
@@ -2774,6 +2808,7 @@ gh auth status`
 
 	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
+	s.setBootstrapStatus(clawID, "Connecting to hub")
 
 	// Start the bridge last so the first registration happens only after the
 	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
@@ -3003,6 +3038,74 @@ func (s *Server) setBootstrapStatus(clawID, status string) {
 			"bootstrap_status": status,
 		},
 	})
+}
+
+func activityContent(activity map[string]interface{}) string {
+	for _, key := range []string{"error", "command", "path", "url", "detail"} {
+		if value, ok := activity[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	if value, ok := activity["message"].(string); ok && strings.TrimSpace(value) != "" && !isPhaseActivityText(value) {
+		return strings.TrimSpace(value)
+	}
+	if value, ok := activity["tool"].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	for _, key := range []string{"phase", "stream"} {
+		if value, ok := activity[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "Activity"
+}
+
+func normalizeAgentActivityPayload(payload interface{}) (map[string]interface{}, []byte, bool) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, false
+	}
+	var activity map[string]interface{}
+	if err := json.Unmarshal(raw, &activity); err != nil || activity == nil {
+		return nil, nil, false
+	}
+	return activity, raw, true
+}
+
+func isPhaseActivityText(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "running", "completed", "complete", "done", "failed", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnhelpfulActivityContent(activity map[string]interface{}, content string) bool {
+	if kind, _ := activity["kind"].(string); kind == "still_working" {
+		return true
+	}
+	return strings.HasPrefix(content, "No streamed output")
+}
+
+func daytonaBootstrapStatusForStep(label string) string {
+	switch label {
+	case "uninstall old openclaw", "install openclaw", "verify openclaw":
+		return "Preparing runtime"
+	case "install nix", "install docker", "preflight required commands", "stage openclaw plugin deps":
+		return "Preparing runtime"
+	case "configure openclaw model", "start openclaw gateway":
+		return "Configuring OpenClaw"
+	case "install git credential helper", "install gh cli", "fetch github bootstrap token json", "parse github bootstrap token", "write github token env":
+		return "Preparing repository access"
+	case "write SOUL.md", "write AGENTS.md", "write BOOTSTRAP.md", "write CONTEXT.md":
+		return "Preparing workspace"
+	default:
+		if strings.HasPrefix(label, "write ") {
+			return "Preparing workspace"
+		}
+		return "Preparing sandbox"
+	}
 }
 
 func formatRetryDelay(d time.Duration) string {

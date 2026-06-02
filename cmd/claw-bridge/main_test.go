@@ -100,6 +100,124 @@ func TestLoadGatewayClientEnvVarFallbackWhenNoConfigPassword(t *testing.T) {
 	}
 }
 
+func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]interface{}
+		keys []string
+		want string
+	}{
+		{
+			name: "direct command",
+			data: map[string]interface{}{"command": "npm run build"},
+			keys: []string{"command", "cmd", "input"},
+			want: "npm run build",
+		},
+		{
+			name: "nested item arguments",
+			data: map[string]interface{}{
+				"item": map[string]interface{}{
+					"arguments": map[string]interface{}{"cmd": "go test ./pkg/hub"},
+				},
+			},
+			keys: []string{"command", "cmd", "input"},
+			want: "go test ./pkg/hub",
+		},
+		{
+			name: "json encoded args",
+			data: map[string]interface{}{
+				"input": `{"command":"npm run lint"}`,
+			},
+			keys: []string{"command", "cmd", "input"},
+			want: "npm run lint",
+		},
+		{
+			name: "argv array",
+			data: map[string]interface{}{
+				"arguments": map[string]interface{}{
+					"argv": []interface{}{"npm", "run", "test"},
+				},
+			},
+			keys: []string{"command", "cmd", "argv", "input"},
+			want: "npm run test",
+		},
+		{
+			name: "plain input is not path",
+			data: map[string]interface{}{
+				"input": "npm run build",
+			},
+			keys: []string{"path", "file", "filename"},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nestedString(tt.data, tt.keys...); got != tt.want {
+				t.Fatalf("nestedString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveToolActivityDetailUsesOpenClawMeta(t *testing.T) {
+	tests := []struct {
+		name        string
+		tool        string
+		meta        string
+		wantCommand string
+		wantPath    string
+		wantURL     string
+		wantDetail  string
+	}{
+		{
+			name:        "exec meta is command",
+			tool:        "exec",
+			meta:        "npm run build",
+			wantCommand: "npm run build",
+		},
+		{
+			name:     "read meta is path",
+			tool:     "read",
+			meta:     "/workspace/web/package.json",
+			wantPath: "/workspace/web/package.json",
+		},
+		{
+			name:    "web fetch url meta is url",
+			tool:    "web_fetch",
+			meta:    "https://example.com/docs",
+			wantURL: "https://example.com/docs",
+		},
+		{
+			name:       "unknown tool meta is detail",
+			tool:       "memory_search",
+			meta:       "query eslint",
+			wantDetail: "query eslint",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, path, url, detail := resolveToolActivityDetail(tt.tool, "", "", "", tt.meta, nil)
+			if command != tt.wantCommand || path != tt.wantPath || url != tt.wantURL || detail != tt.wantDetail {
+				t.Fatalf("resolveToolActivityDetail() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", command, path, url, detail, tt.wantCommand, tt.wantPath, tt.wantURL, tt.wantDetail)
+			}
+		})
+	}
+}
+
+func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
+	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
+	got := sanitizeActivityText(input)
+	if strings.Contains(got, "abc") || strings.Contains(got, "xyz") || strings.Contains(got, "tok1") || strings.Contains(got, "tok2") {
+		t.Fatalf("sanitizeActivityText leaked secret: %q", got)
+	}
+	if strings.Count(got, "access_token=[redacted]") != 2 {
+		t.Fatalf("sanitizeActivityText redacted access_token count = %d, want 2 in %q", strings.Count(got, "access_token=[redacted]"), got)
+	}
+	if strings.Count(got, "Bearer [redacted]") != 2 {
+		t.Fatalf("sanitizeActivityText redacted bearer count = %d, want 2 in %q", strings.Count(got, "Bearer [redacted]"), got)
+	}
+}
+
 func TestPromoteInsufficientGatewayPairingPromotesReadOnlyDevice(t *testing.T) {
 	home := t.TempDir()
 	devicesDir := filepath.Join(home, ".openclaw", "devices")

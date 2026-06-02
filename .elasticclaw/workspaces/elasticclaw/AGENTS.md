@@ -40,6 +40,11 @@ go version && node --version && npm --version && oras version
 docker version   # Docker is on the VM; use for container tests
 ```
 
+## Git
+
+You have a git credential helper installed. Use that to interaction with git and gh.
+NEVER force push and rebase unless you are resolving conflicts. When addressing standard feedback, it's preferable to push a new commit.
+
 ## Memory
 
 - **Daily notes:** `memory/YYYY-MM-DD.md` — log what you did, decisions made, blockers
