@@ -126,9 +126,7 @@ export function Sidebar({
         .then((data) => {
           if (cancelled) return
           const workflows = data.flatMap((workspace) => workspace.workflows || [])
-          const manual = workflows.filter(
-            (workflow) => workflow.enabled && workflow.enableManualTrigger
-          )
+          const manual = workflows.filter((workflow) => workflow.enableManualTrigger)
           console.log("[sidebar] loaded workflows:", workflows.length, "manual:", manual.length)
           setManualWorkflows(manual)
         })

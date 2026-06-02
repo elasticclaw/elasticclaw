@@ -6,11 +6,12 @@ import { getHubUrl } from "@/lib/hub-url"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
-import { fetchWorkspaces, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
+import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -2486,6 +2487,7 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [savingWorkflow, setSavingWorkflow] = useState("")
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -2504,6 +2506,28 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
   const workflows = workspaces.flatMap((workspace) =>
     (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
   ).filter((workflow) => workflow.workspaceName === selectedWorkspace)
+
+  const patchWorkflow = useCallback(async (workflow: Workflow, patch: { enabled?: boolean; enableManualTrigger?: boolean }) => {
+    const key = `${workflow.workspaceName}/${workflow.name}`
+    setSavingWorkflow(key)
+    setError("")
+    try {
+      const updated = await updateWorkflowControls(workflow, patch)
+      setWorkspaces(current => current.map(workspace => {
+        if (workspace.name !== updated.workspaceName) return workspace
+        return {
+          ...workspace,
+          workflows: (workspace.workflows || []).map(item =>
+            item.name === updated.name ? { ...item, ...updated } : item
+          ),
+        }
+      }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update workflow")
+    } finally {
+      setSavingWorkflow("")
+    }
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -2527,7 +2551,12 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
       ) : (
         <div className="border border-border rounded-lg divide-y divide-border">
           {workflows.map((workflow) => (
-            <WorkflowSummaryRow key={`${workflow.workspaceName}/${workflow.name}`} workflow={workflow} />
+            <WorkflowSummaryRow
+              key={`${workflow.workspaceName}/${workflow.name}`}
+              workflow={workflow}
+              saving={savingWorkflow === `${workflow.workspaceName}/${workflow.name}`}
+              onPatch={patchWorkflow}
+            />
           ))}
         </div>
       )}
@@ -2535,10 +2564,18 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
   )
 }
 
-function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
+function WorkflowSummaryRow({
+  workflow,
+  saving,
+  onPatch,
+}: {
+  workflow: Workflow
+  saving: boolean
+  onPatch: (workflow: Workflow, patch: { enabled?: boolean; enableManualTrigger?: boolean }) => void
+}) {
   return (
     <div className="px-4 py-3">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <p className="text-sm font-medium truncate">{workflow.name}</p>
           <p className="text-xs text-muted-foreground truncate">
@@ -2546,7 +2583,25 @@ function WorkflowSummaryRow({ workflow }: { workflow: Workflow }) {
             {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Switch
+              checked={workflow.enabled}
+              disabled={saving}
+              onCheckedChange={(checked) => onPatch(workflow, { enabled: checked })}
+              aria-label={`Toggle automatic handling for ${workflow.name}`}
+            />
+            <span>Auto handling</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Switch
+              checked={Boolean(workflow.enableManualTrigger)}
+              disabled={saving}
+              onCheckedChange={(checked) => onPatch(workflow, { enableManualTrigger: checked })}
+              aria-label={`Toggle manual trigger for ${workflow.name}`}
+            />
+            <span>Manual trigger</span>
+          </label>
           {workflow.enableManualTrigger && (
             <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
           )}
