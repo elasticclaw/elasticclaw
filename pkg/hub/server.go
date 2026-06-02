@@ -3690,11 +3690,12 @@ const (
 	wakeMessageMarker  = "__WAKE_MESSAGE__"
 	defaultWakeContent = "Introduce yourself briefly and let the user know you're ready to help."
 	factoryWakeContent = `You've been assigned an issue. Use your tools to read the full details, then:
-1. Send a short intro message to the user: your name, the issue you're working on, and your plan.
-2. Start working. As you go, narrate your progress — what you're exploring, what you're trying, why.
-3. If you hit something interesting or unexpected, say so.
-4. When you open a PR, summarize what you did and what the PR contains.
-5. Do NOT ask for permission at any point. Just work and keep the user informed.`
+1. Send a short visible intro message to the user: your name, the issue you're working on, and your plan.
+2. Start working. As you go, send visible progress updates in normal assistant messages. Tool calls and activity rows are collapsed in the UI, so do not rely on them as user communication.
+3. Narrate meaningful progress before and after substantial work: what context you gathered, what you changed, what you are verifying, and what you learned.
+4. If you hit something interesting, unexpected, slow, or blocked, say so promptly.
+5. When you open a PR, summarize what you did, what you tested, and what the PR contains.
+6. Do NOT ask for permission at any point. Just work and keep the user informed.`
 )
 
 // sendWakeMessage sends a silent system message to wake the agent.
