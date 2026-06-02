@@ -747,16 +747,29 @@ func sanitizeActivityText(value string) string {
 		{"GH_TOKEN=", "GH_TOKEN=[redacted]"},
 	}
 	for _, r := range replacers {
-		if idx := strings.Index(strings.ToLower(value), strings.ToLower(r.prefix)); idx >= 0 {
-			end := idx + len(r.prefix)
-			for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
-				end++
-			}
-			value = value[:idx] + r.value + value[end:]
-		}
+		value = redactActivityPrefix(value, r.prefix, r.value)
 	}
 	if len(value) > 240 {
 		value = value[:237] + "..."
+	}
+	return value
+}
+
+func redactActivityPrefix(value, prefix, replacement string) string {
+	offset := 0
+	lowerPrefix := strings.ToLower(prefix)
+	for offset < len(value) {
+		idx := strings.Index(strings.ToLower(value[offset:]), lowerPrefix)
+		if idx < 0 {
+			break
+		}
+		start := offset + idx
+		end := start + len(prefix)
+		for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
+			end++
+		}
+		value = value[:start] + replacement + value[end:]
+		offset = start + len(replacement)
 	}
 	return value
 }

@@ -36,6 +36,7 @@ import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
+import { isTerminalAssistantMessage } from "@/lib/messages"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -896,10 +897,6 @@ function isHiddenActivity(message: Message): boolean {
 
 function isStaleModelWait(message: Message, latestActivity: Message | null): boolean {
   return message.activity?.kind === "model_started" && latestActivity?.id !== message.id
-}
-
-function isTerminalAssistantMessage(message: Message): boolean {
-  return message.role === "claw" && /\[(DONE|READY_TO_COMMIT)\]/.test(message.content)
 }
 
 function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {

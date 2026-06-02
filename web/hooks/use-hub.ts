@@ -13,6 +13,7 @@ import {
   isConfigured,
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
+import { isTerminalAssistantMessage } from "@/lib/messages"
 import type { ApiClaw } from "@/lib/types"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
@@ -76,10 +77,6 @@ function isUnhelpfulActivity(activity: AgentActivity): boolean {
 
 function withoutModelWaitActivities(messages: Message[]): Message[] {
   return messages.filter((message) => message.activity?.kind !== "model_started")
-}
-
-function isTerminalAssistantMessage(message: Message): boolean {
-  return message.role === "claw" && /\[(DONE|READY_TO_COMMIT)\]/.test(message.content)
 }
 
 function loadSavedOrder(): string[] {
@@ -373,19 +370,21 @@ export function useHub(selectedClawId: string | null): HubState {
           if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return
           const segment = splitTypewriter(clawId)
           const createdAt = payload.created_at ? new Date(payload.created_at) : new Date()
+          const segmentId = segment.trim() ? nextClientMessageId("live-segment", clawId) : null
+          const activityId = nextClientMessageId("activity", clawId)
           segmentedStreamRef.current[clawId] = true
           setMessages((prev) => {
             const nextMessages = [...(prev[clawId] || [])]
-            if (segment.trim()) {
+            if (segmentId) {
               nextMessages.push({
-                id: nextClientMessageId("live-segment", clawId),
+                id: segmentId,
                 role: "claw",
                 content: segment,
                 timestamp: createdAt,
               })
             }
             nextMessages.push({
-              id: nextClientMessageId("activity", clawId),
+              id: activityId,
               role: "activity",
               content: formatActivityContent(activity),
               activity,
@@ -407,6 +406,7 @@ export function useHub(selectedClawId: string | null): HubState {
           if (segmentedStreamRef.current[clawId]) {
             const tail = clearTypewriter(clawId)
             delete segmentedStreamRef.current[clawId]
+            const tailId = tail.trim() ? nextClientMessageId("live-segment", clawId) : null
             // Called once typewriter is fully drained — safe to add final message
             setClaws((prev) =>
               prev.map((c) =>
@@ -425,9 +425,9 @@ export function useHub(selectedClawId: string | null): HubState {
             setMessages((prev) => {
               const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
               const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
-              if (tail.trim()) {
+              if (tailId) {
                 nextMessages.push({
-                  id: nextClientMessageId("live-segment", clawId),
+                  id: tailId,
                   role: "claw",
                   content: tail,
                   timestamp: msg.timestamp,

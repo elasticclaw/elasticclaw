@@ -204,6 +204,20 @@ func TestResolveToolActivityDetailUsesOpenClawMeta(t *testing.T) {
 	}
 }
 
+func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
+	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
+	got := sanitizeActivityText(input)
+	if strings.Contains(got, "abc") || strings.Contains(got, "xyz") || strings.Contains(got, "tok1") || strings.Contains(got, "tok2") {
+		t.Fatalf("sanitizeActivityText leaked secret: %q", got)
+	}
+	if strings.Count(got, "access_token=[redacted]") != 2 {
+		t.Fatalf("sanitizeActivityText redacted access_token count = %d, want 2 in %q", strings.Count(got, "access_token=[redacted]"), got)
+	}
+	if strings.Count(got, "Bearer [redacted]") != 2 {
+		t.Fatalf("sanitizeActivityText redacted bearer count = %d, want 2 in %q", strings.Count(got, "Bearer [redacted]"), got)
+	}
+}
+
 func TestPromoteInsufficientGatewayPairingPromotesReadOnlyDevice(t *testing.T) {
 	home := t.TempDir()
 	devicesDir := filepath.Join(home, ".openclaw", "devices")
