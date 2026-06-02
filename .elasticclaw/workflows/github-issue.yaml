@@ -1,6 +1,15 @@
 schema_version: v1
 name: github-issue
 
+enable_manual_trigger: true
+
+inputs:
+  - name: issue_number
+    type: number
+    required: true
+    min: 1
+    description: GitHub issue number to run this workflow against.
+
 trigger:
   github_issues:
     event: issue_labeled
@@ -13,7 +22,7 @@ trigger:
     labelers:
       - "*"
 
-concurrency_group: ddd
+concurrency_group: global
 
 stages:
   - id: working
