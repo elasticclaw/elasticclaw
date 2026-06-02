@@ -188,6 +188,14 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPatch {
+		s.handleWorkspaceWorkflowPatch(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
 	workflowName := strings.TrimSpace(r.PathValue("workflow"))
 	if workspaceName == "" || workflowName == "" {
@@ -200,6 +208,59 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 		return
 	}
 	jsonOK(w, workflow)
+}
+
+type WorkflowPatchRequest struct {
+	Enabled                  *bool `json:"enabled"`
+	EnableManualTrigger      *bool `json:"enableManualTrigger"`
+	EnableManualTriggerSnake *bool `json:"enable_manual_trigger"`
+}
+
+func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Request) {
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	workflowName := strings.TrimSpace(r.PathValue("workflow"))
+	if workspaceName == "" || workflowName == "" {
+		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
+		return
+	}
+	var req WorkflowPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
+		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
+		return
+	}
+	if req.EnableManualTrigger != nil && req.EnableManualTriggerSnake != nil {
+		http.Error(w, "provide only one of enableManualTrigger or enable_manual_trigger", http.StatusBadRequest)
+		return
+	}
+
+	workspace, workflow, ok, err := s.resolveWorkflowConfig(workspaceName, workflowName)
+	if err != nil {
+		http.Error(w, "failed to load workflow: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "workflow not found", http.StatusNotFound)
+		return
+	}
+	if req.Enabled != nil {
+		workflow.Enabled = req.Enabled
+	}
+	if req.EnableManualTrigger != nil {
+		workflow.EnableManualTrigger = *req.EnableManualTrigger
+	}
+	if req.EnableManualTriggerSnake != nil {
+		workflow.EnableManualTrigger = *req.EnableManualTriggerSnake
+	}
+	workflow.RawConfig = ""
+	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
+		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, workflowToView(workspace.Name, workflow))
 }
 
 func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
@@ -230,10 +291,6 @@ func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.R
 func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
 	if !workflow.EnableManualTrigger {
 		jsonError(w, http.StatusForbidden, "workflow does not support manual triggers")
-		return
-	}
-	if workflow.Enabled != nil && !*workflow.Enabled {
-		jsonError(w, http.StatusForbidden, "workflow is disabled")
 		return
 	}
 

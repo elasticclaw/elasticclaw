@@ -291,6 +291,19 @@ export async function fetchWorkflow(workspaceName: string, workflowName: string)
   return apiFetch<Workflow>(`/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}`)
 }
 
+export async function updateWorkflowControls(
+  workflow: Workflow,
+  patch: { enabled?: boolean; enableManualTrigger?: boolean }
+): Promise<Workflow> {
+  return apiFetch<Workflow>(
+    `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }
+  )
+}
+
 export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
   return apiFetch<{ claw_id: string; status: string }>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,

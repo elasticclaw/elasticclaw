@@ -191,6 +191,101 @@ func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":"github-issue","trigger":{"github_issues":{"event":"issue_labeled","repositories":["elasticclaw/elasticclaw"],"labels":["agent-ready"],"labelers":["*"]}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/github-issue", strings.NewReader(`{"enabled":false,"enableManualTrigger":true}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var workflow WorkflowView
+	if err := json.Unmarshal(rr.Body.Bytes(), &workflow); err != nil {
+		t.Fatalf("decode patched workflow: %v", err)
+	}
+	if workflow.Enabled || !workflow.EnableManualTrigger {
+		t.Fatalf("patched controls = enabled:%v manual:%v, want false/true", workflow.Enabled, workflow.EnableManualTrigger)
+	}
+
+	loaded, err := loadExternalWorkspace("engineering")
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	if len(loaded.Workflows) != 1 {
+		t.Fatalf("workflow count = %d, want 1", len(loaded.Workflows))
+	}
+	persisted := loaded.Workflows[0]
+	if persisted.Enabled == nil || *persisted.Enabled || !persisted.EnableManualTrigger {
+		t.Fatalf("persisted controls = enabled:%v manual:%v, want false/true", persisted.Enabled, persisted.EnableManualTrigger)
+	}
+	if persisted.Trigger == nil || persisted.Trigger.GitHubIssues == nil || len(persisted.Stages) != 1 {
+		t.Fatalf("patch did not preserve trigger/stages: %#v", persisted)
+	}
+}
+
+func TestWorkspaceWorkflowPatchRejectsDuplicateManualTriggerFields(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":"github-issue","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/github-issue", strings.NewReader(`{"enableManualTrigger":true,"enable_manual_trigger":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("patch status = %d, want %d, body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "provide only one of enableManualTrigger or enable_manual_trigger") {
+		t.Fatalf("unexpected error body: %s", rr.Body.String())
+	}
+}
+
 func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
@@ -223,6 +318,44 @@ func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d, body = %s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+}
+
+func TestWorkspaceWorkflowTriggerAllowsPausedManualWorkflow(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	enabled := false
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "engineering",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+			},
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion:       "v1",
+			Name:                "manual-only",
+			Enabled:             &enabled,
+			EnableManualTrigger: true,
+		}},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/manual-only/trigger", strings.NewReader(`{"inputs":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
 
