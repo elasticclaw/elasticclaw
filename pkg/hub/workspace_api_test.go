@@ -248,6 +248,44 @@ func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWorkflowPatchRejectsDuplicateManualTriggerFields(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":"github-issue","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/github-issue", strings.NewReader(`{"enableManualTrigger":true,"enable_manual_trigger":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("patch status = %d, want %d, body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "provide only one of enableManualTrigger or enable_manual_trigger") {
+		t.Fatalf("unexpected error body: %s", rr.Body.String())
+	}
+}
+
 func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")

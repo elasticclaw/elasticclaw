@@ -2602,9 +2602,6 @@ function WorkflowSummaryRow({
             />
             <span>Manual trigger</span>
           </label>
-          {workflow.enableManualTrigger && (
-            <span className="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">manual</span>
-          )}
           <span className={cn(
             "text-xs px-2 py-0.5 rounded",
             workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"

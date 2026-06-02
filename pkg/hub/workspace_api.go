@@ -232,6 +232,10 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
 		return
 	}
+	if req.EnableManualTrigger != nil && req.EnableManualTriggerSnake != nil {
+		http.Error(w, "provide only one of enableManualTrigger or enable_manual_trigger", http.StatusBadRequest)
+		return
+	}
 
 	workspace, workflow, ok, err := s.resolveWorkflowConfig(workspaceName, workflowName)
 	if err != nil {
