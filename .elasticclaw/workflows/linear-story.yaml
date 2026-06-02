@@ -7,7 +7,7 @@ trigger:
     states:
       - Todo
 
-concurrency_group: ddd
+concurrency_group: global
 
 stages:
   - id: working

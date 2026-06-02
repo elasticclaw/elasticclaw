@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -247,6 +248,19 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		return
 	}
 
+	if workflow.Integration == "github-issues" || (workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil) {
+		clawID, err := s.createClawForManualGitHubIssueWorkflow(workspace, workflow, validatedInputs)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
+			return
+		}
+		jsonOK(w, map[string]string{
+			"claw_id": clawID,
+			"status":  "created",
+		})
+		return
+	}
+
 	clawID, _, err := s.createClawFromWorkflow(workspace, workflow, validatedInputs, "manual workflow trigger")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
@@ -256,6 +270,78 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		"claw_id": clawID,
 		"status":  "created",
 	})
+}
+
+func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string) (string, error) {
+	rawIssueNumber := strings.TrimSpace(inputs["issue_number"])
+	if rawIssueNumber == "" {
+		return "", fmt.Errorf(`missing required input "issue_number"`)
+	}
+	issueNumberFloat, err := strconv.ParseFloat(rawIssueNumber, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid issue_number %q: %w", rawIssueNumber, err)
+	}
+	issueNumber := int(issueNumberFloat)
+	if issueNumber < 1 || float64(issueNumber) != issueNumberFloat {
+		return "", fmt.Errorf("issue_number must be a positive integer")
+	}
+
+	repos := githubIssuesWorkflowTriggerRepos(workflow)
+	exactRepos := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" || strings.HasSuffix(repo, "/*") {
+			continue
+		}
+		exactRepos = append(exactRepos, repo)
+	}
+	if len(exactRepos) != 1 {
+		return "", fmt.Errorf("manual GitHub issue workflow requires exactly one exact trigger repository, got %d", len(exactRepos))
+	}
+	repo := exactRepos[0]
+
+	token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+	if token == "" {
+		return "", fmt.Errorf("no GitHub Issues token configured for workflow %s/%s", workspace.Name, workflow.Name)
+	}
+
+	base := s.githubBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	issue, err := s.queryGitHubIssue(repo, token, base, issueNumber)
+	if err != nil {
+		return "", err
+	}
+
+	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, "manual")
+	if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "manual workflow trigger"); err != nil {
+		return "", err
+	}
+
+	var clawID string
+	issueID := fmt.Sprintf("%s/%d", repo, issueNumber)
+	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
+	if clawID == "" {
+		return "", fmt.Errorf("created GitHub issue workflow claw for %s but could not resolve claw id", issueID)
+	}
+	return clawID, nil
+}
+
+func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
+	item, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
+	if err != nil {
+		return githubIssuesPollItem{}, err
+	}
+	var issue githubIssuesPollItem
+	b, _ := json.Marshal(item)
+	if err := json.Unmarshal(b, &issue); err != nil {
+		return githubIssuesPollItem{}, fmt.Errorf("parse GitHub issue response: %w", err)
+	}
+	if issue.Number != issueNumber {
+		return githubIssuesPollItem{}, fmt.Errorf("GitHub issue %s/%d not found or unreadable", repo, issueNumber)
+	}
+	return issue, nil
 }
 
 func (s *Server) findWorkflowView(workspaceName, workflowName string) (WorkflowView, bool) {

@@ -225,3 +225,104 @@ func TestWorkspaceWorkflowTriggerUsesWorkflowRules(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body = %s", rr.Code, http.StatusForbidden, rr.Body.String())
 	}
 }
+
+func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	var authHeaders []string
+	ghi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/testorg/testrepo/issues/42" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 42,
+			"title": "Manual trigger issue",
+			"body": "Issue body",
+			"html_url": "https://github.com/testorg/testrepo/issues/42",
+			"state": "open",
+			"labels": [{"name": "dev-only"}],
+			"user": {"login": "testuser"}
+		}`))
+	}))
+	t.Cleanup(ghi.Close)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, ghi.URL, "", "")
+	one := 1.0
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "engineering",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+				"CONTEXT.md":              "Workspace context\n",
+			},
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion:       "v1",
+			Name:                "github-issue",
+			EnableManualTrigger: true,
+			Inputs: []types.FactoryInput{{
+				Name:     "issue_number",
+				Type:     "number",
+				Required: true,
+				Min:      &one,
+			}},
+			Trigger: &types.WorkflowTrigger{
+				GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+					Event:        "issue_labeled",
+					Repositories: []string{"testorg/testrepo"},
+					States:       []string{"open"},
+					Labels:       []string{"agent-ready"},
+					Labelers:     []string{"*"},
+				},
+			},
+			Stages: []types.WorkflowStage{{
+				ID:    "working",
+				Label: "Working",
+				Entry: true,
+				OnEnter: map[string]interface{}{
+					"inject": "Issue: {{.Issue.Identifier}} - {{.Issue.Title}}\n",
+				},
+			}},
+		}},
+	)
+	SaveWorkspaceIssueTrackerForTest(t, "engineering", "github-issues", "default", "test-github-issues-token", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/github-issue/trigger", strings.NewReader(`{"inputs":{"issue_number":42}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["claw_id"] == "" {
+		t.Fatalf("missing claw_id in response: %#v", resp)
+	}
+	var issueID, filesJSON string
+	if err := db.QueryRow(`SELECT github_issue_id, template_files FROM claws WHERE id=?`, resp["claw_id"]).Scan(&issueID, &filesJSON); err != nil {
+		t.Fatalf("load created claw: %v", err)
+	}
+	if issueID != "testorg/testrepo/42" {
+		t.Fatalf("github_issue_id = %q, want testorg/testrepo/42", issueID)
+	}
+	if !strings.Contains(filesJSON, "Manual trigger issue") || !strings.Contains(filesJSON, "Issue body") {
+		t.Fatalf("template_files missing GitHub issue context: %s", filesJSON)
+	}
+	if len(authHeaders) != 1 || authHeaders[0] != "Bearer test-github-issues-token" {
+		t.Fatalf("GitHub issue fetch auth headers = %#v, want one bearer token", authHeaders)
+	}
+}
