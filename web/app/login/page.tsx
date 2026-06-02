@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
 import { clearConfig } from "@/lib/api"
+import { setGitHubToken, setHubToken, getOAuthState, setOAuthState, removeOAuthState, getOAuthNext, setOAuthNext, removeOAuthNext } from "@/lib/auth-storage"
 
 interface AuthConfig {
   github_oauth_enabled: boolean
@@ -49,14 +50,14 @@ function LoginForm() {
     if (!code || !state) return
 
     // Validate state to prevent CSRF
-    const storedState = sessionStorage.getItem("oauth_state")
+    const storedState = getOAuthState()
     if (!storedState || state !== storedState) {
       setError("OAuth state mismatch — please try again")
       return
     }
-    sessionStorage.removeItem("oauth_state")
-    const storedNext = safeNextPath(sessionStorage.getItem("oauth_next"))
-    sessionStorage.removeItem("oauth_next")
+    removeOAuthState()
+    const storedNext = safeNextPath(getOAuthNext())
+    removeOAuthNext()
     const callbackNext = nextParam || storedNext || "/"
 
     const redirectUri = window.location.origin + "/login"
@@ -77,7 +78,7 @@ function LoginForm() {
         if (cancelled) return
         if (data.github_token) {
           clearConfig()
-          sessionStorage.setItem("ec_github_token", data.github_token)
+          setGitHubToken(data.github_token)
           router.replace(callbackNext)
         } else {
           throw new Error("missing token")
@@ -108,7 +109,7 @@ function LoginForm() {
         const data = await res.json()
         if (data.hubToken) {
           clearConfig()
-          sessionStorage.setItem("ec_hub_token", data.hubToken)
+          setHubToken(data.hubToken)
         }
         try {
           const { getHubUrl } = await import("@/lib/hub-url")
@@ -141,8 +142,8 @@ function LoginForm() {
     // Ask the hub for the client_id (already public in /api/auth/config)
     // Build the GitHub authorize URL entirely in the browser.
     const state = randomState()
-    sessionStorage.setItem("oauth_state", state)
-    if (nextParam) sessionStorage.setItem("oauth_next", nextParam)
+    setOAuthState(state)
+    if (nextParam) setOAuthNext(nextParam)
 
     const redirectUri = window.location.origin + "/login"
 

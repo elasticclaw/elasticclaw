@@ -8,6 +8,7 @@ import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
 import { isConfigured, type Workflow } from "@/lib/api"
+import { getAuthToken } from "@/lib/auth-storage"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -28,7 +29,7 @@ export default function Home() {
 
   // Fetch admin status
   useEffect(() => {
-    const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+    const token = getAuthToken() || ""
     if (!token) {
       setIsAdmin(false)
       return

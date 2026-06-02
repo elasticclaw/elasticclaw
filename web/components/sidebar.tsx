@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
+import { getAuthToken } from "@/lib/auth-storage"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -464,7 +465,7 @@ export function Sidebar({
             size="sm"
             className="flex-1 justify-start gap-2 text-muted-foreground hover:text-foreground"
             onClick={async () => {
-              const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+              const token = getAuthToken() || ""
               if (token) {
                 const { getHubUrl } = await import("@/lib/hub-url")
                 const hubUrl = getHubUrl()

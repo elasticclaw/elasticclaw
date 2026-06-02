@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
+import { getAuthToken } from "@/lib/auth-storage"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -122,7 +123,7 @@ interface ConcurrencyGroup {
 
 async function fetchSettings(): Promise<SettingsData> {
   const hubUrl = getHubUrl()
-  const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = getAuthToken() || ""
   const res = await fetch(`${hubUrl}/api/settings`, {
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -132,7 +133,7 @@ async function fetchSettings(): Promise<SettingsData> {
 
 async function patchSettings(patch: object): Promise<void> {
   const hubUrl = getHubUrl()
-  const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = getAuthToken() || ""
   const res = await fetch(`${hubUrl}/api/settings`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -185,7 +186,7 @@ export default function SettingsSectionPage() {
 
   useEffect(() => {
     const hubUrl = getHubUrl()
-    const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+    const token = getAuthToken() || ""
     fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.json())
       .then((d) => { setVersion(d.version || "unknown"); setHubPublicUrl(d.hubUrl || "") })
@@ -1157,7 +1158,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
   const [workspaceError, setWorkspaceError] = useState("")
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => getAuthToken() || ""
 
   const resetModal = () => {
     setAppName(""); setAppId(""); setUrl(""); setInstallation(""); setPem("")
@@ -1900,7 +1901,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const hubUrl = getHubUrl()
-  const authToken = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const authToken = () => getAuthToken() || ""
   const issueTrackersPath = selectedWorkspace ? `/api/workspaces/${encodeURIComponent(selectedWorkspace)}/issue-trackers` : ""
   const linear = workspaceTrackers.filter(t => t.type === "linear")
   const shortcut = workspaceTrackers.filter(t => t.type === "shortcut")
@@ -2588,7 +2589,7 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
     setError("")
     try {
       const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const token = getAuthToken() || ""
       const [analyticsRes, workspaceData] = await Promise.all([
         fetch(`${hubUrl}/api/analytics/factories`, { headers: { Authorization: `Bearer ${token}` } }),
         fetchWorkspaces(),
@@ -2732,7 +2733,7 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const [loading, setLoading] = useState(true)
 
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => getAuthToken() || ""
   const secretsPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
 
   const refresh = useCallback(async () => {
@@ -2985,7 +2986,7 @@ function AIConfigSection() {
   const chatInputRef = useRef<HTMLInputElement>(null)
 
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => getAuthToken() || ""
 
   // Persist messages to sessionStorage on change
   useEffect(() => {
@@ -3875,7 +3876,7 @@ function TroubleshootSection() {
   const diagnosisScrollRef = useRef<HTMLDivElement>(null)
 
   const hubUrl = getHubUrl()
-  const token = () => sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+  const token = () => getAuthToken() || ""
 
   const canSubmit = problem.trim() !== "" && timeRange !== null && !loading
 
@@ -4100,7 +4101,7 @@ function DoctorSection() {
     setError(null)
     try {
       const hubUrl = getHubUrl()
-      const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+      const token = getAuthToken() || ""
       const res = await fetch(`${hubUrl}/api/doctor${refresh ? "?refresh=true" : ""}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
