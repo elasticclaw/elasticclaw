@@ -8,6 +8,7 @@ import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
 import { patchClaw } from "@/lib/api"
 import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
+import { BootstrapProgress } from "@/components/bootstrap-progress"
 
 interface ClawCardProps {
   claw: Claw
@@ -116,6 +117,13 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
   }
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
+  const railClass = claw.isStreaming
+    ? "border-l-green-500"
+    : claw.status === "provisioning"
+      ? "border-l-blue-400"
+      : claw.status === "error"
+        ? "border-l-red-500"
+        : COLOR_CLASSES[localColor]?.border ?? "border-l-border"
 
   return (
     <div
@@ -129,8 +137,8 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         }
       }}
       className={cn(
-        "w-full text-left p-3 rounded-md transition-colors relative group border-l-2",
-        COLOR_CLASSES[localColor]?.border ?? "border-l-border",
+        "w-full min-w-0 text-left p-3 rounded-md transition-colors relative group border-l-2",
+        railClass,
         isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
         isSelected && "bg-accent",
         hasUnread && !isSelected && "bg-blue-950/30"
@@ -186,8 +194,11 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
           </button>
         )}
       </div>
+      <div className="min-w-0 max-w-[170px] overflow-hidden pl-5 pr-1">
+        <BootstrapProgress claw={claw} variant="sidebar" />
+      </div>
       {(localTags.length > 0 || isSelected) && (
-        <div className="mt-1.5 pl-5 flex items-start gap-2" onClick={(e) => e.stopPropagation()}>
+        <div className="mt-1.5 max-w-[170px] overflow-hidden pl-5 pr-1 flex items-start gap-2" onClick={(e) => e.stopPropagation()}>
           <TagEditor
             clawId={claw.id}
             tags={localTags}
@@ -236,9 +247,6 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             )}
           </div>
         </div>
-      )}
-      {claw.isStreaming && (
-        <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-green-500 rounded-full" />
       )}
     </div>
   )

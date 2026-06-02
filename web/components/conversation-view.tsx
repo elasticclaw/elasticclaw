@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback, memo } from "react"
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
 import {
   DndContext,
@@ -35,6 +35,7 @@ import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
+import { BootstrapProgress } from "@/components/bootstrap-progress"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -307,6 +308,10 @@ function ClawBoardCard({
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const [showCardScrollBtn, setShowCardScrollBtn] = useState(false)
+  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
+  const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
+  const latestActivity = useMemo(() => latestActivityMessage(messages), [messages])
+  const [activityNow, setActivityNow] = useState(() => Date.now())
 
   const {
     attachments,
@@ -323,6 +328,17 @@ function ClawBoardCard({
   const stillUploading = attachments.some((a) => a.status === "uploading")
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmitCard = !isPending && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
+
+  const toggleActivityGroup = useCallback((id: string) => {
+    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
+  }, [])
+
+  useEffect(() => {
+    if (!latestActivity) return
+    setActivityNow(Date.now())
+    const timer = window.setInterval(() => setActivityNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [latestActivity])
 
   useEffect(() => {
     const el = msgScrollRef.current
@@ -453,6 +469,7 @@ function ClawBoardCard({
                 )}
               </span>
             </div>
+            <BootstrapProgress claw={claw} />
             {claw.tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-2">
                 {claw.tags.slice(0, 3).map((tag) => (
@@ -480,7 +497,20 @@ function ClawBoardCard({
                 No messages yet
               </p>
             ) : (
-              messages.map((message) => {
+              conversationItems.map((item) => {
+                if (item.type === "activity-summary") {
+                  return (
+                    <ActivitySummary
+                      key={item.id}
+                      item={item}
+                      expanded={Boolean(expandedActivityGroups[item.id])}
+                      onToggle={() => toggleActivityGroup(item.id)}
+                      variant="card"
+                    />
+                  )
+                }
+                const { message } = item
+                const isLatestVisibleActivity = message.role === "activity" && isLatestActivityMessage(messages, message)
                 if (message.content === "__THINKING__") {
                   return (
                     <div key={message.id} className="flex gap-1 py-2 pl-2">
@@ -510,6 +540,17 @@ function ClawBoardCard({
                         message.format === "pre" && "whitespace-pre-wrap"
                       )}>{message.content}</span>
                     </div>
+                  )
+                }
+                if (message.role === "activity") {
+                  return (
+                    <ActivityRow
+                      key={message.id}
+                      message={message}
+                      variant="card"
+                      label={isLatestVisibleActivity ? "Last activity" : undefined}
+                      now={isLatestVisibleActivity ? activityNow : undefined}
+                    />
                   )
                 }
                 const { body: cardBody, attachments: cardAttachments } = message.role === "user"
@@ -797,6 +838,319 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
+function activityTitle(message: Message): string {
+  const activity = message.activity
+  if (!activity) return "Activity"
+  if (activity.kind === "session_error") return "Session issue"
+  if (activity.error) return "Agent error"
+  if (activity.kind === "model_started") return "Waiting for model"
+  if (activity.kind === "tool") return activity.tool || activity.phase || "Tool"
+  if (activity.kind === "diagnostic") return "Diagnostic"
+  return activity.tool || activity.phase || activity.stream || "Activity"
+}
+
+function activityDetail(message: Message): string {
+  const activity = message.activity
+  if (!activity) return nonPhaseMessage(message.content)
+  if (activity.kind === "model_started" && activity.message?.startsWith("waiting for ")) {
+    return activity.message.replace(/^waiting for\s+/, "")
+  }
+  return activity.error || activity.command || activity.path || activity.url || activity.detail || nonPhaseMessage(activity.message) || nonPhaseMessage(message.content)
+}
+
+function activityDetailKind(message: Message): "command" | "path" | "url" | "text" {
+  const activity = message.activity
+  if (activity?.command) return "command"
+  if (activity?.path) return "path"
+  if (activity?.url) return "url"
+  return "text"
+}
+
+function activityStatusText(message: Message): string {
+  const activity = message.activity
+  if (!activity?.message || isPhaseMessage(activity.message)) return ""
+  const detail = activityDetail(message)
+  return activity.message === detail ? "" : activity.message
+}
+
+function isPhaseMessage(value?: string): boolean {
+  if (!value) return false
+  return ["running", "completed", "complete", "done", "failed", "error"].includes(value.toLowerCase())
+}
+
+function nonPhaseMessage(value?: string): string {
+  return isPhaseMessage(value) ? "" : value || ""
+}
+
+function activityIcon(message: Message, className: string) {
+  const kind = message.activity?.kind
+  if (message.activity?.error || kind === "session_error") return <AlertCircle className={className} />
+  if (kind === "tool") return <Wrench className={className} />
+  if (kind === "model_started") return <Loader2 className={cn(className, "animate-spin")} />
+  return <Info className={className} />
+}
+
+function isHiddenActivity(message: Message): boolean {
+  return message.activity?.kind === "still_working" || message.content.startsWith("No streamed output")
+}
+
+function isStaleModelWait(message: Message, latestActivity: Message | null): boolean {
+  return message.activity?.kind === "model_started" && latestActivity?.id !== message.id
+}
+
+function isTerminalAssistantMessage(message: Message): boolean {
+  return message.role === "claw" && /\[(DONE|READY_TO_COMMIT)\]/.test(message.content)
+}
+
+function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (isTerminalAssistantMessage(messages[i])) return true
+  }
+  return false
+}
+
+function activityTone(message: Message): "error" | "warning" | "normal" {
+  if (message.activity?.error && message.activity.kind === "tool") return "error"
+  if (message.activity?.error || message.activity?.kind === "session_error") return "warning"
+  return "normal"
+}
+
+function latestActivityMessage(messages: Message[]): Message | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role !== "activity" || isHiddenActivity(message)) continue
+    if (message.activity?.kind === "model_started" && hasEarlierTerminalAssistant(messages, i)) continue
+    return message
+  }
+  return null
+}
+
+function isLatestActivityMessage(messages: Message[], candidate: Message): boolean {
+  return latestActivityMessage(messages)?.id === candidate.id
+}
+
+function formatActivityAge(timestamp: Date, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - timestamp.getTime()) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (minutes < 60) return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s ago` : `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ago`
+}
+
+type ConversationItem =
+  | { type: "message"; message: Message }
+  | { type: "activity-summary"; id: string; messages: Message[] }
+
+function compactActivityRuns(messages: Message[]): ConversationItem[] {
+  const items: ConversationItem[] = []
+  let run: Message[] = []
+  const latestActivity = latestActivityMessage(messages)
+
+  const flush = () => {
+    const visible = run.filter((message) => !isHiddenActivity(message) && !isStaleModelWait(message, latestActivity))
+    run = []
+    if (visible.length === 0) return
+    if (visible.length === 1) {
+      items.push({ type: "message", message: visible[0] })
+      return
+    }
+    const collapsed = visible.slice(0, -1)
+    const latest = visible[visible.length - 1]
+    items.push({
+      type: "activity-summary",
+      id: `activity-summary-${collapsed[0].id}-${collapsed[collapsed.length - 1].id}`,
+      messages: collapsed,
+    })
+    items.push({ type: "message", message: latest })
+  }
+
+  for (const message of messages) {
+    if (message.role === "activity") {
+      run.push(message)
+      continue
+    }
+    flush()
+    items.push({ type: "message", message })
+  }
+  flush()
+
+  return items
+}
+
+function activityGroupKey(message: Message): string {
+  const activity = message.activity
+  if (!activity) return message.id
+  return [
+    activity.kind || "",
+    activity.tool || "",
+    activity.detail || "",
+    activity.command || "",
+    activity.path || "",
+    activity.url || "",
+  ].join("\u0000")
+}
+
+function isRunningActivity(message: Message): boolean {
+  return message.activity?.kind === "tool" && (message.activity.phase === "running" || message.activity.message === "running")
+}
+
+function isTerminalActivity(message: Message): boolean {
+  const phase = (message.activity?.phase || message.activity?.message || "").toLowerCase()
+  return message.activity?.kind === "tool" && ["completed", "complete", "done", "failed", "error"].includes(phase)
+}
+
+function coalesceActivityMessages(messages: Message[]): Message[] {
+  const terminalKeys = new Set(messages.filter(isTerminalActivity).map(activityGroupKey))
+  return messages.filter((message) => !(isRunningActivity(message) && terminalKeys.has(activityGroupKey(message))))
+}
+
+function activitySummaryLabel(messages: Message[]): string {
+  const toolCount = messages.filter((message) => message.activity?.kind === "tool").length
+  const noun = toolCount === messages.length ? "tool call" : "activity update"
+  return `${messages.length} earlier ${noun}${messages.length === 1 ? "" : "s"}`
+}
+
+function ActivityRow({
+  message,
+  variant = "full",
+  label,
+  now,
+}: {
+  message: Message
+  variant?: "card" | "full"
+  label?: string
+  now?: number
+}) {
+  if (isHiddenActivity(message)) return null
+  const detail = activityDetail(message)
+  const detailKind = activityDetailKind(message)
+  const statusText = activityStatusText(message)
+  const tone = activityTone(message)
+  const age = now ? `updated ${formatActivityAge(message.timestamp, now)}` : ""
+
+  if (variant === "card") {
+    return (
+      <div className={cn(
+        "rounded border px-1.5 py-1 text-[10px]",
+        tone === "error"
+          ? "border-red-500/20 bg-red-500/5 text-red-400"
+          : tone === "warning"
+            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
+          : "border-border/50 bg-muted/30 text-muted-foreground"
+      )}>
+        <div className="flex min-w-0 items-center gap-1.5">
+          {activityIcon(message, "size-2.5 shrink-0")}
+          {label && <span className="font-medium shrink-0">{label}</span>}
+          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
+          {statusText && (
+            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
+          )}
+          {age && <span className="ml-auto shrink-0 text-muted-foreground/60" suppressHydrationWarning>{age}</span>}
+        </div>
+        {detail && (
+          <span
+            className={cn(
+              "mt-0.5 block truncate pl-4 text-muted-foreground/70",
+              detailKind !== "text" && "font-mono"
+            )}
+            title={detail}
+          >
+            {detail}
+          </span>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-2 py-2">
+      <div className="flex-1 h-px bg-border/50" />
+      <div className={cn(
+        "min-w-0 max-w-[82%] rounded border px-2.5 py-1.5 text-xs",
+        tone === "error"
+          ? "border-red-500/20 bg-red-500/5 text-red-400"
+          : tone === "warning"
+            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
+          : "border-border/60 bg-muted/35 text-muted-foreground"
+      )}>
+        <div className="flex min-w-0 items-center gap-2">
+          {activityIcon(message, "size-3 shrink-0")}
+          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
+          {statusText && (
+            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
+          )}
+          <span className="ml-auto shrink-0 text-muted-foreground/50" suppressHydrationWarning>
+            {formatTimestamp(message.timestamp)}
+          </span>
+        </div>
+        {detail && (
+          <span
+            className={cn(
+              "mt-1 block truncate pl-5 text-muted-foreground/80",
+              detailKind !== "text" && "font-mono"
+            )}
+            title={detail}
+          >
+            {detail}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 h-px bg-border/50" />
+    </div>
+  )
+}
+
+function ActivitySummary({
+  item,
+  expanded,
+  onToggle,
+  variant = "full",
+}: {
+  item: Extract<ConversationItem, { type: "activity-summary" }>
+  expanded: boolean
+  onToggle: () => void
+  variant?: "card" | "full"
+}) {
+  const visibleMessages = coalesceActivityMessages(item.messages)
+  if (variant === "card") {
+    return (
+      <div className="space-y-1">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-1 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
+        >
+          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages)}
+        </button>
+        {expanded && visibleMessages.map((message) => (
+          <ActivityRow key={message.id} message={message} variant="card" />
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 py-1">
+        <div className="flex-1 h-px bg-border/50" />
+        <button
+          type="button"
+          onClick={onToggle}
+          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+        >
+          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages)}
+        </button>
+        <div className="flex-1 h-px bg-border/50" />
+      </div>
+      {expanded && visibleMessages.map((message) => (
+        <ActivityRow key={message.id} message={message} />
+      ))}
+    </div>
+  )
+}
+
 const MessageBubble = memo(function MessageBubble({
   message,
   clawId,
@@ -830,6 +1184,10 @@ const MessageBubble = memo(function MessageBubble({
         <div className="flex-1 h-px bg-border" />
       </div>
     )
+  }
+
+  if (message.role === "activity") {
+    return <ActivityRow message={message} />
   }
 
   // Thinking indicator
@@ -960,6 +1318,8 @@ function ClawChatView({
     clawId: claw.id,
     liveMessages,
   })
+  const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
+  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
@@ -1004,6 +1364,10 @@ function ClawChatView({
   const stillUploading = attachments.some((a) => a.status === "uploading")
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
+
+  const toggleActivityGroup = useCallback((id: string) => {
+    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1071,6 +1435,7 @@ function ClawChatView({
             <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
           </div>
         </div>
+        <BootstrapProgress claw={claw} variant="full" />
       </header>
 
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-hide p-6 relative">
@@ -1088,8 +1453,17 @@ function ClawChatView({
           {messages.length === 0 ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
-            messages.map((message) => (
-              <MessageBubble key={message.id} message={message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
+            conversationItems.map((item) => (
+              item.type === "activity-summary" ? (
+                <ActivitySummary
+                  key={item.id}
+                  item={item}
+                  expanded={Boolean(expandedActivityGroups[item.id])}
+                  onToggle={() => toggleActivityGroup(item.id)}
+                />
+              ) : (
+                <MessageBubble key={item.message.id} message={item.message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
+              )
             ))
           )}
           <div ref={bottomRef} className="h-4" />

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import type { Claw, Message, CreateClawRequest } from "@/lib/types"
+import type { AgentActivity, Claw, Message, CreateClawRequest } from "@/lib/types"
 import {
   fetchClaws,
   fetchMessages,
@@ -36,6 +36,52 @@ export interface HubState {
 
 const ORDER_KEY = "elasticclaw_claw_order"
 
+function describeWsUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl)
+    if (url.searchParams.has("token")) {
+      url.searchParams.set("token", "[redacted]")
+    }
+    return url.toString()
+  } catch {
+    return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
+  }
+}
+
+function isTransientMessage(message: Message): boolean {
+  return message.id.startsWith("activity-") || message.id.startsWith("live-") || message.id.startsWith("thinking-")
+}
+
+function formatActivityContent(activity: AgentActivity): string {
+  if (activity.error) return activity.error
+  if (activity.command) return activity.command
+  if (activity.path) return activity.path
+  if (activity.url) return activity.url
+  if (activity.detail) return activity.detail
+  if (activity.message) return activity.message
+  if (activity.tool) return activity.tool
+  switch (activity.kind) {
+    case "model_started":
+      return "Waiting on model response"
+    case "tool":
+      return "Tool activity"
+    default:
+      return activity.phase || activity.stream || "Activity"
+  }
+}
+
+function isUnhelpfulActivity(activity: AgentActivity): boolean {
+  return activity.kind === "still_working" || Boolean(activity.message?.startsWith("No streamed output")) || Boolean(activity.error?.startsWith("No streamed output"))
+}
+
+function withoutModelWaitActivities(messages: Message[]): Message[] {
+  return messages.filter((message) => message.activity?.kind !== "model_started")
+}
+
+function isTerminalAssistantMessage(message: Message): boolean {
+  return message.role === "claw" && /\[(DONE|READY_TO_COMMIT)\]/.test(message.content)
+}
+
 function loadSavedOrder(): string[] {
   try {
     const raw = localStorage.getItem(ORDER_KEY)
@@ -57,10 +103,24 @@ export function useHub(selectedClawId: string | null): HubState {
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const messagesRef = useRef<Record<string, Message[]>>({})
   const [connected, setConnected] = useState(false)
-  const { displayBuffers: streamingBuffers, pushChunk, finalize: finalizeTypewriter } = useTypewriter()
+  const {
+    displayBuffers: streamingBuffers,
+    pushChunk,
+    finalize: finalizeTypewriter,
+    split: splitTypewriter,
+    clear: clearTypewriter,
+  } = useTypewriter()
   const [configured, setConfigured] = useState(false)
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
+  const segmentedStreamRef = useRef<Record<string, boolean>>({})
+  const clientMessageSeqRef = useRef(0)
+
+  const nextClientMessageId = useCallback((prefix: string, clawId?: string) => {
+    clientMessageSeqRef.current += 1
+    const scope = clawId ? `${clawId}-` : ""
+    return `${prefix}-${scope}${Date.now()}-${clientMessageSeqRef.current}`
+  }, [])
 
   // Track pinned state from localStorage
   const pinnedRef = useRef<Record<string, boolean>>({})
@@ -86,15 +146,20 @@ export function useHub(selectedClawId: string | null): HubState {
     try {
       const toSave: Record<string, unknown[]> = {}
       for (const [clawId, clawMsgs] of Object.entries(msgs)) {
-        // Keep last N messages per claw, skip optimistic/system
+        // Keep last N durable messages per claw. Live stream segments and activity
+        // rows are per-tab transcript state; the API stores canonical messages.
         toSave[clawId] = clawMsgs
-          .filter((m) => !m.id.startsWith("opt-") && m.role !== "system")
+          .filter((m) => !m.id.startsWith("opt-") && m.role !== "system" && !isTransientMessage(m))
           .slice(-MAX_CACHED_PER_CLAW)
       }
       localStorage.setItem(MESSAGES_KEY, JSON.stringify(toSave))
     } catch {}
   }, [])
   const wsRef = useRef<WebSocket | null>(null)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const reconnectAttemptRef = useRef(0)
+  const shouldReconnectRef = useRef(false)
+  const lastWsErrorLogRef = useRef(0)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const selectedClawIdRef = useRef<string | null>(selectedClawId)
 
@@ -201,7 +266,7 @@ export function useHub(selectedClawId: string | null): HubState {
         // Merge API result with cached state:
         // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
         // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
-        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-'))
+        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
         const apiIds = new Set(msgs.map((m) => m.id))
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
@@ -228,31 +293,49 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [persistMessages])
 
   const connectWebSocket = useCallback(() => {
+    if (!shouldReconnectRef.current) return
     if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
       wsRef.current.close()
     }
     const wsUrl = getHubWsUrl()
+    const safeWsUrl = describeWsUrl(wsUrl)
     let ws: WebSocket
     try {
       ws = new WebSocket(wsUrl)
     } catch (err) {
-      console.error("WS create failed:", err)
+      console.error(`WS create failed for ${safeWsUrl}:`, err)
       return
     }
     wsRef.current = ws
 
     ws.onopen = () => {
+      reconnectAttemptRef.current = 0
       setConnected(true)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (wsRef.current !== ws) return
       setConnected(false)
-      // Reconnect after 3s
-      setTimeout(connectWebSocket, 3000)
+      if (!shouldReconnectRef.current) return
+      const attempt = reconnectAttemptRef.current
+      reconnectAttemptRef.current += 1
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5))
+      if (event.code !== 1000) {
+        console.warn(
+          `WS closed for ${safeWsUrl}: code=${event.code} reason=${event.reason || "none"}; reconnecting in ${Math.round(delayMs / 1000)}s`
+        )
+      }
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
     }
 
-    ws.onerror = (err) => {
-      console.warn("WS error:", err)
+    ws.onerror = () => {
+      const nowMs = Date.now()
+      if (nowMs - lastWsErrorLogRef.current < 10_000) return
+      lastWsErrorLogRef.current = nowMs
+      console.warn(`WS error for ${safeWsUrl}; check the Network tab for /api/ws status and close code`)
     }
 
     ws.onmessage = (event) => {
@@ -266,14 +349,64 @@ export function useHub(selectedClawId: string | null): HubState {
           pushChunk(claw_id, content)
           setClaws((prev) =>
             prev.map((c) =>
-              c.id === claw_id ? { ...c, isStreaming: true } : c
+                c.id === claw_id ? { ...c, isStreaming: true } : c
+            )
+          )
+        } else if (type === "agent_activity") {
+          const clawId = payload.claw_id
+          if (!clawId) return
+          const activity: AgentActivity = {
+            kind: payload.kind || "activity",
+            stream: payload.stream,
+            phase: payload.phase,
+            tool: payload.tool,
+            detail: payload.detail,
+            command: payload.command,
+            path: payload.path,
+            url: payload.url,
+            message: payload.message,
+            error: payload.error,
+          }
+          if (isUnhelpfulActivity(activity)) return
+          const currentMessages = messagesRef.current[clawId] || []
+          const lastDurable = [...currentMessages].reverse().find((message) => !isTransientMessage(message) && message.role !== "activity")
+          if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return
+          const segment = splitTypewriter(clawId)
+          const createdAt = payload.created_at ? new Date(payload.created_at) : new Date()
+          segmentedStreamRef.current[clawId] = true
+          setMessages((prev) => {
+            const nextMessages = [...(prev[clawId] || [])]
+            if (segment.trim()) {
+              nextMessages.push({
+                id: nextClientMessageId("live-segment", clawId),
+                role: "claw",
+                content: segment,
+                timestamp: createdAt,
+              })
+            }
+            nextMessages.push({
+              id: nextClientMessageId("activity", clawId),
+              role: "activity",
+              content: formatActivityContent(activity),
+              activity,
+              timestamp: createdAt,
+            })
+            const next = { ...prev, [clawId]: nextMessages }
+            persistMessages(next)
+            return next
+          })
+          setClaws((prev) =>
+            prev.map((c) =>
+              c.id === clawId ? { ...c, isStreaming: true } : c
             )
           )
         } else if (type === "message") {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
           const clawId = payload.claw_id
-          finalizeTypewriter(clawId, () => {
+          if (segmentedStreamRef.current[clawId]) {
+            const tail = clearTypewriter(clawId)
+            delete segmentedStreamRef.current[clawId]
             // Called once typewriter is fully drained — safe to add final message
             setClaws((prev) =>
               prev.map((c) =>
@@ -290,11 +423,46 @@ export function useHub(selectedClawId: string | null): HubState {
               )
             )
             setMessages((prev) => {
-              const next = { ...prev, [clawId]: [...(prev[clawId] || []), msg] }
+              const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
+              const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
+              if (tail.trim()) {
+                nextMessages.push({
+                  id: nextClientMessageId("live-segment", clawId),
+                  role: "claw",
+                  content: tail,
+                  timestamp: msg.timestamp,
+                })
+              } else if (!hasLiveSegment && msg.content.trim()) {
+                nextMessages.push(msg)
+              }
+              const next = { ...prev, [clawId]: nextMessages }
               persistMessages(next)
               return next
             })
-          })
+          } else {
+            finalizeTypewriter(clawId, () => {
+              // Called once typewriter is fully drained — safe to add final message
+              setClaws((prev) =>
+                prev.map((c) =>
+                  c.id === clawId
+                    ? {
+                        ...c,
+                        isStreaming: false,
+                        unreadCount:
+                          selectedClawIdRef.current !== clawId && msg.role === "claw"
+                            ? c.unreadCount + 1
+                            : c.unreadCount,
+                      }
+                    : c
+                )
+              )
+              setMessages((prev) => {
+                const next = { ...prev, [clawId]: [...withoutModelWaitActivities(prev[clawId] || []), msg] }
+                persistMessages(next)
+                return next
+              })
+            })
+          }
         } else if (type === "claw_status") {
           const { claw_id, status } = payload
           if (status === "deleted") {
@@ -327,7 +495,7 @@ export function useHub(selectedClawId: string | null): HubState {
         console.warn("Failed to parse WS message:", err)
       }
     }
-  }, [mergeClaws, refreshClaws])
+  }, [clearTypewriter, finalizeTypewriter, nextClientMessageId, persistMessages, pushChunk, refreshClaws, splitTypewriter])
 
   // Initialize
   useEffect(() => {
@@ -342,11 +510,18 @@ export function useHub(selectedClawId: string | null): HubState {
     pollIntervalRef.current = setInterval(refreshClaws, 10_000)
 
     // Wait for token then connect WS
+    shouldReconnectRef.current = true
     resolveToken().then(() => connectWebSocket())
 
     return () => {
+      shouldReconnectRef.current = false
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
-      if (wsRef.current) wsRef.current.close()
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+      if (wsRef.current) {
+        wsRef.current.onclose = null
+        wsRef.current.onerror = null
+        wsRef.current.close()
+      }
     }
   }, []) // run once on mount
 
@@ -355,7 +530,7 @@ export function useHub(selectedClawId: string | null): HubState {
 
     // Optimistically add user message
     const optimistic: Message = {
-      id: `opt-${Date.now()}`,
+      id: nextClientMessageId("opt", clawId),
       role: "user",
       content: content.trim(),
       timestamp: new Date(),
@@ -391,7 +566,7 @@ export function useHub(selectedClawId: string | null): HubState {
         prev.map((c) => (c.id === clawId ? { ...c, isStreaming: false } : c))
       )
     }
-  }, [])
+  }, [nextClientMessageId, persistMessages, pushChunk])
 
   const createClaw = useCallback(async (req: { name: string; template: string }) => {
     const apiClaw = await apiCreateClaw({

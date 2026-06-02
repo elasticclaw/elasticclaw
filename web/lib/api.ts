@@ -38,6 +38,9 @@ export function resolveToken(): Promise<string> {
   })
     .then((r) => r.json())
     .then((d) => {
+      if (typeof d.hubUrl === "string" && d.hubUrl.trim()) {
+        setHubUrl(d.hubUrl.trim())
+      }
       _token = d.token || ""
       return _token!
     })

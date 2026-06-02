@@ -311,6 +311,60 @@ func TestGitHubAccessChecksReturnNotFoundForMissingClaw(t *testing.T) {
 	}
 }
 
+func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at, status) VALUES(?,?,?,?,datetime('now'),?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, "connected",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	req.SetPathValue("id", "claw-1")
+	rec := httptest.NewRecorder()
+
+	s.handleClawDetail(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, rec.Code)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, "claw-1").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "deleted" {
+		t.Fatalf("expected claw status deleted, got %q", status)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	listReq = listReq.WithContext(context.WithValue(listReq.Context(), ctxTenantKey{}, "test-tenant-id"))
+	listRec := httptest.NewRecorder()
+	s.handleClaws(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d", http.StatusOK, listRec.Code)
+	}
+	var claws []types.Claw
+	if err := json.NewDecoder(listRec.Body).Decode(&claws); err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 0 {
+		t.Fatalf("expected deleted claw to be hidden from list, got %#v", claws)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/claws/claw-1", nil)
+	getReq = getReq.WithContext(context.WithValue(getReq.Context(), ctxTenantKey{}, "test-tenant-id"))
+	getReq.SetPathValue("id", "claw-1")
+	getRec := httptest.NewRecorder()
+	s.handleClawDetail(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("expected detail status %d, got %d", http.StatusNotFound, getRec.Code)
+	}
+}
+
 func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Auth: &types.AuthConfig{

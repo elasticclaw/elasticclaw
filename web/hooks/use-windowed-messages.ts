@@ -7,6 +7,13 @@ import type { Message } from "@/lib/types"
 
 const PAGE_SIZE = 50    // messages per page
 const MAX_WINDOW = 50   // max messages kept in DOM
+const ROLE_ORDER: Record<Message["role"], number> = {
+  user: 0,
+  hub: 1,
+  claw: 2,
+  activity: 3,
+  system: 4,
+}
 
 interface UseWindowedMessagesOptions {
   clawId: string
@@ -27,13 +34,16 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
   const [hasOlder, setHasOlder] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const initialLoaded = useRef(false)
+  const loadedClawId = useRef<string | null>(null)
   const oldestTimestamp = useRef<string | null>(null)
 
   // Initial load — last PAGE_SIZE messages
   useEffect(() => {
-    if (initialLoaded.current || !clawId) return
-    initialLoaded.current = true
+    if (!clawId || loadedClawId.current === clawId) return
+    loadedClawId.current = clawId
+    oldestTimestamp.current = null
+    setHistoricalMsgs([])
+    setHasOlder(false)
 
     fetchMessages(clawId)
       .then((apiMsgs) => {
@@ -97,7 +107,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     }
   }, [loadOlder, loadingOlder, hasOlder])
 
-  // Merge historical + live, deduplicate by id, cap window
+  // Merge historical + live, deduplicate, sort by timestamp, cap window
   const messages = (() => {
     const seen = new Set<string>()
     const all: Message[] = []
@@ -105,11 +115,40 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
       if (!seen.has(m.id)) { seen.add(m.id); all.push(m) }
     }
     for (const m of liveMessages) {
-      if (!seen.has(m.id)) { seen.add(m.id); all.push(m) }
+      if (seen.has(m.id)) continue
+      if (all.some((existing) => isDuplicateLiveActivity(existing, m))) continue
+      seen.add(m.id)
+      all.push(m)
     }
-    // If too many, drop oldest
+    all.sort(compareMessages)
     return all.length > MAX_WINDOW ? all.slice(all.length - MAX_WINDOW) : all
   })()
 
   return { messages, hasOlder, loadingOlder, loadOlder, scrollRef, onScroll }
+}
+
+function compareMessages(a: Message, b: Message): number {
+  const timeDelta = a.timestamp.getTime() - b.timestamp.getTime()
+  if (timeDelta !== 0) return timeDelta
+  return (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9)
+}
+
+function isDuplicateLiveActivity(existing: Message, candidate: Message): boolean {
+  if (existing.role !== "activity" || candidate.role !== "activity") return false
+  const timeDelta = Math.abs(existing.timestamp.getTime() - candidate.timestamp.getTime())
+  if (timeDelta > 2000) return false
+  if (existing.content !== candidate.content) return false
+
+  const existingActivity = existing.activity
+  const candidateActivity = candidate.activity
+  if (!existingActivity || !candidateActivity) return true
+
+  return (
+    existingActivity.kind === candidateActivity.kind &&
+    existingActivity.phase === candidateActivity.phase &&
+    existingActivity.tool === candidateActivity.tool &&
+    existingActivity.command === candidateActivity.command &&
+    existingActivity.path === candidateActivity.path &&
+    existingActivity.url === candidateActivity.url
+  )
 }

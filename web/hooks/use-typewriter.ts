@@ -20,7 +20,7 @@ interface TypewriterEntry {
  * smoothly-drained display buffers that feel like a typewriter.
  *
  * Usage:
- *   const { displayBuffers, pushChunk, finalize } = useTypewriter()
+ *   const { displayBuffers, pushChunk, finalize, split, clear } = useTypewriter()
  *
  *   pushChunk(clawId, chunkText)   — call on every WS chunk event
  *   finalize(clawId)               — call when the final message arrives
@@ -139,6 +139,35 @@ export function useTypewriter() {
     }
   }, [])
 
+  /** Snapshot and reset the currently displayed stream at an activity boundary. */
+  const split = useCallback((clawId: string): string => {
+    const entry = entries.current[clawId]
+    if (!entry) return ""
+    const text = entry.shown + entry.queue
+    entry.shown = ""
+    entry.queue = ""
+    entry.hadChunks = false
+    entry.pausedAt = null
+    entry.done = false
+    setDisplayBuffers((prev) => ({ ...prev, [clawId]: { text: "", hadChunks: false, isPaused: false } }))
+    return text
+  }, [])
+
+  /** Snapshot and remove the currently displayed stream. */
+  const clear = useCallback((clawId: string): string => {
+    const entry = entries.current[clawId]
+    if (!entry) return ""
+    const text = entry.shown + entry.queue
+    delete entries.current[clawId]
+    delete onDrainCallbacks.current[clawId]
+    setDisplayBuffers((prev) => {
+      const next = { ...prev }
+      delete next[clawId]
+      return next
+    })
+    return text
+  }, [])
+
   /** Check if a claw is still draining */
   const isTyping = useCallback((clawId: string) => {
     return Boolean(entries.current[clawId])
@@ -150,5 +179,5 @@ export function useTypewriter() {
     }
   }, [])
 
-  return { displayBuffers, pushChunk, finalize, isTyping }
+  return { displayBuffers, pushChunk, finalize, split, clear, isTyping }
 }

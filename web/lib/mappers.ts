@@ -119,11 +119,18 @@ export function mapApiClaw(
 }
 
 export function mapApiMessage(apiMsg: ApiMessage): Message {
+  let activity
+  if (apiMsg.role === "activity" && apiMsg.format?.startsWith("activity:")) {
+    try {
+      activity = JSON.parse(apiMsg.format.slice("activity:".length))
+    } catch {}
+  }
   return {
     id: apiMsg.id,
     role: apiMsg.role,
     content: apiMsg.content,
-    format: apiMsg.format,
+    format: apiMsg.format?.startsWith("activity:") ? undefined : apiMsg.format,
+    activity,
     timestamp: new Date(apiMsg.created_at),
     claw_id: apiMsg.claw_id,
     tenant_id: apiMsg.tenant_id,
