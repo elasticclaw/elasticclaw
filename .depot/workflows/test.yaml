@@ -70,6 +70,17 @@ jobs:
         run: npm install
         working-directory: web
 
+      - name: Lint (smoke check — tolerates rule violations, still fails on tool/config errors)
+        run: |
+          set +e
+          npm run lint
+          ec=$?
+          if [ $ec -eq 0 ] || [ $ec -eq 1 ]; then
+            exit 0
+          fi
+          exit $ec
+        working-directory: web
+
       - name: Build (static export)
         run: npm run build
         working-directory: web
