@@ -522,6 +522,21 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 	}
 }
 
+func TestFactoryWakePromptRequiresVisibleProgressUpdates(t *testing.T) {
+	required := []string{
+		"short visible intro message",
+		"send visible progress updates in normal assistant messages",
+		"Tool calls and activity rows are collapsed in the UI",
+		"what context you gathered, what you changed, what you are verifying, and what you learned",
+		"what you did, what you tested, and what the PR contains",
+	}
+	for _, want := range required {
+		if !strings.Contains(factoryWakeContent, want) {
+			t.Fatalf("factory wake content missing %q:\n%s", want, factoryWakeContent)
+		}
+	}
+}
+
 func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",
