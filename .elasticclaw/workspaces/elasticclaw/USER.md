@@ -14,3 +14,4 @@
 - If you're blocked, say so clearly with what you tried
 - When sharing run/dev/test guidance, include exact commands and required prerequisites
 - Be explicit about which checks were run (`make test`, `go test ./...`, `make build-release`) and what still needs to be verified
+- NEVER force push when resolving CI or Greptile feedback. It's better to push a new commit.
