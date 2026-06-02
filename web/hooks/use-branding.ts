@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { getHubUrl } from "@/lib/hub-url"
+import { getHubToken } from "@/lib/auth-storage"
 
 interface Branding {
   appName: string
@@ -18,7 +19,7 @@ export function useBranding(): Branding {
   useEffect(() => {
     if (cached) return
     const hubUrl = getHubUrl()
-    const token = typeof window !== "undefined" ? sessionStorage.getItem("ec_hub_token") || "" : ""
+    const token = typeof window !== "undefined" ? getHubToken() || "" : ""
     fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => {

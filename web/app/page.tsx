@@ -8,6 +8,7 @@ import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
 import { isConfigured, type Workflow } from "@/lib/api"
+import { requestAuthToken } from "@/lib/auth-storage"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -28,19 +29,25 @@ export default function Home() {
 
   // Fetch admin status
   useEffect(() => {
-    const token = sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
-    if (!token) {
-      setIsAdmin(false)
-      return
-    }
-    import("@/lib/hub-url").then(({ getHubUrl }) => {
+    let cancelled = false
+    async function loadAdminStatus() {
+      const token = await requestAuthToken()
+      if (cancelled) return
+      if (!token) {
+        setIsAdmin(false)
+        return
+      }
+      const { getHubUrl } = await import("@/lib/hub-url")
+      if (cancelled) return
       const hubUrl = getHubUrl()
       const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
       fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.ok ? r.json() : null)
-        .then(data => { setIsAdmin(data?.is_admin === true) })
-        .catch(() => { setIsAdmin(false) })
-    })
+        .then(data => { if (!cancelled) setIsAdmin(data?.is_admin === true) })
+        .catch(() => { if (!cancelled) setIsAdmin(false) })
+    }
+    loadAdminStatus()
+    return () => { cancelled = true }
   }, [])
 
   const hub = useHub(selectedClawId)

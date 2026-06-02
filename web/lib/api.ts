@@ -1,12 +1,13 @@
 import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
+import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
 
 // Token is resolved once and cached.
-// Priority: sessionStorage (set on login) > /api/hub-config (proxy to hub)
+// Priority: sessionStorage or an open-tab session sync > /api/hub-config (proxy to hub)
 let _token: string | null = null
 let _tokenPromise: Promise<string> | null = null
 
-export function resolveToken(): Promise<string> {
+export async function resolveToken(): Promise<string> {
   if (_token) return Promise.resolve(_token)
   if (_tokenPromise) return _tokenPromise
 
@@ -16,16 +17,11 @@ export function resolveToken(): Promise<string> {
     return Promise.resolve(_token)
   }
 
-  // Check sessionStorage first (set by login page)
+  // Check this tab first, then ask other currently open tabs for their session.
   // Prefer GitHub OAuth token over hub token when both exist
-  const githubToken = sessionStorage.getItem("ec_github_token")
-  if (githubToken) {
-    _token = githubToken
-    return Promise.resolve(_token)
-  }
-  const stored = sessionStorage.getItem("ec_hub_token")
-  if (stored) {
-    _token = stored
+  const authToken = getAuthToken() || await requestAuthToken()
+  if (authToken) {
+    _token = authToken
     return Promise.resolve(_token)
   }
 
@@ -34,7 +30,7 @@ export function resolveToken(): Promise<string> {
   const hubConfigUrl = hubUrl ? `${hubUrl}/api/hub-config` : "/api/hub-config"
 
   _tokenPromise = fetch(hubConfigUrl, {
-    headers: { Authorization: `Bearer ${sessionStorage.getItem("ec_hub_token") || ""}` }
+    headers: { Authorization: "Bearer " }
   })
     .then((r) => r.json())
     .then((d) => {
@@ -56,7 +52,7 @@ export function resolveToken(): Promise<string> {
 function getTokenSync(): string {
   if (_token) return _token
   if (typeof window !== "undefined") {
-    return sessionStorage.getItem("ec_github_token") || sessionStorage.getItem("ec_hub_token") || ""
+    return getAuthToken() || ""
   }
   return ""
 }
@@ -203,10 +199,7 @@ export function saveConfig(_hubUrl: string, _token: string) {
 export function clearConfig() {
   _token = null
   _tokenPromise = null
-  if (typeof window !== "undefined") {
-    sessionStorage.removeItem("ec_hub_token")
-    sessionStorage.removeItem("ec_github_token")
-  }
+  clearAuthTokens()
 }
 
 export function getConfig() {
