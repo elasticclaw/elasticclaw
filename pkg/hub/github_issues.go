@@ -300,7 +300,10 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 			}
 			matched = true
 			log.Printf("[workflow:%s/%s] GitHub issue %s matched workflow trigger — creating claw", workspace.Name, workflow.Name, issueID)
-			if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
+			if _, _, err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
+				if isFactoryTriggerAlreadyClaimed(err) {
+					continue
+				}
 				log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
 			}
 		}
@@ -393,13 +396,13 @@ func assignedToMatches(filter, assignee string) bool {
 	}
 }
 
-func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) error {
+func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) (string, bool, error) {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
 		log.Printf("[workflow:%s/%s] GitHub issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
-		return nil
+		return existing, false, nil
 	}
 
 	triggerKey := factoryTriggerKey("github-issues", issueID)
@@ -411,11 +414,11 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		"workflow":  workflow.Name,
 	})
 	if err != nil {
-		return fmt.Errorf("claim workflow trigger: %w", err)
+		return "", false, fmt.Errorf("claim workflow trigger: %w", err)
 	}
 	if !claimed {
 		log.Printf("[workflow:%s/%s] GitHub issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
-		return nil
+		return "", false, errFactoryTriggerAlreadyClaimed
 	}
 	claimOpen := true
 	defer func() {
@@ -441,14 +444,14 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		reason:         reason,
 	})
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "github-issues", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		return fmt.Errorf("complete workflow trigger: %w", err)
+		return "", false, fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false
-	return nil
+	return clawID, true, nil
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {

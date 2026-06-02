@@ -325,4 +325,20 @@ func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *te
 	if len(authHeaders) != 1 || authHeaders[0] != "Bearer test-github-issues-token" {
 		t.Fatalf("GitHub issue fetch auth headers = %#v, want one bearer token", authHeaders)
 	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/github-issue/trigger", strings.NewReader(`{"inputs":{"issue_number":42}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("duplicate trigger status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var duplicateResp map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &duplicateResp); err != nil {
+		t.Fatalf("decode duplicate response: %v", err)
+	}
+	if duplicateResp["claw_id"] != resp["claw_id"] || duplicateResp["status"] != "existing" {
+		t.Fatalf("duplicate response = %#v, want same claw id with existing status", duplicateResp)
+	}
 }

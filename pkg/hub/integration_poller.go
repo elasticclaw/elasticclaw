@@ -1032,7 +1032,10 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 		if !ok {
 			continue
 		}
-		if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
+		if _, _, err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
 		}
 	}

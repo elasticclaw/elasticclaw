@@ -249,14 +249,22 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	}
 
 	if workflow.Integration == "github-issues" || (workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil) {
-		clawID, err := s.createClawForManualGitHubIssueWorkflow(workspace, workflow, validatedInputs)
+		clawID, created, err := s.createClawForManualGitHubIssueWorkflow(workspace, workflow, validatedInputs)
 		if err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				jsonError(w, http.StatusConflict, "workflow trigger already in progress for this GitHub issue")
+				return
+			}
 			jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 			return
 		}
+		status := "existing"
+		if created {
+			status = "created"
+		}
 		jsonOK(w, map[string]string{
 			"claw_id": clawID,
-			"status":  "created",
+			"status":  status,
 		})
 		return
 	}
@@ -272,18 +280,18 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	})
 }
 
-func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string) (string, error) {
+func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string) (string, bool, error) {
 	rawIssueNumber := strings.TrimSpace(inputs["issue_number"])
 	if rawIssueNumber == "" {
-		return "", fmt.Errorf(`missing required input "issue_number"`)
+		return "", false, fmt.Errorf(`missing required input "issue_number"`)
 	}
 	issueNumberFloat, err := strconv.ParseFloat(rawIssueNumber, 64)
 	if err != nil {
-		return "", fmt.Errorf("invalid issue_number %q: %w", rawIssueNumber, err)
+		return "", false, fmt.Errorf("invalid issue_number %q: %w", rawIssueNumber, err)
 	}
 	issueNumber := int(issueNumberFloat)
 	if issueNumber < 1 || float64(issueNumber) != issueNumberFloat {
-		return "", fmt.Errorf("issue_number must be a positive integer")
+		return "", false, fmt.Errorf("issue_number must be a positive integer")
 	}
 
 	repos := githubIssuesWorkflowTriggerRepos(workflow)
@@ -296,13 +304,13 @@ func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.Workspa
 		exactRepos = append(exactRepos, repo)
 	}
 	if len(exactRepos) != 1 {
-		return "", fmt.Errorf("manual GitHub issue workflow requires exactly one exact trigger repository, got %d", len(exactRepos))
+		return "", false, fmt.Errorf("manual GitHub issue workflow requires exactly one exact trigger repository, got %d", len(exactRepos))
 	}
 	repo := exactRepos[0]
 
 	token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
 	if token == "" {
-		return "", fmt.Errorf("no GitHub Issues token configured for workflow %s/%s", workspace.Name, workflow.Name)
+		return "", false, fmt.Errorf("no GitHub Issues token configured for workflow %s/%s", workspace.Name, workflow.Name)
 	}
 
 	base := s.githubBaseURL
@@ -311,21 +319,11 @@ func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.Workspa
 	}
 	issue, err := s.queryGitHubIssue(repo, token, base, issueNumber)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, "manual")
-	if err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "manual workflow trigger"); err != nil {
-		return "", err
-	}
-
-	var clawID string
-	issueID := fmt.Sprintf("%s/%d", repo, issueNumber)
-	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`, issueID).Scan(&clawID)
-	if clawID == "" {
-		return "", fmt.Errorf("created GitHub issue workflow claw for %s but could not resolve claw id", issueID)
-	}
-	return clawID, nil
+	return s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "manual workflow trigger")
 }
 
 func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
@@ -334,7 +332,10 @@ func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (gi
 		return githubIssuesPollItem{}, err
 	}
 	var issue githubIssuesPollItem
-	b, _ := json.Marshal(item)
+	b, err := json.Marshal(item)
+	if err != nil {
+		return githubIssuesPollItem{}, fmt.Errorf("marshal GitHub issue response: %w", err)
+	}
 	if err := json.Unmarshal(b, &issue); err != nil {
 		return githubIssuesPollItem{}, fmt.Errorf("parse GitHub issue response: %w", err)
 	}
