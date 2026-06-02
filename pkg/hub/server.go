@@ -1768,9 +1768,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			} else if msg.Type == "agent_activity" {
-				payload, _ := json.Marshal(msg.Payload)
-				var activity map[string]interface{}
-				if err := json.Unmarshal(payload, &activity); err == nil {
+				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
 					createdAt := now()
 					activity["claw_id"] = clawID
 					activity["created_at"] = createdAt.Format(time.RFC3339Nano)
@@ -2374,21 +2372,26 @@ echo uninstalled`); err != nil {
 
 	const daytonaOpenClawVersion = "2026.5.20"
 	if err := exec("install openclaw", 3*time.Minute,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-PREFIX="$(/usr/local/share/nvm/current/bin/npm config get prefix)"; \
-echo "npm=$NVM_DIR/current/bin/npm prefix=$PREFIX"; \
-sudo env PATH="$NVM_DIR/current/bin:$PATH" npm install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
+NPM="$NVM_DIR/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
+echo "npm=$NPM prefix=$PREFIX"; \
+sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
 hash -r; \
 echo 'install done'`, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
+NPM="$NVM_DIR/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
 hash -r; \
 OPENCLAW_PATH="$(command -v openclaw || true)"; \
 OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(node -e "try{console.log(require('$NVM_DIR/current/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
+PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
 echo "openclaw path=$OPENCLAW_PATH"; \
 echo "openclaw version=$OPENCLAW_VERSION"; \
 echo "openclaw package_version=$PACKAGE_VERSION"; \
@@ -3055,6 +3058,18 @@ func activityContent(activity map[string]interface{}) string {
 		}
 	}
 	return "Activity"
+}
+
+func normalizeAgentActivityPayload(payload interface{}) (map[string]interface{}, []byte, bool) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, false
+	}
+	var activity map[string]interface{}
+	if err := json.Unmarshal(raw, &activity); err != nil || activity == nil {
+		return nil, nil, false
+	}
+	return activity, raw, true
 }
 
 func isPhaseActivityText(value string) bool {
