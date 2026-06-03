@@ -686,6 +686,13 @@ type ProviderConfig struct {
 
 	// local provider
 	Enabled bool `yaml:"enabled,omitempty"`
+
+	// docker (local) provider
+	// Image is the agent container image to run (default: elasticclaw/claw-agent:dev).
+	Image string `yaml:"image,omitempty"`
+	// Network is the Docker network to attach agent containers to so they can
+	// reach the hub by service name (e.g. "elasticclaw-dev").
+	Network string `yaml:"network,omitempty"`
 }
 
 // MCPConfig is the resolved MCP server configuration passed to a claw at creation time.
