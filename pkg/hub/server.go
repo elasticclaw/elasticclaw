@@ -3773,6 +3773,12 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 	return false
 }
 
+func (s *Server) tenantIDForClaw(clawID string) string {
+	var tenantID string
+	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID)
+	return tenantID
+}
+
 func (s *Server) hasSystemMarker(clawID, marker string) bool {
 	var count int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='system' AND content=?`, clawID, marker).Scan(&count)

@@ -3,6 +3,7 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -42,6 +43,41 @@ func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
+	}
+}
+
+func TestPipelineEntryInjectIncludesInitialPlanInstruction(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-initial-plan-pipeline"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", `["workflow:github-issue"]`, "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "entry",
+		Label: "Entry",
+		OnEnter: pipeline.OnEnter{
+			Inject: "Read the GitHub issue and start work.",
+		},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+		t.Fatalf("stage transition returned false")
+	}
+
+	var content string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
+		t.Fatalf("select injected message: %v", err)
+	}
+	if !strings.Contains(content, initialPlanWakeContent) || !strings.Contains(content, "Task context:\nRead the GitHub issue and start work.") {
+		t.Fatalf("pipeline inject did not include initial plan and task context:\n%s", content)
+	}
+	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) {
+		t.Fatalf("initial plan required marker was not inserted")
 	}
 }
 
