@@ -283,6 +283,7 @@ func migrate(db *sql.DB) error {
 		created_at   DATETIME NOT NULL
 	);
 
+	-- v9: pipeline_outputs table for workflow script output capture
 	CREATE TABLE IF NOT EXISTS pipeline_outputs (
 		claw_id      TEXT NOT NULL,
 		stage_id     TEXT NOT NULL,
