@@ -21,7 +21,7 @@ var validIntegrations = map[string]bool{
 
 // Valid provider types
 var validProviders = map[string]bool{
-	"replicated": true, "daytona": true, "exedev": true,
+	"replicated": true, "daytona": true, "exedev": true, "docker": true,
 }
 
 // Valid MCP sources
