@@ -600,7 +600,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	s.mu.RLock()
 	cc, ok := s.claws[clawID]
 	s.mu.RUnlock()
-	delivered := false
+	acceptedForAgent := false
 	if ok {
 		cc.mu.Lock()
 		cc.lastUserMessageAt = time.Now()
@@ -608,7 +608,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 			cc.messageQueue = append(cc.messageQueue, msg)
 			queueLen := len(cc.messageQueue)
 			cc.mu.Unlock()
-			delivered = true
+			acceptedForAgent = true
 			log.Printf("[pr-watcher] queued injected message for claw %s (queue length: %d)", shortID(clawID), queueLen)
 		} else {
 			conn := cc.conn
@@ -619,19 +619,24 @@ func (s *Server) injectMessage(clawID, content, role string) {
 			cancel()
 			if err != nil {
 				log.Printf("[pr-watcher] failed to send injected message to claw %s: %v, queueing", shortID(clawID), err)
-				cc.mu.Lock()
-				cc.messageQueue = append([]types.HubMessage{msg}, cc.messageQueue...)
-				cc.mu.Unlock()
-				delivered = true
+				s.mu.RLock()
+				currentCC := s.claws[clawID]
+				s.mu.RUnlock()
+				if currentCC != nil {
+					currentCC.mu.Lock()
+					currentCC.messageQueue = append([]types.HubMessage{msg}, currentCC.messageQueue...)
+					queueLen := len(currentCC.messageQueue)
+					currentCC.mu.Unlock()
+					acceptedForAgent = true
+					log.Printf("[pr-watcher] queued injected message for claw %s after send failure (queue length: %d)", shortID(clawID), queueLen)
+				}
 			} else {
-				delivered = true
+				acceptedForAgent = true
+				log.Printf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
 			}
 		}
-		if delivered {
-			log.Printf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
-		}
 	}
-	if delivered {
+	if acceptedForAgent {
 		// Signal to UI that agent is working on the injected message
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type: "agent_typing",
@@ -645,7 +650,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	// If this is a user/hub message injection (not a claw response), move the issue
 	// to WorkingStatus if the claw was idle (watching for PR events).
 	// Only move if the message was delivered or queued for the agent.
-	if delivered && (role == "user" || role == "hub") {
+	if acceptedForAgent && (role == "user" || role == "hub") {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "idle" {

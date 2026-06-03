@@ -4778,7 +4778,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	}
 
 	// Check if claw is still busy
-	if !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" {
+	if cc.isBusyLocked() {
 		cc.mu.Unlock()
 		return
 	}
