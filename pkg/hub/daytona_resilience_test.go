@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,5 +84,21 @@ func TestSanitizeBootstrapOutput_TruncatesWorkspaceDiagnostic(t *testing.T) {
 	}
 	if !strings.Contains(got, "verify FAILED") {
 		t.Fatal("expected sanitized output to contain the failure reason")
+	}
+}
+
+func TestDaytonaRepoReadinessSnippetQuotesRepoName(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	repo := "owner/repo$(touch " + marker + ")"
+	repoName := repoDirectoryName(repo)
+
+	script := "cd " + shellQuote(dir) + "; mkdir -p " + shellQuote(repoName+"/.git") + "; " + daytonaRepoReadinessSnippet(repo)
+	cmd := exec.Command("bash", "-c", script)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("readiness snippet failed: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("repo name was evaluated as shell code; marker stat err=%v", err)
 	}
 }

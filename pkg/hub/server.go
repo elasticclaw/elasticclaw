@@ -2103,10 +2103,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
 			Payload: map[string]interface{}{
-				"claw_id":          c.id,
-				"name":             c.name,
-				"status":           c.status, // provisioning / starting / error
-				"bootstrap_status": c.bootstrapStatus,
+				"claw_id":              c.id,
+				"name":                 c.name,
+				"status":               c.status, // provisioning / starting / error
+				"bootstrap_status":     c.bootstrapStatus,
+				"bootstrap_diagnostic": c.bootstrapDiagnostic,
 			},
 		})
 	}
@@ -2743,7 +2744,7 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyReposScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; "
 				for _, repo := range repositories {
-					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", repo.Repo)
+					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", shellQuote(repo.Repo))
 				}
 				log.Printf("[daytona] verify configured repositories (no retries)...")
 				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
@@ -2764,12 +2765,19 @@ gh auth status`
 
 			cloneScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
 			for _, repo := range repositories {
-				repoParts := strings.SplitN(repo.Repo, "/", 2)
-				repoName := repo.Repo
-				if len(repoParts) == 2 {
-					repoName = repoParts[1]
-				}
-				cloneScript += fmt.Sprintf("echo '[daytona] cloning %s into %s'; if [ ! -d %q ]; then git clone https://x-access-token:${GH_TOKEN}@github.com/%s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] clone FAILED: %s'; exit 1; }; echo '[daytona] clone OK: %s'; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] pull FAILED: %s'; exit 1; }; echo '[daytona] pull OK: %s'; fi; ", repo.Repo, repoName, repoName, repo.Repo, repoName, repo.Repo, repo.Repo, repoName, repo.Repo, repo.Repo)
+				repoName := repoDirectoryName(repo.Repo)
+				cloneURL := "https://x-access-token:${GH_TOKEN}@github.com/" + shellQuote(repo.Repo)
+				cloneScript += fmt.Sprintf("echo %s; if [ ! -d %s ]; then git clone %s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; fi; ",
+					shellQuote(fmt.Sprintf("[daytona] cloning %s into %s", repo.Repo, repoName)),
+					shellQuote(repoName),
+					cloneURL,
+					shellQuote(repoName),
+					shellQuote("[daytona] clone FAILED: "+repo.Repo),
+					shellQuote("[daytona] clone OK: "+repo.Repo),
+					shellQuote(repoName),
+					shellQuote("[daytona] pull FAILED: "+repo.Repo),
+					shellQuote("[daytona] pull OK: "+repo.Repo),
+				)
 			}
 			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
 			if cloneErr != nil {
@@ -2783,12 +2791,7 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 				for _, repo := range repositories {
-					repoParts := strings.SplitN(repo.Repo, "/", 2)
-					repoName := repo.Repo
-					if len(repoParts) == 2 {
-						repoName = repoParts[1]
-					}
-					verifyCloneScript += fmt.Sprintf("echo '[daytona] verifying %s'; [ -d %q/.git ] || { echo '[daytona] verify FAILED: %s/.git missing'; exit 1; }; echo '[daytona] verify OK: %s'; ", repoName, repoName, repoName, repoName)
+					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
 				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, 20*time.Second)
 				if verifyErr != nil {
@@ -2814,12 +2817,7 @@ gh auth status`
 		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
 		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 		for _, repo := range repositories {
-			repoParts := strings.SplitN(repo.Repo, "/", 2)
-			repoName := repo.Repo
-			if len(repoParts) == 2 {
-				repoName = repoParts[1]
-			}
-			verifyScript += fmt.Sprintf("echo '[daytona] verifying %s'; [ -d %q/.git ] || { echo '[daytona] verify FAILED: %s/.git missing'; exit 1; }; echo '[daytona] verify OK: %s'; ", repoName, repoName, repoName, repoName)
+			verifyScript += daytonaRepoReadinessSnippet(repo.Repo)
 		}
 		verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyScript}, 20*time.Second)
 		if verifyErr != nil {
@@ -3045,6 +3043,24 @@ func (s *Server) setBootstrapStatus(clawID, status string) {
 	s.setBootstrapStatusWithDiagnostic(clawID, status, "")
 }
 
+func repoDirectoryName(repoFullName string) string {
+	repoParts := strings.SplitN(repoFullName, "/", 2)
+	if len(repoParts) == 2 {
+		return repoParts[1]
+	}
+	return repoFullName
+}
+
+func daytonaRepoReadinessSnippet(repoFullName string) string {
+	repoName := repoDirectoryName(repoFullName)
+	return fmt.Sprintf("echo %s; [ -d %s/.git ] || { echo %s; exit 1; }; echo %s; ",
+		shellQuote("[daytona] verifying "+repoName),
+		shellQuote(repoName),
+		shellQuote("[daytona] verify FAILED: "+repoName+"/.git missing"),
+		shellQuote("[daytona] verify OK: "+repoName),
+	)
+}
+
 func (s *Server) setBootstrapStatusWithDiagnostic(clawID, status, diagnostic string) {
 	if clawID == "" {
 		return
@@ -3066,9 +3082,10 @@ func (s *Server) setBootstrapStatusWithDiagnostic(clawID, status, diagnostic str
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type: "claw_status",
 		Payload: map[string]string{
-			"claw_id":          clawID,
-			"status":           "starting",
-			"bootstrap_status": status,
+			"claw_id":              clawID,
+			"status":               "starting",
+			"bootstrap_status":     status,
+			"bootstrap_diagnostic": diagnostic,
 		},
 	})
 }
