@@ -629,6 +629,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 					currentCC.mu.Unlock()
 					acceptedForAgent = true
 					log.Printf("[pr-watcher] queued injected message for claw %s after send failure (queue length: %d)", shortID(clawID), queueLen)
+					go s.sendNextQueuedMessage(currentCC)
 				}
 			} else {
 				acceptedForAgent = true
