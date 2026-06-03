@@ -1,0 +1,11 @@
+.git
+bin/
+tmp/
+web/node_modules
+web/.next
+web/out
+internal/webui/out
+.elasticclaw
+memory/
+.demovoice
+coverage.out

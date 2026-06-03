@@ -1,0 +1,57 @@
+name: elasticclaw-dev
+
+# Shared network so agent containers can reach the hub by service name.
+networks:
+  elasticclaw:
+    name: elasticclaw-dev
+
+services:
+  hub:
+    build:
+      context: ..
+      dockerfile: docker/hub.Dockerfile
+    working_dir: /app
+    ports:
+      - "8080:8080"
+    networks:
+      - elasticclaw
+    volumes:
+      # Source code — air watches for .go changes and rebuilds
+      - ..:/app
+      # Persistent SQLite DB and hub.yaml config
+      - hub-data:/root/.elasticclaw
+      # Dev config: copy hub.dev.yaml.example → hub.dev.yaml and fill in your keys.
+      # Not read-only — the hub rewrites hub.yaml during migrations (stripping legacy fields).
+      - ./hub.dev.yaml:/root/.elasticclaw/hub.yaml
+      # Go module and build caches speed up rebuilds significantly
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+      # Docker socket so the hub can spawn sibling agent containers (Docker-out-of-Docker)
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - GOFLAGS=-buildvcs=false
+
+  web:
+    image: node:22-slim
+    working_dir: /app
+    # npm install runs on every start so adding packages works without rebuilding the image
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    networks:
+      - elasticclaw
+    volumes:
+      - ../web:/app
+      - web-node-modules:/app/node_modules
+    environment:
+      # Browser calls the hub directly on localhost:8080 (hub has permissive CORS).
+      # Do NOT use the Docker service name here — this is consumed by the browser, not the container.
+      - NEXT_PUBLIC_HUB_URL=http://localhost:8080
+    depends_on:
+      - hub
+
+volumes:
+  hub-data:
+  go-mod:
+  go-build:
+  web-node-modules:
