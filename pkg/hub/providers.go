@@ -2,6 +2,7 @@ package hub
 
 import (
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	dockerpkg "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
 	"github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicated "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -21,6 +22,13 @@ func newExedevProvider(cfg types.ProviderConfig) (*exedev.Provider, error) {
 		DefaultCPU:    cfg.DefaultCPU,
 		DefaultMemory: cfg.DefaultMemory,
 		DefaultDisk:   cfg.DefaultDisk,
+	})
+}
+
+func newDockerProvider(cfg types.ProviderConfig) (*dockerpkg.Provider, error) {
+	return dockerpkg.New(dockerpkg.Config{
+		Image:   cfg.Image,
+		Network: cfg.Network,
 	})
 }
 

@@ -1055,6 +1055,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
+		case "docker":
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -3386,6 +3388,117 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
+}
+
+func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
+	p, err := newDockerProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("docker init: %w", err)
+	}
+
+	// Load claw configuration from DB
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var nixEnabled, dockerEnabled int
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
+		return fmt.Errorf("load claw config: %w", err)
+	}
+
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
+
+	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
+	defaultModel := templateDefaultModel
+	if defaultModel == "" {
+		defaultModel = hubCfg.DefaultModel
+	}
+
+	gatewayPassword := randomHex(16)
+	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
+	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName)
+
+	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
+	containerEnv := map[string]string{
+		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
+		"ELASTICCLAW_CLAW_ID":            clawID,
+		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
+		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_BOOTSTRAP":          "1",
+		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
+		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
+		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
+		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
+		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
+		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
+		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+	}
+
+	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
+	for _, line := range strings.Split(llmKeyEnv, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+		kv := strings.TrimPrefix(line, "export ")
+		if idx := strings.IndexByte(kv, '='); idx > 0 {
+			k := kv[:idx]
+			v := strings.Trim(kv[idx+1:], `"`)
+			containerEnv[k] = v
+		}
+	}
+
+	// Inject LINEAR_API_KEY if configured
+	if linearToken != "" {
+		containerEnv["LINEAR_API_KEY"] = linearToken
+	}
+
+	createReq := types.CreateRequest{
+		Name: req.ProviderName,
+		Env:  containerEnv,
+	}
+
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("docker create: %w", err)
+	}
+	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
+
+	// Copy template files into workspace asynchronously
+	go func() {
+		bgCtx := context.Background()
+		p2, err := newDockerProvider(cfg)
+		if err != nil {
+			log.Printf("[docker] provider reinit failed for claw %s: %v", clawID, err)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Docker provider init failed: %v", err), false)
+			return
+		}
+		s.setBootstrapStatus(clawID, "Copying workspace files")
+		for path, content := range files {
+			dest := "/home/claw/workspace/" + path
+			if err := p2.CopyIn(bgCtx, instance.ID, dest, content); err != nil {
+				log.Printf("[docker] copy %s failed for claw %s: %v", path, clawID, err)
+				s.stopAgentWithReason(clawID, fmt.Sprintf("Docker file copy failed: %s: %v", path, err), false)
+				return
+			}
+		}
+		log.Printf("[docker] workspace files copied for claw %.8s", clawID)
+	}()
+
+	return nil
+}
+
+// boolEnv converts a bool to "true"/"false" for environment variable injection.
+func boolEnv(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 func (s *Server) provisionReplicated(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, env map[string]string) error {
