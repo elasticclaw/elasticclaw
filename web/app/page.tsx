@@ -228,24 +228,6 @@ export default function Home() {
     [selectedClawId, hub]
   )
 
-  const handleNewSession = useCallback(() => {
-    if (!selectedClawId) return
-    handleNewSessionForClaw(selectedClawId)
-  }, [selectedClawId])
-
-  const handleNewSessionForClaw = useCallback((clawId: string) => {
-    // Context reset — add a system divider
-    const systemMessage: Message = {
-      id: `sys-${Date.now()}`,
-      role: "system",
-      content: "Context Reset",
-      timestamp: new Date(),
-    }
-    // We can't call the hook setter directly from here without a closure issue,
-    // so we handle this inline via a local state fallback
-    // The real implementation: the hub exposes no "context reset" API so we just add a UI marker
-  }, [])
-
   // Show loading state until we know if configured
   if (configuredState === null) {
     return <div className="flex h-screen bg-background items-center justify-center" />
@@ -288,8 +270,6 @@ export default function Home() {
           onSendMessageToClaw={handleSendMessageToClaw}
           onKill={handleKill}
           onKillClaw={handleKillClaw}
-          onNewSession={handleNewSession}
-          onNewSessionForClaw={handleNewSessionForClaw}
           onSelectClaw={handleSelectClaw}
           onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
           onReorderClaws={reorderClaws}
