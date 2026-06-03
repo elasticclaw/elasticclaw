@@ -875,14 +875,14 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	var tenantID, providerID, provider string
 	_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
 
-	// 1. Set terminal status
-	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='' WHERE id=? AND status != 'deleted'`, clawID)
+	// 1. Set terminal status and persist sanitized diagnostic
+	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
+	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
-	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "error", "reason": safeReason},
+		Payload: map[string]string{"claw_id": clawID, "status": "error", "reason": safeReason, "bootstrap_diagnostic": safeReason},
 	})
 
 	// 3. Disconnect WebSocket if still connected

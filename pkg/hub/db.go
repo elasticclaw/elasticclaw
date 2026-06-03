@@ -46,6 +46,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_status TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_diagnostic TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN external_trigger_id TEXT NOT NULL DEFAULT ''`)
@@ -172,8 +173,9 @@ func migrate(db *sql.DB) error {
 		shortcut_story_id TEXT NOT NULL DEFAULT '',
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
-		bootstrap_ok     INTEGER NOT NULL DEFAULT 0,
-		bootstrap_status TEXT NOT NULL DEFAULT '',
+		bootstrap_ok        INTEGER NOT NULL DEFAULT 0,
+		bootstrap_status    TEXT NOT NULL DEFAULT '',
+		bootstrap_diagnostic TEXT NOT NULL DEFAULT '',
 		factory_name     TEXT NOT NULL DEFAULT '',
 		concurrency_group TEXT NOT NULL DEFAULT '',
 		external_trigger_id TEXT NOT NULL DEFAULT '',
