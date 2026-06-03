@@ -142,3 +142,68 @@ func TestLLMKeysList_Empty(t *testing.T) {
 		t.Errorf("expected 0 keys when llm_keys absent, got %d", len(keys))
 	}
 }
+
+func TestReadTemplateFilesIncludesScripts(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write elasticclaw-config.yaml (required for template)
+	configYAML := `
+provider: replicated
+`
+	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatalf("write elasticclaw-config.yaml: %v", err)
+	}
+
+	// Write a regular file (SOUL.md is a known template file)
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("# Test"), 0644); err != nil {
+		t.Fatalf("write SOUL.md: %v", err)
+	}
+
+	// Write scripts directory with files
+	scriptsDir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "analyze.py"), []byte("print('hello')"), 0644); err != nil {
+		t.Fatalf("write analyze.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "deploy.sh"), []byte("#!/bin/bash\necho 'deploying'"), 0644); err != nil {
+		t.Fatalf("write deploy.sh: %v", err)
+	}
+
+	// Write nested file in scripts
+	subDir := filepath.Join(scriptsDir, "utils")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("mkdir utils: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "helper.py"), []byte("# helper"), 0644); err != nil {
+		t.Fatalf("write helper.py: %v", err)
+	}
+
+	files, err := ReadTemplateFiles(dir)
+	if err != nil {
+		t.Fatalf("ReadTemplateFiles: %v", err)
+	}
+
+	// Should include known files and all scripts
+	expected := map[string]bool{
+		"elasticclaw-config.yaml": false,
+		"SOUL.md":                 false,
+		"scripts/analyze.py":      false,
+		"scripts/deploy.sh":       false,
+	}
+
+	for path := range files {
+		if _, ok := expected[path]; ok {
+			expected[path] = true
+		} else {
+			t.Errorf("unexpected file: %s", path)
+		}
+	}
+
+	for path, found := range expected {
+		if !found {
+			t.Errorf("expected file not found: %s", path)
+		}
+	}
+}

@@ -112,6 +112,213 @@ func TestGitHubAPIDeleteLabelIgnoresMissingLabel(t *testing.T) {
 	}
 }
 
+func TestPersistPipelineOutputStoresAndLoadsJSON(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-output-test"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	result := &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"branch":"feat/foo","commit":"abc123"}`,
+		Stderr:   "",
+	}
+	s.persistPipelineOutput(clawID, "stage-1", "git_info", result)
+
+	// Verify it was stored
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pipeline_outputs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count outputs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 output row, got %d", count)
+	}
+
+	// Verify load returns parsed JSON
+	outputs := s.loadPipelineOutputs(clawID)
+	if outputs == nil {
+		t.Fatal("loadPipelineOutputs returned nil")
+	}
+	gitInfo, ok := outputs["git_info"]
+	if !ok {
+		t.Fatal("expected git_info in outputs")
+	}
+	if gitInfo["branch"] != "feat/foo" {
+		t.Fatalf("expected branch=feat/foo, got %v", gitInfo["branch"])
+	}
+	if gitInfo["commit"] != "abc123" {
+		t.Fatalf("expected commit=abc123, got %v", gitInfo["commit"])
+	}
+}
+
+func TestPersistPipelineOutputNonJSON(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-output-nonjson"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	result := &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   "plain text output",
+		Stderr:   "",
+	}
+	s.persistPipelineOutput(clawID, "stage-1", "plain", result)
+
+	outputs := s.loadPipelineOutputs(clawID)
+	if outputs == nil {
+		t.Fatal("loadPipelineOutputs returned nil")
+	}
+	plain, ok := outputs["plain"]
+	if !ok {
+		t.Fatal("expected plain in outputs")
+	}
+	// Non-JSON stdout should result in empty parsed_json
+	if len(plain) != 0 {
+		t.Fatalf("expected empty parsed map for non-JSON, got %v", plain)
+	}
+}
+
+func TestPersistPipelineOutputOverwrite(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-output-overwrite"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// First write
+	s.persistPipelineOutput(clawID, "stage-1", "version", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"v":"1.0.0"}`,
+	})
+
+	// Second write with same output name — should overwrite
+	s.persistPipelineOutput(clawID, "stage-2", "version", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"v":"2.0.0"}`,
+	})
+
+	outputs := s.loadPipelineOutputs(clawID)
+	if outputs == nil {
+		t.Fatal("loadPipelineOutputs returned nil")
+	}
+	version, ok := outputs["version"]
+	if !ok {
+		t.Fatal("expected version in outputs")
+	}
+	if version["v"] != "2.0.0" {
+		t.Fatalf("expected v=2.0.0 after overwrite, got %v", version["v"])
+	}
+
+	// Verify only one row
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pipeline_outputs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count outputs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 output row after overwrite, got %d", count)
+	}
+}
+
+func TestValidateScriptCommandBlocksTraversal(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmd     string
+		wantErr bool
+	}{
+		{"normal script", "python scripts/analyze.py", false},
+		{"script with args", "bash scripts/deploy.sh --env=prod", false},
+		{"path traversal scripts/..", "python scripts/../etc/passwd", true},
+		{"scripts/.. traversal deep", "bash scripts/../../etc/shadow", true},
+		{"direct traversal", "cat ../../.ssh/id_rsa", true},
+		{"traversal with slash", "cat ../config.yaml", true},
+		{"empty command", "", false},
+		{"absolute path", "/bin/ls", false},
+		{"flag with dot", "python -m ..module", true}, // flag values with .. are still rejected
+		{"script in subdir", "python scripts/utils/helper.py", false},
+		{"flag value traversal", "sometool --file ../../.ssh/id_rsa", true},
+		{"module flag value traversal", "python -m ../../evil.py", true},
+		{"inline flag value traversal", "sometool --output=../../.ssh/id_rsa", true},
+		{"inline flag safe", "sometool --output=results.json", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateScriptCommand(tc.cmd)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.cmd)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.cmd, err)
+			}
+		})
+	}
+}
+
+func TestInjectTemplateDataMergesOutputs(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-template-outputs"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Store an output
+	s.persistPipelineOutput(clawID, "stage-1", "build_info", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"success","duration":"45s"}`,
+	})
+
+	// Build template data
+	baseData := map[string]interface{}{
+		"Issue": map[string]string{"Title": "Test Issue"},
+	}
+	data := s.injectTemplateData(clawID, baseData)
+
+	// Should be a map with both Issue and Outputs
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map[string]interface{}, got %T", data)
+	}
+
+	if _, ok := m["Issue"]; !ok {
+		t.Fatal("expected Issue key in merged data")
+	}
+
+	outputs, ok := m["Outputs"].(map[string]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected Outputs map, got %T", m["Outputs"])
+	}
+
+	buildInfo, ok := outputs["build_info"]
+	if !ok {
+		t.Fatal("expected build_info in outputs")
+	}
+	if buildInfo["status"] != "success" {
+		t.Fatalf("expected status=success, got %v", buildInfo["status"])
+	}
+}
+
 func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
