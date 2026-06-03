@@ -650,3 +650,98 @@ func TestNormalizeAgentActivityPayloadRejectsNull(t *testing.T) {
 		t.Fatalf("valid payload normalized to activity=%v raw=%q ok=%v", activity, raw, ok)
 	}
 }
+
+func TestBusyAgentActivitySignals(t *testing.T) {
+	tests := []struct {
+		name     string
+		activity map[string]interface{}
+		want     bool
+	}{
+		{
+			name:     "model started",
+			activity: map[string]interface{}{"kind": "model_started"},
+			want:     true,
+		},
+		{
+			name:     "tool running",
+			activity: map[string]interface{}{"kind": "tool", "phase": "running"},
+			want:     true,
+		},
+		{
+			name:     "tool completed",
+			activity: map[string]interface{}{"kind": "tool", "phase": "completed"},
+			want:     false,
+		},
+		{
+			name:     "session error",
+			activity: map[string]interface{}{"kind": "session_error"},
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBusyAgentActivity(tt.activity); got != tt.want {
+				t.Fatalf("isBusyAgentActivity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFinishTurnClearsActivityOnlyBusyState(t *testing.T) {
+	cc := &clawConn{
+		id:                   "claw-1",
+		tenantID:             "test-tenant-id",
+		streamingStartedAt:   now(),
+		streamingTimeoutSent: true,
+		contextWarningSent:   true,
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if !cc.isBusyLocked() {
+		t.Fatal("expected activity-only turn to be busy")
+	}
+	cc.finishTurnLocked()
+	if cc.isBusyLocked() {
+		t.Fatal("expected finishTurnLocked to clear busy state")
+	}
+	if cc.streamingTimeoutSent || cc.contextWarningSent {
+		t.Fatal("expected finishTurnLocked to clear turn warnings")
+	}
+}
+
+func TestInjectUserMessageQueuesWhenActivityOnlyTurnIsBusy(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at, status) VALUES(?,?,?,?,datetime('now'),?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, "connected",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := &clawConn{
+		id:                 "claw-1",
+		tenantID:           "test-tenant-id",
+		streamingStartedAt: now(),
+	}
+	s.claws["claw-1"] = cc
+
+	s.injectUserMessage("claw-1", "New greptile review comment on PR #339")
+
+	cc.mu.Lock()
+	if len(cc.messageQueue) != 1 {
+		t.Fatalf("expected 1 queued message, got %d", len(cc.messageQueue))
+	}
+	queued := cc.messageQueue[0]
+	cc.mu.Unlock()
+	if queued.Role != "user" || queued.Content != "New greptile review comment on PR #339" {
+		t.Fatalf("queued message = %#v", queued)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, "claw-1", queued.Content).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected persisted injected message, got count %d", count)
+	}
+}

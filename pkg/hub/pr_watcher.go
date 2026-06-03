@@ -554,66 +554,84 @@ func (s *Server) updateReviewCommentWatermark(pr clawPR, reviewCommentsData []in
 
 // injectUserMessage inserts a user-role message into the claw's conversation
 // and forwards it over the WS connection (if connected) so the agent sees it.
-// Skips injection if the claw is currently streaming a response.
 func (s *Server) injectUserMessage(clawID, content string) {
-	s.injectMessageWithRetry(clawID, content, "user", 0)
+	s.injectMessage(clawID, content, "user")
 }
 
 // injectHubMessageByID inserts a hub-role message into the claw's conversation.
 // Hub messages are system-injected and rendered distinctly in the UI.
 func (s *Server) injectHubMessageByID(clawID, content string) {
-	s.injectMessageWithRetry(clawID, content, "hub", 0)
+	s.injectMessage(clawID, content, "hub")
 }
 
-func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount int) {
-	// Don't interrupt a response in progress
-	s.mu.RLock()
-	cc, connected := s.claws[clawID]
-	streaming := connected && cc.streamingBuf.Len() > 0
-	s.mu.RUnlock()
-	if streaming {
-		if retryCount < 1 {
-			log.Printf("[pr-watcher] claw %s is streaming, delaying injection", clawID[:8])
-			// Retry once after 30s
-			go func() {
-				time.Sleep(30 * time.Second)
-				s.injectMessageWithRetry(clawID, content, role, retryCount+1)
-			}()
-		} else {
-			log.Printf("[pr-watcher] claw %s still streaming after retry, dropping message", clawID[:8])
-		}
-		return
-	}
-
+func (s *Server) injectMessage(clawID, content, role string) {
 	// Resolve tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
 		return
 	}
 
-	msgID := uuid.New().String()
 	format := ""
 	if role == "hub" {
 		format = "pre"
 	}
+	msg := types.HubMessage{
+		ID:        uuid.New().String(),
+		ClawID:    clawID,
+		TenantID:  tenantID,
+		Role:      role,
+		Content:   content,
+		Format:    format,
+		CreatedAt: now(),
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
-		msgID, clawID, tenantID, role, content, format, now(),
+		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to insert message: %v", err)
 		return
 	}
 
-	// Forward to agent over WS
+	// Broadcast to dashboard immediately, even if delivery to the agent is queued.
+	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
+
+	// Forward to agent over WS, or queue behind the current turn.
 	s.mu.RLock()
 	cc, ok := s.claws[clawID]
 	s.mu.RUnlock()
+	delivered := false
 	if ok {
-		_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{
-			Type:    "message",
-			Payload: map[string]string{"role": role, "content": content},
-		})
+		cc.mu.Lock()
+		cc.lastUserMessageAt = time.Now()
+		if cc.isBusyLocked() {
+			cc.messageQueue = append(cc.messageQueue, msg)
+			queueLen := len(cc.messageQueue)
+			cc.mu.Unlock()
+			delivered = true
+			log.Printf("[pr-watcher] queued injected message for claw %s (queue length: %d)", shortID(clawID), queueLen)
+		} else {
+			conn := cc.conn
+			cc.mu.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+			cancel()
+			if err != nil {
+				log.Printf("[pr-watcher] failed to send injected message to claw %s: %v, queueing", shortID(clawID), err)
+				cc.mu.Lock()
+				cc.messageQueue = append([]types.HubMessage{msg}, cc.messageQueue...)
+				cc.mu.Unlock()
+				delivered = true
+			} else {
+				delivered = true
+			}
+		}
+		if delivered {
+			log.Printf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
+		}
+	}
+	if delivered {
 		// Signal to UI that agent is working on the injected message
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type: "agent_typing",
@@ -626,8 +644,8 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 
 	// If this is a user/hub message injection (not a claw response), move the issue
 	// to WorkingStatus if the claw was idle (watching for PR events).
-	// Only move if the message was actually delivered to the agent (ok=true).
-	if ok && (role == "user" || role == "hub") {
+	// Only move if the message was delivered or queued for the agent.
+	if delivered && (role == "user" || role == "hub") {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "idle" {
@@ -680,20 +698,7 @@ func (s *Server) injectMessageWithRetry(clawID, content, role string, retryCount
 		}
 	}
 
-	// Broadcast to dashboard
-	s.broadcastToUsers(tenantID, types.WSMessage{
-		Type: "message",
-		Payload: map[string]interface{}{
-			"id":         msgID,
-			"claw_id":    clawID,
-			"tenant_id":  tenantID,
-			"role":       role,
-			"content":    content,
-			"format":     format,
-			"created_at": now(),
-		},
-	})
-	log.Printf("[pr-watcher] injected message into claw %s", clawID[:8])
+	log.Printf("[pr-watcher] injected message into claw %s", shortID(clawID))
 }
 
 // githubAPI makes a GET request to the GitHub API and returns parsed JSON.
