@@ -775,7 +775,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -799,7 +799,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic); err != nil {
 			continue
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
@@ -1244,9 +1244,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -2057,14 +2057,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	type dbClaw struct {
-		id, name, status, tagsJSON, bootstrapStatus string
+		id, name, status, tagsJSON, bootstrapStatus, bootstrapDiagnostic string
 	}
 	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
 	if rows != nil {
 		for rows.Next() {
 			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus)
+			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus, &c.bootstrapDiagnostic)
 			dbClaws = append(dbClaws, c)
 		}
 		_ = rows.Close()
@@ -2110,10 +2110,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
 			Payload: map[string]interface{}{
-				"claw_id":          c.id,
-				"name":             c.name,
-				"status":           c.status, // provisioning / starting / error
-				"bootstrap_status": c.bootstrapStatus,
+				"claw_id":              c.id,
+				"name":                 c.name,
+				"status":               c.status, // provisioning / starting / error
+				"bootstrap_status":     c.bootstrapStatus,
+				"bootstrap_diagnostic": c.bootstrapDiagnostic,
 			},
 		})
 	}
@@ -2750,7 +2751,7 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyReposScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; "
 				for _, repo := range repositories {
-					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", repo.Repo)
+					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", shellQuote(repo.Repo))
 				}
 				log.Printf("[daytona] verify configured repositories (no retries)...")
 				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
@@ -2771,12 +2772,19 @@ gh auth status`
 
 			cloneScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
 			for _, repo := range repositories {
-				repoParts := strings.SplitN(repo.Repo, "/", 2)
-				repoName := repo.Repo
-				if len(repoParts) == 2 {
-					repoName = repoParts[1]
-				}
-				cloneScript += fmt.Sprintf("echo '[daytona] cloning %s into %s'; if [ ! -d %q ]; then git clone https://x-access-token:${GH_TOKEN}@github.com/%s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] clone FAILED: %s'; exit 1; }; echo '[daytona] clone OK: %s'; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo '[daytona] pull FAILED: %s'; exit 1; }; echo '[daytona] pull OK: %s'; fi; ", repo.Repo, repoName, repoName, repo.Repo, repoName, repo.Repo, repo.Repo, repoName, repo.Repo, repo.Repo)
+				repoName := repoDirectoryName(repo.Repo)
+				cloneURL := "https://x-access-token:${GH_TOKEN}@github.com/" + shellQuote(repo.Repo)
+				cloneScript += fmt.Sprintf("echo %s; if [ ! -d %s ]; then git clone %s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; fi; ",
+					shellQuote(fmt.Sprintf("[daytona] cloning %s into %s", repo.Repo, repoName)),
+					shellQuote(repoName),
+					cloneURL,
+					shellQuote(repoName),
+					shellQuote("[daytona] clone FAILED: "+repo.Repo),
+					shellQuote("[daytona] clone OK: "+repo.Repo),
+					shellQuote(repoName),
+					shellQuote("[daytona] pull FAILED: "+repo.Repo),
+					shellQuote("[daytona] pull OK: "+repo.Repo),
+				)
 			}
 			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
 			if cloneErr != nil {
@@ -2790,12 +2798,7 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 				for _, repo := range repositories {
-					repoParts := strings.SplitN(repo.Repo, "/", 2)
-					repoName := repo.Repo
-					if len(repoParts) == 2 {
-						repoName = repoParts[1]
-					}
-					verifyCloneScript += fmt.Sprintf("echo '[daytona] verifying %s'; [ -d %q/.git ] || { echo '[daytona] verify FAILED: %s/.git missing'; exit 1; }; echo '[daytona] verify OK: %s'; ", repoName, repoName, repoName, repoName)
+					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
 				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, 20*time.Second)
 				if verifyErr != nil {
@@ -2813,7 +2816,31 @@ gh auth status`
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
 
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID)
+	// Final workspace readiness gate: verify every configured repository is
+	// present at the expected path and has a .git directory. Fail fast with a
+	// sanitized, actionable bootstrap error instead of starting the agent
+	// against an incomplete workspace.
+	if len(repositories) > 0 {
+		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
+		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+		for _, repo := range repositories {
+			verifyScript += daytonaRepoReadinessSnippet(repo.Repo)
+		}
+		verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyScript}, 20*time.Second)
+		if verifyErr != nil {
+			diag := fmt.Sprintf("Workspace readiness failed: %v", verifyErr)
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace readiness: %w", verifyErr)
+		}
+		if verifyResult.ExitCode != 0 {
+			diag := fmt.Sprintf("Workspace incomplete: required repositories are missing. %s", sanitizeBootstrapOutput(verifyResult.Stdout))
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace readiness failed (exit %d): %s", verifyResult.ExitCode, sanitizeBootstrapOutput(verifyResult.Stdout))
+		}
+		log.Printf("[daytona] workspace readiness verified for claw %s", clawID)
+	}
+
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
 	s.setBootstrapStatus(clawID, "Connecting to hub")
 
@@ -3020,10 +3047,32 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 }
 
 func (s *Server) setBootstrapStatus(clawID, status string) {
+	s.setBootstrapStatusWithDiagnostic(clawID, status, "")
+}
+
+func repoDirectoryName(repoFullName string) string {
+	repoParts := strings.SplitN(repoFullName, "/", 2)
+	if len(repoParts) == 2 {
+		return repoParts[1]
+	}
+	return repoFullName
+}
+
+func daytonaRepoReadinessSnippet(repoFullName string) string {
+	repoName := repoDirectoryName(repoFullName)
+	return fmt.Sprintf("echo %s; [ -d %s/.git ] || { echo %s; exit 1; }; echo %s; ",
+		shellQuote("[daytona] verifying "+repoName),
+		shellQuote(repoName),
+		shellQuote("[daytona] verify FAILED: "+repoName+"/.git missing"),
+		shellQuote("[daytona] verify OK: "+repoName),
+	)
+}
+
+func (s *Server) setBootstrapStatusWithDiagnostic(clawID, status, diagnostic string) {
 	if clawID == "" {
 		return
 	}
-	res, err := s.db.Exec(`UPDATE claws SET bootstrap_status=? WHERE id=? AND status != 'deleted'`, status, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET bootstrap_status=?, bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, status, diagnostic, clawID)
 	if err != nil {
 		return
 	}
@@ -3040,9 +3089,10 @@ func (s *Server) setBootstrapStatus(clawID, status string) {
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type: "claw_status",
 		Payload: map[string]string{
-			"claw_id":          clawID,
-			"status":           "starting",
-			"bootstrap_status": status,
+			"claw_id":              clawID,
+			"status":               "starting",
+			"bootstrap_status":     status,
+			"bootstrap_diagnostic": diagnostic,
 		},
 	})
 }
@@ -4832,7 +4882,10 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 // detectToolLoop returns true if the same class of tool error appears 3+ times
 // in the content of a completed assistant turn.
 func detectToolLoop(content string) bool {
-	patterns := []string{"edit failed:", "write failed:", "read failed:"}
+	patterns := []string{
+		"edit failed:", "write failed:", "read failed:",
+		"exec failed:", "elevated is not available", "tool-policy",
+	}
 	for _, p := range patterns {
 		if strings.Count(strings.ToLower(content), p) >= 3 {
 			return true

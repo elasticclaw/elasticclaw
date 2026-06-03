@@ -14,7 +14,8 @@ type Claw struct {
 	LastSeen        time.Time      `json:"last_seen" db:"last_seen"`
 	CreatedAt       time.Time      `json:"created_at" db:"created_at"`
 	ContextUsage    int            `json:"context_usage"`
-	BootstrapStatus string         `json:"bootstrap_status,omitempty"`
+	BootstrapStatus    string         `json:"bootstrap_status,omitempty"`
+	BootstrapDiagnostic string         `json:"bootstrap_diagnostic,omitempty"`
 	Tags            []string       `json:"tags,omitempty"`
 	Color           string         `json:"color,omitempty"`
 	SSHHost         string         `json:"ssh_host,omitempty"`
