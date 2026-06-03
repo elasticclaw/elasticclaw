@@ -581,6 +581,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 
 	injectMessage:
+		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
+			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
+		}
 		s.injectHubMessageByID(clawID, injectMsg)
 	}
 

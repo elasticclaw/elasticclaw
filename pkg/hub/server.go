@@ -1395,26 +1395,26 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
+			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
 		)
 	} else if after != "" {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at ASC LIMIT ?`,
-			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
+			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
 		)
 	} else {
 		// Default: last N messages
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, wakeMessageMarker, defaultWakeContent, factoryWakeContent, limit,
+			clawID, tenantID, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
 		)
 	}
 	if err != nil {
@@ -1594,6 +1594,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	usedPipelineEntryInject := false
 	if allowWake && cc.gatewayReady && currentStatus == "connected" {
 		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
+		if usedPipelineEntryInject {
+			go s.sendInitialPlanInstruction(cc, clawID)
+		}
 	}
 	// If no pipeline entry inject was sent, fire the default wake message.
 	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
@@ -1746,7 +1749,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					if shouldWake {
-						if !s.initializePipelineEntryIfNeeded(clawID) && s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
+						if s.initializePipelineEntryIfNeeded(clawID) {
+							go s.sendInitialPlanInstruction(wakeConn, clawID)
+						} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 							go s.sendWakeMessage(wakeConn, clawID)
 						}
 					}
@@ -1784,6 +1789,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Type:    "agent_activity",
 						Payload: activity,
 					})
+					s.handleInitialPlanActivity(clawID, tenantID, activity)
 				}
 			} else if msg.Type == "chunk" {
 				// Streaming chunk — forward to users immediately AND buffer server-side
@@ -1868,6 +1874,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
@@ -3687,15 +3694,22 @@ func (s *Server) bridgeDownloadURL() string {
 }
 
 const (
-	wakeMessageMarker  = "__WAKE_MESSAGE__"
-	defaultWakeContent = "Introduce yourself briefly and let the user know you're ready to help."
-	factoryWakeContent = `You've been assigned an issue. Use your tools to read the full details, then:
-1. Send a short visible intro message to the user: your name, the issue you're working on, and your plan.
-2. Start working. As you go, send visible progress updates in normal assistant messages. Tool calls and activity rows are collapsed in the UI, so do not rely on them as user communication.
-3. Narrate meaningful progress before and after substantial work: what context you gathered, what you changed, what you are verifying, and what you learned.
-4. If you hit something interesting, unexpected, slow, or blocked, say so promptly.
-5. When you open a PR, summarize what you did, what you tested, and what the PR contains.
-6. Do NOT ask for permission at any point. Just work and keep the user informed.`
+	wakeMessageMarker               = "__WAKE_MESSAGE__"
+	initialPlanRequiredMarker       = "__INITIAL_PLAN_REQUIRED__"
+	initialPlanAcceptedMarker       = "__INITIAL_PLAN_ACCEPTED__"
+	initialPlanCorrectionSentMarker = "__INITIAL_PLAN_CORRECTION_SENT__"
+	defaultWakeContent              = "Introduce yourself briefly and let the user know you're ready to help."
+	initialPlanWakeContent          = `Initial plan required before implementation.
+
+Before editing files, running builds, or doing broad tool exploration, send one visible assistant message that contains:
+1. Your understanding of the issue or task.
+2. The likely area of the codebase or behavior involved.
+3. A rough implementation plan.
+4. What you will verify or test.
+
+This first message must be a normal assistant message visible to the user. Tool calls, activity rows, and update_plan do not count. After that visible plan, wait for the hub's proceed message, then start implementation and continue sending visible progress updates.`
+	initialPlanProceedContent    = `[hub] Initial plan received. Proceed with implementation. Keep sending visible progress updates before and after substantial work; tool calls and activity rows do not count as user communication.`
+	initialPlanCorrectionContent = `[hub] Initial plan is required before implementation. Pause tool work and send a visible assistant message with your understanding of the issue, likely code area, rough plan, and verification approach.`
 )
 
 // sendWakeMessage sends a silent system message to wake the agent.
@@ -3703,8 +3717,9 @@ const (
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := defaultWakeContent
-	if factory, _ := s.findFactoryForClaw(clawID); factory != nil {
-		wakeContent = factoryWakeContent
+	if s.clawNeedsInitialPlan(clawID) {
+		wakeContent = initialPlanWakeContent
+		_ = s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker)
 	}
 	wakeMsg := types.HubMessage{
 		ID:        uuid.New().String(),
@@ -3725,6 +3740,124 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	// with 'go' (asynchronously). The normal end-of-turn path in handleClawWS read loop
 	// will drain the queue once the claw finishes the wake response. This prevents race
 	// conditions where both goroutines try to dequeue messages concurrently.
+}
+
+func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
+	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		return
+	}
+	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
+		return
+	}
+	msg := types.HubMessage{
+		ID:        uuid.New().String(),
+		ClawID:    clawID,
+		TenantID:  cc.tenantID,
+		Role:      "system",
+		Content:   initialPlanWakeContent,
+		CreatedAt: now(),
+	}
+	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+}
+
+func (s *Server) clawNeedsInitialPlan(clawID string) bool {
+	issueID, tags := s.clawIssueAndTags(clawID)
+	if issueID != "" {
+		return true
+	}
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, "factory:") || strings.HasPrefix(tag, "workflow:") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) tenantIDForClaw(clawID string) string {
+	var tenantID string
+	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID)
+	return tenantID
+}
+
+func (s *Server) hasSystemMarker(clawID, marker string) bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='system' AND content=?`, clawID, marker).Scan(&count)
+	return count > 0
+}
+
+func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
+	if clawID == "" || tenantID == "" || marker == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasSystemMarker(clawID, marker) {
+		return false
+	}
+	res, err := s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "system", marker, now(),
+	)
+	if err != nil {
+		return false
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0
+}
+
+func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
+	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		return
+	}
+	if isValidInitialPlan(content) {
+		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+		s.injectHubMessageByID(clawID, initialPlanProceedContent)
+		return
+	}
+	if !s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
+		_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
+		s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
+	}
+}
+
+func (s *Server) handleInitialPlanActivity(clawID, tenantID string, activity map[string]interface{}) {
+	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) ||
+		s.hasSystemMarker(clawID, initialPlanAcceptedMarker) ||
+		s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
+		return
+	}
+	kind, _ := activity["kind"].(string)
+	if kind != "tool" {
+		return
+	}
+	_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
+	s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
+}
+
+func isValidInitialPlan(content string) bool {
+	content = strings.TrimSpace(content)
+	if len(content) < 120 || len(strings.Fields(content)) < 35 {
+		return false
+	}
+	lower := strings.ToLower(content)
+	hasUnderstanding := strings.Contains(lower, "understand") ||
+		strings.Contains(lower, "issue") ||
+		strings.Contains(lower, "task") ||
+		strings.Contains(lower, "problem")
+	hasPlan := strings.Contains(lower, "plan") ||
+		strings.Contains(lower, "step") ||
+		strings.Contains(lower, "approach")
+	hasVerification := strings.Contains(lower, "test") ||
+		strings.Contains(lower, "verify") ||
+		strings.Contains(lower, "check") ||
+		strings.Contains(lower, "build")
+	hasCodeArea := strings.Contains(lower, "file") ||
+		strings.Contains(lower, "code") ||
+		strings.Contains(lower, "package") ||
+		strings.Contains(lower, "component") ||
+		strings.Contains(lower, "backend") ||
+		strings.Contains(lower, "frontend")
+	return hasUnderstanding && hasPlan && hasVerification && hasCodeArea
 }
 
 // clawHasMessages returns true if the claw already has message history.
