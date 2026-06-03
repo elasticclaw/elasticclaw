@@ -495,6 +495,7 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 		{ID: "wake-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: wakeMessageMarker, CreatedAt: now()},
 		{ID: "plan-required-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanRequiredMarker, CreatedAt: now()},
 		{ID: "plan-accepted-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanAcceptedMarker, CreatedAt: now()},
+		{ID: "plan-correction-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanCorrectionSentMarker, CreatedAt: now()},
 		{ID: "user-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "user", Content: "hello", CreatedAt: now()},
 	} {
 		_, err := db.Exec(
@@ -602,6 +603,30 @@ func TestHandleInitialPlanActivityMarksCorrectionOnToolBeforePlan(t *testing.T) 
 	s.handleInitialPlanActivity("claw-tool-before-plan", "test-tenant-id", map[string]interface{}{"kind": "tool", "tool": "exec"})
 	if !s.hasSystemMarker("claw-tool-before-plan", initialPlanCorrectionSentMarker) {
 		t.Fatalf("tool activity before initial plan did not mark correction sent")
+	}
+}
+
+func TestInsertSystemMarkerReportsOnlyFirstInsert(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-marker", "test-tenant-id", "claw marker", `[]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.insertSystemMarker("claw-marker", "test-tenant-id", initialPlanRequiredMarker) {
+		t.Fatalf("first marker insert returned false")
+	}
+	if s.insertSystemMarker("claw-marker", "test-tenant-id", initialPlanRequiredMarker) {
+		t.Fatalf("duplicate marker insert returned true")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='system' AND content=?`, "claw-marker", initialPlanRequiredMarker).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one marker row, got %d", count)
 	}
 }
 

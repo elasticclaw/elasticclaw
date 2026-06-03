@@ -3719,7 +3719,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeContent := defaultWakeContent
 	if s.clawNeedsInitialPlan(clawID) {
 		wakeContent = initialPlanWakeContent
-		s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker)
+		_ = s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker)
 	}
 	wakeMsg := types.HubMessage{
 		ID:        uuid.New().String(),
@@ -3743,10 +3743,12 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 }
 
 func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
-	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
-	s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker)
+	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
+		return
+	}
 	msg := types.HubMessage{
 		ID:        uuid.New().String(),
 		ClawID:    clawID,
@@ -3777,14 +3779,24 @@ func (s *Server) hasSystemMarker(clawID, marker string) bool {
 	return count > 0
 }
 
-func (s *Server) insertSystemMarker(clawID, tenantID, marker string) {
-	if clawID == "" || tenantID == "" || marker == "" || s.hasSystemMarker(clawID, marker) {
-		return
+func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
+	if clawID == "" || tenantID == "" || marker == "" {
+		return false
 	}
-	_, _ = s.db.Exec(
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasSystemMarker(clawID, marker) {
+		return false
+	}
+	res, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
 		uuid.New().String(), clawID, tenantID, "system", marker, now(),
 	)
+	if err != nil {
+		return false
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0
 }
 
 func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
@@ -3792,12 +3804,12 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 		return
 	}
 	if isValidInitialPlan(content) {
-		s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
 		s.injectHubMessageByID(clawID, initialPlanProceedContent)
 		return
 	}
 	if !s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
-		s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
+		_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 		s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 	}
 }
@@ -3812,7 +3824,7 @@ func (s *Server) handleInitialPlanActivity(clawID, tenantID string, activity map
 	if kind != "tool" {
 		return
 	}
-	s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
+	_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 	s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 }
 
