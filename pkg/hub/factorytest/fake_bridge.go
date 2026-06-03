@@ -2,6 +2,7 @@ package factorytest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -23,6 +24,7 @@ type ReceivedMessage struct {
 
 type FakeBridge struct {
 	ClawID   string
+	HubURL   string
 	mu       sync.Mutex
 	Messages []ReceivedMessage
 	conn     *websocket.Conn
@@ -56,7 +58,7 @@ func ConnectFakeBridge(t *testing.T, hubURL, clawID, clawName, clawToken string)
 		cancel()
 		t.Fatalf("FakeBridge register: %v", err)
 	}
-	fb := &FakeBridge{ClawID: clawID, conn: conn, ctx: ctx, cancel: cancel}
+	fb := &FakeBridge{ClawID: clawID, HubURL: hubURL, conn: conn, ctx: ctx, cancel: cancel}
 	go fb.readLoop()
 	t.Cleanup(fb.Disconnect)
 	return fb
@@ -77,6 +79,18 @@ func (fb *FakeBridge) readLoop() {
 		fb.mu.Lock()
 		fb.Messages = append(fb.Messages, rm)
 		fb.mu.Unlock()
+
+		// Respond to checkpoint requests so termination doesn't block
+		if msgType == "checkpoint_create" {
+			var checkpointID string
+			if p, ok := msg["payload"].(map[string]interface{}); ok {
+				checkpointID, _ = p["checkpoint_id"].(string)
+			}
+			// Complete checkpoint via HTTP API
+			if checkpointID != "" {
+				go fb.completeCheckpoint(checkpointID)
+			}
+		}
 	}
 }
 
@@ -113,6 +127,23 @@ func (fb *FakeBridge) WaitForMessage(t *testing.T, contains string, timeout time
 	}
 	t.Fatalf("FakeBridge: timed out waiting for message containing %q", contains)
 	return ""
+}
+
+func (fb *FakeBridge) completeCheckpoint(checkpointID string) {
+	// POST to checkpoint complete endpoint
+	url := fmt.Sprintf("%s/api/checkpoints/%s/complete?claw_token=test-claw-token", fb.HubURL, checkpointID)
+	body := map[string]interface{}{"root_sha256": ""}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", url, strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("[FakeBridge] checkpoint complete error: %v\n", err)
+		return
+	}
+	resp.Body.Close()
+	fmt.Printf("[FakeBridge] checkpoint complete status: %d\n", resp.StatusCode)
 }
 
 func (fb *FakeBridge) Disconnect() {

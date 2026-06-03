@@ -1,0 +1,19 @@
+name: terminal-stage
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Please complete the task. Reply with [DONE] when finished.
+
+  - id: terminal
+    label: Terminal
+    triggers:
+      - message_contains: "[DONE]"
+    terminal: true
+    on_enter:
+      inject: |
+        Workflow complete. Agent will be terminated.

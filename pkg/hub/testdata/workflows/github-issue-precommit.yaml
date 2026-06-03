@@ -1,0 +1,27 @@
+name: github-issue-precommit
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Please implement the requested feature based on the issue context.
+        When you are ready to commit your changes, reply with [READY_TO_COMMIT].
+
+  - id: pre-commit
+    label: Pre-commit
+    triggers:
+      - message_contains: "[READY_TO_COMMIT]"
+    on_enter:
+      run:
+        command: "echo 'Running pre-commit checks'"
+      inject: |
+        Pre-commit checks passed. Please review your changes and reply with [DONE] when ready.
+
+  - id: review
+    label: Review
+    triggers:
+      - message_contains: "[DONE]"
+    terminal: true

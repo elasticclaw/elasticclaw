@@ -783,6 +783,24 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 	return s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
 }
 
+// checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
+// and transitions to the matching stage if found. Returns true if a transition occurred.
+func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return false
+	}
+	stage := pl.StageForMessageContains(message)
+	if stage == nil {
+		return false
+	}
+	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+}
+
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
