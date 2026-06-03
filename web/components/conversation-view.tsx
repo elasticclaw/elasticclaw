@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, RotateCcw, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -54,8 +54,6 @@ interface ConversationViewProps {
   onSendMessageToClaw: (clawId: string, content: string) => void
   onKill: () => void
   onKillClaw: (clawId: string) => void
-  onNewSession: () => void
-  onNewSessionForClaw: (clawId: string) => void
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
@@ -287,7 +285,6 @@ function ClawBoardCard({
   messages,
   onClick,
   onSendMessage,
-  onNewSession,
   onKill,
   dragHandleProps,
 }: { 
@@ -295,7 +292,6 @@ function ClawBoardCard({
   messages: Message[]
   onClick: () => void
   onSendMessage: (content: string) => void
-  onNewSession: () => void
   onKill: () => void
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
 }) {
@@ -744,18 +740,6 @@ function ClawBoardCard({
             </Button>
             <div className="flex gap-2">
               <Button 
-                variant="outline" 
-                size="sm" 
-                className="flex-1"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onNewSession()
-                }}
-              >
-                <RotateCcw className="size-3 mr-1.5" />
-                New Session
-              </Button>
-              <Button 
                 variant="destructive" 
                 size="sm" 
                 className="flex-1"
@@ -800,14 +784,12 @@ function SortableClawBoardCard({
   messages,
   onClick,
   onSendMessage,
-  onNewSession,
   onKill,
 }: {
   claw: Claw
   messages: Message[]
   onClick: () => void
   onSendMessage: (content: string) => void
-  onNewSession: () => void
   onKill: () => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -827,7 +809,6 @@ function SortableClawBoardCard({
         messages={messages}
         onClick={onClick}
         onSendMessage={onSendMessage}
-        onNewSession={onNewSession}
         onKill={onKill}
         dragHandleProps={{ ...attributes, ...listeners }}
       />
@@ -1280,14 +1261,12 @@ function ClawChatView({
   messages: liveMessages,
   onSendMessage,
   onKill,
-  onNewSession,
   onDeselectClaw,
 }: {
   claw: Claw
   messages: Message[]
   onSendMessage: (content: string) => void
   onKill: () => void
-  onNewSession: () => void
   onDeselectClaw: () => void
 }) {
   const [input, setInput] = useState("")
@@ -1425,10 +1404,6 @@ function ClawChatView({
                 Terminal
               </Button>
             )}
-            <Button variant="outline" size="sm" onClick={onNewSession}>
-              <RotateCcw className="size-3.5 mr-1.5" />
-              New Session
-            </Button>
             <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
           </div>
         </div>
@@ -1599,8 +1574,6 @@ export function ConversationView({
   onSendMessageToClaw,
   onKill,
   onKillClaw,
-  onNewSession,
-  onNewSessionForClaw,
   onSelectClaw,
   onDeselectClaw,
   onReorderClaws,
@@ -1749,7 +1722,6 @@ export function ConversationView({
                     messages={(allMessages && allMessages[c.id]) || []}
                     onClick={() => onSelectClaw(c.id)}
                     onSendMessage={(content) => onSendMessageToClaw(c.id, content)}
-                    onNewSession={() => onNewSessionForClaw(c.id)}
                     onKill={() => onKillClaw(c.id)}
                   />
                 ))}
@@ -1765,7 +1737,6 @@ export function ConversationView({
                     messages={(allMessages && allMessages[activeDragClaw.id]) || []}
                     onClick={() => {}}
                     onSendMessage={() => {}}
-                    onNewSession={() => {}}
                     onKill={() => {}}
                   />
                 </div>
@@ -1795,7 +1766,6 @@ export function ConversationView({
       messages={messages}
       onSendMessage={onSendMessage}
       onKill={onKill}
-      onNewSession={onNewSession}
       onDeselectClaw={onDeselectClaw}
     />
   )
