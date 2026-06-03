@@ -112,6 +112,18 @@ func gatewayReadyBool(v *bool) bool {
 	return v == nil || *v
 }
 
+func (cc *clawConn) isBusyLocked() bool {
+	return !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
+}
+
+func (cc *clawConn) finishTurnLocked() {
+	cc.streamingMsgID = ""
+	cc.streamingBuf.Reset()
+	cc.streamingStartedAt = time.Time{}
+	cc.streamingTimeoutSent = false
+	cc.contextWarningSent = false
+}
+
 type userConn struct {
 	conn        *websocket.Conn
 	send        func(context.Context, types.WSMessage) error
@@ -1774,6 +1786,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if msg.Type == "agent_activity" {
 				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
+					if isBusyAgentActivity(activity) {
+						cc.mu.Lock()
+						if cc.streamingStartedAt.IsZero() {
+							cc.streamingStartedAt = time.Now()
+							cc.streamingTimeoutSent = false
+							cc.contextWarningSent = false
+						}
+						cc.mu.Unlock()
+					}
 					createdAt := now()
 					activity["claw_id"] = clawID
 					activity["created_at"] = createdAt.Format(time.RFC3339Nano)
@@ -1810,9 +1831,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Lock()
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
-							cc.streamingStartedAt = time.Now()
 							cc.streamingTimeoutSent = false
 							cc.contextWarningSent = false
+						}
+						if cc.streamingStartedAt.IsZero() {
+							cc.streamingStartedAt = time.Now()
 						}
 						cc.streamingBuf.WriteString(chunk.Content)
 						msgID := cc.streamingMsgID
@@ -1843,14 +1866,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				cc.mu.Lock()
 				if cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
-					cc.streamingMsgID = ""
-					cc.streamingBuf.Reset()
-					cc.streamingStartedAt = time.Time{}
-					cc.streamingTimeoutSent = false
-					cc.contextWarningSent = false
 				} else {
 					hm.ID = uuid.New().String()
 				}
+				cc.finishTurnLocked()
 				cc.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
@@ -3127,6 +3146,24 @@ func normalizeAgentActivityPayload(payload interface{}) (map[string]interface{},
 		return nil, nil, false
 	}
 	return activity, raw, true
+}
+
+func isBusyAgentActivity(activity map[string]interface{}) bool {
+	kind, _ := activity["kind"].(string)
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "model_started":
+		return true
+	case "tool":
+		phase, _ := activity["phase"].(string)
+		switch strings.ToLower(strings.TrimSpace(phase)) {
+		case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+			return false
+		default:
+			return true
+		}
+	default:
+		return false
+	}
 }
 
 func isPhaseActivityText(value string) bool {
@@ -4927,7 +4964,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	}
 
 	// Check if claw is still busy
-	if !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" {
+	if cc.isBusyLocked() {
 		cc.mu.Unlock()
 		return
 	}
