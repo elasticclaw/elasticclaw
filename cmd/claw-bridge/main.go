@@ -1811,51 +1811,84 @@ PYEOF`, defaultModelJSON, gatewayPasswordJSON)
 }
 
 func patchOllamaLocalDevCatalog(baseURL string) error {
-	baseURLJSON, _ := json.Marshal(baseURL)
-	script := fmt.Sprintf(`python3 <<'PYEOF'
-import json, os, time
-base_url = %s
-model = os.environ.get('OPENCLAW_DEFAULT_MODEL', '')
-model_id = model.split('/', 1)[1] if model.startswith('ollama/') else ''
-roots = [
-    os.path.expanduser('~/.openclaw/agents/main/agent/plugins/ollama/catalog.json'),
-]
-for attempt in range(10):
-    patched = 0
-    for path in roots:
-        if not os.path.exists(path):
-            continue
-        with open(path) as f:
-            catalog = json.load(f)
-        providers = catalog.get('providers')
-        if not isinstance(providers, dict):
-            continue
-        for provider_id, provider in providers.items():
-            if provider_id == 'ollama' and isinstance(provider, dict):
-                provider['baseUrl'] = base_url
-                for item in provider.get('models', []):
-                    if not isinstance(item, dict):
-                        continue
-                    if model_id and item.get('id') != model_id:
-                        continue
-                    item['baseUrl'] = base_url
-                    item['contextWindow'] = 32768
-                    item['maxTokens'] = 1024
-                    item['params'] = {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'}
-                    compat = item.setdefault('compat', {})
-                    compat['supportsTools'] = True
-                    compat['supportsUsageInStreaming'] = True
-                patched += 1
-        with open(path, 'w') as f:
-            json.dump(catalog, f, indent=2)
-    if patched:
-        print(f'Patched Ollama local dev catalog: {base_url}')
-        break
-    time.sleep(1)
-else:
-    raise SystemExit('Ollama catalog not found')
-PYEOF`, baseURLJSON)
-	return runShell(script)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	modelID := ""
+	if model := os.Getenv("OPENCLAW_DEFAULT_MODEL"); strings.HasPrefix(model, "ollama/") {
+		modelID = strings.TrimPrefix(model, "ollama/")
+	}
+	catalogPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "plugins", "ollama", "catalog.json")
+
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		if err := patchOllamaLocalDevCatalogFile(catalogPath, baseURL, modelID); err == nil {
+			log.Printf("[bootstrap] patched Ollama local dev catalog: %s", baseURL)
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("patch Ollama catalog: %w", lastErr)
+}
+
+func patchOllamaLocalDevCatalogFile(path, baseURL, modelID string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var catalog map[string]interface{}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	providers, ok := catalog["providers"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("catalog has no providers object")
+	}
+	provider, ok := providers["ollama"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("catalog has no ollama provider")
+	}
+
+	provider["baseUrl"] = baseURL
+	if models, ok := provider["models"].([]interface{}); ok {
+		for _, item := range models {
+			model, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if modelID != "" && model["id"] != modelID {
+				continue
+			}
+			model["baseUrl"] = baseURL
+			model["contextWindow"] = 32768
+			model["maxTokens"] = 1024
+			model["params"] = map[string]interface{}{
+				"num_ctx":    32768,
+				"thinking":   false,
+				"keep_alive": "15m",
+			}
+			compat, ok := model["compat"].(map[string]interface{})
+			if !ok {
+				compat = map[string]interface{}{}
+				model["compat"] = compat
+			}
+			compat["supportsTools"] = true
+			compat["supportsUsageInStreaming"] = true
+		}
+	}
+
+	patched, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, patched, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // onboardOpenClaw runs openclaw onboard to initialize the identity/config.

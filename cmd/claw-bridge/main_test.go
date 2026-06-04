@@ -243,6 +243,12 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 							"supportsTools": true,
 						},
 					},
+					map[string]interface{}{
+						"id":            "llama3.2:3b",
+						"baseUrl":       "http://127.0.0.1:11434",
+						"contextWindow": float64(4096),
+						"maxTokens":     float64(2048),
+					},
 				},
 			},
 			"ollama-cloud": map[string]interface{}{
@@ -293,7 +299,7 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	if got.Providers["ollama-cloud"].BaseURL != "https://ollama.com" {
 		t.Fatalf("ollama-cloud was modified: %q", got.Providers["ollama-cloud"].BaseURL)
 	}
-	if len(local.Models) != 1 {
+	if len(local.Models) != 2 {
 		t.Fatalf("models len = %d", len(local.Models))
 	}
 	model := local.Models[0]
@@ -305,6 +311,10 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	}
 	if !model.Compat.SupportsTools || !model.Compat.SupportsUsageInStreaming {
 		t.Fatalf("model compat not patched: %+v", model.Compat)
+	}
+	otherModel := local.Models[1]
+	if otherModel.BaseURL != "http://127.0.0.1:11434" || otherModel.ContextWindow != 4096 || otherModel.MaxTokens != 2048 {
+		t.Fatalf("non-selected model was modified: %+v", otherModel)
 	}
 }
 
