@@ -413,6 +413,15 @@ func TestClawAPIReturnsGitHubIssueLink(t *testing.T) {
 	}
 }
 
+func TestGitHubIssueURLRequiresNumericIssueNumber(t *testing.T) {
+	if got := githubIssueURL("elasticclaw/elasticclaw/342"); got != "https://github.com/elasticclaw/elasticclaw/issues/342" {
+		t.Fatalf("githubIssueURL(valid) = %q", got)
+	}
+	if got := githubIssueURL("elasticclaw/elasticclaw/not-a-number"); got != "" {
+		t.Fatalf("githubIssueURL(invalid) = %q, want empty", got)
+	}
+}
+
 func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Auth: &types.AuthConfig{

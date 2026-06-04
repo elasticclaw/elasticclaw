@@ -853,6 +853,11 @@ func githubIssueURL(issueID string) string {
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return ""
 	}
+	for _, ch := range parts[2] {
+		if ch < '0' || ch > '9' {
+			return ""
+		}
+	}
 	return fmt.Sprintf("https://github.com/%s/%s/issues/%s", parts[0], parts[1], parts[2])
 }
 

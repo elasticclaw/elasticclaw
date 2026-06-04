@@ -432,12 +432,23 @@ function ClawBoardCard({
               </span>
               <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
               {claw.githubIssueUrl ? (
-                <ClawTitle
-                  name={claw.name}
-                  githubIssueId={claw.githubIssueId}
-                  githubIssueUrl={claw.githubIssueUrl}
-                  className="flex-1 font-mono text-sm font-medium text-foreground"
-                />
+                <>
+                  <ClawTitle
+                    name={claw.name}
+                    githubIssueId={claw.githubIssueId}
+                    githubIssueUrl={claw.githubIssueUrl}
+                    className="flex-1 font-mono text-sm font-medium text-foreground"
+                  />
+                  {!isPending && (
+                    <button
+                      onClick={onClick}
+                      className="p-1 rounded hover:bg-accent transition-colors"
+                      title="Open conversation"
+                    >
+                      <MessageSquare className="size-3.5 text-muted-foreground" />
+                    </button>
+                  )}
+                </>
               ) : (
                 <button
                   onClick={isPending ? undefined : onClick}
