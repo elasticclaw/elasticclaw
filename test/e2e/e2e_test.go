@@ -27,8 +27,8 @@ const (
 	agentToken     = "e2e-agent-token"
 	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
 	defaultFixture = "elasticclaw/e2e-fixtures"
-	daytonaPrefix  = "ec-e2e-"
-	cmxPrefix      = "ec-e2e-cmx-"
+	daytonaPrefix  = "ec-e2e"
+	cmxPrefix      = "ec-e2e-cmx"
 	maxRunIDLen    = 32
 )
 
@@ -91,8 +91,7 @@ func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
 		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
 	})
 
-	gh.deleteE2EHooks(ctx, t)
-	gh.cleanupE2EIssuesAndLabels(ctx, t)
+	gh.cleanupGitHubE2EResources(ctx, t, workspaceName, env.RunID, labelName)
 	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
 	runCLI(ctx, t, root, env, "github-app", "create", "e2e",
 		"--workspace", workspaceName,
@@ -170,17 +169,21 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	switch sandboxProvider {
 	case "daytona":
 		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
-		env.ProviderPrefix = daytonaPrefix
+		env.ProviderPrefix = e2eProviderPrefix(daytonaPrefix, runID)
 	case "replicated":
 		env.ReplicatedToken = requiredEnv(t, "REPLICATED_API_TOKEN")
 		env.ReplicatedAPIURL = os.Getenv("ELASTICCLAW_E2E_REPLICATED_API_URL")
 		env.ReplicatedType = envOrDefault("ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE", "r1.small")
 		env.ReplicatedTTL = envOrDefault("ELASTICCLAW_E2E_REPLICATED_TTL", "1h")
-		env.ProviderPrefix = cmxPrefix
+		env.ProviderPrefix = e2eProviderPrefix(cmxPrefix, runID)
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", sandboxProvider)
 	}
 	return env
+}
+
+func e2eProviderPrefix(base, runID string) string {
+	return fmt.Sprintf("%s-%s-", base, runID)
 }
 
 type hubProcess struct {
@@ -730,7 +733,35 @@ func (g githubClient) createHook(ctx context.Context, t *testing.T, url, secret 
 	return out.ID
 }
 
+func (g githubClient) cleanupGitHubE2EResources(ctx context.Context, t *testing.T, workspaceName, runID, labelName string) {
+	t.Helper()
+	g.deleteE2EHooksForWorkspace(ctx, t, workspaceName)
+	g.closeE2EIssuesForRun(ctx, t, runID, labelName)
+	_ = g.deleteLabel(ctx, labelName)
+	if shouldSweepStaleE2E() {
+		g.deleteE2EHooks(ctx, t)
+		g.cleanupE2EIssuesAndLabels(ctx, t)
+	}
+}
+
+func shouldSweepStaleE2E() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_SWEEP_STALE")), "1") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_SWEEP_STALE")), "true")
+}
+
+func (g githubClient) deleteE2EHooksForWorkspace(ctx context.Context, t *testing.T, workspaceName string) {
+	t.Helper()
+	g.deleteE2EHooksMatching(ctx, t, func(url string) bool {
+		return githubE2EHookURLMatchesWorkspace(url, workspaceName)
+	})
+}
+
 func (g githubClient) deleteE2EHooks(ctx context.Context, t *testing.T) {
+	t.Helper()
+	g.deleteE2EHooksMatching(ctx, t, isGitHubE2EHookURL)
+}
+
+func (g githubClient) deleteE2EHooksMatching(ctx context.Context, t *testing.T, match func(string) bool) {
 	t.Helper()
 	var hooks []struct {
 		ID     int64 `json:"id"`
@@ -740,12 +771,20 @@ func (g githubClient) deleteE2EHooks(ctx context.Context, t *testing.T) {
 	}
 	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
 	for _, hook := range hooks {
-		if strings.Contains(hook.Config.URL, "/api/workspaces/") && strings.HasSuffix(hook.Config.URL, "/webhooks/github-issues") {
+		if match(hook.Config.URL) {
 			if err := g.deleteHook(ctx, hook.ID); err != nil {
 				t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
 			}
 		}
 	}
+}
+
+func githubE2EHookURLMatchesWorkspace(hookURL, workspaceName string) bool {
+	return strings.Contains(hookURL, "/api/workspaces/"+workspaceName+"/webhooks/github-issues")
+}
+
+func isGitHubE2EHookURL(hookURL string) bool {
+	return strings.Contains(hookURL, "/api/workspaces/") && strings.HasSuffix(hookURL, "/webhooks/github-issues")
 }
 
 func (g githubClient) deleteHook(ctx context.Context, hookID int64) error {
@@ -772,6 +811,22 @@ func (g githubClient) cleanupE2EIssuesAndLabels(ctx context.Context, t *testing.
 
 func (g githubClient) closeE2EIssues(ctx context.Context, t *testing.T) {
 	t.Helper()
+	g.closeE2EIssuesMatching(ctx, t, isE2EIssue)
+}
+
+func (g githubClient) closeE2EIssuesForRun(ctx context.Context, t *testing.T, runID, labelName string) {
+	t.Helper()
+	g.closeE2EIssuesMatching(ctx, t, func(title, body string, labels []struct {
+		Name string `json:"name"`
+	}) bool {
+		return isE2EIssueForRun(title, body, labels, runID, labelName)
+	})
+}
+
+func (g githubClient) closeE2EIssuesMatching(ctx context.Context, t *testing.T, match func(string, string, []struct {
+	Name string `json:"name"`
+}) bool) {
+	t.Helper()
 	var issues []struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
@@ -782,7 +837,7 @@ func (g githubClient) closeE2EIssues(ctx context.Context, t *testing.T) {
 	}
 	g.api(ctx, t, http.MethodGet, "issues?state=open&per_page=100", nil, &issues)
 	for _, issue := range issues {
-		if !isE2EIssue(issue.Title, issue.Body, issue.Labels) {
+		if !match(issue.Title, issue.Body, issue.Labels) {
 			continue
 		}
 		if err := g.closeIssue(ctx, issue.Number); err != nil {
@@ -802,6 +857,30 @@ func isE2EIssue(title, body string, labels []struct {
 	}
 	for _, label := range labels {
 		if strings.HasPrefix(label.Name, "agent-ready-") {
+			return true
+		}
+	}
+	return false
+}
+
+func isE2EIssueForRun(title, body string, labels []struct {
+	Name string `json:"name"`
+}, runID, labelName string) bool {
+	if runID != "" && bodyHasE2ERunID(body, runID) {
+		return true
+	}
+	for _, label := range labels {
+		if label.Name == labelName {
+			return true
+		}
+	}
+	return false
+}
+
+func bodyHasE2ERunID(body, runID string) bool {
+	marker := "ElasticClaw E2E run: " + runID
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == marker {
 			return true
 		}
 	}

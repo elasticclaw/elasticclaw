@@ -81,7 +81,10 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 	})
 
 	team := linear.teamByKey(ctx, t, env.LinearTeamKey)
-	linear.deleteE2EWebhooks(ctx, t)
+	linear.deleteE2EWebhooksForWorkspace(ctx, t, workspaceName)
+	if shouldSweepStaleE2E() {
+		linear.deleteE2EWebhooks(ctx, t)
+	}
 	labelName := "elasticclaw-e2e-" + env.RunID
 	linear.deleteLabelsByName(ctx, t, labelName)
 	labelID = linear.createLabel(ctx, t, team.ID, labelName)
@@ -279,7 +282,19 @@ func (c linearClient) createWebhook(ctx context.Context, t *testing.T, url, team
 	return out.Data.WebhookCreate.Webhook.ID
 }
 
+func (c linearClient) deleteE2EWebhooksForWorkspace(ctx context.Context, t *testing.T, workspaceName string) {
+	t.Helper()
+	c.deleteE2EWebhooksMatching(ctx, t, func(url string) bool {
+		return linearE2EWebhookURLMatchesWorkspace(url, workspaceName)
+	})
+}
+
 func (c linearClient) deleteE2EWebhooks(ctx context.Context, t *testing.T) {
+	t.Helper()
+	c.deleteE2EWebhooksMatching(ctx, t, isLinearE2EWebhookURL)
+}
+
+func (c linearClient) deleteE2EWebhooksMatching(ctx context.Context, t *testing.T, match func(string) bool) {
 	t.Helper()
 	var out struct {
 		Data struct {
@@ -298,7 +313,7 @@ func (c linearClient) deleteE2EWebhooks(ctx context.Context, t *testing.T) {
 }`, nil, &out)
 	var deleteErr error
 	for _, webhook := range out.Data.Webhooks.Nodes {
-		if strings.Contains(webhook.URL, "/api/workspaces/e2e-linear-") && strings.HasSuffix(webhook.URL, "/webhooks/linear") {
+		if match(webhook.URL) {
 			if err := c.deleteWebhook(ctx, webhook.ID); err != nil {
 				t.Logf("delete stale Linear E2E webhook %s: %v", webhook.ID, err)
 				deleteErr = err
@@ -308,6 +323,14 @@ func (c linearClient) deleteE2EWebhooks(ctx context.Context, t *testing.T) {
 	if deleteErr != nil {
 		t.Fatalf("one or more stale Linear E2E webhooks could not be deleted")
 	}
+}
+
+func linearE2EWebhookURLMatchesWorkspace(webhookURL, workspaceName string) bool {
+	return strings.Contains(webhookURL, "/api/workspaces/"+workspaceName+"/webhooks/linear")
+}
+
+func isLinearE2EWebhookURL(webhookURL string) bool {
+	return strings.Contains(webhookURL, "/api/workspaces/e2e-linear-") && strings.HasSuffix(webhookURL, "/webhooks/linear")
 }
 
 func (c linearClient) deleteWebhook(ctx context.Context, id string) error {
