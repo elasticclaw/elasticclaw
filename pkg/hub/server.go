@@ -787,7 +787,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -811,9 +811,10 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID); err != nil {
 			continue
 		}
+		c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 		c.TenantID = tenantID
 		if lastSeen.Valid {
@@ -845,6 +846,14 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		out = []types.Claw{}
 	}
 	jsonOK(w, out)
+}
+
+func githubIssueURL(issueID string) string {
+	parts := strings.Split(issueID, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/%s/issues/%s", parts[0], parts[1], parts[2])
 }
 
 func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenantID string) {
@@ -1256,9 +1265,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1273,6 +1282,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.TenantID = tenantID
+	c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
 	if lastSeen.Valid {
 		c.LastSeen = lastSeen.Time
 	}
@@ -2076,14 +2086,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	type dbClaw struct {
-		id, name, status, tagsJSON, bootstrapStatus, bootstrapDiagnostic string
+		id, name, status, tagsJSON, bootstrapStatus, bootstrapDiagnostic, githubIssueID string
 	}
 	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
+	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
 	if rows != nil {
 		for rows.Next() {
 			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus, &c.bootstrapDiagnostic)
+			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus, &c.bootstrapDiagnostic, &c.githubIssueID)
 			dbClaws = append(dbClaws, c)
 		}
 		_ = rows.Close()
@@ -2134,6 +2144,8 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				"status":               c.status, // provisioning / starting / error
 				"bootstrap_status":     c.bootstrapStatus,
 				"bootstrap_diagnostic": c.bootstrapDiagnostic,
+				"github_issue_id":      c.githubIssueID,
+				"github_issue_url":     githubIssueURL(c.githubIssueID),
 			},
 		})
 	}

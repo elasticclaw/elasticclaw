@@ -15,6 +15,8 @@ export interface Claw {
   description?: string
   reason?: string // stop reason when status is error
   bootstrap_status?: string
+  githubIssueId?: string
+  githubIssueUrl?: string
   // SSH / terminal access
   ssh_host?: string
   ssh_port?: number
@@ -66,6 +68,8 @@ export interface ApiClaw {
   ssh_port?: number
   ssh_user?: string
   bootstrap_status?: string
+  github_issue_id?: string
+  github_issue_url?: string
 }
 
 export interface ApiMessage {

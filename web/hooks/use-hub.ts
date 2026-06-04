@@ -478,6 +478,8 @@ export function useHub(selectedClawId: string | null): HubState {
                       isStreaming: status !== "connected" ? false : c.isStreaming,
                       reason: status === "error" ? payload.reason : undefined,
                       bootstrap_status: status === "connected" || status === "error" ? undefined : payload.bootstrap_status ?? c.bootstrap_status,
+                      githubIssueId: payload.github_issue_id ?? c.githubIssueId,
+                      githubIssueUrl: payload.github_issue_url ?? c.githubIssueUrl,
                     }
                   : c
               )

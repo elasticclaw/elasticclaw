@@ -365,6 +365,54 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 	}
 }
 
+func TestClawAPIReturnsGitHubIssueLink(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at, status, github_issue_id) VALUES(?,?,?,?,datetime('now'),?,?)`,
+		"claw-1", "test-tenant-id", "elasticclaw/elasticclaw/342", `[]`, "connected", "elasticclaw/elasticclaw/342",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	listReq = listReq.WithContext(context.WithValue(listReq.Context(), ctxTenantKey{}, "test-tenant-id"))
+	listRec := httptest.NewRecorder()
+	s.handleClaws(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d", http.StatusOK, listRec.Code)
+	}
+	var claws []types.Claw
+	if err := json.NewDecoder(listRec.Body).Decode(&claws); err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 {
+		t.Fatalf("expected 1 claw, got %d", len(claws))
+	}
+	if claws[0].GitHubIssueID != "elasticclaw/elasticclaw/342" {
+		t.Fatalf("github_issue_id = %q", claws[0].GitHubIssueID)
+	}
+	if claws[0].GitHubIssueURL != "https://github.com/elasticclaw/elasticclaw/issues/342" {
+		t.Fatalf("github_issue_url = %q", claws[0].GitHubIssueURL)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/claws/claw-1", nil)
+	getReq = getReq.WithContext(context.WithValue(getReq.Context(), ctxTenantKey{}, "test-tenant-id"))
+	getReq.SetPathValue("id", "claw-1")
+	getRec := httptest.NewRecorder()
+	s.handleClawDetail(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected detail status %d, got %d", http.StatusOK, getRec.Code)
+	}
+	var claw types.Claw
+	if err := json.NewDecoder(getRec.Body).Decode(&claw); err != nil {
+		t.Fatal(err)
+	}
+	if claw.GitHubIssueURL != "https://github.com/elasticclaw/elasticclaw/issues/342" {
+		t.Fatalf("detail github_issue_url = %q", claw.GitHubIssueURL)
+	}
+}
+
 func TestClawSubresourceRequiresTagAccessForGitHubSession(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Auth: &types.AuthConfig{

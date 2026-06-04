@@ -4,23 +4,25 @@ import "time"
 
 // Claw represents an agent instance registered with the hub.
 type Claw struct {
-	ID              string         `json:"id" db:"id"`
-	TenantID        string         `json:"tenant_id" db:"tenant_id"`
-	Name            string         `json:"name" db:"name"`
-	Template        string         `json:"template" db:"template"`
-	Provider        string         `json:"provider,omitempty" db:"provider"`
-	ProviderID      string         `json:"provider_id,omitempty" db:"provider_id"`
-	Status          InstanceStatus `json:"status" db:"status"`
-	LastSeen        time.Time      `json:"last_seen" db:"last_seen"`
-	CreatedAt       time.Time      `json:"created_at" db:"created_at"`
-	ContextUsage    int            `json:"context_usage"`
-	BootstrapStatus    string         `json:"bootstrap_status,omitempty"`
+	ID                  string         `json:"id" db:"id"`
+	TenantID            string         `json:"tenant_id" db:"tenant_id"`
+	Name                string         `json:"name" db:"name"`
+	Template            string         `json:"template" db:"template"`
+	Provider            string         `json:"provider,omitempty" db:"provider"`
+	ProviderID          string         `json:"provider_id,omitempty" db:"provider_id"`
+	Status              InstanceStatus `json:"status" db:"status"`
+	LastSeen            time.Time      `json:"last_seen" db:"last_seen"`
+	CreatedAt           time.Time      `json:"created_at" db:"created_at"`
+	ContextUsage        int            `json:"context_usage"`
+	BootstrapStatus     string         `json:"bootstrap_status,omitempty"`
 	BootstrapDiagnostic string         `json:"bootstrap_diagnostic,omitempty"`
-	Tags            []string       `json:"tags,omitempty"`
-	Color           string         `json:"color,omitempty"`
-	SSHHost         string         `json:"ssh_host,omitempty"`
-	SSHPort         int            `json:"ssh_port,omitempty"`
-	SSHUser         string         `json:"ssh_user,omitempty"`
+	GitHubIssueID       string         `json:"github_issue_id,omitempty"`
+	GitHubIssueURL      string         `json:"github_issue_url,omitempty"`
+	Tags                []string       `json:"tags,omitempty"`
+	Color               string         `json:"color,omitempty"`
+	SSHHost             string         `json:"ssh_host,omitempty"`
+	SSHPort             int            `json:"ssh_port,omitempty"`
+	SSHUser             string         `json:"ssh_user,omitempty"`
 }
 
 // HubMessage is a message exchanged between a claw and a user.

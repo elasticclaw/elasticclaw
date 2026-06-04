@@ -36,6 +36,7 @@ import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
+import { ClawTitle } from "@/components/claw-title"
 import { isTerminalAssistantMessage } from "@/lib/messages"
 
 const XTerminal = dynamic(
@@ -430,15 +431,24 @@ function ClawBoardCard({
                 <GripVertical className="size-3.5" />
               </span>
               <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
-              <button
-                onClick={isPending ? undefined : onClick}
-                className={cn(
-                  "font-mono text-sm font-medium text-foreground truncate flex-1 text-left",
-                  !isPending && "hover:underline"
-                )}
-              >
-                {claw.name}
-              </button>
+              {claw.githubIssueUrl ? (
+                <ClawTitle
+                  name={claw.name}
+                  githubIssueId={claw.githubIssueId}
+                  githubIssueUrl={claw.githubIssueUrl}
+                  className="flex-1 font-mono text-sm font-medium text-foreground"
+                />
+              ) : (
+                <button
+                  onClick={isPending ? undefined : onClick}
+                  className={cn(
+                    "min-w-0 font-mono text-sm font-medium text-foreground flex-1 text-left",
+                    !isPending && "hover:underline"
+                  )}
+                >
+                  <ClawTitle name={claw.name} className="block" />
+                </button>
+              )}
               {hasUnread && (
                 <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500 text-white rounded-full">
                   {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
@@ -700,9 +710,12 @@ function ClawBoardCard({
           <div className="p-3 border-b border-border">
             <div className="flex items-center gap-2">
               <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
-              <span className="font-mono text-sm font-medium text-foreground truncate flex-1">
-                {claw.name}
-              </span>
+              <ClawTitle
+                name={claw.name}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="flex-1 font-mono text-sm font-medium text-foreground"
+              />
               {claw.ssh_host && (
                 <button
                   onClick={(e) => { e.stopPropagation(); setShowTerminal((v) => !v) }}
@@ -1389,11 +1402,16 @@ function ClawChatView({
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
         </div>
         <div className="flex items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 items-center gap-4">
             <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
               <LayoutGrid className="size-4" />
             </Button>
-            <h2 className="font-mono text-xl font-semibold text-foreground">{claw.name}</h2>
+            <ClawTitle
+              name={claw.name}
+              githubIssueId={claw.githubIssueId}
+              githubIssueUrl={claw.githubIssueUrl}
+              className="flex-1 font-mono text-xl font-semibold text-foreground"
+            />
             <StatusBadge status={claw.status} />
             <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
           </div>
