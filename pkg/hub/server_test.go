@@ -148,6 +148,16 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			},
 			expectedModel: "deepseek/deepseek-chat",
 		},
+		{
+			name: "ollama provider",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "",
+			},
+			key: &types.LLMKeyConfig{
+				Provider: "ollama",
+			},
+			expectedModel: "ollama/qwen2.5-coder:1.5b",
+		},
 	}
 
 	for _, tt := range tests {
@@ -157,6 +167,38 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 				t.Errorf("expected %s, got %s", tt.expectedModel, result)
 			}
 		})
+	}
+}
+
+func TestGetSettingsTreatsBlankOllamaKeyAsConfigured(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "local-ollama", Provider: "ollama", Default: true},
+			{Name: "openai-missing", Provider: "openai"},
+		},
+	}, "", "", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rec := httptest.NewRecorder()
+
+	s.getSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var view SettingsView
+	if err := json.NewDecoder(rec.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]LLMKeyView{}
+	for _, key := range view.LLMKeys {
+		byName[key.Name] = key
+	}
+	if !byName["local-ollama"].KeySet {
+		t.Fatalf("blank ollama key should be treated as configured: %#v", byName["local-ollama"])
+	}
+	if byName["openai-missing"].KeySet {
+		t.Fatalf("blank external key should not be treated as configured: %#v", byName["openai-missing"])
 	}
 }
 

@@ -126,11 +126,32 @@ if isinstance(agent_models, dict):
     for key in list(agent_models.keys()):
         if 'kimi-k2p5' in key:
             agent_models.pop(key, None)
-# OpenClaw 2026.5.20 rejects the legacy top-level models provider catalog
-# shape we used to write. Onboard handles provider auth; keep only agent default.
+# OpenClaw rejects the legacy top-level models provider catalog shape we used
+# to write. Onboard handles provider auth; keep only agent default.
 models = config.get('models')
 if isinstance(models, dict) and any(k in models for k in ('providers', 'routers', 'mode')):
     config.pop('models', None)
+if model.startswith('ollama/'):
+    model_id = model.split('/', 1)[1]
+    agent_defaults.setdefault('experimental', {})['localModelLean'] = True
+    config.setdefault('models', {})['mode'] = 'merge'
+    providers = config['models'].setdefault('providers', {})
+    providers['ollama'] = {
+        'baseUrl': 'http://ollama:11434',
+        'api': 'ollama',
+        'apiKey': 'OLLAMA_API_KEY',
+        'models': [{
+            'id': model_id,
+            'name': model_id,
+            'reasoning': False,
+            'input': ['text'],
+            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+            'contextWindow': 32768,
+            'maxTokens': 1024,
+            'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'},
+            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+        }],
+    }
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
@@ -290,9 +311,9 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// buildOnboardFlags returns the --auth-choice flags for openclaw onboard
-// based on the active LLM key (selected > default > first).
-func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+// buildOnboardFlags returns the --auth-choice flags for openclaw onboard based
+// on the active LLM key (selected > default > first).
+func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel string) string {
 	active := resolveActiveKey(keys, selectedKeyName)
 	if active == nil {
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
@@ -311,6 +332,15 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName string) strin
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	case "codex":
 		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
+	case "ollama":
+		model := active.DefaultModel
+		if model == "" || !strings.HasPrefix(model, active.Provider+"/") {
+			model = defaultModel
+		}
+		if model == "" || !strings.HasPrefix(model, active.Provider+"/") {
+			model = "ollama/qwen2.5-coder:1.5b"
+		}
+		return fmt.Sprintf(`--auth-choice ollama --custom-base-url "http://ollama:11434" --custom-model-id %s`, shellQuote(stripProviderPrefix(model)))
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}

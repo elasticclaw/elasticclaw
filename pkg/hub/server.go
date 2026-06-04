@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2399,7 +2400,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.5.20"
+	const daytonaOpenClawVersion = "2026.6.1"
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
 NPM="$NVM_DIR/current/bin/npm"; \
@@ -2480,7 +2481,7 @@ docker --version`); err != nil {
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	if activeKeyDaytona != nil {
 		activeKeyNameDaytona = activeKeyDaytona.Name
@@ -3346,7 +3347,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 	})
 
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
@@ -3420,7 +3421,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 
 	gatewayPassword := randomHex(16)
 	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName)
+	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
 	containerEnv := map[string]string{
@@ -3428,7 +3429,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
 		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
 		"ELASTICCLAW_BOOTSTRAP":          "1",
+		"ELASTICCLAW_WAIT_FOR_WORKSPACE": "1",
 		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
 		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
 		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
@@ -3447,7 +3450,12 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		kv := strings.TrimPrefix(line, "export ")
 		if idx := strings.IndexByte(kv, '='); idx > 0 {
 			k := kv[:idx]
-			v := strings.Trim(kv[idx+1:], `"`)
+			v := kv[idx+1:]
+			if unquoted, err := strconv.Unquote(v); err == nil {
+				v = unquoted
+			} else if len(v) >= 2 && strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+				v = v[1 : len(v)-1]
+			}
 			containerEnv[k] = v
 		}
 	}
@@ -3469,26 +3477,19 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
 
-	// Copy template files into workspace asynchronously
-	go func() {
-		bgCtx := context.Background()
-		p2, err := newDockerProvider(cfg)
-		if err != nil {
-			log.Printf("[docker] provider reinit failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Docker provider init failed: %v", err), false)
-			return
+	s.setBootstrapStatus(clawID, "Copying workspace files")
+	for path, content := range files {
+		dest := "/home/claw/workspace/" + path
+		if err := p.CopyIn(ctx, instance.ID, dest, content); err != nil {
+			_ = p.Destroy(context.Background(), instance.ID, false)
+			return fmt.Errorf("docker file copy failed: %s: %w", path, err)
 		}
-		s.setBootstrapStatus(clawID, "Copying workspace files")
-		for path, content := range files {
-			dest := "/home/claw/workspace/" + path
-			if err := p2.CopyIn(bgCtx, instance.ID, dest, content); err != nil {
-				log.Printf("[docker] copy %s failed for claw %s: %v", path, clawID, err)
-				s.stopAgentWithReason(clawID, fmt.Sprintf("Docker file copy failed: %s: %v", path, err), false)
-				return
-			}
-		}
-		log.Printf("[docker] workspace files copied for claw %.8s", clawID)
-	}()
+	}
+	if err := p.CopyIn(ctx, instance.ID, "/home/claw/workspace/.elasticclaw-workspace-ready", []byte("ready\n")); err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker workspace ready marker: %w", err)
+	}
+	log.Printf("[docker] workspace files copied for claw %.8s", clawID)
 
 	return nil
 }
@@ -4178,7 +4179,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()
@@ -4466,6 +4467,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
 		return "deepseek/deepseek-chat"
+	case "ollama":
+		return "ollama/qwen2.5-coder:1.5b"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:

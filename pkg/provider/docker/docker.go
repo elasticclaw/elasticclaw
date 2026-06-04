@@ -90,6 +90,10 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 // CopyIn copies content into a running container using a tar stream piped to docker cp.
 // dest is an absolute path inside the container (e.g. "/home/claw/workspace/AGENTS.md").
 func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, content []byte) error {
+	if !strings.HasPrefix(dest, "/") {
+		return fmt.Errorf("docker cp: dest must be an absolute path, got %q", dest)
+	}
+
 	// Build a single-file tar in memory
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -109,12 +113,19 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 	if _, err := tw.Write(content); err != nil {
 		return fmt.Errorf("docker cp tar write: %w", err)
 	}
-	tw.Close()
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("docker cp tar close: %w", err)
+	}
 
 	// Determine destination directory
 	destDir := "/"
 	if idx := strings.LastIndex(dest, "/"); idx > 0 {
 		destDir = dest[:idx]
+	}
+
+	mkdirCmd := exec.CommandContext(ctx, "docker", "exec", containerName, "mkdir", "-p", destDir)
+	if out, err := mkdirCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker mkdir -p %s: %w (out: %s)", destDir, err, string(out))
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)

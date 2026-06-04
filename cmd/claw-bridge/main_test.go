@@ -100,6 +100,23 @@ func TestLoadGatewayClientEnvVarFallbackWhenNoConfigPassword(t *testing.T) {
 	}
 }
 
+func TestWaitForWorkspaceReadyIfRequested(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ELASTICCLAW_WAIT_FOR_WORKSPACE", "1")
+	workspaceDir := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n"), 0600); err != nil {
+		t.Fatalf("write ready marker: %v", err)
+	}
+
+	if err := waitForWorkspaceReadyIfRequested(); err != nil {
+		t.Fatalf("waitForWorkspaceReadyIfRequested(): %v", err)
+	}
+}
+
 func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
 	tests := []struct {
 		name string
@@ -201,6 +218,93 @@ func TestResolveToolActivityDetailUsesOpenClawMeta(t *testing.T) {
 				t.Fatalf("resolveToolActivityDetail() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", command, path, url, detail, tt.wantCommand, tt.wantPath, tt.wantURL, tt.wantDetail)
 			}
 		})
+	}
+}
+
+func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OPENCLAW_DEFAULT_MODEL", "ollama/qwen2.5-coder:1.5b")
+
+	catalogPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "plugins", "ollama", "catalog.json")
+	if err := os.MkdirAll(filepath.Dir(catalogPath), 0700); err != nil {
+		t.Fatalf("mkdir catalog dir: %v", err)
+	}
+	initial := map[string]interface{}{
+		"providers": map[string]interface{}{
+			"ollama": map[string]interface{}{
+				"baseUrl": "http://127.0.0.1:11434",
+				"models": []interface{}{
+					map[string]interface{}{
+						"id":            "qwen2.5-coder:1.5b",
+						"contextWindow": float64(128000),
+						"maxTokens":     float64(8192),
+						"compat": map[string]interface{}{
+							"supportsTools": true,
+						},
+					},
+				},
+			},
+			"ollama-cloud": map[string]interface{}{
+				"baseUrl": "https://ollama.com",
+			},
+		},
+	}
+	data, _ := json.Marshal(initial)
+	if err := os.WriteFile(catalogPath, data, 0600); err != nil {
+		t.Fatalf("write catalog: %v", err)
+	}
+
+	if err := patchOllamaLocalDevCatalog("http://ollama:11434"); err != nil {
+		t.Fatalf("patch catalog: %v", err)
+	}
+
+	data, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatalf("read catalog: %v", err)
+	}
+	var got struct {
+		Providers map[string]struct {
+			BaseURL string `json:"baseUrl"`
+			Models  []struct {
+				ID            string `json:"id"`
+				BaseURL       string `json:"baseUrl"`
+				ContextWindow int    `json:"contextWindow"`
+				MaxTokens     int    `json:"maxTokens"`
+				Params        struct {
+					NumCtx    int    `json:"num_ctx"`
+					Thinking  bool   `json:"thinking"`
+					KeepAlive string `json:"keep_alive"`
+				} `json:"params"`
+				Compat struct {
+					SupportsTools            bool `json:"supportsTools"`
+					SupportsUsageInStreaming bool `json:"supportsUsageInStreaming"`
+				} `json:"compat"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parse catalog: %v", err)
+	}
+	local := got.Providers["ollama"]
+	if local.BaseURL != "http://ollama:11434" {
+		t.Fatalf("local baseUrl = %q", local.BaseURL)
+	}
+	if got.Providers["ollama-cloud"].BaseURL != "https://ollama.com" {
+		t.Fatalf("ollama-cloud was modified: %q", got.Providers["ollama-cloud"].BaseURL)
+	}
+	if len(local.Models) != 1 {
+		t.Fatalf("models len = %d", len(local.Models))
+	}
+	model := local.Models[0]
+	if model.BaseURL != "http://ollama:11434" || model.ContextWindow != 32768 || model.MaxTokens != 1024 {
+		t.Fatalf("model limits not patched: %+v", model)
+	}
+	if model.Params.NumCtx != 32768 || model.Params.Thinking || model.Params.KeepAlive != "15m" {
+		t.Fatalf("model params not patched: %+v", model.Params)
+	}
+	if !model.Compat.SupportsTools || !model.Compat.SupportsUsageInStreaming {
+		t.Fatalf("model compat not patched: %+v", model.Compat)
 	}
 }
 

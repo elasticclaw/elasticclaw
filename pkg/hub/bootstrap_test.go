@@ -167,7 +167,7 @@ export OPENAI_API_KEY="sk-openai-key"`
 
 func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
 	p := baseParams()
-	p.OnboardFlags = buildOnboardFlags(nil, "")
+	p.OnboardFlags = buildOnboardFlags(nil, "", p.DefaultModel)
 	script := GenerateReplicatedBootstrapScript(p)
 
 	assertContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'`, "onboard flags shell quoted")
@@ -281,12 +281,35 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 			keys := []*types.LLMKeyConfig{
 				{Name: tc.name + "-key", Provider: tc.provider, Default: true},
 			}
-			flags := buildOnboardFlags(keys, "")
+			flags := buildOnboardFlags(keys, "", "")
 			assertContains(t, flags, "--auth-choice "+tc.authChoice, "provider auth choice")
 			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`:-}"`, "provider api key flag")
 			assertNotContains(t, flags, "anthropic-api-key", "should not fallback to anthropic")
 		})
 	}
+}
+
+func TestBuildOnboardFlags_OllamaUsesNativeBaseURLAndModelID(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "ollama-main", Provider: "ollama", Default: true},
+	}
+
+	flags := buildOnboardFlags(keys, "", "ollama/qwen2.5-coder:7b")
+
+	assertContains(t, flags, "--auth-choice ollama", "ollama auth choice")
+	assertContains(t, flags, `--custom-base-url "http://ollama:11434"`, "ollama native base URL")
+	assertContains(t, flags, `--custom-model-id 'qwen2.5-coder:7b'`, "ollama model id without provider prefix")
+	assertNotContains(t, flags, "/v1", "OpenClaw Ollama base URL must use native API, not OpenAI-compatible path")
+}
+
+func TestBuildOnboardFlags_OllamaPrefersKeyDefaultModel(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "ollama-main", Provider: "ollama", Default: true, DefaultModel: "ollama/llama3.2:3b"},
+	}
+
+	flags := buildOnboardFlags(keys, "", "ollama/qwen2.5-coder:7b")
+
+	assertContains(t, flags, `--custom-model-id 'llama3.2:3b'`, "ollama key default model")
 }
 
 func TestBuildOpenClawProviderConfig_DoesNotWriteLegacyProviderCatalog(t *testing.T) {
@@ -305,6 +328,25 @@ func TestBuildOpenClawProviderConfig_DoesNotWriteLegacyProviderCatalog(t *testin
 	assertNotContains(t, snippet, "providers.update", "does not write legacy provider catalog")
 	assertNotContains(t, snippet, "'fireworks': {", "does not write fireworks provider entry")
 	assertNotContains(t, snippet, "'openai': {", "does not write openai provider entry")
+}
+
+func TestBuildOpenClawProviderConfig_ConfiguresOllamaProviderBaseURL(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "ollama-main", Provider: "ollama", Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "ollama-main")
+
+	assertContains(t, snippet, "if model.startswith('ollama/'):", "only configures Ollama when selected model is Ollama")
+	assertContains(t, snippet, "agent_defaults.setdefault('experimental', {})['localModelLean'] = True", "uses lean mode for weak local dev models")
+	assertContains(t, snippet, "'baseUrl': 'http://ollama:11434'", "uses Compose Ollama service URL")
+	assertContains(t, snippet, "'apiKey': 'OLLAMA_API_KEY'", "keeps Ollama API key env reference")
+	assertContains(t, snippet, "'contextWindow': 32768", "keeps OpenClaw local model prompt budget within Docker Ollama limits")
+	assertContains(t, snippet, "'maxTokens': 1024", "keeps local dev generation bounded")
+	assertContains(t, snippet, "'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'}", "sets native Ollama runtime context explicitly")
+	assertContains(t, snippet, "'compat': {'supportsTools': True, 'supportsUsageInStreaming': True}", "keeps tool support while lean mode reduces local model prompt pressure")
+	assertContains(t, snippet, "providers['ollama']", "writes only the built-in Ollama provider config")
+	assertNotContains(t, snippet, "'ollama-cloud'", "does not rewrite Ollama Cloud")
 }
 
 func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T) {

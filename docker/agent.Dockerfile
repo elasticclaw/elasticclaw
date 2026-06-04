@@ -21,8 +21,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-install OpenClaw globally so bootstrap skips the npm install step
-RUN npm install -g openclaw@2026.5.20 --ignore-scripts 2>&1 || true
+# Pre-install OpenClaw globally so bootstrap skips the npm install step.
+RUN npm install -g openclaw@2026.6.1 --ignore-scripts
 
 # Create the 'claw' user (bridge runs as non-root; bootstrap expects this user)
 RUN useradd -m -s /bin/bash claw \
