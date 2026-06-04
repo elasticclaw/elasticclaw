@@ -280,30 +280,60 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			}
 		}
 
-		// Check if a claw already exists for this release (scoped per factory)
-		triggerID := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
+		// Build trigger key for atomic claim
+		triggerKey := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
 		if payload.Release != nil {
-			triggerID = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
+			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
 		}
-		existingClawID := s.findClawForExternalTrigger(factory.Name, triggerID)
-		if existingClawID != "" {
-			log.Printf("[external-webhook] factory %q: claw %s already exists for %s",
-				factory.Name, existingClawID[:8], triggerID)
+
+		// Atomically claim the trigger via factory_triggers (prevents concurrent duplicate creation)
+		claimed, err := s.claimFactoryTrigger(factory.Name, "external", triggerKey, "webhook", map[string]string{
+			"repository": repoFullName,
+			"event_type": eventType,
+		})
+		if err != nil {
+			log.Printf("[external-webhook] factory %q: failed to claim trigger for %s: %v",
+				factory.Name, triggerKey, err)
+			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+				"", eventType, "error", "", err.Error())
 			continue
 		}
+		if !claimed {
+			log.Printf("[external-webhook] factory %q: trigger %s already claimed — treating as idempotent success",
+				factory.Name, triggerKey)
+			continue
+		}
+		claimOpen := true
+		defer func() {
+			if claimOpen {
+				s.failFactoryTrigger(factory.Name, "external", triggerKey)
+			}
+		}()
 
 		// Create claw
 		log.Printf("[external-webhook] factory %q: creating claw for %s (event=%s)",
-			factory.Name, triggerID, eventType)
-		if err := s.createClawForExternalEvent(factory, payload, triggerID); err != nil {
+			factory.Name, triggerKey, eventType)
+		clawID, err := s.createClawForExternalEvent(factory, payload, triggerKey)
+		if err != nil {
 			log.Printf("[external-webhook] factory %q: failed to create claw for %s: %v",
-				factory.Name, triggerID, err)
-			s.logFactoryEvent(factory.Name, triggerID, fmt.Sprintf("External event: %s", eventType),
+				factory.Name, triggerKey, err)
+			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
 				"", eventType, "error", "", err.Error())
-		} else {
-			s.logFactoryEvent(factory.Name, triggerID, fmt.Sprintf("External event: %s", eventType),
-				"", eventType, "claw_created", "", "")
+			continue
 		}
+
+		if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
+			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+			log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
+				factory.Name, triggerKey, err)
+			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+				"", eventType, "error", "", err.Error())
+			continue
+		}
+		claimOpen = false
+
+		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+			"", eventType, "claw_created", clawID, "")
 	}
 }
 
@@ -345,18 +375,9 @@ func matchGlob(pattern, s string) bool {
 	return true
 }
 
-// findClawForExternalTrigger returns the claw ID that is already tracking this external trigger for the given factory, or "".
-func (s *Server) findClawForExternalTrigger(factoryName, triggerID string) string {
-	var clawID string
-	_ = s.db.QueryRow(
-		`SELECT id FROM claws WHERE external_trigger_id = ? AND factory_name = ? AND status NOT IN ('deleted','error','offline') LIMIT 1`,
-		triggerID, factoryName,
-	).Scan(&clawID)
-	return clawID
-}
-
 // createClawForExternalEvent provisions a new claw for an external event.
-func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payload externalWebhookPayload, triggerID string) error {
+// The caller must have already claimed the factory trigger atomically.
+func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payload externalWebhookPayload, triggerID string) (string, error) {
 	repoFullName := payload.Repository.FullName
 	eventType := payload.EventType
 	if eventType == "" {
@@ -366,7 +387,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	// Resolve template files
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
 	if err != nil {
-		return fmt.Errorf("template %q not found: %w", factory.Template, err)
+		return "", fmt.Errorf("template %q not found: %w", factory.Template, err)
 	}
 
 	// Parse elasticclaw-config.yaml from the template if present
@@ -412,7 +433,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	// Find tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
-		return fmt.Errorf("no tenant: %w", err)
+		return "", fmt.Errorf("no tenant: %w", err)
 	}
 
 	// Read all hub config values under lock to avoid data races
@@ -441,7 +462,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	s.mu.RUnlock()
 
 	if provider == "" {
-		return fmt.Errorf("no provider configured")
+		return "", fmt.Errorf("no provider configured")
 	}
 
 	// Build env vars
@@ -594,7 +615,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	s.promoteMu.Unlock()
 
 	if err != nil {
-		return fmt.Errorf("db insert: %w", err)
+		return "", fmt.Errorf("db insert: %w", err)
 	}
 
 	log.Printf("[factory] created claw %s (%s) for external trigger %s (status=%s)",
@@ -605,7 +626,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	})
 
 	if isPending {
-		return nil
+		return clawID, nil
 	}
 
 	// Provision asynchronously
@@ -657,7 +678,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		}
 	}()
 
-	return nil
+	return clawID, nil
 }
 
 // buildExternalEventContext builds the CONTEXT.md content for an external event.

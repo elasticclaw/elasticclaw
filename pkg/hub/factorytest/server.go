@@ -39,6 +39,21 @@ func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout
 	return ""
 }
 
+func (ts *TestServer) WaitForClawWithExternalTrigger(t *testing.T, triggerID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var clawID string
+		ts.DB.QueryRow(`SELECT id FROM claws WHERE external_trigger_id=?`, triggerID).Scan(&clawID)
+		if clawID != "" {
+			return clawID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("WaitForClawWithExternalTrigger: no claw for trigger %s after %v", triggerID, timeout)
+	return ""
+}
+
 func (ts *TestServer) WaitForClawWithStory(t *testing.T, storyID string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -179,6 +194,59 @@ func NewTestServerWithShortcut(t *testing.T) *TestServer {
 		Linear:   li,
 		Shortcut: sc,
 		DB:       db,
+	}
+}
+
+// NewTestServerWithExternal creates a TestServer that includes an external webhook factory.
+func NewTestServerWithExternal(t *testing.T) *TestServer {
+	t.Helper()
+	gh := NewMockGitHub(t)
+	li := NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "release-factory",
+				Integration:   "external",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				WebhookSecret: "test-webhook-secret",
+				ExternalTrigger: &types.ExternalTrigger{
+					Source: "github-release",
+					Filter: &types.ExternalTriggerFilter{
+						Repository: "testorg/testrepo",
+						EventType:  "released",
+						TagPattern: "v*",
+					},
+				},
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
+		},
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+
+	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, "")
+	s.StartPRWatcherForTest()
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	return &TestServer{
+		Server:  s,
+		HTTPSrv: httpSrv,
+		GitHub:  gh,
+		Linear:  li,
+		DB:      db,
 	}
 }
 
