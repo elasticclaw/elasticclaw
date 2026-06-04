@@ -97,6 +97,10 @@ type RunAction struct {
 	Command         string `yaml:"command"`
 	ContinueOnError bool   `yaml:"continue_on_error,omitempty"`
 	Timeout         string `yaml:"timeout,omitempty"`
+	// Output names the output bucket for this run. When set, stdout is parsed
+	// as JSON and the resulting map is stored under that name so later stages
+	// can reference values via {{ .Outputs.<name>.<key> }}.
+	Output string `yaml:"output,omitempty"`
 }
 
 // OnEnter holds the actions to run when entering a stage.

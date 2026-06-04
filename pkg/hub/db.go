@@ -282,6 +282,21 @@ func migrate(db *sql.DB) error {
 		detail       TEXT NOT NULL DEFAULT '',
 		created_at   DATETIME NOT NULL
 	);
+
+	-- v9: pipeline_outputs table for workflow script output capture
+	CREATE TABLE IF NOT EXISTS pipeline_outputs (
+		claw_id      TEXT NOT NULL,
+		stage_id     TEXT NOT NULL,
+		output_name  TEXT NOT NULL,
+		exit_code    INTEGER NOT NULL DEFAULT 0,
+		stdout       TEXT NOT NULL DEFAULT '',
+		stderr       TEXT NOT NULL DEFAULT '',
+		parsed_json  TEXT NOT NULL DEFAULT '{}',
+		created_at   DATETIME NOT NULL,
+		PRIMARY KEY (claw_id, output_name)
+	);
+	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_claw ON pipeline_outputs(claw_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_stage ON pipeline_outputs(claw_id, stage_id);
 	`)
 	return err
 }

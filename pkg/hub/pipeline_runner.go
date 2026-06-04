@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -279,6 +280,28 @@ func renderInjectWithData(clawID, injectMsg string, data interface{}) string {
 	return buf.String()
 }
 
+// injectTemplateData wraps the given data with Outputs loaded from the DB so
+// templates can reference {{ .Outputs.<name>.<key> }}.
+func (s *Server) injectTemplateData(clawID string, baseData interface{}) interface{} {
+	outputs := s.loadPipelineOutputs(clawID)
+	if outputs == nil {
+		return baseData
+	}
+	// Use a map so we can merge outputs with any base data shape.
+	// Apply baseData first, then unconditionally set Outputs so pipeline
+	// outputs can never be silently overwritten by caller data.
+	result := make(map[string]interface{})
+	if m, ok := baseData.(map[string]interface{}); ok {
+		for k, v := range m {
+			result[k] = v
+		}
+	} else {
+		result["Data"] = baseData
+	}
+	result["Outputs"] = outputs
+	return result
+}
+
 func fallbackGitHubIssueDetails(issueID string) *githubIssueDetails {
 	details := &githubIssueDetails{Identifier: issueID}
 	parts := strings.Split(issueID, "/")
@@ -340,6 +363,9 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 	command := strings.TrimSpace(action.Command)
 	if command == "" {
 		return nil, nil
+	}
+	if err := validateScriptCommand(command); err != nil {
+		return nil, err
 	}
 	timeout := defaultPipelineRunTimeout
 	if strings.TrimSpace(action.Timeout) != "" {
@@ -414,6 +440,118 @@ func (s *Server) executeReplicatedPipelineRun(user, host, command string, timeou
 	return &pipelineRunResult{ExitCode: 0, Stdout: output}, nil
 }
 
+// persistPipelineOutput stores a run result in the DB so later stages can
+// reference it via {{ .Outputs.<name>.<key> }} and it survives hub restarts.
+func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, result *pipelineRunResult) {
+	if result == nil || outputName == "" {
+		return
+	}
+	var parsedJSON string
+	if result.ExitCode == 0 && strings.TrimSpace(result.Stdout) != "" {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(result.Stdout), &parsed); err == nil {
+			b, _ := json.Marshal(parsed)
+			parsedJSON = string(b)
+		}
+	}
+	if parsedJSON == "" {
+		parsedJSON = "{}"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(claw_id, output_name) DO UPDATE SET
+			stage_id=excluded.stage_id,
+			exit_code=excluded.exit_code,
+			stdout=excluded.stdout,
+			stderr=excluded.stderr,
+			parsed_json=excluded.parsed_json,
+			created_at=excluded.created_at`,
+		clawID, stageID, outputName, result.ExitCode, result.Stdout, result.Stderr, parsedJSON, now())
+	if err != nil {
+		log.Printf("[pipeline] failed to persist output %q for claw %s: %v", outputName, clawID[:8], err)
+	} else {
+		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
+	}
+}
+
+// loadPipelineOutputs returns all persisted outputs for a claw as a map of
+// output_name → parsed_json map. Used for template rendering.
+func (s *Server) loadPipelineOutputs(clawID string) map[string]map[string]interface{} {
+	rows, err := s.db.Query(`SELECT output_name, parsed_json FROM pipeline_outputs WHERE claw_id=?`, clawID)
+	if err != nil {
+		log.Printf("[pipeline] failed to load outputs for claw %s: %v", clawID[:8], err)
+		return nil
+	}
+	defer rows.Close()
+	outputs := make(map[string]map[string]interface{})
+	for rows.Next() {
+		var name, jsonStr string
+		if err := rows.Scan(&name, &jsonStr); err != nil {
+			continue
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &parsed); err == nil {
+			outputs[name] = parsed
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[pipeline] rows error loading outputs for claw %s: %v", clawID[:8], err)
+	}
+	return outputs
+}
+
+// validateScriptCommand checks that a workflow run command doesn't attempt path
+// traversal outside the workspace scripts directory.
+func validateScriptCommand(command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	// Reject any path traversal sequence — ".." in any path component could
+	// escape the workspace. We tokenize the command and check each token that is
+	// not a flag or a flag value.
+	parts := strings.Fields(command)
+	// Known flags that take a value — skip the next token after these.
+	valueFlags := map[string]bool{"-m": true, "--module": true, "-f": true, "--file": true}
+	skipNext := false
+	for _, part := range parts {
+		if skipNext {
+			skipNext = false
+			// Still reject traversal sequences even in flag values
+			if strings.Contains(part, "..") {
+				return fmt.Errorf("script command contains path traversal: %q", command)
+			}
+			continue
+		}
+		// Skip standalone flags (e.g. -f, --verbose), but still check inline values
+		// like --output=../../.ssh/id_rsa for traversal sequences.
+		if strings.HasPrefix(part, "-") {
+			// Reject traversal even inside inline flag values (--output=../../evil)
+			if strings.Contains(part, "..") {
+				return fmt.Errorf("script command contains path traversal: %q", command)
+			}
+			if valueFlags[part] {
+				skipNext = true
+			}
+			continue
+		}
+		// Reject any token containing ".." — this covers scripts/../..,
+		// ../../.ssh/id_rsa, /etc/passwd/../shadow, etc.
+		if strings.Contains(part, "..") {
+			return fmt.Errorf("script command contains path traversal: %q", command)
+		}
+		// Reject absolute paths that clean to a different path (traversal via symlinks)
+		if strings.HasPrefix(part, "/") {
+			clean := filepath.Clean(part)
+			if !strings.HasPrefix(clean, "/") {
+				return fmt.Errorf("script command contains absolute path traversal: %q", command)
+			}
+		}
+	}
+	return nil
+}
+
 func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResult, err error) string {
 	command := strings.TrimSpace(action.Command)
 	if command == "" {
@@ -458,6 +596,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
 		}
+		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
+		if stage.OnEnter.Run.Output != "" && result != nil {
+			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
+		}
 	}
 
 	if stage.OnEnter.Inject != "" {
@@ -470,9 +612,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			linearToken := s.resolveLinearTokenForPipeline(ctx)
 			if linearToken == "" {
 				s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
-				injectMsg = renderInjectWithData(clawID, injectMsg, struct {
-					Issue *linearIssueDetails
-				}{Issue: &linearIssueDetails{Identifier: issueID}})
+				injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
+					"Issue": &linearIssueDetails{Identifier: issueID},
+				}))
 				goto injectMessage
 			}
 			details, err := s.fetchLinearIssueDetails(linearToken, issueID)
@@ -492,12 +634,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				goto injectMessage
 			}
 			var buf bytes.Buffer
-			data := struct {
-				Issue *linearIssueDetails
-			}{
-				Issue: details,
-			}
-			log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], data.Issue.Identifier, data.Issue.Title, data.Issue.URL)
+			data := s.injectTemplateData(clawID, map[string]interface{}{
+				"Issue": details,
+			})
+			log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], details.Identifier, details.Title, details.URL)
 			if err := tmpl.Execute(&buf, data); err != nil {
 				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
 				goto injectMessage
@@ -510,9 +650,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			details := fallbackGitHubIssueDetails(issueID)
 			if ghToken == "" {
 				s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
-				injectMsg = renderInjectWithData(clawID, injectMsg, struct {
-					Issue *githubIssueDetails
-				}{Issue: details})
+				injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
+					"Issue": details,
+				}))
 				goto injectMessage
 			}
 			parts := strings.Split(issueID, "/")
@@ -543,11 +683,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				goto injectMessage
 			}
 			var buf bytes.Buffer
-			data := struct {
-				Issue *githubIssueDetails
-			}{
-				Issue: details,
-			}
+			data := s.injectTemplateData(clawID, map[string]interface{}{
+				"Issue": details,
+			})
 			if err := tmpl.Execute(&buf, data); err != nil {
 				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
 				goto injectMessage
@@ -567,11 +705,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				// Load inputs from CONTEXT.md (stored during manual trigger)
 				inputs := s.loadManualTriggerInputs(clawID)
 				if inputs != nil {
-					data := struct {
-						Inputs map[string]string
-					}{
-						Inputs: inputs,
-					}
+					data := s.injectTemplateData(clawID, map[string]interface{}{
+						"Inputs": inputs,
+					})
 					if err := tmpl.Execute(&buf, data); err == nil {
 						injectMsg = buf.String()
 						log.Printf("[pipeline] template RENDERED with inputs for claw %s", clawID[:8])
@@ -645,7 +781,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
 				if err == nil {
 					var buf bytes.Buffer
-					data := struct{ Inputs map[string]string }{Inputs: inputs}
+					data := s.injectTemplateData(clawID, map[string]interface{}{
+						"Inputs": inputs,
+					})
 					if err := tmpl.Execute(&buf, data); err == nil {
 						resolvedIssueID = buf.String()
 					}
@@ -681,7 +819,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 								tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
 								if err == nil {
 									var buf bytes.Buffer
-									data := struct{ Issue *githubIssueDetails }{Issue: &ghDetails}
+									data := s.injectTemplateData(clawID, map[string]interface{}{
+										"Issue": &ghDetails,
+									})
 									if err := tmpl.Execute(&buf, data); err == nil {
 										resolvedIssueID = buf.String()
 									}
@@ -696,7 +836,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
 				if err == nil {
 					var buf bytes.Buffer
-					data := struct{ Issue *linearIssueDetails }{Issue: details}
+					data := s.injectTemplateData(clawID, map[string]interface{}{
+						"Issue": details,
+					})
 					if err := tmpl.Execute(&buf, data); err == nil {
 						resolvedIssueID = buf.String()
 					}

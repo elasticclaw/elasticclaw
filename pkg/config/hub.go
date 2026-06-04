@@ -3,6 +3,8 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"strings"
+
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 	"io"
@@ -292,5 +294,25 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 			files["memory/"+e.Name()] = string(data)
 		}
 	}
+
+	// Include scripts/ directory if present — workspace scripts delivered to claws
+	scriptsDir := filepath.Join(templateDir, "scripts")
+	if entries, err := os.ReadDir(scriptsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(scriptsDir, name))
+			if err != nil {
+				continue
+			}
+			files["scripts/"+name] = string(data)
+		}
+	}
+
 	return files, nil
 }
