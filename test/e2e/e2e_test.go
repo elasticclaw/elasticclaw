@@ -866,11 +866,21 @@ func isE2EIssue(title, body string, labels []struct {
 func isE2EIssueForRun(title, body string, labels []struct {
 	Name string `json:"name"`
 }, runID, labelName string) bool {
-	if runID != "" && strings.Contains(body, "ElasticClaw E2E run: "+runID) {
+	if runID != "" && bodyHasE2ERunID(body, runID) {
 		return true
 	}
 	for _, label := range labels {
 		if label.Name == labelName {
+			return true
+		}
+	}
+	return false
+}
+
+func bodyHasE2ERunID(body, runID string) bool {
+	marker := "ElasticClaw E2E run: " + runID
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == marker {
 			return true
 		}
 	}

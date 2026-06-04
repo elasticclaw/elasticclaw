@@ -80,7 +80,8 @@ e2e-run: build-dev build-bridge-linux
 	NGROK_DOMAIN_JSON="$$(mktemp -t elasticclaw-ngrok-domain.XXXXXX.json)"; \
 	DAYTONA_IDS="$$(mktemp -t elasticclaw-daytona-sandbox-ids.XXXXXX)"; \
 	REPLICATED_IDS="$$(mktemp -t elasticclaw-replicated-vm-ids.XXXXXX)"; \
-	E2E_RUN_ID="$${ELASTICCLAW_E2E_RUN_ID:-$$(python3 -c 'import time,uuid; print(f"{time.time_ns()}-{uuid.uuid4().hex[:8]}")')}"; \
+	E2E_RUN_ID_RAW="$${ELASTICCLAW_E2E_RUN_ID:-$$(python3 -c 'import time,uuid; print(f"{time.time_ns()}-{uuid.uuid4().hex[:8]}")')}"; \
+	E2E_RUN_ID="$$(printf '%s' "$$E2E_RUN_ID_RAW" | python3 -c 'import sys; value=sys.stdin.read().strip().lower(); out="".join(ch if ch.isalnum() and ch.isascii() or ch == "-" else "-" for ch in value).strip("-") or "run"; print((out[:32].strip("-")) or "run")')"; \
 	NGROK_PID=""; \
 	NGROK_DOMAIN_ID=""; \
 	printf 'version: "3"\nagent:\n  web_addr: "%s"\n' "$$NGROK_API_ADDR" > "$$NGROK_CONFIG"; \
