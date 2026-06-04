@@ -157,12 +157,14 @@ clean:
 # make is already installed on macOS via Xcode Command Line Tools.
 #
 # Quick start:
-#   cp docker/hub.dev.yaml.example docker/hub.dev.yaml   # once — add your LLM key
+#   cp docker/hub.dev.yaml.example docker/hub.dev.yaml
 #   make dev                                              # builds + starts everything
+#   make dev-ollama-pull                                  # pulls the default local test model
 #   open http://localhost:3000  (login: devpass)
-#   make dev-claw               # spawn a local agent (requires LLM key in hub.dev.yaml)
+#   make dev-claw                                         # spawn a local agent
 
 COMPOSE := docker compose -f docker/compose.dev.yml
+MODEL ?= qwen2.5-coder:1.5b
 
 # Ensure docker/hub.dev.yaml exists as a FILE before any compose command.
 # Docker creates an empty directory when a bind-mounted file is missing, which
@@ -173,7 +175,8 @@ _dev-config-check:
 		cp docker/hub.dev.yaml.example docker/hub.dev.yaml; \
 		echo ""; \
 		echo "  Created docker/hub.dev.yaml from example."; \
-		echo "  Open docker/hub.dev.yaml and set your LLM key, then run make dev again."; \
+		echo "  It defaults to local Ollama. Run make dev again, then make dev-ollama-pull."; \
+		echo "  Edit docker/hub.dev.yaml if you want to use an external LLM API."; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -183,7 +186,7 @@ dev: _dev-config-check dev-agent-build dev-up	## Build agent image then start hu
 dev-up: _dev-config-check		## Start hub + web (builds hub image if needed)
 	$(COMPOSE) up --build
 
-dev-up-d:			## Start hub + web in background (detached)
+dev-up-d: _dev-config-check		## Start hub + web in background (detached)
 	$(COMPOSE) up --build -d
 
 dev-down:			## Stop containers (preserves DB volume)
@@ -206,6 +209,9 @@ dev-sh-web:			## Open a shell in the running web container
 
 dev-agent-build:		## Build the local agent container image (elasticclaw/claw-agent:dev)
 	docker build -f docker/agent.Dockerfile -t elasticclaw/claw-agent:dev .
+
+dev-ollama-pull:		## Pull the local Ollama model (override with MODEL=model:tag)
+	$(COMPOSE) exec ollama ollama pull $(MODEL)
 
 dev-claw:			## Spawn a one-off local agent via the docker provider
 	@curl -fsS -X POST http://localhost:8080/api/claws \

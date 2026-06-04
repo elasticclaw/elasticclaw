@@ -1,5 +1,5 @@
 # ElasticClaw local dev configuration
-# Copy to docker/hub.dev.yaml (gitignored) and fill in your values before running `make dev`.
+# Copy to docker/hub.dev.yaml (gitignored) before running `make dev`.
 
 # Address the CLI uses to reach the hub
 url: http://localhost:8080
@@ -14,21 +14,41 @@ claw_token: devclawtoken
 ui_password: devpass
 
 # Default model in the format "provider/model-name".
-# Examples:
-#   anthropic: anthropic/claude-sonnet-4-6
-#   openai:    openai/gpt-4.1
-#   groq:      groq/llama-3.3-70b-versatile
-#   deepseek:  deepseek/deepseek-chat
-#   fireworks: fireworks/accounts/fireworks/models/kimi-k2p6
-default_model: openai/gpt-4.1
+# Local smoke testing uses the Ollama service from docker/compose.dev.yml.
+# The Docker agent config treats this small default model conservatively:
+# lean prompt surface and explicit Ollama context.
+# Use an external provider below for tool-heavy agent testing or prompt tuning.
+# Run `make dev-ollama-pull` once after the stack is up to pull this model.
+default_model: ollama/qwen2.5-coder:1.5b
 
 llm_keys:
-  - name: primary
+  - name: local-ollama
     # provider maps to the env var: <PROVIDER in uppercase>_API_KEY
-    # e.g. "openai" → OPENAI_API_KEY, "groq" → GROQ_API_KEY
-    provider: openai
-    api_key: "PASTE_YOUR_API_KEY_HERE"
+    # e.g. "ollama" → OLLAMA_API_KEY, "openai" → OPENAI_API_KEY
+    # Local Ollama only needs a placeholder key.
+    provider: ollama
+    api_key: "ollama-local"
     default: true
+
+  # For stronger models or prompt tuning, add an external key and either:
+  # - set this entry to default: true and local-ollama to default: false
+  # - change default_model to the matching provider/model
+  #
+  # - name: openai-dev
+  #   provider: openai
+  #   api_key: "sk-proj-..."
+  #   default_model: openai/gpt-5.5
+  #   default: false
+  #
+  # - name: anthropic-dev
+  #   provider: anthropic
+  #   api_key: "sk-ant-..."
+  #   default_model: anthropic/claude-sonnet-4-6
+  #   default: false
+  #
+  # Other OpenAI-compatible providers remain supported, for example:
+  # groq/llama-3.3-70b-versatile, deepseek/deepseek-chat, or
+  # fireworks/accounts/fireworks/models/kimi-k2p6.
 
 providers:
   docker:

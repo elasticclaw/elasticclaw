@@ -50,8 +50,18 @@ services:
     depends_on:
       - hub
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    networks:
+      - elasticclaw
+    volumes:
+      - ollama-data:/root/.ollama
+
 volumes:
   hub-data:
   go-mod:
   go-build:
   web-node-modules:
+  ollama-data:
