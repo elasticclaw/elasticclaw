@@ -1,0 +1,22 @@
+name: linear-move-issue
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Please work on this issue. When ready, reply with [READY_FOR_REVIEW].
+
+  - id: move-issue
+    label: Move Issue
+    triggers:
+      - message_contains: "[READY_FOR_REVIEW]"
+    on_enter:
+      move_issue:
+        status: "In Review"
+        comment: "Issue {{.Issue.Identifier}} is ready for review"
+      inject: |
+        Issue moved to In Review. Workflow complete.
+    terminal: true

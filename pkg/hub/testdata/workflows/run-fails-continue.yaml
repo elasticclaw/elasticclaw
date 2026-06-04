@@ -1,0 +1,27 @@
+name: run-fails-continue
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Starting workflow. The next step will run a command that fails with continue_on_error.
+
+  - id: run-fail-continue
+    label: Run Fail Continue
+    triggers:
+      - message_contains: "[PROCEED]"
+    on_enter:
+      run:
+        command: "exit 1"
+        continue_on_error: true
+      inject: |
+        This message SHOULD appear because continue_on_error is true.
+
+  - id: terminal
+    label: Terminal
+    triggers:
+      - message_contains: "[DONE]"
+    terminal: true

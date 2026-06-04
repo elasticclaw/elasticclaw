@@ -427,6 +427,9 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand, timeout)
 	case "noop":
 		return &pipelineRunResult{ExitCode: 0, Stdout: "noop provider skipped workflow command"}, nil
+	case "failing":
+		// Test-only provider that always fails workflow run actions
+		return &pipelineRunResult{ExitCode: 1, Stderr: "failing provider simulated run failure"}, fmt.Errorf("failing provider simulated run failure")
 	default:
 		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
 	}
@@ -923,6 +926,24 @@ issueResolved:
 // ensuring any injected message is delivered (waits if agent is streaming).
 func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, factory *types.FactoryConfig, issueID string) bool {
 	return s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: issueID})
+}
+
+// checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
+// and transitions to the matching stage if found. Returns true if a transition occurred.
+func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return false
+	}
+	stage := pl.StageForMessageContains(message)
+	if stage == nil {
+		return false
+	}
+	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {

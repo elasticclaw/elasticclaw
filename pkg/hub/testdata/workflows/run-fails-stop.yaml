@@ -1,0 +1,26 @@
+name: run-fails-stop
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Starting workflow. The next step will run a command that fails.
+
+  - id: run-fail
+    label: Run Fail
+    triggers:
+      - message_contains: "[PROCEED]"
+    on_enter:
+      run:
+        command: "exit 1"
+      inject: |
+        This message should NOT appear because the run action failed.
+
+  - id: terminal
+    label: Terminal
+    triggers:
+      - message_contains: "[NEVER_REACHED]"
+    terminal: true

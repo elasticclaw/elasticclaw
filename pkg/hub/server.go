@@ -1894,6 +1894,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
+				// Evaluate pipeline triggers for non-[DONE] messages
+				if !strings.Contains(hm.Content, "[DONE]") {
+					go s.checkPipelineMessageTriggers(clawID, hm.Content)
+				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
