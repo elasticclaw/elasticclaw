@@ -412,6 +412,29 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 	}
 }
 
+func TestIsRetryableLLMSendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "api upstream", err: errString("api_error: upstream error"), want: true},
+		{name: "overloaded", err: errString("provider overloaded, try again"), want: true},
+		{name: "temporary unavailable", err: errString("model temporarily unavailable"), want: true},
+		{name: "rate limit", err: errString("rate limit exceeded"), want: true},
+		{name: "timeout", err: errString("request timeout waiting for model"), want: true},
+		{name: "permanent tool error", err: errString("tool-policy: exec is not allowed"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableLLMSendError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableLLMSendError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }

@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1427,23 +1428,39 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
 
-	reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
-	if err == nil || !isRecoverableSessionSendError(err) {
-		return reply, err
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return "", ctxErr
-	}
+	delays := []time.Duration{2 * time.Second, 5 * time.Second}
+	for attempt := 0; ; attempt++ {
+		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		if err == nil {
+			return reply, err
+		}
+		if isRetryableLLMSendRequestError(err) && attempt < len(delays) {
+			delay := delays[attempt]
+			log.Printf("[gateway] transient LLM error on attempt %d/%d: %v — retrying in %s", attempt+1, len(delays)+1, err, delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			continue
+		}
+		if !isRecoverableSessionSendError(err) {
+			return reply, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 
-	recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	resetErr := gs.createFreshSession(recoveryCtx, err.Error())
-	cancel()
-	if resetErr != nil {
-		return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
-	}
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resetErr := gs.createFreshSession(recoveryCtx, err.Error())
+		cancel()
+		if resetErr != nil {
+			return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
+		}
 
-	log.Printf("[session] retrying message in fresh session after recoverable error")
-	return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		log.Printf("[session] retrying message in fresh session after recoverable error")
+		return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+	}
 }
 
 func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
@@ -1467,7 +1484,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 		"message": message,
 	})
 	if err != nil {
-		return "", fmt.Errorf("sessions.send: %w", err)
+		return "", &sessionSendRequestError{err: err}
 	}
 	log.Printf("[gateway] message sent, streaming response...")
 	inf.mu.Lock()
@@ -1498,6 +1515,39 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 			return "", ctx.Err()
 		}
 	}
+}
+
+type sessionSendRequestError struct {
+	err error
+}
+
+func (e *sessionSendRequestError) Error() string {
+	return fmt.Sprintf("sessions.send: %v", e.err)
+}
+
+func (e *sessionSendRequestError) Unwrap() error {
+	return e.err
+}
+
+func isRetryableLLMSendRequestError(err error) bool {
+	var sendErr *sessionSendRequestError
+	if !errors.As(err, &sendErr) {
+		return false
+	}
+	return isRetryableLLMSendError(sendErr.err)
+}
+
+func isRetryableLLMSendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "api_error") ||
+		strings.Contains(msg, "upstream error") ||
+		strings.Contains(msg, "overloaded") ||
+		strings.Contains(msg, "temporarily unavailable") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "timeout")
 }
 
 func formatActivityDuration(d time.Duration) string {
