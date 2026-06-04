@@ -286,55 +286,59 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
 		}
 
-		// Atomically claim the trigger via factory_triggers (prevents concurrent duplicate creation)
-		claimed, err := s.claimFactoryTrigger(factory.Name, "external", triggerKey, "webhook", map[string]string{
-			"repository": repoFullName,
-			"event_type": eventType,
-		})
-		if err != nil {
-			log.Printf("[external-webhook] factory %q: failed to claim trigger for %s: %v",
-				factory.Name, triggerKey, err)
-			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
-				"", eventType, "error", "", err.Error())
-			continue
-		}
-		if !claimed {
-			log.Printf("[external-webhook] factory %q: trigger %s already claimed — treating as idempotent success",
-				factory.Name, triggerKey)
-			continue
-		}
-		claimOpen := true
-		defer func() {
-			if claimOpen {
-				s.failFactoryTrigger(factory.Name, "external", triggerKey)
-			}
-		}()
-
-		// Create claw
-		log.Printf("[external-webhook] factory %q: creating claw for %s (event=%s)",
-			factory.Name, triggerKey, eventType)
-		clawID, err := s.createClawForExternalEvent(factory, payload, triggerKey)
-		if err != nil {
-			log.Printf("[external-webhook] factory %q: failed to create claw for %s: %v",
-				factory.Name, triggerKey, err)
-			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
-				"", eventType, "error", "", err.Error())
-			continue
-		}
-
-		if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-			_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-			log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
-				factory.Name, triggerKey, err)
-			s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
-				"", eventType, "error", "", err.Error())
-			continue
-		}
-		claimOpen = false
-
-		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
-			"", eventType, "claw_created", clawID, "")
+		s.processExternalFactoryTrigger(factory, payload, triggerKey, repoFullName, eventType)
 	}
+}
+
+func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, payload externalWebhookPayload, triggerKey, repoFullName, eventType string) {
+	// Atomically claim the trigger via factory_triggers (prevents concurrent duplicate creation).
+	claimed, err := s.claimFactoryTrigger(factory.Name, "external", triggerKey, "webhook", map[string]string{
+		"repository": repoFullName,
+		"event_type": eventType,
+	})
+	if err != nil {
+		log.Printf("[external-webhook] factory %q: failed to claim trigger for %s: %v",
+			factory.Name, triggerKey, err)
+		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+			"", eventType, "error", "", err.Error())
+		return
+	}
+	if !claimed {
+		log.Printf("[external-webhook] factory %q: trigger %s already claimed — treating as idempotent success",
+			factory.Name, triggerKey)
+		return
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "external", triggerKey)
+		}
+	}()
+
+	// Create claw
+	log.Printf("[external-webhook] factory %q: creating claw for %s (event=%s)",
+		factory.Name, triggerKey, eventType)
+	clawID, err := s.createClawForExternalEvent(factory, payload, triggerKey)
+	if err != nil {
+		log.Printf("[external-webhook] factory %q: failed to create claw for %s: %v",
+			factory.Name, triggerKey, err)
+		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+			"", eventType, "error", "", err.Error())
+		return
+	}
+
+	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
+			factory.Name, triggerKey, err)
+		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+			"", eventType, "error", "", err.Error())
+		return
+	}
+	claimOpen = false
+
+	s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
+		"", eventType, "claw_created", clawID, "")
 }
 
 // matchGlob performs simple glob matching (only * wildcard supported).
