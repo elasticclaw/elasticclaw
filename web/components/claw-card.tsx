@@ -9,6 +9,7 @@ import { TagEditor } from "@/components/tag-editor"
 import { patchClaw } from "@/lib/api"
 import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
+import { ClawTitle } from "@/components/claw-title"
 
 interface ClawCardProps {
   claw: Claw
@@ -148,7 +149,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} />
         <span 
           className={cn(
-            "font-mono text-sm truncate flex-1 group/name flex items-center gap-1",
+            "font-mono text-sm min-w-0 flex-1 group/name flex items-center gap-1",
             hasUnread ? "text-foreground font-medium" : "text-foreground"
           )}
         >
@@ -164,7 +165,12 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             />
           ) : (
             <>
-              <span className="truncate">{localName}</span>
+              <ClawTitle
+                name={localName}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="flex-1"
+              />
               <button
                 onClick={startRename}
                 className="opacity-0 group-hover/name:opacity-60 hover:!opacity-100 transition-opacity flex-shrink-0"

@@ -109,6 +109,8 @@ export function mapApiClaw(
     description: overrides.description,
     reason: overrides.reason,
     bootstrap_status: overrides.bootstrap_status ?? apiClaw.bootstrap_status,
+    githubIssueId: overrides.githubIssueId ?? apiClaw.github_issue_id,
+    githubIssueUrl: overrides.githubIssueUrl ?? apiClaw.github_issue_url,
     ssh_host: apiClaw.ssh_host,
     ssh_port: apiClaw.ssh_port,
     ssh_user: apiClaw.ssh_user,
