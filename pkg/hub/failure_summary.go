@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -273,7 +274,11 @@ func openAICompatibleConfig(provider string) openAICompatibleProvider {
 	case "deepseek":
 		return openAICompatibleProvider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
 	case "ollama":
-		return openAICompatibleProvider{Name: "Ollama", BaseURL: "http://ollama:11434/v1"}
+		baseURL := os.Getenv("OLLAMA_BASE_URL")
+		if baseURL == "" {
+			baseURL = "http://ollama:11434"
+		}
+		return openAICompatibleProvider{Name: "Ollama", BaseURL: strings.TrimRight(baseURL, "/") + "/v1"}
 	default:
 		return openAICompatibleProvider{Name: "OpenAI", BaseURL: "https://api.openai.com/v1"}
 	}

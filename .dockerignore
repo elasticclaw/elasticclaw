@@ -9,3 +9,4 @@ internal/webui/out
 memory/
 .demovoice
 coverage.out
+docker/hub.dev.yaml

@@ -112,6 +112,15 @@ func TestSelectFailureSummaryModelSupportsOllama(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleConfigUsesOllamaBaseURLEnv(t *testing.T) {
+	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434/")
+
+	provider := openAICompatibleConfig("ollama")
+	if provider.Name != "Ollama" || provider.BaseURL != "http://localhost:11434/v1" {
+		t.Fatalf("ollama provider config = %#v", provider)
+	}
+}
+
 func TestSelectFailureSummaryModelAllowsBlankOllamaAPIKey(t *testing.T) {
 	keys := types.LLMKeysList{
 		{Name: "ollama-main", Provider: "ollama", Default: true},

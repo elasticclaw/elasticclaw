@@ -51,7 +51,7 @@ services:
       - hub
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.6.5
     ports:
       - "11434:11434"
     networks:

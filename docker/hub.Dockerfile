@@ -4,7 +4,7 @@ FROM golang:1.25-alpine
 RUN apk add --no-cache git ca-certificates tzdata docker-cli
 
 # Install air for hot reload on .go file changes
-RUN go install github.com/air-verse/air@latest
+RUN go install github.com/air-verse/air@v1.61.7
 
 WORKDIR /app
 EXPOSE 8080
