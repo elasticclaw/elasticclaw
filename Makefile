@@ -89,7 +89,20 @@ e2e-run: build-dev build-bridge-linux
 	trap cleanup EXIT INT TERM; \
 	NGROK_HOST="ec-$$(git rev-parse --short HEAD 2>/dev/null || echo dev)-$$E2E_RUN_ID.ngrok-free.app"; \
 	echo "Creating temporary ngrok reserved domain https://$$NGROK_HOST"; \
-	ngrok api reserved-domains create --api-key "$$NGROK_API_KEY" --domain "$$NGROK_HOST" --description "ElasticClaw E2E temporary tunnel" --metadata "elasticclaw-e2e" > "$$NGROK_DOMAIN_JSON"; \
+	for attempt in $$(seq 1 5); do \
+		if ngrok api reserved-domains create --api-key "$$NGROK_API_KEY" --domain "$$NGROK_HOST" --description "ElasticClaw E2E temporary tunnel" --metadata "elasticclaw-e2e" > "$$NGROK_DOMAIN_JSON"; then \
+			break; \
+		fi; \
+		if [ "$$attempt" -eq 5 ]; then \
+			cat "$$NGROK_DOMAIN_JSON" 2>/dev/null || true; \
+			echo "ngrok reserved domain create failed after $$attempt attempts"; \
+			exit 1; \
+		fi; \
+		cat "$$NGROK_DOMAIN_JSON" 2>/dev/null || true; \
+		sleep_seconds=$$((attempt * 5)); \
+		echo "ngrok reserved domain create failed on attempt $$attempt; retrying in $$sleep_seconds seconds"; \
+		sleep "$$sleep_seconds"; \
+	done; \
 	NGROK_DOMAIN_ID="$$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' < "$$NGROK_DOMAIN_JSON")"; \
 	if [ -z "$$NGROK_DOMAIN_ID" ]; then cat "$$NGROK_DOMAIN_JSON"; echo "ngrok reserved domain create did not return an id"; exit 1; fi; \
 	sleep 5; \
