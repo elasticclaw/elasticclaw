@@ -435,6 +435,26 @@ func TestIsRetryableLLMSendError(t *testing.T) {
 	}
 }
 
+func TestIsRetryableLLMSendRequestError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "lifecycle upstream", err: errString("api_error: upstream error"), want: false},
+		{name: "send request upstream", err: &sessionSendRequestError{err: errString("api_error: upstream error")}, want: true},
+		{name: "send request permanent", err: &sessionSendRequestError{err: errString("tool-policy: exec is not allowed")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableLLMSendRequestError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableLLMSendRequestError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }
