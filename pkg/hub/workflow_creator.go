@@ -316,7 +316,12 @@ func buildWorkflowManualTriggerContext(workflow *types.WorkflowConfig, inputs ma
 			b.WriteString(fmt.Sprintf("  - %s\n", in.Description))
 		}
 	}
-	b.WriteString("\n")
+	b.WriteString("\n## Instructions\n\n")
+	b.WriteString("1. Read the trigger inputs fully\n")
+	b.WriteString("2. Explore the codebase\n")
+	b.WriteString("3. Implement the requested work\n")
+	b.WriteString("4. Follow the PR Completion Policy below\n")
+	appendDefaultFactoryPRPolicy(&b)
 	return b.String()
 }
 
