@@ -390,3 +390,28 @@ func TestGatewayReadLoopFailsPendingRequestsOnDisconnect(t *testing.T) {
 		t.Fatalf("pending requests = %d, want 0", pendingLen)
 	}
 }
+
+func TestIsRecoverableSessionSendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "caller deadline", err: context.DeadlineExceeded, want: false},
+		{name: "context overflow", err: errString("context overflow detected"), want: true},
+		{name: "prompt too large", err: errString("Context overflow: prompt too large for the model"), want: true},
+		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRecoverableSessionSendError(tt.err); got != tt.want {
+				t.Fatalf("isRecoverableSessionSendError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

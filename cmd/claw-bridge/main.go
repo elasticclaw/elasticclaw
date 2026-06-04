@@ -1385,6 +1385,41 @@ func (gs *gatewaySession) setReady() {
 	go gs.refreshContextUsage(context.Background())
 }
 
+func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string) error {
+	log.Printf("[session] creating fresh session after %s", reason)
+	resp, err := gs.sendReq(ctx, "sessions.create", map[string]string{"agentId": "main"})
+	if err != nil {
+		return fmt.Errorf("sessions.create: %w", err)
+	}
+	var payload struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(resp.Payload, &payload)
+	if payload.Key == "" {
+		return fmt.Errorf("sessions.create returned empty key")
+	}
+	gs.sessionKey = payload.Key
+	saveBridgeSession(payload.Key)
+	if err := gs.subscribe(ctx); err != nil {
+		return err
+	}
+	gs.ctxMu.Lock()
+	gs.contextUsage = 0
+	gs.ctxMu.Unlock()
+	gs.setReady()
+	log.Printf("[session] recovered with fresh session: %s", gs.sessionKey)
+	return nil
+}
+
+func isRecoverableSessionSendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "context overflow") ||
+		strings.Contains(msg, "prompt too large")
+}
+
 // SendMessage sends a user message to the persistent session, streams chunks
 // via onChunk, and returns the full response text.
 func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
@@ -1392,6 +1427,26 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
 
+	reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+	if err == nil || !isRecoverableSessionSendError(err) {
+		return reply, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	resetErr := gs.createFreshSession(recoveryCtx, err.Error())
+	cancel()
+	if resetErr != nil {
+		return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
+	}
+
+	log.Printf("[session] retrying message in fresh session after recoverable error")
+	return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+}
+
+func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	inf := &inFlightState{
 		onChunk:    onChunk,
 		onActivity: onActivity,
