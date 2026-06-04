@@ -19,6 +19,12 @@ import (
 // named workflow fixture from testdata/workflows/*.yaml.
 func newWorkflowHarnessServer(t *testing.T, fixtureName string) *factorytest.TestServer {
 	t.Helper()
+	return newWorkflowHarnessServerWithProvider(t, fixtureName, "noop")
+}
+
+// newWorkflowHarnessServerWithProvider creates a TestServer with a specific provider.
+func newWorkflowHarnessServerWithProvider(t *testing.T, fixtureName, provider string) *factorytest.TestServer {
+	t.Helper()
 	pipelineYAML, err := os.ReadFile("testdata/workflows/" + fixtureName + ".yaml")
 	if err != nil {
 		t.Fatalf("read workflow fixture %s: %v", fixtureName, err)
@@ -26,6 +32,11 @@ func newWorkflowHarnessServer(t *testing.T, fixtureName string) *factorytest.Tes
 
 	gh := factorytest.NewMockGitHub(t)
 	li := factorytest.NewMockLinear(t)
+
+	providers := map[string]types.ProviderConfig{
+		"noop":    {Type: "noop"},
+		"failing": {Type: "failing"},
+	}
 
 	cfg := &types.HubConfig{
 		ClawToken: "test-claw-token",
@@ -37,7 +48,7 @@ func newWorkflowHarnessServer(t *testing.T, fixtureName string) *factorytest.Tes
 				TriggerStatus: "In Progress",
 				DoneStatus:    "done-state-id",
 				Template:      "elasticclaw",
-				Provider:      "noop",
+				Provider:      provider,
 				PipelineYAML:  string(pipelineYAML),
 			},
 		},
@@ -49,9 +60,7 @@ func newWorkflowHarnessServer(t *testing.T, fixtureName string) *factorytest.Tes
 				},
 			},
 		},
-		Providers: map[string]types.ProviderConfig{
-			"noop": {Type: "noop"},
-		},
+		Providers: providers,
 	}
 
 	s, db := hub.NewTestServerWithConfig(t, cfg, gh.URL, li.URL, "")
@@ -121,7 +130,8 @@ func TestWorkflowHarness_GitHubIssuePrecommit(t *testing.T) {
 }
 
 func TestWorkflowHarness_RunFailsStop(t *testing.T) {
-	ts := newWorkflowHarnessServer(t, "run-fails-stop")
+	// Use the "failing" provider so the run action actually fails
+	ts := newWorkflowHarnessServerWithProvider(t, "run-fails-stop", "failing")
 
 	issueID := "ELA-456"
 	triggerFactoryWebhook(t, ts, issueID, "Backlog", "In Progress")
@@ -138,10 +148,14 @@ func TestWorkflowHarness_RunFailsStop(t *testing.T) {
 	// Fake agent: proceed to run-fail stage
 	bridge.SendMessage("Proceeding. [PROCEED]")
 
-	// With the noop provider, the run action always succeeds, so the inject WILL appear.
-	// In a real environment with a real provider, the run would fail and the inject would NOT appear.
-	// Wait a bit for any async processing, then verify the stage and messages.
-	bridge.WaitForMessage(t, "should NOT appear", 5*time.Second)
+	// The run action fails (failing provider), so the inject message should NOT appear.
+	// Wait briefly to ensure the inject is NOT sent.
+	time.Sleep(200 * time.Millisecond)
+	for _, m := range bridge.Messages {
+		if strings.Contains(m.Content, "should NOT appear") {
+			t.Fatal("inject message should NOT appear when run fails without continue_on_error")
+		}
+	}
 
 	// Verify claw is in run-fail stage
 	var stage string
@@ -152,7 +166,8 @@ func TestWorkflowHarness_RunFailsStop(t *testing.T) {
 }
 
 func TestWorkflowHarness_RunFailsContinue(t *testing.T) {
-	ts := newWorkflowHarnessServer(t, "run-fails-continue")
+	// Use the "failing" provider so the run action actually fails
+	ts := newWorkflowHarnessServerWithProvider(t, "run-fails-continue", "failing")
 
 	issueID := "ELA-789"
 	triggerFactoryWebhook(t, ts, issueID, "Backlog", "In Progress")
@@ -168,6 +183,9 @@ func TestWorkflowHarness_RunFailsContinue(t *testing.T) {
 
 	// Fake agent: proceed to run-fail-continue stage
 	bridge.SendMessage("Proceeding. [PROCEED]")
+
+	// Wait for the warning message about the failed run
+	bridge.WaitForMessage(t, "Workflow command failed", 5*time.Second)
 
 	// Wait for the follow-up inject message (should appear because continue_on_error=true)
 	bridge.WaitForMessage(t, "This message SHOULD appear", 5*time.Second)
@@ -206,9 +224,10 @@ func TestWorkflowHarness_LinearMoveIssue(t *testing.T) {
 	// Wait for terminal inject
 	bridge.WaitForMessage(t, "Issue moved to In Review", 5*time.Second)
 
-	// Verify Linear mock received the move request
-	if !ts.Linear.SawAPICall() {
-		t.Fatal("expected Linear API call for move_issue")
+	// Verify Linear mock received the move request by checking IssueStates
+	// (SawAPICall would return true for routine polling queries too)
+	if ts.Linear.IssueStates["issue-uuid-123"] == "" {
+		t.Fatal("expected Linear issueUpdate mutation to set issue state")
 	}
 }
 

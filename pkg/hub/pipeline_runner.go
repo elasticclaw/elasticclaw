@@ -401,6 +401,9 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		return s.executeReplicatedPipelineRun(sshUser, fmt.Sprintf("%s:%d", sshHost, sshPort), workspaceCommand, timeout)
 	case "noop":
 		return &pipelineRunResult{ExitCode: 0, Stdout: "noop provider skipped workflow command"}, nil
+	case "failing":
+		// Test-only provider that always fails workflow run actions
+		return &pipelineRunResult{ExitCode: 1, Stderr: "failing provider simulated run failure"}, fmt.Errorf("failing provider simulated run failure")
 	default:
 		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
 	}
