@@ -1417,8 +1417,7 @@ func isRecoverableSessionSendError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "context overflow") ||
-		strings.Contains(msg, "prompt too large") ||
-		strings.Contains(msg, "context deadline exceeded")
+		strings.Contains(msg, "prompt too large")
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -1432,6 +1431,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	if err == nil || !isRecoverableSessionSendError(err) {
 		return reply, err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
 
 	recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	resetErr := gs.createFreshSession(recoveryCtx, err.Error())
@@ -1440,14 +1442,8 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 	}
 
-	retryCtx := ctx
-	retryCancel := func() {}
-	if ctx.Err() != nil {
-		retryCtx, retryCancel = context.WithTimeout(context.Background(), 30*time.Minute)
-	}
-	defer retryCancel()
 	log.Printf("[session] retrying message in fresh session after recoverable error")
-	return gs.sendMessageOnce(retryCtx, message, onChunk, onActivity)
+	return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
 }
 
 func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {

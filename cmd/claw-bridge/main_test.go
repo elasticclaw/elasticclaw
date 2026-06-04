@@ -398,7 +398,8 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 		want bool
 	}{
 		{name: "nil", err: nil, want: false},
-		{name: "context overflow", err: context.DeadlineExceeded, want: true},
+		{name: "caller deadline", err: context.DeadlineExceeded, want: false},
+		{name: "context overflow", err: errString("context overflow detected"), want: true},
 		{name: "prompt too large", err: errString("Context overflow: prompt too large for the model"), want: true},
 		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
 	}
