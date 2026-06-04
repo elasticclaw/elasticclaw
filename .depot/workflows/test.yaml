@@ -58,6 +58,7 @@ jobs:
   web:
     name: Web UI build
     runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -72,13 +73,21 @@ jobs:
 
       - name: Lint (smoke check — tolerates rule violations, still fails on tool/config errors)
         run: |
-          set +e
-          npm run lint
-          ec=$?
-          if [ $ec -eq 0 ] || [ $ec -eq 1 ]; then
-            exit 0
-          fi
-          exit $ec
+          npm run lint || {
+            ec=$?
+            if [ $ec -eq 1 ]; then
+              exit 0
+            fi
+            exit $ec
+          }
+        working-directory: web
+
+      - name: Install Playwright browsers
+        run: npm exec -- playwright install --with-deps chromium
+        working-directory: web
+
+      - name: Run UI E2E tests
+        run: npm run e2e
         working-directory: web
 
       - name: Build (static export)

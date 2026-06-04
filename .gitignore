@@ -24,6 +24,9 @@ web/.next/
 web/tsconfig.tsbuildinfo
 web/package-lock.json
 web/pnpm-lock.yaml
+web/test-results/
+web/playwright-report/
+test-results/
 
 # build artifacts (root-level binaries only, not cmd/claw-bridge/ source)
 /claw-bridge

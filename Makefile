@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-replicated-github e2e-replicated-linear e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container test-web-e2e e2e e2e-github e2e-linear e2e-replicated-github e2e-replicated-linear e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -122,6 +122,10 @@ test-bootstrap:
 # Run container integration tests (requires Docker + ELASTICCLAW_TEST_BRIDGE_URL)
 test-container:
 	ELASTICCLAW_CONTAINER_TESTS=1 go test -v ./pkg/hub/ -run TestBootstrap_ContainerRun -timeout 10m
+
+test-web-e2e:
+	@command -v npm >/dev/null 2>&1 || (echo "npm is required for make test-web-e2e" && exit 1)
+	cd web && npm install --no-package-lock && npm exec -- playwright install chromium && npm run e2e
 
 # Run install integration tests in a real Ubuntu container (requires Docker)
 test-install:

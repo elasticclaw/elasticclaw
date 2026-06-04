@@ -101,6 +101,7 @@ rm -rf ~/.elasticclaw/hub.db
 
 ```bash
 make test                # Go unit tests
+make test-web-e2e        # mocked Playwright UI E2E tests
 make test-bootstrap      # bootstrap script tests (needs shellcheck)
 make test-install        # container integration test (needs Docker)
 ELASTICCLAW_INSTALL_TESTS=1 make test-install  # actually spins Ubuntu container

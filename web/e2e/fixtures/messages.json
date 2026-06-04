@@ -1,0 +1,30 @@
+{
+  "claw-alpha": [
+    {
+      "id": "msg-alpha-user-1",
+      "claw_id": "claw-alpha",
+      "tenant_id": "tenant-test",
+      "role": "user",
+      "content": "Hello from user",
+      "created_at": "2026-06-04T12:01:00Z"
+    },
+    {
+      "id": "msg-alpha-claw-1",
+      "claw_id": "claw-alpha",
+      "tenant_id": "tenant-test",
+      "role": "claw",
+      "content": "Hello from alpha",
+      "created_at": "2026-06-04T12:01:10Z"
+    }
+  ],
+  "claw-docs": [
+    {
+      "id": "msg-docs-claw-1",
+      "claw_id": "claw-docs",
+      "tenant_id": "tenant-test",
+      "role": "claw",
+      "content": "Docs agent is idle",
+      "created_at": "2026-06-04T11:35:00Z"
+    }
+  ]
+}
