@@ -23,13 +23,14 @@ type ReceivedMessage struct {
 }
 
 type FakeBridge struct {
-	ClawID   string
-	HubURL   string
-	mu       sync.Mutex
-	Messages []ReceivedMessage
-	conn     *websocket.Conn
-	ctx      context.Context
-	cancel   context.CancelFunc
+	ClawID    string
+	HubURL    string
+	ClawToken string
+	mu        sync.Mutex
+	Messages  []ReceivedMessage
+	conn      *websocket.Conn
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func ConnectFakeBridge(t *testing.T, hubURL, clawID, clawName, clawToken string) *FakeBridge {
@@ -58,7 +59,7 @@ func ConnectFakeBridge(t *testing.T, hubURL, clawID, clawName, clawToken string)
 		cancel()
 		t.Fatalf("FakeBridge register: %v", err)
 	}
-	fb := &FakeBridge{ClawID: clawID, HubURL: hubURL, conn: conn, ctx: ctx, cancel: cancel}
+	fb := &FakeBridge{ClawID: clawID, HubURL: hubURL, ClawToken: clawToken, conn: conn, ctx: ctx, cancel: cancel}
 	go fb.readLoop()
 	t.Cleanup(fb.Disconnect)
 	return fb
@@ -131,7 +132,7 @@ func (fb *FakeBridge) WaitForMessage(t *testing.T, contains string, timeout time
 
 func (fb *FakeBridge) completeCheckpoint(checkpointID string) {
 	// POST to checkpoint complete endpoint
-	url := fmt.Sprintf("%s/api/checkpoints/%s/complete?claw_token=test-claw-token", fb.HubURL, checkpointID)
+	url := fmt.Sprintf("%s/api/checkpoints/%s/complete?claw_token=%s", fb.HubURL, checkpointID, fb.ClawToken)
 	body := map[string]interface{}{"root_sha256": ""}
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(b)))
