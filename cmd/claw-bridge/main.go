@@ -1431,6 +1431,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	delays := []time.Duration{2 * time.Second, 5 * time.Second}
 	for attempt := 0; ; attempt++ {
 		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		// Retry only failures from the initial sessions.send request. Once the
+		// request is accepted, chunks may already be visible to the UI, so stream
+		// or lifecycle errors must not replay the turn.
 		if err == nil {
 			return reply, err
 		}
@@ -1547,7 +1550,8 @@ func isRetryableLLMSendError(err error) bool {
 		strings.Contains(msg, "overloaded") ||
 		strings.Contains(msg, "temporarily unavailable") ||
 		strings.Contains(msg, "rate limit") ||
-		strings.Contains(msg, "timeout")
+		strings.Contains(msg, "request timeout") ||
+		strings.Contains(msg, "model timeout")
 }
 
 func formatActivityDuration(d time.Duration) string {

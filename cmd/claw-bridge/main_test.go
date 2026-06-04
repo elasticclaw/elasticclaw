@@ -423,7 +423,9 @@ func TestIsRetryableLLMSendError(t *testing.T) {
 		{name: "overloaded", err: errString("provider overloaded, try again"), want: true},
 		{name: "temporary unavailable", err: errString("model temporarily unavailable"), want: true},
 		{name: "rate limit", err: errString("rate limit exceeded"), want: true},
-		{name: "timeout", err: errString("request timeout waiting for model"), want: true},
+		{name: "request timeout", err: errString("request timeout waiting for model"), want: true},
+		{name: "model timeout", err: errString("model timeout waiting for completion"), want: true},
+		{name: "transport timeout", err: errString("sessions.send: i/o timeout"), want: false},
 		{name: "permanent tool error", err: errString("tool-policy: exec is not allowed"), want: false},
 	}
 	for _, tt := range tests {
@@ -443,7 +445,10 @@ func TestIsRetryableLLMSendRequestError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "lifecycle upstream", err: errString("api_error: upstream error"), want: false},
+		{name: "lifecycle model timeout", err: errString("model timeout waiting for completion"), want: false},
 		{name: "send request upstream", err: &sessionSendRequestError{err: errString("api_error: upstream error")}, want: true},
+		{name: "send request model timeout", err: &sessionSendRequestError{err: errString("model timeout waiting for completion")}, want: true},
+		{name: "send request transport timeout", err: &sessionSendRequestError{err: errString("i/o timeout")}, want: false},
 		{name: "send request permanent", err: &sessionSendRequestError{err: errString("tool-policy: exec is not allowed")}, want: false},
 	}
 	for _, tt := range tests {
