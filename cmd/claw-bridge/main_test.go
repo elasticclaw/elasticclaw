@@ -412,6 +412,54 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 	}
 }
 
+func TestIsRetryableLLMSendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "api upstream", err: errString("api_error: upstream error"), want: true},
+		{name: "overloaded", err: errString("provider overloaded, try again"), want: true},
+		{name: "temporary unavailable", err: errString("model temporarily unavailable"), want: true},
+		{name: "rate limit", err: errString("rate limit exceeded"), want: true},
+		{name: "request timeout", err: errString("request timeout waiting for model"), want: true},
+		{name: "model timeout", err: errString("model timeout waiting for completion"), want: true},
+		{name: "transport timeout", err: errString("sessions.send: i/o timeout"), want: false},
+		{name: "permanent tool error", err: errString("tool-policy: exec is not allowed"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableLLMSendError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableLLMSendError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRetryableLLMSendRequestError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "lifecycle upstream", err: errString("api_error: upstream error"), want: false},
+		{name: "lifecycle model timeout", err: errString("model timeout waiting for completion"), want: false},
+		{name: "send request upstream", err: &sessionSendRequestError{err: errString("api_error: upstream error")}, want: true},
+		{name: "send request model timeout", err: &sessionSendRequestError{err: errString("model timeout waiting for completion")}, want: true},
+		{name: "send request transport timeout", err: &sessionSendRequestError{err: errString("i/o timeout")}, want: false},
+		{name: "send request permanent", err: &sessionSendRequestError{err: errString("tool-policy: exec is not allowed")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableLLMSendRequestError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableLLMSendRequestError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }
