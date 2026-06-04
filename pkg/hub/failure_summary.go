@@ -180,7 +180,7 @@ func summarizeFailureWithLLM(ctx context.Context, sanitizedReason string, llmKey
 	switch key.Provider {
 	case "anthropic":
 		return callAnthropicModel(ctx, key.APIKey, stripProviderPrefix(model), systemPrompt, msgs, 700)
-	case "openai", "codex", "fireworks", "groq", "deepseek":
+	case "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
 		return callOpenAICompatible(ctx, openAICompatibleConfig(key.Provider), key.APIKey, stripProviderPrefix(model), systemPrompt, msgs)
 	default:
 		return "", fmt.Errorf("unsupported LLM provider %q", key.Provider)
@@ -194,18 +194,18 @@ func selectFailureSummaryModel(llmKeys types.LLMKeysList, defaultModel string) (
 	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
 	if defaultProvider != "" {
 		for _, key := range llmKeys {
-			if key != nil && key.APIKey != "" && key.Provider == defaultProvider && isFailureSummaryProvider(key.Provider) {
+			if key != nil && llmKeyHasRequiredAPIKey(key) && key.Provider == defaultProvider && isFailureSummaryProvider(key.Provider) {
 				return key, modelForFailureSummary(key, defaultModel), nil
 			}
 		}
 	}
 	for _, key := range llmKeys {
-		if key != nil && key.APIKey != "" && key.Default && isFailureSummaryProvider(key.Provider) {
+		if key != nil && llmKeyHasRequiredAPIKey(key) && key.Default && isFailureSummaryProvider(key.Provider) {
 			return key, modelForFailureSummary(key, defaultModel), nil
 		}
 	}
 	for _, key := range llmKeys {
-		if key != nil && key.APIKey != "" && isFailureSummaryProvider(key.Provider) {
+		if key != nil && llmKeyHasRequiredAPIKey(key) && isFailureSummaryProvider(key.Provider) {
 			return key, modelForFailureSummary(key, defaultModel), nil
 		}
 	}
@@ -214,7 +214,7 @@ func selectFailureSummaryModel(llmKeys types.LLMKeysList, defaultModel string) (
 
 func isFailureSummaryProvider(provider string) bool {
 	switch provider {
-	case "anthropic", "openai", "codex", "fireworks", "groq", "deepseek":
+	case "anthropic", "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
 		return true
 	default:
 		return false
@@ -244,6 +244,8 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
 		return "deepseek/deepseek-chat"
+	case "ollama":
+		return "ollama/qwen2.5-coder:1.5b"
 	default:
 		return defaultModel
 	}
@@ -270,6 +272,8 @@ func openAICompatibleConfig(provider string) openAICompatibleProvider {
 		return openAICompatibleProvider{Name: "Groq", BaseURL: "https://api.groq.com/openai/v1"}
 	case "deepseek":
 		return openAICompatibleProvider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
+	case "ollama":
+		return openAICompatibleProvider{Name: "Ollama", BaseURL: "http://ollama:11434/v1"}
 	default:
 		return openAICompatibleProvider{Name: "OpenAI", BaseURL: "https://api.openai.com/v1"}
 	}

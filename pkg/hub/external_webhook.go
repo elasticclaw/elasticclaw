@@ -747,6 +747,14 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 		return "anthropic/claude-sonnet-4-6"
 	case "fireworks":
 		return "fireworks/accounts/fireworks/models/kimi-k2p6"
+	case "openai":
+		return "openai/gpt-5.5"
+	case "groq":
+		return "groq/llama-3.3-70b-versatile"
+	case "deepseek":
+		return "deepseek/deepseek-chat"
+	case "ollama":
+		return "ollama/qwen2.5-coder:1.5b"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:

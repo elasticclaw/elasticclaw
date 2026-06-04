@@ -171,6 +171,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 	validProviders := map[string]bool{
 		"anthropic": true, "openai": true, "fireworks": true,
 		"moonshot": true, "google": true, "mistral": true,
+		"groq": true, "deepseek": true, "codex": true, "ollama": true,
 	}
 
 	allKeysValid := true
@@ -190,7 +191,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 				},
 			})
 		}
-		if key.APIKey == "" {
+		if !llmKeyHasRequiredAPIKey(key) {
 			allKeysValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "models",

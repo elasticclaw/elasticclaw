@@ -826,6 +826,7 @@ const PROVIDER_OPTIONS = [
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
   { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
   { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
+  { value: "ollama",     label: "Ollama",     placeholder: "ollama-local" },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
@@ -834,6 +835,7 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
     { id: "anthropic/claude-opus-4-5",   name: "Claude Opus 4.5" },
     { id: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+    { id: "__custom",                    name: "Custom Anthropic model" },
   ],
   fireworks: [
     { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2.6" },
@@ -846,6 +848,7 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "fireworks/accounts/fireworks/models/gpt-oss-20b",                name: "OpenAI gpt-oss-20b" },
     { id: "fireworks/accounts/fireworks/models/minimax-m2p5",               name: "MiniMax M2.5" },
     { id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",    name: "Llama 3.3 70B Instruct" },
+    { id: "__custom",                                                       name: "Custom Fireworks model" },
   ],
   openai: [
     { id: "openai/gpt-5.5",      name: "GPT-5.5" },
@@ -857,12 +860,21 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "openai/o3",           name: "o3" },
     // coding-tuned variants available via regular OpenAI API
     { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex (coding tuned)" },
+    { id: "__custom",             name: "Custom OpenAI model" },
   ],
   codex: [
     // Codex is an autonomous agentic coding platform — it selects and routes to the
     // appropriate underlying model (including special Codex checkpoints) on its own.
     { id: "codex/codex",      name: "Codex (auto)" },
     { id: "codex/codex-pro",  name: "Codex Pro (auto)" },
+    { id: "__custom",         name: "Custom Codex model" },
+  ],
+  ollama: [
+    { id: "ollama/qwen2.5-coder:1.5b", name: "Qwen2.5 Coder 1.5B" },
+    { id: "ollama/qwen2.5-coder:7b", name: "Qwen2.5 Coder 7B" },
+    { id: "ollama/llama3.2:3b",      name: "Llama 3.2 3B" },
+    { id: "ollama/gpt-oss:20b",      name: "gpt-oss 20B" },
+    { id: "__custom",                name: "Custom Ollama model" },
   ],
 }
 
@@ -879,12 +891,13 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formKey, setFormKey] = useState("")
   const [formDefault, setFormDefault] = useState(false)
   const [formDefaultModel, setFormDefaultModel] = useState("")
+  const [formCustomModel, setFormCustomModel] = useState("")
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
 
   const resetForm = () => {
-    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setEditIdx(null)
+    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setEditIdx(null)
   }
 
   const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
@@ -896,7 +909,14 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     setFormCustomProvider(isCustom ? k.provider : "")
     setFormKey("")
     setFormDefault(k.default)
-    setFormDefaultModel(k.defaultModel || "")
+    const providerModels = PROVIDER_MODELS[k.provider] || []
+    if (k.defaultModel && providerModels.length > 0 && !providerModels.some(m => m.id === k.defaultModel)) {
+      setFormDefaultModel("__custom")
+      setFormCustomModel(k.defaultModel)
+    } else {
+      setFormDefaultModel(k.defaultModel || "")
+      setFormCustomModel("")
+    }
     setEditIdx(i)
     setModalMode("edit")
     setShowModal(true)
@@ -907,9 +927,10 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
 
   function doSave() {
     const actualProvider = formProvider === "other" ? formCustomProvider : formProvider
+    const actualDefaultModel = formDefaultModel === "__custom" ? formCustomModel.trim() : formDefaultModel
     if (modalMode === "add") {
-      if (!formName.trim() || !formKey.trim()) return
-      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: formDefaultModel || undefined }] })
+      if (!formName.trim() || (!formKey.trim() && actualProvider !== "ollama")) return
+      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: actualDefaultModel || undefined }] })
     } else if (editIdx !== null) {
       const existing = llmKeys[editIdx]
       const patch: Record<string, unknown> = {
@@ -918,7 +939,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       }
       if (formKey.trim()) patch.apiKey = formKey.trim()
       patch.default = formDefault       // always send so user can unset
-      if (formDefaultModel) patch.defaultModel = formDefaultModel
+      if (actualDefaultModel) patch.defaultModel = actualDefaultModel
       if (actualProvider !== existing.provider) patch.provider = actualProvider
       onSave({ llmKeys: [patch] })
     }
@@ -1076,7 +1097,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                   <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
                   <select
                     value={formProvider}
-                    onChange={e => { setFormProvider(e.target.value); setFormDefaultModel("") }}
+                    onChange={e => { setFormProvider(e.target.value); setFormDefaultModel(""); setFormCustomModel("") }}
                     className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
                   >
                     {PROVIDER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1114,6 +1135,14 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                   </select>
                 ) : (
                   <Input value={formDefaultModel} onChange={e => setFormDefaultModel(e.target.value)} className="h-8 text-sm" placeholder="e.g. myprovider/model-name" />
+                )}
+                {PROVIDER_MODELS[formProvider] && formDefaultModel === "__custom" && (
+                  <Input
+                    value={formCustomModel}
+                    onChange={e => setFormCustomModel(e.target.value)}
+                    className="h-8 text-sm mt-2"
+                    placeholder={formProvider === "ollama" ? "e.g. ollama/qwen3:14b" : "e.g. provider/model-name"}
+                  />
                 )}
               </div>
               <label className="flex items-center gap-2 text-sm cursor-pointer">

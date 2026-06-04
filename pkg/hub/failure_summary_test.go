@@ -94,3 +94,42 @@ func TestSelectFailureSummaryModelSupportsOpenAICompatibleProviders(t *testing.T
 		t.Fatalf("provider/model = %s/%s", key.Provider, model)
 	}
 }
+
+func TestSelectFailureSummaryModelSupportsOllama(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "ollama-main", Provider: "ollama", APIKey: "ollama-local", Default: true},
+	}
+	key, model, err := selectFailureSummaryModel(keys, "")
+	if err != nil {
+		t.Fatalf("select model: %v", err)
+	}
+	if key.Provider != "ollama" || model != "ollama/qwen2.5-coder:1.5b" {
+		t.Fatalf("provider/model = %s/%s", key.Provider, model)
+	}
+	provider := openAICompatibleConfig("ollama")
+	if provider.Name != "Ollama" || provider.BaseURL != "http://ollama:11434/v1" {
+		t.Fatalf("ollama provider config = %#v", provider)
+	}
+}
+
+func TestSelectFailureSummaryModelAllowsBlankOllamaAPIKey(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "ollama-main", Provider: "ollama", Default: true},
+	}
+	key, model, err := selectFailureSummaryModel(keys, "")
+	if err != nil {
+		t.Fatalf("select model: %v", err)
+	}
+	if key.Provider != "ollama" || model != "ollama/qwen2.5-coder:1.5b" {
+		t.Fatalf("provider/model = %s/%s", key.Provider, model)
+	}
+}
+
+func TestSelectFailureSummaryModelRejectsBlankExternalAPIKey(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "openai-main", Provider: "openai", Default: true},
+	}
+	if _, _, err := selectFailureSummaryModel(keys, ""); err == nil {
+		t.Fatal("expected blank external API key to be rejected")
+	}
+}

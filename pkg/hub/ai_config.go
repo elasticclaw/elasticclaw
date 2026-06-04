@@ -468,57 +468,14 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 	msgs = append(msgs, sanitizeAIChatHistory(history)...)
 	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
 
-	// Select provider: prefer defaultModel provider, then fall back to first available
-	var anthropicKey, openaiKey, codexKey string
-	for _, k := range llmKeys {
-		if k.Provider == "anthropic" && anthropicKey == "" {
-			anthropicKey = k.APIKey
-		}
-		if k.Provider == "openai" && openaiKey == "" {
-			openaiKey = k.APIKey
-		}
-		if k.Provider == "codex" && codexKey == "" {
-			codexKey = k.APIKey
-		}
+	choice, err := selectAIConfigProvider(llmKeys, defaultModel)
+	if err != nil {
+		return "", err
 	}
-
-	if len(llmKeys) == 0 {
-		return "", fmt.Errorf("no LLM keys configured")
+	if choice.Anthropic {
+		return callAnthropic(choice.Key.APIKey, systemPrompt, msgs)
 	}
-
-	// Try defaultModel provider first
-	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
-	switch defaultProvider {
-	case "anthropic":
-		if anthropicKey != "" {
-			return callAnthropic(anthropicKey, systemPrompt, msgs)
-		}
-	case "openai":
-		if openaiKey != "" {
-			return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-5.5")
-		}
-	case "codex":
-		if codexKey != "" {
-			return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
-		}
-	}
-
-	// Fall back to hard-coded priority
-	if anthropicKey != "" {
-		return callAnthropic(anthropicKey, systemPrompt, msgs)
-	}
-	if openaiKey != "" {
-		return callOpenAI(openaiKey, systemPrompt, msgs, "gpt-5.5")
-	}
-	if codexKey != "" {
-		return callOpenAI(codexKey, systemPrompt, msgs, "o4-mini")
-	}
-
-	availableProviders := uniqueProviders(llmKeys)
-	if defaultProvider != "" {
-		return "", fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
-	}
-	return "", fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex; configured: %s)", strings.Join(availableProviders, ", "))
+	return callOpenAI(choice.Provider, choice.Key.APIKey, systemPrompt, msgs, choice.Model)
 }
 
 // callLLMForConfigStream selects the best available provider and streams tokens via onToken.
@@ -535,58 +492,123 @@ func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, 
 // streamLLMWithSystemPrompt selects a provider from llmKeys/defaultModel and streams tokens via onToken.
 // Callers supply a fully-built system prompt and message list.
 func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
-	var anthropicKey, openaiKey, codexKey string
-	var firstKey *types.LLMKeyConfig
-	for _, k := range llmKeys {
-		if firstKey == nil {
-			firstKey = k
-		}
-		if k.Provider == "anthropic" && anthropicKey == "" {
-			anthropicKey = k.APIKey
-		}
-		if k.Provider == "openai" && openaiKey == "" {
-			openaiKey = k.APIKey
-		}
-		if k.Provider == "codex" && codexKey == "" {
-			codexKey = k.APIKey
-		}
+	choice, err := selectAIConfigProvider(llmKeys, defaultModel)
+	if err != nil {
+		return err
+	}
+	if choice.Anthropic {
+		return streamAnthropic(ctx, choice.Key.APIKey, systemPrompt, msgs, onToken)
+	}
+	return streamOpenAI(ctx, choice.Provider, choice.Key.APIKey, systemPrompt, msgs, onToken, choice.Model)
+}
+
+type aiConfigProviderChoice struct {
+	Key       *types.LLMKeyConfig
+	Anthropic bool
+	Provider  openAICompatibleProvider
+	Model     string
+}
+
+func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*aiConfigProviderChoice, error) {
+	if len(llmKeys) == 0 {
+		return nil, fmt.Errorf("no LLM keys configured")
 	}
 
-	if firstKey == nil {
-		return fmt.Errorf("no LLM keys configured")
+	var anthropicKey *types.LLMKeyConfig
+	openAIKeys := map[string]*types.LLMKeyConfig{}
+	for _, k := range llmKeys {
+		if k == nil || !llmKeyHasRequiredAPIKey(k) {
+			continue
+		}
+		if k.Provider == "anthropic" && anthropicKey == nil {
+			anthropicKey = k
+		}
+		if isOpenAICompatibleConfigProvider(k.Provider) && openAIKeys[k.Provider] == nil {
+			openAIKeys[k.Provider] = k
+		}
 	}
 
 	defaultProvider := strings.TrimSpace(strings.SplitN(defaultModel, "/", 2)[0])
 	switch defaultProvider {
 	case "anthropic":
-		if anthropicKey != "" {
-			return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
+		if anthropicKey != nil {
+			return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 		}
-	case "openai":
-		if openaiKey != "" {
-			return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-5.5")
-		}
-	case "codex":
-		if codexKey != "" {
-			return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
+	default:
+		if key := openAIKeys[defaultProvider]; key != nil {
+			return &aiConfigProviderChoice{
+				Key:      key,
+				Provider: openAICompatibleConfig(key.Provider),
+				Model:    stripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
+			}, nil
 		}
 	}
 
-	if anthropicKey != "" {
-		return streamAnthropic(ctx, anthropicKey, systemPrompt, msgs, onToken)
+	if anthropicKey != nil {
+		return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 	}
-	if openaiKey != "" {
-		return streamOpenAI(ctx, openaiKey, systemPrompt, msgs, onToken, "gpt-5.5")
-	}
-	if codexKey != "" {
-		return streamOpenAI(ctx, codexKey, systemPrompt, msgs, onToken, "o4-mini")
+	for _, provider := range []string{"openai", "codex", "fireworks", "groq", "deepseek", "ollama"} {
+		if key := openAIKeys[provider]; key != nil {
+			return &aiConfigProviderChoice{
+				Key:      key,
+				Provider: openAICompatibleConfig(key.Provider),
+				Model:    stripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
+			}, nil
+		}
 	}
 
 	availableProviders := uniqueProviders(llmKeys)
 	if defaultProvider != "" {
-		return fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
+		return nil, fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex, fireworks, groq, deepseek, ollama; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
 	}
-	return fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex; configured: %s)", strings.Join(availableProviders, ", "))
+	return nil, fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex, fireworks, groq, deepseek, ollama; configured: %s)", strings.Join(availableProviders, ", "))
+}
+
+func llmKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
+	if key == nil {
+		return false
+	}
+	return key.APIKey != "" || key.Provider == "ollama"
+}
+
+func isOpenAICompatibleConfigProvider(provider string) bool {
+	switch provider {
+	case "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
+		return true
+	default:
+		return false
+	}
+}
+
+func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
+	if key == nil {
+		return defaultModel
+	}
+	if key.DefaultModel != "" {
+		if strings.HasPrefix(key.DefaultModel, key.Provider+"/") {
+			return key.DefaultModel
+		}
+		return key.Provider + "/" + key.DefaultModel
+	}
+	if defaultModel != "" && strings.HasPrefix(defaultModel, key.Provider+"/") {
+		return defaultModel
+	}
+	switch key.Provider {
+	case "openai":
+		return "openai/gpt-5.5"
+	case "codex":
+		return "codex/o4-mini"
+	case "fireworks":
+		return "fireworks/accounts/fireworks/models/kimi-k2p6"
+	case "groq":
+		return "groq/llama-3.3-70b-versatile"
+	case "deepseek":
+		return "deepseek/deepseek-chat"
+	case "ollama":
+		return "ollama/qwen2.5-coder:1.5b"
+	default:
+		return defaultModel
+	}
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
@@ -681,8 +703,9 @@ func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []ai
 	return scanner.Err()
 }
 
-// streamOpenAI calls OpenAI Chat Completions API with stream:true, forwarding delta.content.
-func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
+// streamOpenAI calls an OpenAI-compatible Chat Completions API with stream:true,
+// forwarding delta.content.
+func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -703,7 +726,7 @@ func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiCha
 		Stream:   true,
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(provider.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -724,9 +747,9 @@ func streamOpenAI(ctx context.Context, apiKey, systemPrompt string, msgs []aiCha
 			} `json:"error"`
 		}
 		if json.Unmarshal(data, &errResp) == nil && errResp.Error.Message != "" {
-			return fmt.Errorf("OpenAI error: %s", errResp.Error.Message)
+			return fmt.Errorf("%s error: %s", provider.Name, errResp.Error.Message)
 		}
-		return fmt.Errorf("OpenAI error %d: %s", resp.StatusCode, string(data))
+		return fmt.Errorf("%s error %d: %s", provider.Name, resp.StatusCode, string(data))
 	}
 
 	type streamChoice struct {
@@ -830,7 +853,7 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, e
 	return "", fmt.Errorf("no text content in Anthropic response")
 }
 
-func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
+func callOpenAI(provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -859,7 +882,7 @@ func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage, model string)
 		Messages: openAIMsgs,
 	})
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", strings.TrimRight(provider.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -874,17 +897,17 @@ func callOpenAI(apiKey, systemPrompt string, msgs []aiChatMessage, model string)
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OpenAI error %d: %s", resp.StatusCode, string(data))
+		return "", fmt.Errorf("%s error %d: %s", provider.Name, resp.StatusCode, string(data))
 	}
 	var or openAIResp
 	if err := json.Unmarshal(data, &or); err != nil {
-		return "", fmt.Errorf("invalid OpenAI response: %w", err)
+		return "", fmt.Errorf("invalid %s response: %w", provider.Name, err)
 	}
 	if or.Error != nil {
-		return "", fmt.Errorf("OpenAI error: %s", or.Error.Message)
+		return "", fmt.Errorf("%s error: %s", provider.Name, or.Error.Message)
 	}
 	if len(or.Choices) == 0 {
-		return "", fmt.Errorf("no choices in OpenAI response")
+		return "", fmt.Errorf("no choices in %s response", provider.Name)
 	}
 	return or.Choices[0].Message.Content, nil
 }
