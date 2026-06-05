@@ -363,22 +363,38 @@ func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *te
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	var authHeaders []string
+	var requestPaths []string
 	ghi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
-		if r.Method != http.MethodGet || r.URL.Path != "/repos/testorg/testrepo/issues/42" {
+		requestPaths = append(requestPaths, r.URL.Path)
+		if r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"number": 42,
-			"title": "Manual trigger issue",
-			"body": "Issue body",
-			"html_url": "https://github.com/testorg/testrepo/issues/42",
-			"state": "open",
-			"labels": [{"name": "dev-only"}],
-			"user": {"login": "testuser"}
-		}`))
+		switch r.URL.Path {
+		case "/repos/testorg/testrepo/issues/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"number": 42,
+				"title": "Manual trigger issue",
+				"body": "Issue body",
+				"html_url": "https://github.com/testorg/testrepo/issues/42",
+				"state": "open",
+				"labels": [{"name": "dev-only"}],
+				"user": {"login": "testuser"}
+			}`))
+		case "/repos/testorg/testrepo/issues/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{
+				"id": 501,
+				"body": "First manual comment",
+				"html_url": "https://github.com/testorg/testrepo/issues/42#issuecomment-501",
+				"created_at": "2026-06-05T20:37:00Z",
+				"user": {"login": "manual-reviewer", "type": "User"}
+			}]`))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	t.Cleanup(ghi.Close)
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
@@ -452,11 +468,14 @@ func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *te
 	if issueID != "testorg/testrepo/42" {
 		t.Fatalf("github_issue_id = %q, want testorg/testrepo/42", issueID)
 	}
-	if !strings.Contains(filesJSON, "Manual trigger issue") || !strings.Contains(filesJSON, "Issue body") {
+	if !strings.Contains(filesJSON, "Manual trigger issue") || !strings.Contains(filesJSON, "Issue body") || !strings.Contains(filesJSON, "First manual comment") {
 		t.Fatalf("template_files missing GitHub issue context: %s", filesJSON)
 	}
-	if len(authHeaders) != 1 || authHeaders[0] != "Bearer test-github-issues-token" {
-		t.Fatalf("GitHub issue fetch auth headers = %#v, want one bearer token", authHeaders)
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer test-github-issues-token" || authHeaders[1] != "Bearer test-github-issues-token" {
+		t.Fatalf("GitHub issue fetch auth headers = %#v, want two bearer token calls", authHeaders)
+	}
+	if strings.Join(requestPaths, ",") != "/repos/testorg/testrepo/issues/42,/repos/testorg/testrepo/issues/42/comments" {
+		t.Fatalf("GitHub issue fetch paths = %#v, want issue then comments", requestPaths)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/github-issue/trigger", strings.NewReader(`{"inputs":{"issue_number":42}}`))
