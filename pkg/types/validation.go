@@ -24,8 +24,6 @@ var validProviders = map[string]bool{
 	"replicated": true, "daytona": true, "exedev": true, "docker": true,
 }
 
-const validProviderList = "replicated, daytona, exedev, docker"
-
 // Valid MCP sources
 var validMCPSources = map[string]bool{
 	"npx": true, "uvx": true, "smithery": true, "docker": true, "sse": true,
@@ -95,7 +93,7 @@ func (f *FactoryConfig) Validate() error {
 
 	// Validate provider if provided
 	if f.Provider != "" && !validProviders[f.Provider] {
-		return fmt.Errorf("factory %q: invalid provider %q (must be one of: %s)", f.Name, f.Provider, validProviderList)
+		return fmt.Errorf("factory %q: invalid provider %q (must be one of: replicated, daytona, exedev)", f.Name, f.Provider)
 	}
 
 	// Validate inputs
@@ -169,7 +167,7 @@ func (w *WorkflowConfig) Validate() error {
 		return fmt.Errorf("workflow %q: invalid name_pattern %q (must contain only alphanumeric, hyphens, underscores, and {placeholders})", w.Name, w.NamePattern)
 	}
 	if w.Provider != "" && !validProviders[w.Provider] {
-		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: %s)", w.Name, w.Provider, validProviderList)
+		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: replicated, daytona, exedev)", w.Name, w.Provider)
 	}
 	if w.Trigger != nil {
 		if err := validateWorkflowTrigger(w.Name, w.Trigger); err != nil {
@@ -395,7 +393,7 @@ func (t *TemplateConfig) Validate() error {
 		return fmt.Errorf("template provider is required")
 	}
 	if !validProviders[t.Provider] {
-		return fmt.Errorf("invalid provider %q (must be one of: %s)", t.Provider, validProviderList)
+		return fmt.Errorf("invalid provider %q (must be one of: replicated, daytona, exedev)", t.Provider)
 	}
 
 	// Validate color if provided
@@ -502,7 +500,7 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 	}
 
 	if !validProviders[providerType] {
-		return fmt.Errorf("invalid provider type %q (must be one of: %s)", providerType, validProviderList)
+		return fmt.Errorf("invalid provider type %q (must be one of: replicated, daytona, exedev)", providerType)
 	}
 
 	return nil

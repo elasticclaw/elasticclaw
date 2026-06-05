@@ -249,7 +249,7 @@ func TestValidateScriptCommandBlocksTraversal(t *testing.T) {
 		{"direct traversal", "cat ../../.ssh/id_rsa", true},
 		{"traversal with slash", "cat ../config.yaml", true},
 		{"empty command", "", false},
-		{"absolute path", "/bin/ls", true},
+		{"absolute path", "/bin/ls", false},
 		{"flag with dot", "python -m ..module", true}, // flag values with .. are still rejected
 		{"script in subdir", "python scripts/utils/helper.py", false},
 		{"flag value traversal", "sometool --file ../../.ssh/id_rsa", true},

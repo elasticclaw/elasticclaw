@@ -473,7 +473,7 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 		return "", err
 	}
 	if choice.Anthropic {
-		return callAnthropic(choice.Key.APIKey, systemPrompt, msgs, choice.Model)
+		return callAnthropic(choice.Key.APIKey, systemPrompt, msgs)
 	}
 	return callOpenAI(choice.Provider, choice.Key.APIKey, systemPrompt, msgs, choice.Model)
 }
@@ -497,7 +497,7 @@ func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []
 		return err
 	}
 	if choice.Anthropic {
-		return streamAnthropic(ctx, choice.Key.APIKey, systemPrompt, msgs, onToken, choice.Model)
+		return streamAnthropic(ctx, choice.Key.APIKey, systemPrompt, msgs, onToken)
 	}
 	return streamOpenAI(ctx, choice.Provider, choice.Key.APIKey, systemPrompt, msgs, onToken, choice.Model)
 }
@@ -520,10 +520,10 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 		if k == nil || !llmKeyHasRequiredAPIKey(k) {
 			continue
 		}
-		if k.Provider == "anthropic" && (anthropicKey == nil || k.Default) {
+		if k.Provider == "anthropic" && anthropicKey == nil {
 			anthropicKey = k
 		}
-		if isOpenAICompatibleConfigProvider(k.Provider) && (openAIKeys[k.Provider] == nil || k.Default) {
+		if isOpenAICompatibleConfigProvider(k.Provider) && openAIKeys[k.Provider] == nil {
 			openAIKeys[k.Provider] = k
 		}
 	}
@@ -532,11 +532,7 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	switch defaultProvider {
 	case "anthropic":
 		if anthropicKey != nil {
-			return &aiConfigProviderChoice{
-				Key:       anthropicKey,
-				Anthropic: true,
-				Model:     stripProviderPrefix(aiConfigModelForKey(anthropicKey, defaultModel)),
-			}, nil
+			return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 		}
 	default:
 		if key := openAIKeys[defaultProvider]; key != nil {
@@ -549,11 +545,7 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	}
 
 	if anthropicKey != nil {
-		return &aiConfigProviderChoice{
-			Key:       anthropicKey,
-			Anthropic: true,
-			Model:     stripProviderPrefix(aiConfigModelForKey(anthropicKey, defaultModel)),
-		}, nil
+		return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 	}
 	for _, provider := range []string{"openai", "codex", "fireworks", "groq", "deepseek", "ollama"} {
 		if key := openAIKeys[provider]; key != nil {
@@ -602,8 +594,6 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 		return defaultModel
 	}
 	switch key.Provider {
-	case "anthropic":
-		return "anthropic/claude-sonnet-4-6"
 	case "openai":
 		return "openai/gpt-5.5"
 	case "codex":
@@ -622,7 +612,7 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
-func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
+func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
 	type anthropicMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -640,7 +630,7 @@ func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []ai
 		anthropicMsgs[i] = anthropicMsg{Role: m.Role, Content: m.Content}
 	}
 	body, _ := json.Marshal(anthropicReq{
-		Model:     model,
+		Model:     "claude-sonnet-4-6",
 		MaxTokens: 4096,
 		System:    systemPrompt,
 		Messages:  anthropicMsgs,
@@ -796,7 +786,7 @@ func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey
 	return scanner.Err()
 }
 
-func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
+func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
 	type anthropicMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -824,7 +814,7 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage, model stri
 	}
 
 	body, _ := json.Marshal(anthropicReq{
-		Model:     model,
+		Model:     "claude-sonnet-4-6",
 		MaxTokens: 4096,
 		System:    systemPrompt,
 		Messages:  anthropicMsgs,
