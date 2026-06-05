@@ -2657,6 +2657,37 @@ interface AnalyticsSummary {
   errors: number
   successRate: number
   prMergeRate: number
+  byTriggerStatus: Record<string, number>
+  recentEvents: AnalyticsEvent[]
+  computeError?: string
+}
+
+interface AnalyticsEvent {
+  id: string
+  factoryName: string
+  issueId: string
+  clawId: string
+  action: string
+  detail: string
+  result: string
+  createdAt: string
+}
+
+interface AnalyticsTimelinePoint {
+  date: string
+  triggers: number
+  successes: number
+  failures: number
+  terminations: number
+  prOpened: number
+  prMerged: number
+  prClosed: number
+  doneSignals: number
+}
+
+interface AnalyticsTimelineResponse {
+  factoryName: string
+  points: AnalyticsTimelinePoint[]
 }
 
 function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string }) {
@@ -2664,6 +2695,10 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [days, setDays] = useState(30)
+  const [expandedFactory, setExpandedFactory] = useState<string | null>(null)
+  const [timelines, setTimelines] = useState<Record<string, AnalyticsTimelinePoint[]>>({})
+  const [loadingTimeline, setLoadingTimeline] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -2672,7 +2707,7 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
       const hubUrl = getHubUrl()
       const token = getAuthToken() || ""
       const [analyticsRes, workspaceData] = await Promise.all([
-        fetch(`${hubUrl}/api/analytics/factories`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${hubUrl}/api/analytics/factories?days=${days}`, { headers: { Authorization: `Bearer ${token}` } }),
         fetchWorkspaces(),
       ])
       if (!analyticsRes.ok) throw new Error(await analyticsRes.text())
@@ -2683,9 +2718,28 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [days])
 
   useEffect(() => { load() }, [load])
+
+  const loadTimeline = useCallback(async (factoryName: string) => {
+    if (timelines[factoryName]) return
+    setLoadingTimeline(factoryName)
+    try {
+      const hubUrl = getHubUrl()
+      const token = getAuthToken() || ""
+      const res = await fetch(`${hubUrl}/api/factories/${encodeURIComponent(factoryName)}/analytics/timeline?days=${days}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const data: AnalyticsTimelineResponse = await res.json()
+      setTimelines((prev) => ({ ...prev, [factoryName]: data.points }))
+    } catch (e) {
+      console.error("Failed to load timeline", e)
+    } finally {
+      setLoadingTimeline(null)
+    }
+  }, [days, timelines])
 
   const scopedToWorkspace = selectedWorkspace !== undefined
   const workflowNames = new Set(
@@ -2696,18 +2750,47 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
   const visibleSummaries = scopedToWorkspace
     ? summaries.filter((summary) => workflowNames.has(summary.factoryName))
     : summaries
+
   const totalTriggers = visibleSummaries.reduce((sum, item) => sum + item.totalTriggers, 0)
   const successfulCreations = visibleSummaries.reduce((sum, item) => sum + item.successfulCreations, 0)
   const failedCreations = visibleSummaries.reduce((sum, item) => sum + item.failedCreations, 0)
   const prMerged = visibleSummaries.reduce((sum, item) => sum + item.prMerged, 0)
+  const prOpened = visibleSummaries.reduce((sum, item) => sum + item.prOpened, 0)
+  const terminations = visibleSummaries.reduce((sum, item) => sum + item.terminations, 0)
+  const overallSuccessRate = totalTriggers > 0 ? (successfulCreations / totalTriggers) * 100 : 0
+  const overallMergeRate = prOpened > 0 ? (prMerged / prOpened) * 100 : 0
+
+  const dayOptions = [
+    { label: "7 days", value: 7 },
+    { label: "30 days", value: 30 },
+    { label: "90 days", value: 90 },
+  ]
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Analytics</h2>
-        <p className="text-sm text-muted-foreground">
-          {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Analytics</h2>
+          <p className="text-sm text-muted-foreground">
+            {scopedToWorkspace ? "Activity for workflows in this workspace." : "Activity across all workspaces."}
+          </p>
+        </div>
+        <div className="flex gap-1 bg-muted rounded-lg p-1">
+          {dayOptions.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setDays(opt.value)}
+              className={cn(
+                "px-3 py-1 text-xs rounded-md transition-colors",
+                days === opt.value
+                  ? "bg-background text-foreground font-medium shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && (
@@ -2722,28 +2805,107 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
         <p className="text-sm text-muted-foreground px-4 py-6 text-center">No analytics yet.</p>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-4">
+          {/* Overview cards */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <AnalyticsMetric label="Triggers" value={totalTriggers} />
             <AnalyticsMetric label="Created" value={successfulCreations} />
             <AnalyticsMetric label="Failed" value={failedCreations} />
             <AnalyticsMetric label="PRs merged" value={prMerged} />
           </div>
+
+          {/* Success rate bars */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <AnalyticsRateBar label="Create success rate" value={overallSuccessRate} color="bg-green-500" />
+            <AnalyticsRateBar label="PR merge rate" value={overallMergeRate} color="bg-blue-500" />
+          </div>
+
+          {/* Factory list with expand */}
           <div className="border border-border rounded-lg divide-y divide-border">
-            {visibleSummaries.map((summary) => (
-              <div key={summary.factoryName} className="px-4 py-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{summary.factoryName}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {summary.totalTriggers} triggers · {summary.successRate.toFixed(0)}% create success · {summary.prMergeRate.toFixed(0)}% PR merge
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right text-xs text-muted-foreground">
-                    {summary.errors} errors
-                  </div>
+            {visibleSummaries.map((summary) => {
+              const isExpanded = expandedFactory === summary.factoryName
+              return (
+                <div key={summary.factoryName}>
+                  <button
+                    onClick={() => {
+                      const next = isExpanded ? null : summary.factoryName
+                      setExpandedFactory(next)
+                      if (next) loadTimeline(next)
+                    }}
+                    className="w-full px-4 py-3 flex items-start justify-between gap-3 hover:bg-muted/50 transition-colors text-left"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium truncate">{summary.factoryName}</p>
+                        <ChevronDown className={cn("size-3.5 text-muted-foreground transition-transform", isExpanded && "rotate-180")} />
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                        <span>{summary.totalTriggers} triggers</span>
+                        <span>{summary.successfulCreations} created</span>
+                        <span>{summary.failedCreations} failed</span>
+                        <span>{summary.prOpened} PRs opened</span>
+                        <span>{summary.prMerged} PRs merged</span>
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="text-xs font-medium">{summary.successRate.toFixed(0)}% success</div>
+                      <div className="text-xs text-muted-foreground">{summary.prMergeRate.toFixed(0)}% merge</div>
+                    </div>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="px-4 pb-4 pt-1 bg-muted/30">
+                      {loadingTimeline === summary.factoryName ? (
+                        <p className="text-xs text-muted-foreground py-4 text-center animate-pulse">Loading timeline…</p>
+                      ) : timelines[summary.factoryName] ? (
+                        <div className="space-y-4">
+                          {/* Timeline sparkline */}
+                          <div>
+                            <p className="text-xs font-medium text-muted-foreground mb-2">Daily activity</p>
+                            <AnalyticsSparkline points={timelines[summary.factoryName]} />
+                          </div>
+
+                          {/* Status breakdown */}
+                          {Object.keys(summary.byTriggerStatus).length > 0 && (
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">By trigger status</p>
+                              <div className="flex flex-wrap gap-2">
+                                {Object.entries(summary.byTriggerStatus).map(([status, count]) => (
+                                  <span key={status} className="text-xs bg-background border border-border rounded px-2 py-0.5">
+                                    {status}: {count}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Recent events */}
+                          {summary.recentEvents.length > 0 && (
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">Recent events</p>
+                              <div className="max-h-48 overflow-y-auto border border-border rounded-md divide-y divide-border bg-background">
+                                {summary.recentEvents.slice(0, 20).map((event) => (
+                                  <div key={event.id} className="px-3 py-1.5 flex items-center justify-between gap-2 text-xs">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <AnalyticsEventBadge action={event.action} result={event.result} />
+                                      <span className="text-muted-foreground truncate">{event.detail || event.action}</span>
+                                    </div>
+                                    <span className="shrink-0 text-muted-foreground/60">
+                                      {new Date(event.createdAt).toLocaleDateString()}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground py-4 text-center">No timeline data.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </>
       )}
@@ -2756,6 +2918,103 @@ function AnalyticsMetric({ label, value }: { label: string; value: number }) {
     <div className="rounded-lg border border-border p-3">
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="text-xl font-semibold mt-1">{value}</p>
+    </div>
+  )
+}
+
+function AnalyticsRateBar({ label, value, color }: { label: string; value: number; color: string }) {
+  const pct = Math.min(100, Math.max(0, value))
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className="text-xs font-semibold">{pct.toFixed(1)}%</p>
+      </div>
+      <div className="h-2 bg-muted rounded-full overflow-hidden">
+        <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function AnalyticsEventBadge({ action, result }: { action: string; result: string }) {
+  const color =
+    result === "success" || action === "claw_created" || action === "pr_merged" || action === "done_signal"
+      ? "bg-green-500/10 text-green-600 border-green-500/20"
+      : result === "failure" || action === "error" || action === "pr_closed"
+        ? "bg-red-500/10 text-red-600 border-red-500/20"
+        : "bg-muted text-muted-foreground border-border"
+  return (
+    <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-medium border", color)}>
+      {action.replace(/_/g, " ")}
+    </span>
+  )
+}
+
+function AnalyticsSparkline({ points }: { points: AnalyticsTimelinePoint[] }) {
+  if (!points.length) return null
+  const width = 600
+  const height = 80
+  const pad = 4
+  const maxVal = Math.max(1, ...points.map((p) => Math.max(p.triggers, p.successes, p.failures, p.prMerged)))
+  const step = (width - pad * 2) / (points.length - 1 || 1)
+
+  const y = (v: number) => height - pad - ((v / maxVal) * (height - pad * 2))
+  const x = (i: number) => pad + i * step
+
+  const path = (key: keyof AnalyticsTimelinePoint, color: string) => {
+    const d = points
+      .map((p, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(p[key] as number)}`)
+      .join(" ")
+    return <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+  }
+
+  const area = (key: keyof AnalyticsTimelinePoint, color: string) => {
+    const d =
+      `M ${x(0)} ${height - pad} ` +
+      points.map((p, i) => `${i === 0 ? "L" : "L"} ${x(i)} ${y(p[key] as number)}`).join(" ") +
+      ` L ${x(points.length - 1)} ${height - pad} Z`
+    return <path d={d} fill={color} opacity={0.1} />
+  }
+
+  return (
+    <div className="w-full overflow-x-auto">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-20" preserveAspectRatio="none">
+        {/* Grid lines */}
+        {[0.25, 0.5, 0.75].map((frac) => (
+          <line
+            key={frac}
+            x1={pad}
+            y1={y(maxVal * frac)}
+            x2={width - pad}
+            y2={y(maxVal * frac)}
+            stroke="currentColor"
+            strokeOpacity={0.08}
+            strokeWidth={1}
+          />
+        ))}
+        {area("triggers", "#22c55e")}
+        {path("triggers", "#22c55e")}
+        {area("failures", "#ef4444")}
+        {path("failures", "#ef4444")}
+        {area("prMerged", "#3b82f6")}
+        {path("prMerged", "#3b82f6")}
+      </svg>
+      <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+        <span>{points[0]?.date}</span>
+        <span>{points[points.length - 1]?.date}</span>
+      </div>
+      <div className="flex gap-3 mt-1">
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className="w-2 h-2 rounded-full bg-green-500" /> Triggers
+        </span>
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className="w-2 h-2 rounded-full bg-red-500" /> Failures
+        </span>
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className="w-2 h-2 rounded-full bg-blue-500" /> PR merged
+        </span>
+      </div>
     </div>
   )
 }

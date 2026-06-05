@@ -242,6 +242,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                    // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))     // POST manual trigger
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
+	mux.HandleFunc("/api/factories/{name}/analytics/timeline", s.withAuth(s.handleFactoryAnalyticsTimeline)) // GET factory timeline
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
 	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD))                   // workspace CRUD

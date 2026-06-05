@@ -307,3 +307,119 @@ func (s *Server) trackPRClosed(factoryName, issueID, clawID, repo string, prNumb
 func (s *Server) trackDoneSignal(factoryName, issueID, clawID string, prCount int) {
 	s.logFactoryAnalytics(factoryName, issueID, clawID, "done_signal", fmt.Sprintf("prs=%d", prCount), "success")
 }
+
+// AnalyticsTimelinePoint is a single daily data point for factory metrics.
+type AnalyticsTimelinePoint struct {
+	Date              string `json:"date"`              // YYYY-MM-DD
+	Triggers          int    `json:"triggers"`
+	Successes         int    `json:"successes"`
+	Failures          int    `json:"failures"`
+	Terminations      int    `json:"terminations"`
+	PROpened          int    `json:"prOpened"`
+	PRMerged          int    `json:"prMerged"`
+	PRClosed          int    `json:"prClosed"`
+	DoneSignals       int    `json:"doneSignals"`
+}
+
+// AnalyticsTimelineResponse is the response for the timeline endpoint.
+type AnalyticsTimelineResponse struct {
+	FactoryName string                   `json:"factoryName"`
+	Points      []AnalyticsTimelinePoint `json:"points"`
+}
+
+// handleFactoryAnalyticsTimeline serves GET /api/factories/:name/analytics/timeline
+func (s *Server) handleFactoryAnalyticsTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
+	if len(parts) < 3 || parts[1] != "analytics" || parts[2] != "timeline" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	factoryName := parts[0]
+
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		fmt.Sscanf(d, "%d", &days)
+		if days < 1 {
+			days = 30
+		}
+		if days > 365 {
+			days = 365
+		}
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+
+	points, err := s.computeFactoryTimeline(factoryName, since, days)
+	if err != nil {
+		log.Printf("[analytics] error computing timeline for %s: %v", factoryName, err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, AnalyticsTimelineResponse{FactoryName: factoryName, Points: points})
+}
+
+// computeFactoryTimeline builds daily-bucketed analytics for a factory.
+func (s *Server) computeFactoryTimeline(factoryName, since string, days int) ([]AnalyticsTimelinePoint, error) {
+	// Initialize empty points for each day so the chart has contiguous dates
+	points := make([]AnalyticsTimelinePoint, days)
+	now := time.Now().UTC()
+	for i := 0; i < days; i++ {
+		d := now.AddDate(0, 0, -(days-1-i))
+		points[i].Date = d.Format("2006-01-02")
+	}
+
+	rows, err := s.db.Query(
+		`SELECT date(created_at) as day, action, COUNT(*) as cnt
+		 FROM factory_analytics
+		 WHERE factory_name = ? AND created_at > ?
+		 GROUP BY day, action
+		 ORDER BY day`,
+		factoryName, since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var day string
+		var action string
+		var cnt int
+		if err := rows.Scan(&day, &action, &cnt); err != nil {
+			continue
+		}
+		// Find the matching point
+		for i := range points {
+			if points[i].Date == day {
+				switch action {
+				case "claw_created":
+					points[i].Triggers += cnt
+					points[i].Successes += cnt
+				case "error":
+					points[i].Triggers += cnt
+					points[i].Failures += cnt
+				case "claw_terminated":
+					points[i].Terminations += cnt
+				case "pr_opened":
+					points[i].PROpened += cnt
+				case "pr_merged":
+					points[i].PRMerged += cnt
+				case "pr_closed":
+					points[i].PRClosed += cnt
+				case "done_signal":
+					points[i].DoneSignals += cnt
+				}
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return points, nil
+}
