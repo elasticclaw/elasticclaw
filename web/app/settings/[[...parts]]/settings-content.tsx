@@ -2722,8 +2722,11 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
 
   useEffect(() => { load() }, [load])
 
+  const timelineCacheKey = (factoryName: string) => `${factoryName}:${days}`
+
   const loadTimeline = useCallback(async (factoryName: string) => {
-    if (timelines[factoryName]) return
+    const key = timelineCacheKey(factoryName)
+    if (timelines[key]) return
     setLoadingTimeline(factoryName)
     try {
       const hubUrl = getHubUrl()
@@ -2733,7 +2736,7 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
       })
       if (!res.ok) throw new Error(await res.text())
       const data: AnalyticsTimelineResponse = await res.json()
-      setTimelines((prev) => ({ ...prev, [factoryName]: data.points }))
+      setTimelines((prev) => ({ ...prev, [key]: data.points }))
     } catch (e) {
       console.error("Failed to load timeline", e)
     } finally {
@@ -2856,12 +2859,12 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
                     <div className="px-4 pb-4 pt-1 bg-muted/30">
                       {loadingTimeline === summary.factoryName ? (
                         <p className="text-xs text-muted-foreground py-4 text-center animate-pulse">Loading timeline…</p>
-                      ) : timelines[summary.factoryName] ? (
+                      ) : timelines[timelineCacheKey(summary.factoryName)] ? (
                         <div className="space-y-4">
                           {/* Timeline sparkline */}
                           <div>
                             <p className="text-xs font-medium text-muted-foreground mb-2">Daily activity</p>
-                            <AnalyticsSparkline points={timelines[summary.factoryName]} />
+                            <AnalyticsSparkline points={timelines[timelineCacheKey(summary.factoryName)]} />
                           </div>
 
                           {/* Status breakdown */}
@@ -2972,7 +2975,7 @@ function AnalyticsSparkline({ points }: { points: AnalyticsTimelinePoint[] }) {
   const area = (key: keyof AnalyticsTimelinePoint, color: string) => {
     const d =
       `M ${x(0)} ${height - pad} ` +
-      points.map((p, i) => `${i === 0 ? "L" : "L"} ${x(i)} ${y(p[key] as number)}`).join(" ") +
+      points.map((p, i) => `L ${x(i)} ${y(p[key] as number)}`).join(" ") +
       ` L ${x(points.length - 1)} ${height - pad} Z`
     return <path d={d} fill={color} opacity={0.1} />
   }

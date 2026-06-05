@@ -333,12 +333,11 @@ func (s *Server) handleFactoryAnalyticsTimeline(w http.ResponseWriter, r *http.R
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
-	if len(parts) < 3 || parts[1] != "analytics" || parts[2] != "timeline" {
+	factoryName := r.PathValue("name")
+	if factoryName == "" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	factoryName := parts[0]
 
 	days := 30
 	if d := r.URL.Query().Get("days"); d != "" {
