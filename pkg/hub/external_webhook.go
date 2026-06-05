@@ -280,14 +280,23 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			}
 		}
 
-		// Build trigger key for atomic claim
-		triggerKey := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
-		if payload.Release != nil {
-			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
-		}
+		// Build trigger key for atomic claim.
+		triggerKey := externalFactoryTriggerKey(factory.Name, repoFullName, eventType, payload, body)
 
 		s.processExternalFactoryTrigger(factory, payload, triggerKey, repoFullName, eventType)
 	}
+}
+
+func externalFactoryTriggerKey(factoryName, repoFullName, eventType string, payload externalWebhookPayload, body []byte) string {
+	keySuffix := eventType
+	if payload.Release != nil {
+		keySuffix = payload.Release.TagName
+	}
+	if keySuffix == "" {
+		sum := sha256.Sum256(body)
+		keySuffix = "body-" + hex.EncodeToString(sum[:])[:16]
+	}
+	return fmt.Sprintf("%s:%s@%s", factoryName, repoFullName, keySuffix)
 }
 
 func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, payload externalWebhookPayload, triggerKey, repoFullName, eventType string) {
@@ -327,14 +336,6 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 		return
 	}
 
-	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
-			factory.Name, triggerKey, err)
-		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
-			"", eventType, "error", "", err.Error())
-		return
-	}
 	claimOpen = false
 
 	s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
@@ -622,6 +623,11 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		return "", fmt.Errorf("db insert: %w", err)
 	}
 
+	if err := s.completeFactoryTrigger(factory.Name, "external", triggerID, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return "", fmt.Errorf("complete factory trigger: %w", err)
+	}
+
 	log.Printf("[factory] created claw %s (%s) for external trigger %s (status=%s)",
 		clawName, clawID[:8], triggerID, initialStatus)
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -666,6 +672,8 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		case "docker":
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes, env)
 		case "noop":
 			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")

@@ -26,6 +26,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	dockerProvider "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -1074,7 +1075,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
 		case "docker":
-			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles)
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles, env)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -3513,7 +3514,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	return nil
 }
 
-func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
+func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	p, err := newDockerProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("docker init: %w", err)
@@ -3561,6 +3562,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
 		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+	}
+	for k, v := range env {
+		containerEnv[k] = v
 	}
 
 	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
@@ -5025,9 +5029,31 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateDaytonaVM(vmID)
 	case "exedev":
 		s.terminateExedevVM(vmID)
+	case "docker":
+		s.terminateDockerContainer(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
+}
+
+func (s *Server) terminateDockerContainer(containerID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["docker"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateDockerContainer: no docker provider configured")
+		return
+	}
+	p, err := dockerProvider.New(dockerProvider.Config{Image: cfg.Image, Network: cfg.Network})
+	if err != nil {
+		log.Printf("terminateDockerContainer: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), containerID, false); err != nil {
+		log.Printf("terminateDockerContainer: failed to destroy container %s: %v", containerID, err)
+		return
+	}
+	log.Printf("Docker container %s terminated", containerID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -544,12 +543,8 @@ func validateScriptCommand(command string) error {
 		if strings.Contains(part, "..") {
 			return fmt.Errorf("script command contains path traversal: %q", command)
 		}
-		// Reject absolute paths that clean to a different path (traversal via symlinks)
 		if strings.HasPrefix(part, "/") {
-			clean := filepath.Clean(part)
-			if !strings.HasPrefix(clean, "/") {
-				return fmt.Errorf("script command contains absolute path traversal: %q", command)
-			}
+			return fmt.Errorf("script command must use workspace-relative paths: %q", command)
 		}
 	}
 	return nil

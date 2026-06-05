@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils"
 
 export function IssueAwareTitle({ name }: { name: string }) {
   const lastSlash = name.lastIndexOf("/")
-  if (lastSlash <= 0 || lastSlash === name.length - 1) {
+  if (lastSlash < 0 || lastSlash === name.length - 1) {
     return <span className="block min-w-0 truncate">{name}</span>
   }
 

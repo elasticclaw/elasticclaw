@@ -80,6 +80,41 @@ func TestSelectAIConfigProviderAllowsBlankOllamaAPIKey(t *testing.T) {
 	}
 }
 
+func TestSelectAIConfigProviderUsesAnthropicDefaultModel(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test", Default: true, DefaultModel: "claude-opus-4-1"},
+	}
+
+	choice, err := selectAIConfigProvider(keys, "anthropic/claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("select provider: %v", err)
+	}
+	if !choice.Anthropic {
+		t.Fatal("expected Anthropic provider")
+	}
+	if choice.Model != "claude-opus-4-1" {
+		t.Fatalf("model = %q, want claude-opus-4-1", choice.Model)
+	}
+}
+
+func TestSelectAIConfigProviderPrefersDefaultKeyForProvider(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "openai-first", Provider: "openai", APIKey: "sk-first", DefaultModel: "gpt-first"},
+		{Name: "openai-default", Provider: "openai", APIKey: "sk-default", Default: true, DefaultModel: "gpt-default"},
+	}
+
+	choice, err := selectAIConfigProvider(keys, "openai/gpt-5.5")
+	if err != nil {
+		t.Fatalf("select provider: %v", err)
+	}
+	if choice.Key.Name != "openai-default" {
+		t.Fatalf("key = %q, want openai-default", choice.Key.Name)
+	}
+	if choice.Model != "gpt-default" {
+		t.Fatalf("model = %q, want gpt-default", choice.Model)
+	}
+}
+
 func TestSelectAIConfigProviderRejectsBlankExternalAPIKey(t *testing.T) {
 	keys := types.LLMKeysList{
 		{Name: "openai-main", Provider: "openai", Default: true},
