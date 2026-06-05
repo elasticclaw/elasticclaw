@@ -128,3 +128,28 @@ func TestFetchGitHubIssueCommentsFollowsPagination(t *testing.T) {
 		t.Fatalf("second comment fields incorrect: %#v", comments[1])
 	}
 }
+
+func TestFetchGitHubIssueCommentsIgnoresForeignNextPageHost(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/repos/testorg/testrepo/issues/42/comments" {
+			t.Fatalf("unexpected comments request path: %q", r.URL.Path)
+		}
+		w.Header().Set("Link", `<https://evil.example/repos/testorg/testrepo/issues/42/comments?per_page=100&page=2>; rel="next"`)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":1,"body":"only trusted page","created_at":"2026-06-05T20:37:00Z","user":{"login":"alice"}}]`))
+	}))
+	defer srv.Close()
+
+	comments, err := fetchGitHubIssueComments(srv.URL, "testorg/testrepo", 42, "test-token")
+	if err != nil {
+		t.Fatalf("fetch comments: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want only the first page", requests)
+	}
+	if len(comments) != 1 || comments[0].Body != "only trusted page" {
+		t.Fatalf("comments = %#v, want trusted first page only", comments)
+	}
+}

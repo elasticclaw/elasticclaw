@@ -971,13 +971,13 @@ func fetchGitHubIssueComments(baseURL, repo string, issueNumber int, token strin
 	if token == "" {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	path := fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", repo, issueNumber)
 	var comments []githubIssueComment
 	pagesRemaining := 100
 	for path != "" && pagesRemaining > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		page, next, err := fetchGitHubIssueCommentsPage(ctx, baseURL, path, token)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -1021,10 +1021,10 @@ func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token stri
 	if err := json.Unmarshal(body, &comments); err != nil {
 		return nil, "", fmt.Errorf("github comments parse error: %w", err)
 	}
-	return comments, nextGitHubPagePath(resp.Header.Get("Link")), nil
+	return comments, nextGitHubPagePath(resp.Header.Get("Link"), baseURL), nil
 }
 
-func nextGitHubPagePath(linkHeader string) string {
+func nextGitHubPagePath(linkHeader, baseURL string) string {
 	for _, part := range strings.Split(linkHeader, ",") {
 		part = strings.TrimSpace(part)
 		if !strings.Contains(part, `rel="next"`) {
@@ -1037,6 +1037,10 @@ func nextGitHubPagePath(linkHeader string) string {
 		}
 		u, err := url.Parse(part[start+1 : end])
 		if err != nil {
+			return ""
+		}
+		base, baseErr := url.Parse(baseURL + "/")
+		if baseErr != nil || (base.Host != "" && u.Host != "" && u.Host != base.Host) {
 			return ""
 		}
 		nextPath := strings.TrimPrefix(u.Path, "/")
