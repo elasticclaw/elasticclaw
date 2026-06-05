@@ -331,13 +331,7 @@ type GitHubAppPatch struct {
 
 func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	hasProvider := false
-	for _, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" || p.AccessToken != "" || p.Enabled {
-			hasProvider = true
-			break
-		}
-	}
+	hasProvider := len(s.hubCfg.Providers) > 0
 	hasLLMKey := len(s.hubCfg.LLMKeys) > 0
 	hasGitHub := len(s.hubCfg.GitHubApps) > 0
 	s.mu.RUnlock()
