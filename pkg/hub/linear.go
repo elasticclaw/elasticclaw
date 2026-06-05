@@ -17,6 +17,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
+	"nhooyr.io/websocket"
 )
 
 // linearWebhookPayload is the relevant subset of a Linear webhook event.
@@ -1090,18 +1091,36 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
 	prURLs := extractDonePRURLs(rawMessage)
 
+	noPRDoneAllowed := false
+	if len(prURLs) == 0 {
+		if !s.taskRunRequiresPRForClaw(clawID) {
+			noPRDoneAllowed = true
+		} else {
+			if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+				EventKey:        "done_without_pr:" + clawID,
+				Source:          taskRunSourceHub,
+				EventType:       taskRunEventDoneWithoutPR,
+				ActorType:       taskRunActorAgent,
+				InteractionRole: taskRunInteractionTerminal,
+				FailureType:     taskRunFailureDoneWithoutPR,
+				Detail:          map[string]any{"issueID": issueID},
+				OccurredAt:      now(),
+			}); err != nil {
+				log.Printf("[task-run-analytics] failed to record done_without_pr for claw %s: %v", clawID, err)
+			}
+			s.injectUserMessage(clawID, "[factory] `[DONE]` received with no PR URLs. Please open a PR and resend: `[DONE] https://github.com/org/repo/pull/N`")
+			return
+		}
+	}
+
 	// Validate PRs via GitHub API if we have a token.
 	ghToken := s.resolveGitHubToken()
-	if ghToken != "" {
+	if ghToken != "" && !noPRDoneAllowed {
 		if rejected, reason := s.validateDonePRs(clawID, prURLs, ghToken); rejected {
 			// Nudge the claw to fix and retry — do not terminate.
 			s.injectUserMessage(clawID, reason)
 			return
 		}
-	} else if len(prURLs) == 0 {
-		// No GH App configured, but still require at least one PR URL in the signal.
-		s.injectUserMessage(clawID, "[factory] `[DONE]` received with no PR URLs. Please open a PR and resend: `[DONE] https://github.com/org/repo/pull/N`")
-		return
 	}
 
 	// Store all validated PRs (idempotent).
@@ -1123,6 +1142,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Legacy factory status handling remains for factory-created claws.
 	factory := s.findFactoryForIssue(issueID)
 	if factory == nil {
+		if noPRDoneAllowed {
+			s.completeNoPRDoneClaw(clawID, tenantID, issueID)
+		}
 		return
 	}
 	if !pipelineHandledDone {
@@ -1196,12 +1218,19 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// merged; if it is closed without merge, the claw is notified and decides
 	// what to do (polled by checkPRMerged).
 	// Just mark it as 'watching' so the UI shows it differently.
+	if noPRDoneAllowed {
+		s.completeNoPRDoneClaw(clawID, tenantID, issueID)
+		return
+	}
 	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
 	if err != nil {
 		return
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil || rowsAffected == 0 {
+		if rowsAffected == 0 {
+			log.Printf("[factory] non-pr completion skipped for claw %s: already deleted or terminal", clawID[:8])
+		}
 		return
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -1210,7 +1239,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	})
 	// Notify the claw it's in watch mode — skip if the pipeline already injected a message
 	// Also skip for no-issue manual trigger claws (issueID == "")
-	if !pipelineHandledDone && issueID != "" {
+	if !pipelineHandledDone && issueID != "" && !noPRDoneAllowed {
 		var issueTracker string
 		switch {
 		case strings.HasPrefix(issueID, "sc-"):
@@ -1222,6 +1251,50 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		}
 		s.injectUserMessage(clawID, fmt.Sprintf("PR created and %s updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.", issueTracker))
 	}
+}
+
+func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
+	var provider, providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID)
+	res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id=? AND tenant_id=? AND status NOT IN ('deleted','error')`, clawID, tenantID)
+	if err != nil {
+		log.Printf("[factory] failed to complete non-pr claw %s: %v", clawID, err)
+		return
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		return
+	}
+	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+		EventKey:        "task_completed:" + clawID,
+		Source:          taskRunSourceHub,
+		EventType:       taskRunEventTaskCompleted,
+		ActorType:       taskRunActorAgent,
+		InteractionRole: taskRunInteractionTerminal,
+		Detail:          map[string]any{"issueID": issueID, "requires_pr": false},
+		OccurredAt:      now(),
+	}); err != nil {
+		log.Printf("[task-run-analytics] failed to record non-pr completion for claw %s: %v", clawID, err)
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+	})
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.conn.Close(websocket.StatusNormalClosure, "completed")
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+	go func() {
+		s.checkpointBeforeTermination(clawID, "task-completed")
+		if providerID != "" {
+			s.terminateVM(provider, providerID)
+		}
+		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id=?`, clawID)
+		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
+		s.promotePendingClaws()
+	}()
 }
 
 // handleClawTerminateSignal is called when a claw sends a message containing [TERMINATE].

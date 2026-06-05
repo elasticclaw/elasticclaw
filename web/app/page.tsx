@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
+import { TaskRunAnalyticsView } from "@/components/task-run-analytics-view"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
@@ -18,14 +19,13 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(null)
+  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
+    if (typeof window === "undefined") return null
+    return isConfigured()
+  })
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
-
-  // Check configured on mount (needs browser for localStorage)
-  useEffect(() => {
-    setConfiguredState(isConfigured())
-  }, [])
+  const [activeView, setActiveView] = useState<"agents" | "analytics">("agents")
 
   // Fetch admin status
   useEffect(() => {
@@ -141,7 +141,7 @@ export default function Home() {
     )
   }, [pinnedClaws, activeTagFilters])
 
-    // Eagerly load messages for all claws once the claw list is first available.
+  // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
   // Board cards are passive — they never trigger loadMessages themselves.
   const boardLoadedRef = useRef(false)
@@ -151,11 +151,12 @@ export default function Home() {
     for (const c of claws) {
       hub.loadMessages(c.id)
     }
-  }, [claws]) // re-runs when claws first populate
+  }, [claws, hub]) // re-runs when claws first populate
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
+      setActiveView("agents")
       setSelectedClawId(id)
       localStorage.setItem('elasticclaw_selected_claw', id)
       hub.setUnreadCount(id, 0)
@@ -259,23 +260,36 @@ export default function Home() {
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
         onSelectWorkflow={setSelectedWorkflow}
+        activeView={activeView}
+        onSelectAnalytics={() => {
+          setActiveView("analytics")
+          setSelectedClawId(null)
+          localStorage.removeItem('elasticclaw_selected_claw')
+          if (typeof window !== "undefined" && window.innerWidth < 768) {
+            setSidebarCollapsed(true)
+          }
+        }}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ConversationView
-          claw={selectedClaw}
-          allClaws={claws}
-          messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
-          allMessages={mergedMessages}
-          onSendMessage={handleSendMessage}
-          onSendMessageToClaw={handleSendMessageToClaw}
-          onKill={handleKill}
-          onKillClaw={handleKillClaw}
-          onSelectClaw={handleSelectClaw}
-          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
-          onReorderClaws={reorderClaws}
-          loading={loading}
-          hubError={hubError}
-        />
+        {activeView === "analytics" ? (
+          <TaskRunAnalyticsView />
+        ) : (
+          <ConversationView
+            claw={selectedClaw}
+            allClaws={claws}
+            messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
+            allMessages={mergedMessages}
+            onSendMessage={handleSendMessage}
+            onSendMessageToClaw={handleSendMessageToClaw}
+            onKill={handleKill}
+            onKillClaw={handleKillClaw}
+            onSelectClaw={handleSelectClaw}
+            onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+            onReorderClaws={reorderClaws}
+            loading={loading}
+            hubError={hubError}
+          />
+        )}
       </div>
       <ManualTriggerModal
         open={!!selectedWorkflow}

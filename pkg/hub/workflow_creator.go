@@ -224,6 +224,29 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
 	}
 
+	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForWorkflow(workflow)
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind:          taskRunKindForWorkflow(workflow),
+		OwnerType:        taskRunOwnerWorkflow,
+		OwnerName:        workspace.Name + "/" + workflow.Name,
+		OwnerDisplayName: workflow.Name,
+		WorkspaceName:    workspace.Name,
+		WorkflowName:     workflow.Name,
+		Integration:      workflow.Integration,
+		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID),
+		Model:            defaultModel,
+		LLMKey:           llmKey,
+		Source:           taskRunSourceWorkflow,
+		AnalyticsEnabled: analyticsEnabled,
+		RequiresPR:       requiresPR,
+		ExcludedReason:   excludedReason,
+		StartedAt:        now,
+		EventKey:         "task_start:claw:" + clawID,
+	}); err != nil {
+		_, _ = s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID)
+		return "", false, fmt.Errorf("task run analytics: %w", err)
+	}
+
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",

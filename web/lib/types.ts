@@ -89,3 +89,156 @@ export interface CreateClawRequest {
   default_model?: string
   files?: string[]
 }
+
+export interface TaskRunAnalyticsFilters {
+  status?: string
+  ownerType?: string
+  workspace?: string
+  workflow?: string
+  factory?: string
+  integration?: string
+  repo?: string
+  model?: string
+  warningType?: string
+  failureType?: string
+  analyticsEnabled?: boolean
+  requiresPr?: boolean
+  from?: string
+  to?: string
+  limit?: number
+  cursor?: string
+}
+
+export interface TaskRunAnalyticsSummary {
+  totalRuns: number
+  byStatus: Record<string, number>
+  warningBreakdown: Record<string, number>
+  failureBreakdown: Record<string, number>
+  humanInteractions: number
+  prCounts: {
+    total: number
+    open: number
+    merged: number
+    closed: number
+  }
+}
+
+export interface TaskRunSummary {
+  runId: string
+  initialAttemptId: string
+  currentAttemptId: string
+  status: string
+  phase: string
+  attemptCount: number
+  ownerType: string
+  workspaceName: string
+  workflowName: string
+  factoryName: string
+  ownerId: string
+  ownerDisplayName: string
+  runKind: string
+  integration: string
+  integrationWorkspace: string
+  issueId: string | null
+  clawId: string
+  model: string | null
+  llmKey: string
+  repo: string | null
+  primaryPrUrl: string | null
+  prCount: number
+  openPrCount: number
+  mergedPrCount: number
+  closedPrCount: number
+  warningTypes: string[]
+  failureType: string | null
+  humanInteractionCount: number
+  startedAt: number
+  queuedAt: number
+  provisionStartedAt: number
+  agentStartedAt: number
+  prOpenedAt: number
+  mergedAt: number
+  finishedAt: number
+  timeoutAt: number
+  lastEventAt: number
+  materializedAt: number
+  updatedAt: number
+  analyticsEnabled: boolean
+  requiresPr: boolean
+  excludedReason: string | null
+}
+
+export interface TaskRunsResponse {
+  runs: TaskRunSummary[]
+  nextCursor?: string
+  limit: number
+}
+
+export interface TaskRunAttempt {
+  id: string
+  attemptId: string
+  attemptNumber: number
+  triggerId: string
+  clawId: string
+  status: string
+  failureType: string | null
+  startedAt: number
+  finishedAt: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TaskRunEvent {
+  id: string
+  attemptId: string
+  eventKey: string
+  source: string
+  sourceEventId: string
+  sourceDeliveryId: string
+  eventType: string
+  eventTime: number
+  observedAt: number
+  actorType: string
+  actorId: string
+  actorLogin: string
+  actorDisplayName: string
+  interactionRole: string
+  targetType: string
+  targetId: string
+  targetUrl: string
+  warningType: string
+  failureType: string
+  detail: Record<string, unknown>
+  createdAt: number
+}
+
+export interface TaskRunPR {
+  id: string
+  repo: string
+  prNumber: number
+  url: string
+  headSha: string
+  headBranch: string
+  lastAgentHeadSha: string
+  baseBranch: string
+  state: string
+  merged: boolean
+  openedAt: number
+  closedAt: number
+  mergedAt: number
+  mergedByLogin: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TaskRunFilterOptions {
+  workspaces: string[]
+  workflows: string[]
+  factories: string[]
+  integrations: string[]
+  repos: string[]
+  models: string[]
+  statuses: string[]
+  warningTypes: string[]
+  failureTypes: string[]
+}

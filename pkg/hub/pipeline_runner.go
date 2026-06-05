@@ -1043,7 +1043,24 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 
 	// 1. Set terminal status and persist sanitized diagnostic
 	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
-	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
+	res, updateErr := s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
+	if updateErr == nil {
+		rowsAffected, _ := res.RowsAffected()
+		if rowsAffected > 0 {
+			if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+				EventKey:        "agent_stopped:" + clawID,
+				Source:          taskRunSourceHub,
+				EventType:       taskRunEventAgentStopped,
+				ActorType:       taskRunActorSystem,
+				InteractionRole: taskRunInteractionTerminal,
+				FailureType:     taskRunFailureAgentStopped,
+				Detail:          map[string]any{"reason": safeReason},
+				OccurredAt:      now(),
+			}); err != nil {
+				log.Printf("[task-run-analytics] failed to record agent stop for claw %s: %v", clawID, err)
+			}
+		}
+	}
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{
