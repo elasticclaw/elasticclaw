@@ -2722,11 +2722,13 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
 
   useEffect(() => { load() }, [load])
 
+  // Clear timeline cache when days change so old data doesn't persist
+  useEffect(() => { setTimelines({}) }, [days])
+
   const timelineCacheKey = (factoryName: string) => `${factoryName}:${days}`
 
   const loadTimeline = useCallback(async (factoryName: string) => {
     const key = timelineCacheKey(factoryName)
-    if (timelines[key]) return
     setLoadingTimeline(factoryName)
     try {
       const hubUrl = getHubUrl()
@@ -2736,13 +2738,16 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
       })
       if (!res.ok) throw new Error(await res.text())
       const data: AnalyticsTimelineResponse = await res.json()
-      setTimelines((prev) => ({ ...prev, [key]: data.points }))
+      setTimelines((prev) => {
+        if (prev[key]) return prev // already cached
+        return { ...prev, [key]: data.points }
+      })
     } catch (e) {
       console.error("Failed to load timeline", e)
     } finally {
       setLoadingTimeline(null)
     }
-  }, [days, timelines])
+  }, [days])
 
   const scopedToWorkspace = selectedWorkspace !== undefined
   const workflowNames = new Set(
