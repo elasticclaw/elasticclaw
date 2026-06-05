@@ -68,7 +68,10 @@ func (s *Server) createTaskRun(tenantID, runKind, ownerType, workspace, workflow
 func (s *Server) logTaskRunEvent(tenantID, runID, attemptID, eventKey, source, eventType string, eventTime, observedAt int64, actorType, actorSource, actorID, actorLogin, actorDisplay, interactionRole, targetType, targetID, targetURL string, detail map[string]any) error {
 	detailJSON, _ := json.Marshal(detail)
 	if len(detailJSON) > 8192 {
-		detailJSON = detailJSON[:8192]
+		// Replace with a valid, minimal JSON object instead of truncating raw bytes,
+		// which can split multi-byte UTF-8 sequences or string boundaries and produce
+		// invalid JSON that fails the CHECK(json_valid(detail)) constraint.
+		detailJSON = []byte(`{"truncated":true}`)
 	}
 	nowMs := time.Now().UTC().UnixMilli()
 	_, err := s.db.Exec(
@@ -87,7 +90,7 @@ func (s *Server) materializeTaskRunSummary(tenantID, runID string) error {
 	// Count attempts
 	var attemptCount int
 	var currentAttemptID string
-	row := s.db.QueryRow(`SELECT COUNT(*), MAX(id) FROM task_run_attempts WHERE tenant_id=? AND run_id=?`, tenantID, runID)
+	row := s.db.QueryRow(`SELECT COUNT(*), id FROM task_run_attempts WHERE tenant_id=? AND run_id=? ORDER BY attempt_number DESC LIMIT 1`, tenantID, runID)
 	_ = row.Scan(&attemptCount, &currentAttemptID)
 
 	// Aggregate events
