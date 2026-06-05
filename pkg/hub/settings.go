@@ -373,7 +373,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
 			Name:         k.Name,
 			Provider:     k.Provider,
-			KeySet:       k.APIKey != "",
+			KeySet:       llmKeyHasRequiredAPIKey(k),
 			Default:      k.Default,
 			DefaultModel: k.DefaultModel,
 		})

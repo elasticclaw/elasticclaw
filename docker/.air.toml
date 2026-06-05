@@ -1,0 +1,21 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # Compile the hub binary; args_bin are passed to it on each restart.
+  # Token/ui-password come from hub.yaml mounted at /root/.elasticclaw/hub.yaml.
+  cmd = "go build -o ./tmp/hub ."
+  bin = "./tmp/hub"
+  args_bin = ["hub", "--addr", ":8080", "--no-web-ui"]
+  include_ext = ["go"]
+  exclude_dir  = ["web", "bin", "tmp", "internal/webui/out", ".git", "test"]
+  delay = 800         # ms to wait after a change before rebuilding
+  stop_on_error = true
+  kill_delay = "1s"
+
+[log]
+  time = false
+
+[color]
+  build  = "yellow"
+  runner = "green"

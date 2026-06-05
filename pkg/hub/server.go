@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1069,6 +1070,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
+		case "docker":
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -2418,7 +2421,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.5.20"
+	const daytonaOpenClawVersion = "2026.6.1"
 	if err := exec("install openclaw", 3*time.Minute,
 		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
 NPM="$NVM_DIR/current/bin/npm"; \
@@ -2499,7 +2502,7 @@ docker --version`); err != nil {
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	if activeKeyDaytona != nil {
 		activeKeyNameDaytona = activeKeyDaytona.Name
@@ -3365,7 +3368,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 	})
 
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
@@ -3407,6 +3410,117 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
+}
+
+func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
+	p, err := newDockerProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("docker init: %w", err)
+	}
+
+	// Load claw configuration from DB
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var nixEnabled, dockerEnabled int
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
+		return fmt.Errorf("load claw config: %w", err)
+	}
+
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
+
+	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
+	defaultModel := templateDefaultModel
+	if defaultModel == "" {
+		defaultModel = hubCfg.DefaultModel
+	}
+
+	gatewayPassword := randomHex(16)
+	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
+	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+
+	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
+	containerEnv := map[string]string{
+		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
+		"ELASTICCLAW_CLAW_ID":            clawID,
+		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
+		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
+		"ELASTICCLAW_BOOTSTRAP":          "1",
+		"ELASTICCLAW_WAIT_FOR_WORKSPACE": "1",
+		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
+		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
+		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
+		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
+		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
+		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
+		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+	}
+
+	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
+	for _, line := range strings.Split(llmKeyEnv, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+		kv := strings.TrimPrefix(line, "export ")
+		if idx := strings.IndexByte(kv, '='); idx > 0 {
+			k := kv[:idx]
+			v := kv[idx+1:]
+			if unquoted, err := strconv.Unquote(v); err == nil {
+				v = unquoted
+			} else if len(v) >= 2 && strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+				v = v[1 : len(v)-1]
+			}
+			containerEnv[k] = v
+		}
+	}
+
+	// Inject LINEAR_API_KEY if configured
+	if linearToken != "" {
+		containerEnv["LINEAR_API_KEY"] = linearToken
+	}
+
+	createReq := types.CreateRequest{
+		Name: req.ProviderName,
+		Env:  containerEnv,
+	}
+
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("docker create: %w", err)
+	}
+	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
+
+	s.setBootstrapStatus(clawID, "Copying workspace files")
+	for path, content := range files {
+		dest := "/home/claw/workspace/" + path
+		if err := p.CopyIn(ctx, instance.ID, dest, content); err != nil {
+			_ = p.Destroy(context.Background(), instance.ID, false)
+			return fmt.Errorf("docker file copy failed: %s: %w", path, err)
+		}
+	}
+	if err := p.CopyIn(ctx, instance.ID, "/home/claw/workspace/.elasticclaw-workspace-ready", []byte("ready\n")); err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker workspace ready marker: %w", err)
+	}
+	log.Printf("[docker] workspace files copied for claw %.8s", clawID)
+
+	return nil
+}
+
+// boolEnv converts a bool to "true"/"false" for environment variable injection.
+func boolEnv(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 func (s *Server) provisionReplicated(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, env map[string]string) error {
@@ -4086,7 +4200,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LLMKeyEnv:       llmKeyEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName),
+		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()
@@ -4374,6 +4488,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
 		return "deepseek/deepseek-chat"
+	case "ollama":
+		return "ollama/qwen2.5-coder:1.5b"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:

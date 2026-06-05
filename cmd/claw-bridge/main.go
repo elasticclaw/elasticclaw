@@ -1810,26 +1810,43 @@ func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
 	script := `
 set -euo pipefail
+node_major() {
+  if command -v node >/dev/null 2>&1; then
+    node --version | sed -E 's/^v([0-9]+).*/\1/'
+  fi
+}
+if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$(node_major)" = "24" ]; then
+  echo "Node: $(node --version)"
+  echo "Git: $(git --version)"
+  exit 0
+fi
 # Single apt-get update then install everything in one pass to avoid
 # dpkg state corruption from multiple overlapping install calls.
 sudo apt-get update -qq
-sudo apt-get install -y --fix-broken curl ca-certificates git
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-  sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
-echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
-  sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
-sudo apt-get update -qq
-sudo apt-get install -y --fix-broken nodejs
+sudo apt-get install -y --fix-broken curl ca-certificates git gnupg
+if ! command -v npm >/dev/null 2>&1 || [ "$(node_major)" != "24" ]; then
+  if [ ! -f /etc/apt/sources.list.d/nodesource.sources ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+      sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
+      sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+  fi
+  sudo apt-get update -qq
+  sudo apt-get install -y --fix-broken nodejs
+fi
 echo "Node: $(node --version)"
+echo "Git: $(git --version)"
 `
 	return runShell(script)
 }
 
-// installOpenClaw installs openclaw@2026.5.20 via npm.
+const openClawVersion = "2026.6.1"
+
+// installOpenClaw installs the pinned OpenClaw CLI via npm.
 func installOpenClaw() error {
-	log.Printf("[bootstrap] installing openclaw@2026.5.20...")
-	if err := runShell("sudo npm install -g openclaw@2026.5.20 --ignore-scripts"); err != nil {
+	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
+	if err := runShell(fmt.Sprintf("sudo npm install -g openclaw@%s --ignore-scripts", openClawVersion)); err != nil {
 		return fmt.Errorf("npm install openclaw: %w", err)
 	}
 	out, _ := exec.Command("openclaw", "--version").Output()
@@ -1899,6 +1916,87 @@ PYEOF`, defaultModelJSON, gatewayPasswordJSON)
 	// Disable bonjour plugin — not supported on Replicated VMs.
 	_ = runShell("openclaw plugins disable bonjour 2>/dev/null || true")
 
+	return nil
+}
+
+func patchOllamaLocalDevCatalog(baseURL string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	modelID := ""
+	if model := os.Getenv("OPENCLAW_DEFAULT_MODEL"); strings.HasPrefix(model, "ollama/") {
+		modelID = strings.TrimPrefix(model, "ollama/")
+	}
+	catalogPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "plugins", "ollama", "catalog.json")
+
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		if err := patchOllamaLocalDevCatalogFile(catalogPath, baseURL, modelID); err == nil {
+			log.Printf("[bootstrap] patched Ollama local dev catalog: %s", baseURL)
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("patch Ollama catalog: %w", lastErr)
+}
+
+func patchOllamaLocalDevCatalogFile(path, baseURL, modelID string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var catalog map[string]interface{}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	providers, ok := catalog["providers"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("catalog has no providers object")
+	}
+	provider, ok := providers["ollama"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("catalog has no ollama provider")
+	}
+
+	provider["baseUrl"] = baseURL
+	if models, ok := provider["models"].([]interface{}); ok {
+		for _, item := range models {
+			model, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if modelID != "" && model["id"] != modelID {
+				continue
+			}
+			model["baseUrl"] = baseURL
+			model["contextWindow"] = 32768
+			model["maxTokens"] = 1024
+			model["params"] = map[string]interface{}{
+				"num_ctx":    32768,
+				"thinking":   false,
+				"keep_alive": "15m",
+			}
+			compat, ok := model["compat"].(map[string]interface{})
+			if !ok {
+				compat = map[string]interface{}{}
+				model["compat"] = compat
+			}
+			compat["supportsTools"] = true
+			compat["supportsUsageInStreaming"] = true
+		}
+	}
+
+	patched, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, patched, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -2036,10 +2134,31 @@ func hasWorkspaceFlake() bool {
 	return err == nil
 }
 
+func waitForWorkspaceReadyIfRequested() error {
+	if os.Getenv("ELASTICCLAW_WAIT_FOR_WORKSPACE") != "1" {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	readyPath := filepath.Join(home, "workspace", ".elasticclaw-workspace-ready")
+	log.Printf("[bootstrap] waiting for workspace files at %s...", readyPath)
+	for i := 0; i < 300; i++ {
+		if _, err := os.Stat(readyPath); err == nil {
+			log.Printf("[bootstrap] workspace files ready after %ds", i)
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("workspace files not ready after 300s")
+}
+
 // runBootstrap executes all VM bootstrap steps, then returns so the caller
 // can continue into the normal bridge connect loop.
 func runBootstrap() error {
 	log.Printf("[bootstrap] starting claw-bridge bootstrap mode")
+
+	if err := waitForWorkspaceReadyIfRequested(); err != nil {
+		return err
+	}
 
 	// Check early if we have a workspace flake - this affects how we start the gateway
 	hasFlake := hasWorkspaceFlake()
@@ -2107,6 +2226,17 @@ func runBootstrap() error {
 	gateway, err := startGatewayWithFlake(hasFlake)
 	if err != nil {
 		return fmt.Errorf("startGateway: %w", err)
+	}
+	if strings.HasPrefix(envOr("OPENCLAW_DEFAULT_MODEL", ""), "ollama/") {
+		if err := patchOllamaLocalDevCatalog("http://ollama:11434"); err != nil {
+			log.Printf("[bootstrap] warning: patch Ollama local dev catalog: %v", err)
+		} else {
+			stopGateway(gateway)
+			gateway, err = startGatewayWithFlake(hasFlake)
+			if err != nil {
+				return fmt.Errorf("restartGateway after Ollama catalog patch: %w", err)
+			}
+		}
 	}
 	go func() {
 		if err := gateway.Wait(); err != nil {

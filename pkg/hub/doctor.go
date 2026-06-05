@@ -171,6 +171,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 	validProviders := map[string]bool{
 		"anthropic": true, "openai": true, "fireworks": true,
 		"moonshot": true, "google": true, "mistral": true,
+		"groq": true, "deepseek": true, "codex": true, "ollama": true,
 	}
 
 	allKeysValid := true
@@ -190,7 +191,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 				},
 			})
 		}
-		if key.APIKey == "" {
+		if !llmKeyHasRequiredAPIKey(key) {
 			allKeysValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "models",
@@ -346,7 +347,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	validProviders := map[string]bool{
-		"daytona": true, "replicated": true, "exedev": true,
+		"daytona": true, "replicated": true, "exedev": true, "docker": true,
 	}
 
 	allProvidersValid := true
@@ -357,7 +358,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 				Category:    "sandboxes",
 				Severity:    "warning",
 				Title:       fmt.Sprintf("Unknown sandbox provider: %q", name),
-				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, replicated, exedev).", name),
+				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, replicated, exedev, docker).", name),
 				OK:          false,
 				FixAction: &FixAction{
 					Type:   "navigate",
