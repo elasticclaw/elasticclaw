@@ -1119,6 +1119,19 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
 	prURLs := extractDonePRURLs(rawMessage)
 
+	// Record task-run done signal and PR associations BEFORE validation,
+	// so analytics captures the attempt even if PR validation fails.
+	var taskRunID string
+	_ = s.db.QueryRow(`SELECT task_run_id FROM claws WHERE id=?`, clawID).Scan(&taskRunID)
+	if taskRunID != "" {
+		var attemptID string
+		_ = s.db.QueryRow(`SELECT current_attempt_id FROM task_runs WHERE id=?`, taskRunID).Scan(&attemptID)
+		s.recordTaskRunDoneSignal("default", taskRunID, attemptID, len(prURLs))
+		for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
+			s.recordTaskRunPR("default", taskRunID, pr.repo, pr.number, pr.url, "", "", "open", false, "")
+		}
+	}
+
 	// Validate PRs via GitHub API if we have a token.
 	ghToken := s.resolveGitHubToken()
 	if ghToken != "" {
@@ -1136,18 +1149,6 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Store all validated PRs (idempotent).
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
 		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
-	}
-
-	// Record task-run done signal and PR associations
-	var taskRunID string
-	_ = s.db.QueryRow(`SELECT task_run_id FROM claws WHERE id=?`, clawID).Scan(&taskRunID)
-	if taskRunID != "" {
-		var attemptID string
-		_ = s.db.QueryRow(`SELECT current_attempt_id FROM task_runs WHERE id=?`, taskRunID).Scan(&attemptID)
-		s.recordTaskRunDoneSignal("default", taskRunID, attemptID, len(prURLs))
-		for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-			s.recordTaskRunPR("default", taskRunID, pr.repo, pr.number, pr.url, "", "", "open", false, "")
-		}
 	}
 
 	pipelineHandledDone := false
