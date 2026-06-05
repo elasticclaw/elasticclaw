@@ -509,12 +509,24 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		}
 	}()
 
+	// Create task run for analytics
+	var runID, attemptID string
+	if factory.Workspace != "" {
+		runID, attemptID, err = s.startTaskRunFromFactory(factory.Name, factory.Workspace, "", issueID, "", "", "linear", factory.Workspace, factory.Tags)
+		if err != nil {
+			log.Printf("[factory:%s] failed to create task run for %s: %v", factory.Name, issueID, err)
+		}
+	}
+
 	// Verify we can read the issue before spending money on a sandbox.
 	// Non-negotiable: if the issue is unreadable, we can't do any work.
 	linearToken := s.resolveLinearTokenForFactory(factory)
 	if linearToken != "" {
 		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
 			log.Printf("[factory:%s] pre-flight FAILED for %s: %v", factory.Name, issueID, err)
+			if runID != "" {
+				s.recordTaskRunTerminal("default", runID, attemptID, "permission_or_auth_failed", "linear")
+			}
 			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
 		}
 	} else {
@@ -524,6 +536,9 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Build Linear-specific context and inject into template files
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
 	if err != nil {
+		if runID != "" {
+			s.recordTaskRunTerminal("default", runID, attemptID, "creation_failed", "hub")
+		}
 		return fmt.Errorf("template %q not found: %w", factory.Template, err)
 	}
 	issueContext := buildLinearContext(payload)
@@ -532,14 +547,28 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Create claw using shared factory creator, passing pre-built template files
 	clawID, isPending, err := s.createClawFromFactory(factory, issueID, nil, templateFiles, reason)
 	if err != nil {
+		if runID != "" {
+			s.recordTaskRunTerminal("default", runID, attemptID, "creation_failed", "hub")
+		}
 		return err
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if runID != "" {
+			s.recordTaskRunTerminal("default", runID, attemptID, "creation_failed", "hub")
+		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
 	log.Printf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
+
+	if runID != "" {
+		s.linkClawToTaskRun(clawID, runID)
+		s.recordTaskRunClawCreated("default", runID, attemptID, clawID)
+		if triggerID, _ := s.getFactoryTriggerID(factory.Name, "linear", triggerKey); triggerID != "" {
+			s.linkFactoryTriggerToTaskRun(triggerID, runID)
+		}
+	}
 
 	// Move the issue to WorkingStatus if configured (only if not pending —
 	// a queued claw hasn't actually started working yet)
@@ -1107,6 +1136,18 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Store all validated PRs (idempotent).
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
 		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+	}
+
+	// Record task-run done signal and PR associations
+	var taskRunID string
+	_ = s.db.QueryRow(`SELECT task_run_id FROM claws WHERE id=?`, clawID).Scan(&taskRunID)
+	if taskRunID != "" {
+		var attemptID string
+		_ = s.db.QueryRow(`SELECT current_attempt_id FROM task_runs WHERE id=?`, taskRunID).Scan(&attemptID)
+		s.recordTaskRunDoneSignal("default", taskRunID, attemptID, len(prURLs))
+		for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
+			s.recordTaskRunPR("default", taskRunID, pr.repo, pr.number, pr.url, "", "", "open", false, "")
+		}
 	}
 
 	pipelineHandledDone := false

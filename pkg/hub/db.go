@@ -297,8 +297,246 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_claw ON pipeline_outputs(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_stage ON pipeline_outputs(claw_id, stage_id);
+
+	-- v10: task-run analytics tables
+	CREATE TABLE IF NOT EXISTS task_runs (
+		id                  TEXT PRIMARY KEY,
+		tenant_id           TEXT NOT NULL DEFAULT 'default',
+		initial_attempt_id  TEXT NOT NULL,
+		current_attempt_id  TEXT NOT NULL DEFAULT '',
+		attempt_count       INTEGER NOT NULL DEFAULT 1,
+		run_kind            TEXT NOT NULL DEFAULT 'code_task',
+		owner_type          TEXT NOT NULL DEFAULT 'factory',
+		workspace_name      TEXT NOT NULL DEFAULT '',
+		workflow_name       TEXT NOT NULL DEFAULT '',
+		factory_name        TEXT NOT NULL DEFAULT '',
+		owner_id            TEXT NOT NULL DEFAULT '',
+		owner_display_name  TEXT NOT NULL DEFAULT '',
+		integration         TEXT NOT NULL DEFAULT '',
+		integration_workspace TEXT NOT NULL DEFAULT '',
+		trigger_id          TEXT NOT NULL DEFAULT '',
+		external_trigger_id TEXT NOT NULL DEFAULT '',
+		issue_id            TEXT NOT NULL DEFAULT '',
+		claw_id             TEXT NOT NULL DEFAULT '',
+		tags                TEXT NOT NULL DEFAULT '[]',
+		analytics_enabled   INTEGER NOT NULL DEFAULT 1,
+		requires_pr         INTEGER NOT NULL DEFAULT 1,
+		excluded_reason     TEXT NOT NULL DEFAULT '',
+		timeout_at          INTEGER,
+		created_at          INTEGER NOT NULL,
+		updated_at          INTEGER NOT NULL,
+		CHECK(run_kind IN ('code_task','pr_task')),
+		CHECK(owner_type IN ('workflow','factory','manual','external')),
+		CHECK(json_valid(tags)),
+		CHECK(analytics_enabled IN (0,1)),
+		CHECK(requires_pr IN (0,1)),
+		CHECK((analytics_enabled = 0) OR (requires_pr = 1)),
+		CHECK(attempt_count >= 1),
+		UNIQUE(tenant_id, initial_attempt_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_runs_tenant_created ON task_runs(tenant_id, created_at DESC, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_runs_workspace ON task_runs(tenant_id, workspace_name, created_at DESC, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_runs_factory ON task_runs(tenant_id, factory_name, created_at DESC, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(tenant_id, analytics_enabled, created_at DESC, id DESC);
+
+	CREATE TABLE IF NOT EXISTS task_run_attempts (
+		id              TEXT PRIMARY KEY,
+		tenant_id       TEXT NOT NULL DEFAULT 'default',
+		run_id          TEXT NOT NULL,
+		attempt_id      TEXT NOT NULL,
+		attempt_number  INTEGER NOT NULL,
+		trigger_id      TEXT NOT NULL DEFAULT '',
+		claw_id         TEXT NOT NULL DEFAULT '',
+		status          TEXT NOT NULL DEFAULT 'running',
+		failure_type    TEXT NOT NULL DEFAULT '',
+		started_at      INTEGER NOT NULL,
+		finished_at     INTEGER,
+		created_at      INTEGER NOT NULL,
+		updated_at      INTEGER NOT NULL,
+		UNIQUE(tenant_id, attempt_id),
+		UNIQUE(tenant_id, run_id, attempt_number),
+		CHECK(attempt_number >= 1),
+		CHECK(status IN ('running','succeeded','failed')),
+		CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_attempts_run ON task_run_attempts(tenant_id, run_id, attempt_number);
+
+	CREATE TABLE IF NOT EXISTS task_run_events (
+		id                      TEXT PRIMARY KEY,
+		tenant_id               TEXT NOT NULL DEFAULT 'default',
+		run_id                  TEXT NOT NULL,
+		attempt_id              TEXT NOT NULL,
+		event_key               TEXT NOT NULL,
+		source                  TEXT NOT NULL DEFAULT 'unknown',
+		source_event_id         TEXT NOT NULL DEFAULT '',
+		source_delivery_id      TEXT NOT NULL DEFAULT '',
+		event_type              TEXT NOT NULL,
+		event_time              INTEGER NOT NULL,
+		observed_at             INTEGER NOT NULL,
+		actor_type              TEXT NOT NULL DEFAULT 'unknown',
+		actor_source            TEXT NOT NULL DEFAULT '',
+		actor_id                TEXT NOT NULL DEFAULT '',
+		actor_login             TEXT NOT NULL DEFAULT '',
+		actor_display_name      TEXT NOT NULL DEFAULT '',
+		actor_classification_reason TEXT NOT NULL DEFAULT '',
+		interaction_role        TEXT NOT NULL DEFAULT '',
+		target_type             TEXT NOT NULL DEFAULT '',
+		target_id               TEXT NOT NULL DEFAULT '',
+		target_url              TEXT NOT NULL DEFAULT '',
+		detail                  TEXT NOT NULL DEFAULT '{}',
+		created_at              INTEGER NOT NULL,
+		UNIQUE(tenant_id, run_id, event_key),
+		CHECK(json_valid(detail)),
+		CHECK(actor_type IN ('agent','human','bot','system','unknown')),
+		CHECK(source IN ('github','linear','shortcut','elasticclaw','hub','provider','agent','unknown')),
+		CHECK(interaction_role IN ('allowed_start','allowed_approval','allowed_merge','warning','neutral','terminal','')),
+		CHECK(event_type IN ('run_claimed','run_queued','provision_started','claw_created','agent_started','creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped','manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed','timeout','unknown_failure','pr_associated','pr_opened','pr_closed_unmerged','pr_merged','approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment','human_manual_code_push','human_tracker_update','human_dashboard_message','human_manual_stop_or_resume','human_settings_or_status_change','pr_replaced','correction','retraction'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_events_run ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
+	CREATE INDEX IF NOT EXISTS idx_task_run_events_source ON task_run_events(tenant_id, source, source_event_id);
+	CREATE INDEX IF NOT EXISTS idx_task_run_events_type ON task_run_events(tenant_id, event_type, event_time);
+	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
+
+	CREATE TABLE IF NOT EXISTS task_run_prs (
+		id              TEXT PRIMARY KEY,
+		tenant_id       TEXT NOT NULL DEFAULT 'default',
+		run_id          TEXT NOT NULL,
+		repo            TEXT NOT NULL,
+		pr_number       INTEGER NOT NULL,
+		pr_url          TEXT NOT NULL,
+		head_branch     TEXT NOT NULL DEFAULT '',
+		head_sha        TEXT NOT NULL DEFAULT '',
+		last_agent_head_sha TEXT NOT NULL DEFAULT '',
+		state           TEXT NOT NULL DEFAULT 'open',
+		merged          INTEGER NOT NULL DEFAULT 0,
+		opened_at       INTEGER,
+		closed_at       INTEGER,
+		merged_at       INTEGER,
+		merged_by_login TEXT NOT NULL DEFAULT '',
+		created_at      INTEGER NOT NULL,
+		updated_at      INTEGER NOT NULL,
+		UNIQUE(tenant_id, run_id, repo, pr_number),
+		CHECK(merged IN (0,1)),
+		CHECK(state IN ('open','closed','unknown'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_prs_repo ON task_run_prs(tenant_id, repo, pr_number);
+	CREATE INDEX IF NOT EXISTS idx_task_run_prs_run ON task_run_prs(tenant_id, run_id, state, merged);
+	CREATE INDEX IF NOT EXISTS idx_task_run_prs_merged ON task_run_prs(tenant_id, run_id, merged_at);
+
+	CREATE TABLE IF NOT EXISTS task_run_summaries (
+		tenant_id               TEXT NOT NULL DEFAULT 'default',
+		run_id                  TEXT NOT NULL,
+		initial_attempt_id      TEXT NOT NULL DEFAULT '',
+		current_attempt_id      TEXT NOT NULL DEFAULT '',
+		attempt_count           INTEGER NOT NULL DEFAULT 1,
+		run_kind                TEXT NOT NULL DEFAULT 'code_task',
+		owner_type              TEXT NOT NULL DEFAULT 'factory',
+		workspace_name          TEXT NOT NULL DEFAULT '',
+		workflow_name           TEXT NOT NULL DEFAULT '',
+		factory_name            TEXT NOT NULL DEFAULT '',
+		owner_id                TEXT NOT NULL DEFAULT '',
+		owner_display_name      TEXT NOT NULL DEFAULT '',
+		integration             TEXT NOT NULL DEFAULT '',
+		repo                    TEXT NOT NULL DEFAULT '',
+		issue_id                TEXT NOT NULL DEFAULT '',
+		claw_id                 TEXT NOT NULL DEFAULT '',
+		analytics_enabled       INTEGER NOT NULL DEFAULT 1,
+		requires_pr             INTEGER NOT NULL DEFAULT 1,
+		excluded_reason         TEXT NOT NULL DEFAULT '',
+		status                  TEXT NOT NULL DEFAULT 'running',
+		phase                   TEXT NOT NULL DEFAULT 'claimed',
+		model                   TEXT NOT NULL DEFAULT '',
+		llm_key                 TEXT NOT NULL DEFAULT '',
+		primary_pr_url          TEXT NOT NULL DEFAULT '',
+		pr_count                INTEGER NOT NULL DEFAULT 0,
+		open_pr_count           INTEGER NOT NULL DEFAULT 0,
+		merged_pr_count         INTEGER NOT NULL DEFAULT 0,
+		failure_type            TEXT NOT NULL DEFAULT '',
+		warning_types           TEXT NOT NULL DEFAULT '[]',
+		human_interaction_count INTEGER NOT NULL DEFAULT 0,
+		started_at              INTEGER NOT NULL,
+		queued_at               INTEGER,
+		provision_started_at    INTEGER,
+		agent_started_at        INTEGER,
+		pr_opened_at            INTEGER,
+		merged_at               INTEGER,
+		finished_at             INTEGER,
+		timeout_at              INTEGER,
+		last_event_at           INTEGER,
+		updated_at              INTEGER NOT NULL,
+		PRIMARY KEY(tenant_id, run_id),
+		CHECK(status IN ('running','clean_success','warning_success','failed')),
+		CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
+		CHECK(run_kind IN ('code_task','pr_task')),
+		CHECK(owner_type IN ('workflow','factory','manual','external')),
+		CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		CHECK(analytics_enabled IN (0,1)),
+		CHECK(requires_pr IN (0,1)),
+		CHECK((analytics_enabled = 0) OR (requires_pr = 1)),
+		CHECK(json_valid(warning_types)),
+		CHECK(attempt_count >= 1),
+		CHECK(human_interaction_count >= 0),
+		CHECK(pr_count >= 0),
+		CHECK(open_pr_count >= 0),
+		CHECK(merged_pr_count >= 0)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_tenant_started ON task_run_summaries(tenant_id, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_workspace ON task_run_summaries(tenant_id, workspace_name, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_workspace_wf ON task_run_summaries(tenant_id, workspace_name, workflow_name, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_factory ON task_run_summaries(tenant_id, factory_name, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_owner ON task_run_summaries(tenant_id, owner_type, owner_id, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_status ON task_run_summaries(tenant_id, status, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC, run_id DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, status, timeout_at);
+
+	CREATE TABLE IF NOT EXISTS task_run_summary_warning_types (
+		tenant_id       TEXT NOT NULL DEFAULT 'default',
+		run_id          TEXT NOT NULL,
+		warning_type    TEXT NOT NULL,
+		created_at      INTEGER NOT NULL,
+		PRIMARY KEY(tenant_id, run_id, warning_type),
+		CHECK(warning_type IN ('human_pr_comment','human_review_comment','human_requested_changes','human_manual_code_push','human_tracker_update','human_dashboard_message','human_manual_stop_or_resume','human_settings_or_status_change','pr_replaced','unknown_human_interaction'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summary_warnings_type ON task_run_summary_warning_types(tenant_id, warning_type, run_id);
+
+	CREATE TABLE IF NOT EXISTS task_run_summary_actors (
+		tenant_id       TEXT NOT NULL DEFAULT 'default',
+		run_id          TEXT NOT NULL,
+		actor_key       TEXT NOT NULL,
+		actor_type      TEXT NOT NULL,
+		actor_login     TEXT NOT NULL DEFAULT '',
+		interaction_count INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(tenant_id, run_id, actor_key),
+		CHECK(actor_type IN ('agent','human','bot','system','unknown')),
+		CHECK(interaction_count >= 0)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summary_actors_key ON task_run_summary_actors(tenant_id, actor_key, run_id);
+
+	CREATE TABLE IF NOT EXISTS task_run_analytics_metadata (
+		tenant_id               TEXT PRIMARY KEY DEFAULT 'default',
+		data_starts_at          INTEGER NOT NULL,
+		events_available_since  INTEGER,
+		events_expire_after     TEXT NOT NULL DEFAULT 'P1Y',
+		last_materialized_at    INTEGER,
+		last_rebuild_started_at INTEGER,
+		last_rebuild_finished_at INTEGER,
+		last_rebuild_status     TEXT NOT NULL DEFAULT 'idle',
+		last_rebuild_error      TEXT NOT NULL DEFAULT '',
+		coverage_warnings       TEXT NOT NULL DEFAULT '[]',
+		CHECK(last_rebuild_status IN ('idle','running','failed','succeeded')),
+		CHECK(json_valid(coverage_warnings))
+	);
+
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// task_run_id linkage on claws and factory_triggers
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 // pruneFactoryAnalytics deletes factory_analytics rows older than 1 year.

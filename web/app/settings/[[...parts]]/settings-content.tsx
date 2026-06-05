@@ -391,7 +391,7 @@ export default function SettingsSectionPage() {
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "workspace-analytics" && (
-            <AnalyticsSection selectedWorkspace={selectedWorkspace} />
+            <TaskRunAnalyticsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />
@@ -403,7 +403,7 @@ export default function SettingsSectionPage() {
             <AIConfigSection />
           )}
           {section === "analytics" && (
-            <AnalyticsSection />
+            <TaskRunAnalyticsSection />
           )}
           {section === "doctor" && (
             <DoctorSection />
@@ -3018,6 +3018,364 @@ function AnalyticsSparkline({ points }: { points: AnalyticsTimelinePoint[] }) {
           <span className="w-2 h-2 rounded-full bg-blue-500" /> PR merged
         </span>
       </div>
+    </div>
+  )
+}
+
+// Task-run analytics (new v1)
+interface TaskRunSummary {
+  runId: string
+  initialAttemptId: string
+  currentAttemptId: string
+  attemptCount: number
+  runKind: string
+  ownerType: string
+  workspaceName: string
+  workflowName: string
+  factoryName: string
+  integration: string
+  issueId: string
+  clawId: string
+  status: string
+  phase: string
+  model: string
+  primaryPrUrl: string
+  prCount: number
+  openPrCount: number
+  mergedPrCount: number
+  failureType: string
+  warningTypes: string[]
+  humanInteractionCount: number
+  startedAt: number
+  finishedAt: number
+  lastEventAt: number
+}
+
+interface AnalyticsSummaryResponse {
+  scope: string
+  range: { from: number; to: number }
+  coverage: {
+    dataStartsAt: number
+    partialHistory: boolean
+    eventsAvailableSince: number
+    eventsExpireAfter: string
+    timelineUnavailableBefore: null
+    stale: boolean
+    lastMaterializedAt: number
+    coverageWarnings: string[]
+  }
+  totals: {
+    runs: number
+    excludedRuns: number
+    excludedNonPrRuns: number
+    attempts: number
+    terminalRuns: number
+    runningRuns: number
+    cleanSuccess: number
+    warningSuccess: number
+    failed: number
+    prOpened: number
+    prMerged: number
+  }
+  rates: {
+    cleanSuccessRate: number | null
+    warningSuccessRate: number | null
+    failureRate: number | null
+    prOpenedRate: number | null
+    prMergedRate: number | null
+  }
+  children: Array<{
+    id: string
+    label: string
+    kind: string
+    totals: Record<string, number>
+    rates: Record<string, any>
+    href: string
+  }>
+}
+
+function TaskRunAnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string }) {
+  const [summary, setSummary] = useState<AnalyticsSummaryResponse | null>(null)
+  const [runs, setRuns] = useState<TaskRunSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [days, setDays] = useState(30)
+  const [expandedRun, setExpandedRun] = useState<string | null>(null)
+  const [runEvents, setRunEvents] = useState<Record<string, any[]>>({})
+  const [loadingEvents, setLoadingEvents] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState("")
+
+  const now = Date.now()
+  const fromMs = now - days * 86400000
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      const hubUrl = getHubUrl()
+      const token = getAuthToken() || ""
+      const params = new URLSearchParams({
+        from: String(fromMs),
+        to: String(now),
+        limit: "50",
+      })
+      if (selectedWorkspace) params.set("workspace", selectedWorkspace)
+      if (statusFilter) params.set("status", statusFilter)
+
+      const [summaryRes, runsRes] = await Promise.all([
+        fetch(`${hubUrl}/api/analytics/summary?from=${fromMs}&to=${now}${selectedWorkspace ? `&workspace=${encodeURIComponent(selectedWorkspace)}` : ""}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${hubUrl}/api/analytics/runs?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ])
+      if (!summaryRes.ok) throw new Error(await summaryRes.text())
+      if (!runsRes.ok) throw new Error(await runsRes.text())
+      setSummary(await summaryRes.json())
+      const runsData = await runsRes.json()
+      setRuns(runsData.items || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load analytics")
+    } finally {
+      setLoading(false)
+    }
+  }, [fromMs, now, selectedWorkspace, statusFilter])
+
+  useEffect(() => { load() }, [load])
+
+  const loadEvents = useCallback(async (runId: string) => {
+    if (runEvents[runId]) return
+    setLoadingEvents(runId)
+    try {
+      const hubUrl = getHubUrl()
+      const token = getAuthToken() || ""
+      const res = await fetch(`${hubUrl}/api/analytics/runs/${encodeURIComponent(runId)}/events?limit=200`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setRunEvents((prev) => ({ ...prev, [runId]: data }))
+    } catch (e) {
+      console.error("Failed to load events", e)
+    } finally {
+      setLoadingEvents(null)
+    }
+  }, [runEvents])
+
+  const dayOptions = [
+    { label: "7 days", value: 7 },
+    { label: "30 days", value: 30 },
+    { label: "90 days", value: 90 },
+  ]
+
+  const statusOptions = ["", "running", "clean_success", "warning_success", "failed"]
+  const statusLabels: Record<string, string> = {
+    "": "All",
+    running: "Running",
+    clean_success: "Clean success",
+    warning_success: "Warning success",
+    failed: "Failed",
+  }
+
+  const totals = summary?.totals
+  const rates = summary?.rates
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Task Run Analytics</h2>
+          <p className="text-sm text-muted-foreground">
+            PR-merged outcome rates for agent-executed tasks.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="h-8 px-2 text-xs rounded-md border border-border bg-background"
+          >
+            {statusOptions.map((s) => (
+              <option key={s} value={s}>{statusLabels[s]}</option>
+            ))}
+          </select>
+          <div className="flex gap-1 bg-muted rounded-lg p-1">
+            {dayOptions.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setDays(opt.value)}
+                className={cn(
+                  "px-3 py-1 text-xs rounded-md transition-colors",
+                  days === opt.value
+                    ? "bg-background text-foreground font-medium shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading analytics…</p>
+      ) : !totals ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No analytics data yet.</p>
+      ) : (
+        <>
+          {/* Overview cards */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <AnalyticsMetric label="Total runs" value={totals.runs} />
+            <AnalyticsMetric label="Clean success" value={totals.cleanSuccess} />
+            <AnalyticsMetric label="Warning success" value={totals.warningSuccess} />
+            <AnalyticsMetric label="Failed" value={totals.failed} />
+            <AnalyticsMetric label="PRs merged" value={totals.prMerged} />
+          </div>
+
+          {/* Success rate bars */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <AnalyticsRateBar label="Clean success rate" value={rates?.cleanSuccessRate ?? 0} color="bg-green-500" />
+            <AnalyticsRateBar label="Warning success rate" value={rates?.warningSuccessRate ?? 0} color="bg-yellow-500" />
+            <AnalyticsRateBar label="Failure rate" value={rates?.failureRate ?? 0} color="bg-red-500" />
+          </div>
+
+          {/* Coverage warning */}
+          {summary?.coverage?.partialHistory && (
+            <div className="text-xs text-amber-600 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
+              Analytics data starts at {new Date(summary.coverage.dataStartsAt).toLocaleDateString()}. Earlier periods are not available.
+            </div>
+          )}
+
+          {/* Run list */}
+          <div className="border border-border rounded-lg divide-y divide-border">
+            {runs.length === 0 ? (
+              <p className="text-sm text-muted-foreground px-4 py-6 text-center">No runs match the current filters.</p>
+            ) : (
+              runs.map((run) => {
+                const isExpanded = expandedRun === run.runId
+                const statusColor =
+                  run.status === "clean_success"
+                    ? "bg-green-500/10 text-green-600 border-green-500/20"
+                    : run.status === "warning_success"
+                      ? "bg-yellow-500/10 text-yellow-600 border-yellow-500/20"
+                      : run.status === "failed"
+                        ? "bg-red-500/10 text-red-600 border-red-500/20"
+                        : "bg-blue-500/10 text-blue-600 border-blue-500/20"
+                return (
+                  <div key={run.runId}>
+                    <button
+                      onClick={() => {
+                        const next = isExpanded ? null : run.runId
+                        setExpandedRun(next)
+                        if (next) loadEvents(next)
+                      }}
+                      className="w-full px-4 py-3 flex items-start justify-between gap-3 hover:bg-muted/50 transition-colors text-left"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-medium border", statusColor)}>
+                            {run.status.replace(/_/g, " ")}
+                          </span>
+                          <p className="text-sm font-medium truncate">{run.factoryName || run.workflowName || run.runId.slice(0, 8)}</p>
+                          <ChevronDown className={cn("size-3.5 text-muted-foreground transition-transform", isExpanded && "rotate-180")} />
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                          <span>{run.runKind}</span>
+                          <span>{run.attemptCount} attempt{run.attemptCount > 1 ? "s" : ""}</span>
+                          <span>{run.prCount} PR{run.prCount !== 1 ? "s" : ""}</span>
+                          {run.mergedPrCount > 0 && <span>{run.mergedPrCount} merged</span>}
+                          {run.humanInteractionCount > 0 && <span>{run.humanInteractionCount} human interaction{run.humanInteractionCount > 1 ? "s" : ""}</span>}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right text-xs text-muted-foreground">
+                        {new Date(run.startedAt).toLocaleDateString()}
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="px-4 pb-4 pt-1 bg-muted/30">
+                        {loadingEvents === run.runId ? (
+                          <p className="text-xs text-muted-foreground py-4 text-center animate-pulse">Loading events…</p>
+                        ) : runEvents[run.runId] ? (
+                          <div className="space-y-3">
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div><span className="text-muted-foreground">Run ID:</span> <code className="text-[10px]">{run.runId}</code></div>
+                              <div><span className="text-muted-foreground">Phase:</span> {run.phase}</div>
+                              <div><span className="text-muted-foreground">Model:</span> {run.model || "—"}</div>
+                              <div><span className="text-muted-foreground">Issue:</span> {run.issueId || "—"}</div>
+                              {run.primaryPrUrl && (
+                                <div className="col-span-2">
+                                  <span className="text-muted-foreground">Primary PR:</span>{" "}
+                                  <a href={run.primaryPrUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline truncate inline-block max-w-xs">
+                                    {run.primaryPrUrl}
+                                  </a>
+                                </div>
+                              )}
+                              {run.failureType && (
+                                <div className="col-span-2">
+                                  <span className="text-muted-foreground">Failure:</span>{" "}
+                                  <span className="text-red-600">{run.failureType.replace(/_/g, " ")}</span>
+                                </div>
+                              )}
+                              {run.warningTypes.length > 0 && (
+                                <div className="col-span-2 flex flex-wrap gap-1">
+                                  <span className="text-muted-foreground">Warnings:</span>
+                                  {run.warningTypes.map((w) => (
+                                    <span key={w} className="px-1 py-0.5 rounded text-[10px] bg-yellow-500/10 text-yellow-600 border border-yellow-500/20">
+                                      {w.replace(/_/g, " ")}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Event timeline */}
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">Event timeline</p>
+                              <div className="max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border bg-background">
+                                {runEvents[run.runId].map((event: any) => (
+                                  <div key={event.id} className="px-3 py-1.5 flex items-center justify-between gap-2 text-xs">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className={cn(
+                                        "px-1.5 py-0.5 rounded text-[10px] font-medium border",
+                                        event.interactionRole === "warning"
+                                          ? "bg-yellow-500/10 text-yellow-600 border-yellow-500/20"
+                                          : event.interactionRole === "terminal"
+                                            ? "bg-red-500/10 text-red-600 border-red-500/20"
+                                            : "bg-muted text-muted-foreground border-border"
+                                      )}>
+                                        {event.eventType.replace(/_/g, " ")}
+                                      </span>
+                                      <span className="text-muted-foreground truncate">{event.source}</span>
+                                    </div>
+                                    <span className="shrink-0 text-muted-foreground/60">
+                                      {new Date(event.eventTime).toLocaleString()}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-muted-foreground py-4 text-center">No events available.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }

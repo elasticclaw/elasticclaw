@@ -245,6 +245,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/{name}/analytics/timeline", s.withAuth(s.handleFactoryAnalyticsTimeline)) // GET factory timeline
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
+	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleAnalyticsSummary))         // GET task-run analytics summary
+	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleAnalyticsRuns))                // GET task-run list
+	mux.HandleFunc("/api/analytics/runs/{id}", s.withAuth(s.handleAnalyticsRunDetail))    // GET task-run detail
+	mux.HandleFunc("/api/analytics/runs/{id}/attempts", s.withAuth(s.handleAnalyticsRunAttempts))
+	mux.HandleFunc("/api/analytics/runs/{id}/events", s.withAuth(s.handleAnalyticsRunEvents))
+	mux.HandleFunc("/api/analytics/runs/{id}/prs", s.withAuth(s.handleAnalyticsRunPRs))
+	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleAnalyticsFilterOptions))
 	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD))                   // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))

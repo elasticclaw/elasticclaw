@@ -151,3 +151,16 @@ func (s *Server) failFactoryTrigger(factoryName, integration, triggerKey string)
 		now(), factoryName, integration, triggerKey,
 	)
 }
+
+func (s *Server) getFactoryTriggerID(factoryName, integration, triggerKey string) (string, error) {
+	var id string
+	err := s.db.QueryRow(`
+		SELECT id FROM factory_triggers
+		 WHERE factory_name=? AND integration=? AND trigger_key=?`,
+		factoryName, integration, triggerKey,
+	).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
