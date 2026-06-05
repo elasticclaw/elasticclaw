@@ -3159,9 +3159,9 @@ func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) st
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	for _, name := range names {
-		path := strings.TrimRight(dir, "/") + "/" + name
+		remotePath := strings.TrimRight(dir, "/") + "/" + name
 		b.WriteString("test -e ")
-		b.WriteString(shellDoubleQuote(path))
+		b.WriteString(shellDoubleQuote(remotePath))
 		b.WriteString(" || { echo ")
 		b.WriteString(shellQuote("missing workspace file: " + name))
 		b.WriteString("; exit 1; }\n")
@@ -4352,7 +4352,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			},
 		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -4370,7 +4370,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		},
 	}); err != nil {
 		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -4393,7 +4393,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 				return s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -4405,7 +4405,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand("$HOME/.openclaw/workspace", files))
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
 			return
 		}
 		log.Printf("Template files written for claw %s", clawName)
@@ -4429,7 +4429,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 				return s.sshRun(sshUser, sshHost, credHelper)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
