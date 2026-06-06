@@ -155,7 +155,7 @@ export default function SettingsSectionPage() {
   const firstPartIsSection = isValidSection(firstPart)
   const firstPartIsPlaceholder = firstPart === WORKSPACE_PLACEHOLDER
   const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection && !firstPartIsPlaceholder
-  const rawSection = hasRouteWorkspace ? (secondPart || "workspaces") : (firstPart || "workspaces")
+  const rawSection = (hasRouteWorkspace || firstPartIsPlaceholder) ? (secondPart || "workspaces") : (firstPart || "workspaces")
   const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
   const rawWorkspace = hasRouteWorkspace ? firstPart : ""
   const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
