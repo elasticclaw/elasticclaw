@@ -3889,7 +3889,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		Name:         req.ProviderName, // stable ec-<shortid>
 		InstanceType: req.InstanceType,
 		TTL:          req.TTL,
-	}, nil, env)
+	}, nil, nil)
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}

@@ -1193,6 +1193,59 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	}
 }
 
+func TestProvisionReplicatedDefersEnvInjectionToBootstrap(t *testing.T) {
+	var createRequests int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/vm" {
+			http.NotFound(w, r)
+			return
+		}
+		createRequests++
+		jsonOK(w, map[string]interface{}{
+			"vms": []map[string]string{{"id": "vm-test-1"}},
+		})
+	}))
+	t.Cleanup(api.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Providers: map[string]types.ProviderConfig{
+			"replicated": {
+				Token:  "replicated-token",
+				APIURL: api.URL,
+			},
+		},
+	}, "", "", "")
+	s.identity = &HubIdentity{PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest elasticclaw@hub"}
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, provider, status, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		"claw-replicated-env", "test-tenant-id", "replicated-env", "template", "replicated", "provisioning",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.provisionReplicated(
+		context.Background(),
+		"claw-replicated-env",
+		types.CreateClawRequest{Name: "replicated-env", ProviderName: "ec-replicated-env"},
+		s.hubCfg.Providers["replicated"],
+		map[string]string{"ELASTICCLAW_CLAW_TOKEN": "agent-token"},
+	)
+	if err != nil {
+		t.Fatalf("provisionReplicated with env: %v", err)
+	}
+	if createRequests != 1 {
+		t.Fatalf("replicated create requests = %d, want 1", createRequests)
+	}
+	var providerID string
+	if err := db.QueryRow(`SELECT provider_id FROM claws WHERE id=?`, "claw-replicated-env").Scan(&providerID); err != nil {
+		t.Fatal(err)
+	}
+	if providerID != "vm-test-1" {
+		t.Fatalf("provider_id = %q, want vm-test-1", providerID)
+	}
+}
+
 func TestBrandingEndpointIsPublicAndDoesNotExposeToken(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",
