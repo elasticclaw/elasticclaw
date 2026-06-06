@@ -801,6 +801,93 @@ func TestMessageActivityEndpointExpandsSummaryRange(t *testing.T) {
 	}
 }
 
+func TestMessageActivityEndpointCanReturnNewestActivities(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			fmt.Sprintf("activity-%d", i), "claw-1", "test-tenant-id", "activity", "tool", `activity:{"kind":"tool"}`, base.Add(time.Duration(i+1)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/activity?limit=2&order=desc", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].ID != "activity-5" || msgs[1].ID != "activity-4" {
+		t.Fatalf("activity messages = %#v, want newest two in descending order", msgs)
+	}
+}
+
+func TestMessageTimelineIncludesActivityBeforeFirstConversationMessage(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			fmt.Sprintf("activity-%d", i), "claw-1", "test-tenant-id", "activity", "tool", `activity:{"kind":"tool"}`, base.Add(time.Duration(i+1)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"hub-1", "claw-1", "test-tenant-id", "hub", "Injected proceed message", "", base.Add(10*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/timeline", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].Role != "activity_summary" || msgs[1].ID != "hub-1" {
+		t.Fatalf("timeline = %#v, want pre-message activity summary then hub message", msgs)
+	}
+	meta := decodeActivitySummaryMeta(t, msgs[0])
+	if meta.Count != 4 {
+		t.Fatalf("pre-message summary count = %d, want 4", meta.Count)
+	}
+}
+
 func TestMessageTimelinePreservesDisplayedStateAcrossActivityRuns(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(

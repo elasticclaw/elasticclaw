@@ -1130,16 +1130,25 @@ function ActivitySummary({
   const [loading, setLoading] = useState(false)
   const visibleMessages = coalesceActivityMessages([...(item.messages || []), ...(loadedMessages || [])])
   const countOverride = item.summary?.count
+  const loadedCount = loadedMessages?.length ?? item.messages.length
+  const isPartial = Boolean(countOverride && loadedMessages && loadedCount < countOverride)
   const handleToggle = () => {
     onToggle()
     if (expanded || !item.summary || loadedMessages || loading) return
+    const summaryCount = item.summary.count || 0
+    const limit = Math.max(200, Math.min(summaryCount || 200, 500))
+    const newestFirst = summaryCount > limit
     setLoading(true)
     fetchActivityMessages(clawId, {
       from: item.summary.from,
       to: item.summary.to,
-      limit: Math.max(200, Math.min(item.summary.count || 200, 500)),
+      limit,
+      order: newestFirst ? "desc" : "asc",
     })
-      .then((apiMsgs) => setLoadedMessages(apiMsgs.map(mapApiMessage)))
+      .then((apiMsgs) => {
+        const mapped = apiMsgs.map(mapApiMessage)
+        setLoadedMessages(newestFirst ? mapped.reverse() : mapped)
+      })
       .catch(console.warn)
       .finally(() => setLoading(false))
   }
@@ -1155,6 +1164,11 @@ function ActivitySummary({
         </button>
         {expanded && loading && (
           <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
+        )}
+        {expanded && isPartial && (
+          <div className="px-1.5 text-[10px] text-muted-foreground">
+            Showing latest {loadedCount} of {countOverride} tool calls
+          </div>
         )}
         {expanded && visibleMessages.map((message) => (
           <ActivityRow key={message.id} message={message} variant="card" />
@@ -1178,6 +1192,11 @@ function ActivitySummary({
       </div>
       {expanded && loading && (
         <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
+      )}
+      {expanded && isPartial && (
+        <div className="text-center text-xs text-muted-foreground">
+          Showing latest {loadedCount} of {countOverride} tool calls
+        </div>
       )}
       {expanded && visibleMessages.map((message) => (
         <ActivityRow key={message.id} message={message} />

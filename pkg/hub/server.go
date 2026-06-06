@@ -1542,6 +1542,23 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 	}
 
 	timeline := make([]types.HubMessage, 0, len(rows)*2)
+	firstCreated := rows[0].CreatedAt
+	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if !hasOlderConversation {
+		firstCursor := firstCreated.Format(time.RFC3339Nano)
+		summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary != nil {
+			timeline = append(timeline, *summary)
+		}
+	}
 	for i, msg := range rows {
 		timeline = append(timeline, msg)
 		lower := msg.CreatedAt
@@ -1581,6 +1598,10 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 	to := r.URL.Query().Get("to")
 	before := r.URL.Query().Get("before")
 	limit := parsePositiveLimit(r, 200, 500)
+	order := strings.ToLower(r.URL.Query().Get("order"))
+	if order != "desc" {
+		order = "asc"
+	}
 
 	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
 		FROM messages
@@ -1610,7 +1631,11 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 			args = append(args, before)
 		}
 	}
-	query += ` ORDER BY created_at ASC LIMIT ?`
+	if order == "desc" {
+		query += ` ORDER BY created_at DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY created_at ASC LIMIT ?`
+	}
 	args = append(args, limit)
 
 	rows, err := s.db.Query(query, args...)
@@ -1697,6 +1722,18 @@ func (s *Server) queryConversationMessages(clawID, tenantID, before string, limi
 		msgs[i], msgs[j] = msgs[j], msgs[i]
 	}
 	return msgs, nil
+}
+
+func (s *Server) hasConversationBefore(clawID, tenantID string, before time.Time) (bool, error) {
+	query := `SELECT COUNT(*) FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' AND created_at < ? ` + hiddenSystemMessagesSQL()
+	args := []interface{}{clawID, tenantID, before}
+	args = append(args, hiddenSystemMessagesArgs()...)
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {

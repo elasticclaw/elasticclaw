@@ -123,12 +123,13 @@ export async function fetchMessageTimeline(clawId: string, opts?: { before?: str
   return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/timeline${qs}`)
 }
 
-export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; limit?: number }): Promise<ApiMessage[]> {
+export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; limit?: number; order?: "asc" | "desc" }): Promise<ApiMessage[]> {
   const params = new URLSearchParams()
   if (opts.from) params.set('from', opts.from)
   if (opts.to) params.set('to', opts.to)
   if (opts.before) params.set('before', opts.before)
   if (opts.limit) params.set('limit', String(opts.limit))
+  if (opts.order) params.set('order', opts.order)
   const qs = params.toString() ? '?' + params.toString() : ''
   return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/activity${qs}`)
 }
