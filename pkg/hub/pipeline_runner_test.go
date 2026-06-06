@@ -959,3 +959,96 @@ stages:
 		t.Fatalf("stage = %q, want pr_ready", stage)
 	}
 }
+
+func TestGateEvaluatesNonzeroExitWithValidJSON(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-nonzero"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Simulate a run that exited nonzero but still emitted valid JSON
+	result := &pipelineRunResult{
+		ExitCode: 1, // nonzero exit — but valid JSON output
+		Stdout:   `{"status":"failed","reason":"CodeBuild failed"}`,
+		Stderr:   "exit status 1",
+	}
+	s.persistPipelineOutput(clawID, "validate", "android_validation", result)
+
+	gate := &pipeline.Gate{
+		Output: "android_validation",
+		Pass: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"passed", "skipped"},
+		},
+		Fail: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"failed", "error"},
+		},
+		Required: true,
+	}
+
+	gateResult := s.evaluateGate(clawID, "validate", gate)
+	if gateResult.Verdict != "fail" {
+		t.Fatalf("verdict = %q, want fail (nonzero exit with valid JSON should still evaluate gate)", gateResult.Verdict)
+	}
+	if gateResult.MatchedPath != "status" {
+		t.Fatalf("matched_path = %q, want status", gateResult.MatchedPath)
+	}
+	if gateResult.MatchedValue != "failed" {
+		t.Fatalf("matched_value = %q, want failed", gateResult.MatchedValue)
+	}
+
+	// Verify the gate result was persisted
+	var verdict string
+	if err := db.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, "validate").Scan(&verdict); err != nil {
+		t.Fatalf("select gate result: %v", err)
+	}
+	if verdict != "fail" {
+		t.Fatalf("db verdict = %q, want fail", verdict)
+	}
+}
+
+func TestGateErrorOnNonzeroExitNoValidJSON(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-nonzero-nojson"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Simulate a run that exited nonzero with no valid JSON output
+	result := &pipelineRunResult{
+		ExitCode: 1,
+		Stdout:   "Error: could not connect to CodeBuild",
+		Stderr:   "exit status 1",
+	}
+	s.persistPipelineOutput(clawID, "validate", "android_validation", result)
+
+	gate := &pipeline.Gate{
+		Output: "android_validation",
+		Pass: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"passed"},
+		},
+		Fail: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"failed"},
+		},
+		Required: true,
+	}
+
+	gateResult := s.evaluateGate(clawID, "validate", gate)
+	if gateResult.Verdict != "error" {
+		t.Fatalf("verdict = %q, want error (nonzero exit with no valid JSON should produce error verdict)", gateResult.Verdict)
+	}
+}

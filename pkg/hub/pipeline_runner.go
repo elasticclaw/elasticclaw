@@ -450,7 +450,7 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		return
 	}
 	var parsedJSON string
-	if result.ExitCode == 0 && strings.TrimSpace(result.Stdout) != "" {
+	if strings.TrimSpace(result.Stdout) != "" {
 		var parsed map[string]interface{}
 		if err := json.Unmarshal([]byte(result.Stdout), &parsed); err == nil {
 			b, _ := json.Marshal(parsed)
@@ -821,9 +821,18 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
+		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
+		if stage.OnEnter.Run.Output != "" && result != nil {
+			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
+		}
 		if err != nil || (result != nil && result.ExitCode != 0) {
 			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
-			if stage.OnEnter.Run.ContinueOnError {
+			// If this stage has a gate, treat nonzero exit as a normal validation
+			// failure so the gate can still evaluate the captured JSON output.
+			if stage.Gate != nil && stage.OnEnter.Run.Output != "" && result != nil {
+				log.Printf("[pipeline] %s; continuing because stage has a gate configured", msg)
+				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+			} else if stage.OnEnter.Run.ContinueOnError {
 				log.Printf("[pipeline] %s; continuing because continue_on_error=true", msg)
 				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
 			} else {
@@ -833,10 +842,6 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
-		}
-		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
-		if stage.OnEnter.Run.Output != "" && result != nil {
-			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
 		}
 	}
 
