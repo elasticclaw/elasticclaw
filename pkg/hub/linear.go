@@ -1104,6 +1104,14 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return
 	}
 
+	// Block PR creation if any required gate has failed.
+	if s.hasFailedRequiredGate(clawID) {
+		msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
+		log.Printf("[factory] claw %s [DONE] blocked by failed required gate", clawID[:8])
+		s.injectUserMessage(clawID, msg)
+		return
+	}
+
 	// Store all validated PRs (idempotent).
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
 		s.storePRMention(clawID, pr.repo, pr.number, pr.url)

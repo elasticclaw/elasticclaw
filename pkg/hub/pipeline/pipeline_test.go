@@ -335,3 +335,218 @@ stages:
 		t.Fatal("expected case-insensitive match")
 	}
 }
+
+func TestParseGateAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: android_validation
+    label: "Android Validation"
+    on_enter:
+      run:
+        command: python3 scripts/run_android_codebuild.py --source-dir next_mobile
+        output: android_validation
+    gate:
+      output: android_validation
+      pass:
+        path: status
+        values:
+          - passed
+          - skipped
+      fail:
+        path: status
+        values:
+          - failed
+          - error
+      required: true
+      treat_skipped_as_pass: true
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(p.Stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(p.Stages))
+	}
+	stage := p.Stages[0]
+	if stage.Gate == nil {
+		t.Fatal("expected gate")
+	}
+	if stage.Gate.Output != "android_validation" {
+		t.Fatalf("gate.output = %q, want android_validation", stage.Gate.Output)
+	}
+	if stage.Gate.Pass.Path != "status" {
+		t.Fatalf("gate.pass.path = %q, want status", stage.Gate.Pass.Path)
+	}
+	if len(stage.Gate.Pass.Values) != 2 {
+		t.Fatalf("expected 2 pass values, got %d", len(stage.Gate.Pass.Values))
+	}
+	if stage.Gate.Pass.Values[0] != "passed" {
+		t.Fatalf("gate.pass.values[0] = %q", stage.Gate.Pass.Values[0])
+	}
+	if stage.Gate.Fail.Path != "status" {
+		t.Fatalf("gate.fail.path = %q, want status", stage.Gate.Fail.Path)
+	}
+	if len(stage.Gate.Fail.Values) != 2 {
+		t.Fatalf("expected 2 fail values, got %d", len(stage.Gate.Fail.Values))
+	}
+	if !stage.Gate.Required {
+		t.Fatal("expected gate.required=true")
+	}
+	if !stage.Gate.TreatSkippedAsPass {
+		t.Fatal("expected gate.treat_skipped_as_pass=true")
+	}
+}
+
+func TestParseGateResultTrigger(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: create_pr
+    triggers:
+      - gate_result:
+          stage: android_validation
+          verdict: pass
+  - id: fix_android
+    triggers:
+      - gate_result:
+          stage: android_validation
+          verdict: fail
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(p.Stages) != 2 {
+		t.Fatalf("expected 2 stages, got %d", len(p.Stages))
+	}
+	passStage := p.StageForGateResult("android_validation", "pass")
+	if passStage == nil {
+		t.Fatal("expected stage for gate_result pass")
+	}
+	if passStage.ID != "create_pr" {
+		t.Fatalf("pass stage id = %q, want create_pr", passStage.ID)
+	}
+	failStage := p.StageForGateResult("android_validation", "fail")
+	if failStage == nil {
+		t.Fatal("expected stage for gate_result fail")
+	}
+	if failStage.ID != "fix_android" {
+		t.Fatalf("fail stage id = %q, want fix_android", failStage.ID)
+	}
+}
+
+func TestStageForGateResultCaseInsensitive(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: pr
+    triggers:
+      - gate_result:
+          stage: android_validation
+          verdict: PASS
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	stage := p.StageForGateResult("android_validation", "pass")
+	if stage == nil {
+		t.Fatal("expected case-insensitive match")
+	}
+}
+
+func TestParseOutputMatchesTrigger(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: create_pr
+    triggers:
+      - output_matches:
+          output: android_validation
+          path: status
+          any_of:
+            - passed
+            - skipped
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(p.Stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(p.Stages))
+	}
+	triggers := p.Stages[0].Triggers
+	if len(triggers) != 1 {
+		t.Fatalf("expected 1 trigger, got %d", len(triggers))
+	}
+	om := triggers[0].OutputMatches
+	if om == nil {
+		t.Fatal("expected output_matches trigger")
+	}
+	if om.Output != "android_validation" {
+		t.Fatalf("output = %q, want android_validation", om.Output)
+	}
+	if om.Path != "status" {
+		t.Fatalf("path = %q, want status", om.Path)
+	}
+	if len(om.AnyOf) != 2 {
+		t.Fatalf("expected 2 any_of values, got %d", len(om.AnyOf))
+	}
+	if om.AnyOf[0] != "passed" {
+		t.Fatalf("any_of[0] = %q", om.AnyOf[0])
+	}
+}
+
+func TestStageForOutputMatches(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: create_pr
+    triggers:
+      - output_matches:
+          output: build_info
+          path: status
+          any_of:
+            - success
+            - skipped
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	outputs := map[string]map[string]interface{}{
+		"build_info": {"status": "success"},
+	}
+	stage := p.StageForOutputMatches(outputs)
+	if stage == nil {
+		t.Fatal("expected stage for output_matches")
+	}
+	if stage.ID != "create_pr" {
+		t.Fatalf("stage id = %q, want create_pr", stage.ID)
+	}
+	// No match case
+	outputs2 := map[string]map[string]interface{}{
+		"build_info": {"status": "failed"},
+	}
+	if p.StageForOutputMatches(outputs2) != nil {
+		t.Fatal("expected nil for no match")
+	}
+}
+
+func TestGetJSONPath(t *testing.T) {
+	m := map[string]interface{}{
+		"status": "passed",
+		"details": map[string]interface{}{
+			"duration": "45s",
+			"nested": map[string]interface{}{
+				"value": 42,
+			},
+		},
+	}
+	if v := pipeline.GetJSONPath(m, "status"); v != "passed" {
+		t.Fatalf("status = %v, want passed", v)
+	}
+	if v := pipeline.GetJSONPath(m, "details.duration"); v != "45s" {
+		t.Fatalf("details.duration = %v, want 45s", v)
+	}
+	if v := pipeline.GetJSONPath(m, "details.nested.value"); v != 42 {
+		t.Fatalf("details.nested.value = %v, want 42", v)
+	}
+	if v := pipeline.GetJSONPath(m, "missing"); v != nil {
+		t.Fatalf("missing = %v, want nil", v)
+	}
+	if v := pipeline.GetJSONPath(m, "details.missing"); v != nil {
+		t.Fatalf("details.missing = %v, want nil", v)
+	}
+}
