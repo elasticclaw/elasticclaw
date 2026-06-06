@@ -16,6 +16,22 @@ const ROLE_ORDER: Record<Message["role"], number> = {
   system: 5,
 }
 
+function conversationMessages(messages: Message[]): Message[] {
+  return messages.filter((message) => message.role !== "activity" && message.role !== "activity_summary")
+}
+
+function oldestConversationCursor(messages: Message[]): string | null {
+  const oldest = conversationMessages(messages)[0]
+  if (!oldest) return null
+  return oldest.timestamp instanceof Date ? oldest.timestamp.toISOString() : String(oldest.timestamp)
+}
+
+function hasOlderConversationPage(messages: Message[], pageSize: number): boolean {
+  const conversations = conversationMessages(messages)
+  if (conversations.length < pageSize) return false
+  return messages[0]?.role !== "activity_summary"
+}
+
 interface UseWindowedMessagesOptions {
   clawId: string
   liveMessages: Message[] // streaming/new messages from websocket
@@ -50,10 +66,8 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
       .then((apiMsgs) => {
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
-        if (msgs.length > 0) {
-          oldestTimestamp.current = msgs[0].timestamp instanceof Date ? msgs[0].timestamp.toISOString() : String(msgs[0].timestamp)
-        }
-        setHasOlder(apiMsgs.length >= PAGE_SIZE)
+        oldestTimestamp.current = oldestConversationCursor(msgs)
+        setHasOlder(hasOlderConversationPage(msgs, PAGE_SIZE))
       })
       .catch(console.warn)
   }, [clawId])
@@ -75,10 +89,8 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
         return
       }
 
-      setHasOlder(apiMsgs.length >= PAGE_SIZE)
-      if (older.length > 0) {
-        oldestTimestamp.current = older[0].timestamp instanceof Date ? older[0].timestamp.toISOString() : String(older[0].timestamp)
-      }
+      setHasOlder(hasOlderConversationPage(older, PAGE_SIZE))
+      oldestTimestamp.current = oldestConversationCursor(older)
 
       setHistoricalMsgs((prev) => {
         const combined = [...older, ...prev]
