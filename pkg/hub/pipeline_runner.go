@@ -917,8 +917,14 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 			s.injectHubMessageByID(clawID, msg)
 		}
-		// Auto-transition to next stage if a gate_result trigger matches
-		go s.autoTransitionAfterGate(clawID, stage.ID, gateResult.Verdict, ctx)
+		// Auto-transition to next stage if a gate_result trigger matches.
+		// Normalise "skipped" → "pass" when TreatSkippedAsPass is set so that
+		// gate_result: { verdict: pass } stages are correctly reached.
+		autoTransitionVerdict := gateResult.Verdict
+		if autoTransitionVerdict == "skipped" && stage.Gate.TreatSkippedAsPass {
+			autoTransitionVerdict = "pass"
+		}
+		go s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx)
 		// If gate is required and failed (or errored), block further on_enter actions
 		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)

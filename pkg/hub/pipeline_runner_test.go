@@ -1052,3 +1052,73 @@ func TestGateErrorOnNonzeroExitNoValidJSON(t *testing.T) {
 		t.Fatalf("verdict = %q, want error (nonzero exit with no valid JSON should produce error verdict)", gateResult.Verdict)
 	}
 }
+
+func TestGateSkippedAsPassAutoTransition(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-skipped-pass"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "", `["factory:skipped-factory"]`,
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// No output stored — output is missing, but treat_skipped_as_pass is true
+	gate := &pipeline.Gate{
+		Output:             "missing_output",
+		TreatSkippedAsPass: true,
+	}
+
+	result := s.evaluateGate(clawID, "validate", gate)
+	if result.Verdict != "skipped" {
+		t.Fatalf("verdict = %q, want skipped", result.Verdict)
+	}
+
+	// Create a pipeline with a gate_result: pass trigger that should match
+	factory := &types.FactoryConfig{
+		Name:     "skipped-factory",
+		Template: "base",
+		PipelineYAML: `
+stages:
+  - id: validate
+    label: "Validate"
+    entry: true
+    on_enter:
+      inject: "Start validating"
+    gate:
+      output: missing_output
+      treat_skipped_as_pass: true
+  - id: create_pr
+    label: "Create PR"
+    triggers:
+      - gate_result:
+          stage: validate
+          verdict: pass
+    on_enter:
+      inject: "Skipped treated as pass, create PR"
+`,
+	}
+	s.hubCfg.Factories = []*types.FactoryConfig{factory}
+
+	// Set claw to validate stage
+	_, err = db.Exec(`UPDATE claws SET pipeline_stage='validate' WHERE id=?`, clawID)
+	if err != nil {
+		t.Fatalf("update stage: %v", err)
+	}
+
+	// Simulate the auto-transition that would happen after gate evaluation
+	// The skipped verdict should be normalised to pass for auto-transition
+	ctx := pipelineContext{Factory: factory, IssueID: ""}
+	s.autoTransitionAfterGate(clawID, "validate", "pass", ctx)
+
+	// Verify the stage transitioned to create_pr
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("get stage: %v", err)
+	}
+	if stage != "create_pr" {
+		t.Fatalf("stage = %q, want create_pr (skipped should be normalised to pass for auto-transition)", stage)
+	}
+}
