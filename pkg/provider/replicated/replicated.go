@@ -238,12 +238,13 @@ type VMCreateRequest struct {
 	TTL          string // e.g. 2h, 24h (overrides provider default, max 48h)
 }
 
-// ProvisionClaw creates a VM, waits for it to be running, then installs and
-// starts the OpenClaw agent with hub connection env vars.
-// env is passed through to the bootstrap script; templateFiles must be nil
-// because the Replicated CMX API does not support file injection at creation
-// time. The hub's bootstrapReplicated path handles file injection separately
-// after the VM is running via SSH.
+// ProvisionClaw creates a VM and returns the VM ID. The hub's poller monitors
+// VM status and triggers bootstrapReplicated separately once the VM is running.
+//
+// Neither templateFiles nor env can be injected at creation time because the
+// Replicated CMX API only provisions the VM — SSH is not available until the VM
+// is running. The hub's bootstrapReplicated path handles both file and env
+// injection separately after the VM is running via SSH.
 func (p *Provider) ProvisionClaw(
 	ctx context.Context,
 	req VMCreateRequest,
@@ -252,6 +253,9 @@ func (p *Provider) ProvisionClaw(
 ) (string, error) {
 	if len(templateFiles) > 0 {
 		return "", fmt.Errorf("replicated provider does not support templateFiles in ProvisionClaw: files must be injected after VM is running via SSH")
+	}
+	if len(env) > 0 {
+		return "", fmt.Errorf("replicated provider does not support env in ProvisionClaw: environment variables must be set after VM is running via SSH")
 	}
 	vmID, err := p.CreateVM(ctx, req)
 	if err != nil {

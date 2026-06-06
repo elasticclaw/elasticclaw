@@ -120,6 +120,58 @@ func TestProvisionClawRejectsTemplateFiles(t *testing.T) {
 	}
 }
 
+// TestProvisionClawRejectsEnv verifies that ProvisionClaw returns an error
+// when env vars are provided, since the Replicated CMX API does not support
+// environment variable injection at creation time.
+func TestProvisionClawRejectsEnv(t *testing.T) {
+	p := &Provider{
+		apiURL:      DefaultAPIURL,
+		token:       "test-token",
+		defaultTTL:  DefaultTTL,
+		defaultType: DefaultInstanceType,
+	}
+
+	_, err := p.ProvisionClaw(
+		context.Background(),
+		VMCreateRequest{Name: "test-claw"},
+		nil,
+		map[string]string{"FOO": "bar"},
+	)
+	if err == nil {
+		t.Fatal("expected error for env, got nil")
+	}
+	want := "replicated provider does not support env in ProvisionClaw: environment variables must be set after VM is running via SSH"
+	if err.Error() != want {
+		t.Errorf("error message mismatch\ngot:  %s\nwant: %s", err.Error(), want)
+	}
+}
+
+// TestProvisionClawRejectsBothTemplateFilesAndEnv verifies that ProvisionClaw
+// returns an error when both templateFiles and env are provided.
+func TestProvisionClawRejectsBothTemplateFilesAndEnv(t *testing.T) {
+	p := &Provider{
+		apiURL:      DefaultAPIURL,
+		token:       "test-token",
+		defaultTTL:  DefaultTTL,
+		defaultType: DefaultInstanceType,
+	}
+
+	_, err := p.ProvisionClaw(
+		context.Background(),
+		VMCreateRequest{Name: "test-claw"},
+		map[string][]byte{"hello.txt": []byte("hello world")},
+		map[string]string{"FOO": "bar"},
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// templateFiles check comes first
+	want := "replicated provider does not support templateFiles in ProvisionClaw: files must be injected after VM is running via SSH"
+	if err.Error() != want {
+		t.Errorf("error message mismatch\ngot:  %s\nwant: %s", err.Error(), want)
+	}
+}
+
 // TestSSHUserFromPublicKey verifies SSH username extraction from public key comments.
 func TestSSHUserFromPublicKey(t *testing.T) {
 	tests := []struct {
