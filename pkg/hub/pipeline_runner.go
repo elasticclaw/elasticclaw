@@ -522,7 +522,7 @@ type JudgeResult struct {
 }
 
 // executeJudgeAction runs a model-backed review with constrained inputs.
-func (s *Server) executeJudgeAction(clawID, stageID string, action pipeline.JudgeAction, ctx pipelineContext) (*JudgeResult, error) {
+func (s *Server) executeJudgeAction(clawID string, action pipeline.JudgeAction, ctx pipelineContext) (*JudgeResult, error) {
 	// Build system prompt with instructions and output schema
 	systemPrompt := action.Instructions + `
 
@@ -633,13 +633,45 @@ func judgeTimeout(timeoutStr string) time.Duration {
 }
 
 func parseJudgeResponse(raw string) (*JudgeResult, error) {
-	// Extract JSON from possible markdown fences
+	// Extract JSON from possible markdown fences by finding the first '{' and
+	// then matching the corresponding closing '}' using brace counting.
 	jsonStr := raw
 	if idx := strings.Index(raw, "{"); idx >= 0 {
 		jsonStr = raw[idx:]
 	}
-	if idx := strings.LastIndex(jsonStr, "}"); idx >= 0 {
-		jsonStr = jsonStr[:idx+1]
+	// Find the matching closing brace, not just the last one
+	depth := 0
+	endIdx := -1
+	inString := false
+	escapeNext := false
+	for i, ch := range jsonStr {
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escapeNext = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				endIdx = i
+				break
+			}
+		}
+	}
+	if endIdx >= 0 {
+		jsonStr = jsonStr[:endIdx+1]
 	}
 	jsonStr = strings.TrimSpace(jsonStr)
 
@@ -811,7 +843,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// Execute judge action if configured
 	if stage.OnEnter.Judge.Instructions != "" {
 		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
-		judgeResult, err := s.executeJudgeAction(clawID, stage.ID, stage.OnEnter.Judge, ctx)
+		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
 		if err != nil {
 			msg := fmt.Sprintf("Judge stage failed: %v", err)
 			log.Printf("[pipeline] %s", msg)
@@ -846,6 +878,8 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				}
 				s.injectHubMessageByID(clawID, findingsMsg)
 			}
+			// Auto-transition to next stage if a judge_verdict trigger matches
+			go s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx)
 			// Check required verdict
 			if stage.OnEnter.Judge.Require.Verdict != "" &&
 				!strings.EqualFold(judgeResult.Verdict, stage.OnEnter.Judge.Require.Verdict) {
@@ -856,8 +890,6 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 					return
 				}
 			}
-			// Auto-transition to next stage if a judge_verdict trigger matches
-			go s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx)
 		}
 	}
 

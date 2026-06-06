@@ -416,6 +416,51 @@ func TestParseJudgeResponseWithMarkdownFences(t *testing.T) {
 	}
 }
 
+func TestParseJudgeResponseWithTrailingText(t *testing.T) {
+	// LLM may add trailing text after the JSON object
+	raw := `{"verdict":"pass","summary":"Looks good"} Some trailing text here`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != "Looks good" {
+		t.Fatalf("summary = %q, want Looks good", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseWithNestedBraces(t *testing.T) {
+	// Nested braces in strings should not confuse the parser
+	raw := `{"verdict":"pass","summary":"Check {nested} braces","findings":[]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != "Check {nested} braces" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseWithEscapedQuotes(t *testing.T) {
+	// Escaped quotes should not confuse the parser
+	raw := `{"verdict":"pass","summary":"It said \"hello\"","findings":[]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != `It said "hello"` {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
 func TestParseJudgeResponseMissingVerdict(t *testing.T) {
 	raw := `{"summary":"No verdict"}`
 	_, err := parseJudgeResponse(raw)
