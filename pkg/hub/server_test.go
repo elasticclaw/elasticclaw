@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -798,6 +799,131 @@ func TestMessageActivityEndpointExpandsSummaryRange(t *testing.T) {
 	if len(msgs) != 2 || msgs[0].ID != "activity-0" || msgs[1].ID != "activity-1" {
 		t.Fatalf("activity messages = %#v, want first two", msgs)
 	}
+}
+
+func TestMessageTimelinePreservesDisplayedStateAcrossActivityRuns(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	offset := 0
+	insertMessage := func(id, role, content, format string) {
+		t.Helper()
+		offset++
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "claw-1", "test-tenant-id", role, content, format, base.Add(time.Duration(offset)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertActivityRun := func(prefix string, count int) {
+		t.Helper()
+		for i := 0; i < count; i++ {
+			insertMessage(fmt.Sprintf("%s-%03d", prefix, i), "activity", "tool", `activity:{"kind":"tool","tool":"exec"}`)
+		}
+	}
+
+	insertMessage("hub-1", "hub", "Injected proceed message", "")
+	insertActivityRun("activity-a", 35)
+	insertMessage("claw-1", "claw", "Assistant message 1", "")
+	insertActivityRun("activity-b", 65)
+	insertMessage("claw-2", "claw", "Assistant message 2", "")
+	insertActivityRun("activity-c", 150)
+	insertMessage("claw-3", "claw", "Assistant message 3", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/timeline", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var timeline []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&timeline); err != nil {
+		t.Fatal(err)
+	}
+
+	type expectedItem struct {
+		role    string
+		id      string
+		content string
+		count   int
+	}
+	want := []expectedItem{
+		{role: "hub", id: "hub-1", content: "Injected proceed message"},
+		{role: "activity_summary", count: 35},
+		{role: "claw", id: "claw-1", content: "Assistant message 1"},
+		{role: "activity_summary", count: 65},
+		{role: "claw", id: "claw-2", content: "Assistant message 2"},
+		{role: "activity_summary", count: 150},
+		{role: "claw", id: "claw-3", content: "Assistant message 3"},
+	}
+	if len(timeline) != len(want) {
+		t.Fatalf("timeline len = %d, want %d: %#v", len(timeline), len(want), timeline)
+	}
+
+	for i, wantItem := range want {
+		got := timeline[i]
+		if got.Role != wantItem.role {
+			t.Fatalf("timeline[%d].role = %q, want %q; item=%#v", i, got.Role, wantItem.role, got)
+		}
+		if wantItem.id != "" && got.ID != wantItem.id {
+			t.Fatalf("timeline[%d].id = %q, want %q", i, got.ID, wantItem.id)
+		}
+		if wantItem.content != "" && got.Content != wantItem.content {
+			t.Fatalf("timeline[%d].content = %q, want %q", i, got.Content, wantItem.content)
+		}
+		if wantItem.count > 0 {
+			meta := decodeActivitySummaryMeta(t, got)
+			if meta.Count != wantItem.count {
+				t.Fatalf("timeline[%d] summary count = %d, want %d", i, meta.Count, wantItem.count)
+			}
+			expanded := getActivityMessagesForSummary(t, s, got)
+			if len(expanded) != wantItem.count {
+				t.Fatalf("timeline[%d] expanded activity len = %d, want %d", i, len(expanded), wantItem.count)
+			}
+		}
+	}
+}
+
+func decodeActivitySummaryMeta(t *testing.T, msg types.HubMessage) activitySummaryMeta {
+	t.Helper()
+	if !strings.HasPrefix(msg.Format, "activity_summary:") {
+		t.Fatalf("summary format = %q, want activity_summary prefix", msg.Format)
+	}
+	var meta activitySummaryMeta
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(msg.Format, "activity_summary:")), &meta); err != nil {
+		t.Fatalf("decode summary meta: %v", err)
+	}
+	return meta
+}
+
+func getActivityMessagesForSummary(t *testing.T, s *Server, msg types.HubMessage) []types.HubMessage {
+	t.Helper()
+	meta := decodeActivitySummaryMeta(t, msg)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/messages/%s/activity?from=%s&to=%s&limit=500", msg.ClawID, url.QueryEscape(meta.From), url.QueryEscape(meta.To)), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, msg.TenantID))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	return msgs
 }
 
 func TestInitialPlanWakePromptRequiresVisiblePlanBeforeWork(t *testing.T) {
