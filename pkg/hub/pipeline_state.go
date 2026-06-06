@@ -26,3 +26,29 @@ func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
 	}
 	return rows > 0
 }
+
+// recordPipelineStageVisit records that a claw has visited a given pipeline stage.
+// Used to prevent one-shot triggers (like output_matches) from re-firing.
+func (s *Server) recordPipelineStageVisit(clawID, stageID string) {
+	_, err := s.db.Exec(`
+		INSERT INTO pipeline_stage_history(claw_id, stage_id, created_at)
+		VALUES(?, ?, ?)
+		ON CONFLICT(claw_id, stage_id) DO NOTHING`,
+		clawID, stageID, now())
+	if err != nil {
+		log.Printf("[pipeline] failed to record stage visit for claw %s stage %s: %v", clawID[:8], stageID, err)
+	}
+}
+
+// hasVisitedPipelineStage returns true if the claw has previously visited the
+// given pipeline stage.
+func (s *Server) hasVisitedPipelineStage(clawID, stageID string) bool {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM pipeline_stage_history
+		WHERE claw_id=? AND stage_id=?`, clawID, stageID).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}

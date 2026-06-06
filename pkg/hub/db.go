@@ -311,6 +311,16 @@ func migrate(db *sql.DB) error {
 		PRIMARY KEY (claw_id, stage_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_gate_results_claw ON pipeline_gate_results(claw_id, created_at);
+
+	-- v11: pipeline_stage_history tracks visited stages to prevent one-shot
+	-- triggers (like output_matches) from re-firing on every message.
+	CREATE TABLE IF NOT EXISTS pipeline_stage_history (
+		claw_id    TEXT NOT NULL,
+		stage_id   TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		PRIMARY KEY (claw_id, stage_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_pipeline_stage_history_claw ON pipeline_stage_history(claw_id, created_at);
 	`)
 	return err
 }

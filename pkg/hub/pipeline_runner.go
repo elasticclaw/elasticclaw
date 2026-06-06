@@ -1270,9 +1270,15 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 	}
 	stage := pl.StageForMessageContains(message)
 	if stage == nil {
-		// Also check output_matches triggers against current pipeline outputs
+		// Also check output_matches triggers against current pipeline outputs.
+		// Only evaluate if the claw has not already visited this stage, to
+		// prevent persistent DB state from re-triggering backwards regressions
+		// on every subsequent message.
 		outputs := s.loadPipelineOutputs(clawID)
 		stage = pl.StageForOutputMatches(outputs)
+		if stage != nil && s.hasVisitedPipelineStage(clawID, stage.ID) {
+			stage = nil
+		}
 	}
 	if stage == nil {
 		return false
@@ -1285,6 +1291,9 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false
 	}
+	// Record that this claw has visited this stage, so one-shot triggers
+	// (like output_matches) don't re-fire on subsequent messages.
+	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, ctx)
 
