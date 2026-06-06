@@ -251,6 +251,38 @@ func TestHandleClawDoneSignal_BlockedByFailedRequiredGate(t *testing.T) {
 	}
 }
 
+func TestHandleClawDoneSignal_BlockedByErrorRequiredGate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-done-gate-error"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "ENG-125",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Insert an error verdict required gate — should also block [DONE]
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		clawID, "android_validation", "android_validation", "error", "", "", 1)
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count claw_prs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 PRs stored for error verdict, got %d", count)
+	}
+}
+
 func TestHandleClawDoneSignal_AllowedWhenNoFailedRequiredGate(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 

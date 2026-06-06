@@ -902,6 +902,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
 		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
 			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+		} else if gateResult.Verdict == "error" {
+			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
+			s.injectHubMessageByID(clawID, msg)
 		} else {
 			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
 			if gateResult.MatchedPath != "" {
@@ -911,9 +914,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 		// Auto-transition to next stage if a gate_result trigger matches
 		go s.autoTransitionAfterGate(clawID, stage.ID, gateResult.Verdict, ctx)
-		// If gate is required and failed, block further on_enter actions
-		if stage.Gate.Required && gateResult.Verdict == "fail" {
-			msg := fmt.Sprintf("Required gate %q failed — blocking further pipeline actions", stage.ID)
+		// If gate is required and failed (or errored), block further on_enter actions
+		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
+			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			return
@@ -1412,6 +1415,7 @@ func (s *Server) persistGateResult(clawID, stageID string, gate *pipeline.Gate, 
 }
 
 // loadGateResult returns the most recent gate result for a given claw and stage.
+// Currently used by tests and available for future UI / dashboard display of gate history.
 func (s *Server) loadGateResult(clawID, stageID string) *GateEvaluationResult {
 	var verdict, matchedPath, matchedValue string
 	var required bool
@@ -1429,12 +1433,13 @@ func (s *Server) loadGateResult(clawID, stageID string) *GateEvaluationResult {
 	}
 }
 
-// hasFailedRequiredGate checks whether any required gate for this claw has failed.
+// hasFailedRequiredGate checks whether any required gate for this claw has failed
+// or errored (i.e. produced a non-pass verdict that should block PR creation).
 func (s *Server) hasFailedRequiredGate(clawID string) bool {
 	var count int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM pipeline_gate_results
-		WHERE claw_id=? AND verdict='fail' AND required=1`, clawID).Scan(&count)
+		WHERE claw_id=? AND verdict IN ('fail','error') AND required=1`, clawID).Scan(&count)
 	if err != nil {
 		return false
 	}

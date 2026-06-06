@@ -835,6 +835,18 @@ func TestHasFailedRequiredGate(t *testing.T) {
 	if !s.hasFailedRequiredGate(clawID) {
 		t.Fatal("expected failed required gate")
 	}
+
+	// Insert an error verdict required gate — should also block
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		clawID, "test-stage-2", "build_info", "error", "", "", 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+	if !s.hasFailedRequiredGate(clawID) {
+		t.Fatal("expected failed required gate for error verdict")
+	}
 }
 
 func TestLoadGateResult(t *testing.T) {
