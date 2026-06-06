@@ -219,7 +219,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
-	mux.HandleFunc("/api/branding", s.handleBranding)
+	mux.HandleFunc("/api/branding", s.handleBranding) // public — no auth required
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))

@@ -19,16 +19,21 @@ function loadBranding(): Promise<Branding> {
 
   const hubUrl = getHubUrl()
   pending = fetch(`${hubUrl}/api/branding`)
-    .then(r => r.ok ? r.json() : DEFAULT)
+    .then(r => r.ok ? r.json() : null)
     .then(d => {
+      // Branding is non-critical; cache the fallback for this page lifetime
+      // so shared layout consumers do not repeatedly retry a failed endpoint.
       const branding: Branding = {
-        appName: d.appName || DEFAULT.appName,
-        logoUrl: d.logoUrl || DEFAULT.logoUrl,
+        appName: d?.appName || DEFAULT.appName,
+        logoUrl: d?.logoUrl || DEFAULT.logoUrl,
       }
       cached = branding
       return branding
     })
-    .catch(() => DEFAULT)
+    .catch(() => {
+      cached = DEFAULT
+      return DEFAULT
+    })
     .finally(() => {
       pending = null
     })
