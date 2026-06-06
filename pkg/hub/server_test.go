@@ -982,6 +982,88 @@ func TestMessageTimelinePreservesDisplayedStateAcrossActivityRuns(t *testing.T) 
 	}
 }
 
+func TestStreamingSegmentsPersistAroundActivityForRefreshTimeline(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	cc := &clawConn{id: "claw-1", tenantID: "test-tenant-id"}
+	persistSegment := func(id, content string, offsetSeconds int) {
+		t.Helper()
+		cc.mu.Lock()
+		cc.streamingMsgID = id
+		cc.streamingBuf.WriteString(content)
+		cc.mu.Unlock()
+		if err := s.flushStreamingSegment("claw-1", "test-tenant-id", cc); err != nil {
+			t.Fatal(err)
+		}
+		_, err := db.Exec(`UPDATE messages SET created_at=? WHERE id=?`, base.Add(time.Duration(offsetSeconds)*time.Second), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertActivity := func(id string, offsetSeconds int) {
+		t.Helper()
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "claw-1", "test-tenant-id", "activity", "exec", `activity:{"kind":"tool","tool":"exec"}`, base.Add(time.Duration(offsetSeconds)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	persistSegment("seg-1", "Assistant segment 1", 1)
+	insertActivity("activity-1", 2)
+	persistSegment("seg-2", "Assistant segment 2", 3)
+	insertActivity("activity-2", 4)
+	_, err = db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"seg-3", "claw-1", "test-tenant-id", "claw", "Assistant segment 3", "", base.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/timeline", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var timeline []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&timeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 5 {
+		t.Fatalf("timeline len = %d, want 5: %#v", len(timeline), timeline)
+	}
+	wantRoles := []string{"claw", "activity_summary", "claw", "activity_summary", "claw"}
+	wantIDs := []string{"seg-1", "", "seg-2", "", "seg-3"}
+	for i := range wantRoles {
+		if timeline[i].Role != wantRoles[i] {
+			t.Fatalf("timeline[%d].role = %q, want %q; timeline=%#v", i, timeline[i].Role, wantRoles[i], timeline)
+		}
+		if wantIDs[i] != "" && timeline[i].ID != wantIDs[i] {
+			t.Fatalf("timeline[%d].id = %q, want %q", i, timeline[i].ID, wantIDs[i])
+		}
+		if timeline[i].Role == "activity_summary" {
+			meta := decodeActivitySummaryMeta(t, timeline[i])
+			if meta.Count != 1 {
+				t.Fatalf("timeline[%d] activity count = %d, want 1", i, meta.Count)
+			}
+		}
+	}
+}
+
 func decodeActivitySummaryMeta(t *testing.T, msg types.HubMessage) activitySummaryMeta {
 	t.Helper()
 	if !strings.HasPrefix(msg.Format, "activity_summary:") {
