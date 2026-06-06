@@ -155,7 +155,6 @@ export default function SettingsSectionPage() {
     .split("/")
     .filter(Boolean)
     .slice(1)
-    .map((part) => decodeURIComponent(part))
   const parts = pathname.startsWith("/settings") ? pathnameParts : paramParts
   const firstPart = parts[0] ?? ""
   const secondPart = parts[1] ?? ""
