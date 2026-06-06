@@ -202,6 +202,92 @@ func TestGetSettingsTreatsBlankOllamaKeyAsConfigured(t *testing.T) {
 	}
 }
 
+func TestSettingsStatusProviderReadiness(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider map[string]types.ProviderConfig
+		want     bool
+	}{
+		{
+			name:     "no providers",
+			provider: nil,
+			want:     false,
+		},
+		{
+			name: "empty daytona",
+			provider: map[string]types.ProviderConfig{
+				"daytona": {},
+			},
+			want: false,
+		},
+		{
+			name: "daytona with api key",
+			provider: map[string]types.ProviderConfig{
+				"daytona": {APIKey: "daytona-key"},
+			},
+			want: true,
+		},
+		{
+			name: "empty replicated",
+			provider: map[string]types.ProviderConfig{
+				"replicated": {},
+			},
+			want: false,
+		},
+		{
+			name: "replicated with token",
+			provider: map[string]types.ProviderConfig{
+				"replicated": {Token: "replicated-token"},
+			},
+			want: true,
+		},
+		{
+			name: "docker does not require credentials",
+			provider: map[string]types.ProviderConfig{
+				"docker": {},
+			},
+			want: true,
+		},
+		{
+			name: "exedev does not require configured credentials",
+			provider: map[string]types.ProviderConfig{
+				"exedev": {},
+			},
+			want: true,
+		},
+		{
+			name: "named provider uses explicit type",
+			provider: map[string]types.ProviderConfig{
+				"primary": {Type: "daytona", APIKey: "daytona-key"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+				Providers: tt.provider,
+			}, "", "", "")
+
+			req := httptest.NewRequest(http.MethodGet, "/api/settings/status", nil)
+			rec := httptest.NewRecorder()
+			s.handleSettingsStatus(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			var status SettingsStatus
+			if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status.HasProvider != tt.want {
+				t.Fatalf("HasProvider = %v, want %v", status.HasProvider, tt.want)
+			}
+		})
+	}
+}
+
 func TestTemplateFlakeFiles(t *testing.T) {
 	files := map[string]string{
 		"flake.nix":  "{ description = \"test\"; }",
