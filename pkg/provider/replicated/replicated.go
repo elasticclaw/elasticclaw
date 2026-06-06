@@ -240,13 +240,19 @@ type VMCreateRequest struct {
 
 // ProvisionClaw creates a VM, waits for it to be running, then installs and
 // starts the OpenClaw agent with hub connection env vars.
-// templateFiles and env are injected into the workspace.
+// env is passed through to the bootstrap script; templateFiles must be nil
+// because the Replicated CMX API does not support file injection at creation
+// time. The hub's bootstrapReplicated path handles file injection separately
+// after the VM is running via SSH.
 func (p *Provider) ProvisionClaw(
 	ctx context.Context,
 	req VMCreateRequest,
 	templateFiles map[string][]byte,
 	env map[string]string,
 ) (string, error) {
+	if len(templateFiles) > 0 {
+		return "", fmt.Errorf("replicated provider does not support templateFiles in ProvisionClaw: files must be injected after VM is running via SSH")
+	}
 	vmID, err := p.CreateVM(ctx, req)
 	if err != nil {
 		return "", err
@@ -310,7 +316,19 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 
 // Create implements the types.Provider interface used by the existing cmd layer.
 // For CMX VMs we create the VM and return a placeholder instance.
+//
+// Note: Replicated CMX VMs cannot inject TemplateFiles or Env at creation time
+// because the VM must be running before SSH is available. The hub's
+// bootstrapReplicated path handles file injection separately after the VM is
+// running. If TemplateFiles or Env are provided here, an error is returned
+// to avoid silent data loss.
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
+	if len(req.TemplateFiles) > 0 {
+		return nil, fmt.Errorf("replicated provider does not support TemplateFiles in Create: files must be injected after VM is running via SSH")
+	}
+	if len(req.Env) > 0 {
+		return nil, fmt.Errorf("replicated provider does not support Env in Create: environment variables must be set after VM is running via SSH")
+	}
 	vmID, err := p.CreateVM(ctx, VMCreateRequest{Name: req.Name})
 	if err != nil {
 		return nil, err
