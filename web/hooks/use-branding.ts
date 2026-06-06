@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react"
 import { getHubUrl } from "@/lib/hub-url"
-import { getHubToken } from "@/lib/auth-storage"
 
 interface Branding {
   appName: string
@@ -12,25 +11,36 @@ interface Branding {
 const DEFAULT: Branding = { appName: "ElasticClaw", logoUrl: "" }
 
 let cached: Branding | null = null
+let pending: Promise<Branding> | null = null
+
+function loadBranding(): Promise<Branding> {
+  if (cached) return Promise.resolve(cached)
+  if (pending) return pending
+
+  const hubUrl = getHubUrl()
+  pending = fetch(`${hubUrl}/api/branding`)
+    .then(r => r.ok ? r.json() : DEFAULT)
+    .then(d => {
+      const branding: Branding = {
+        appName: d.appName || DEFAULT.appName,
+        logoUrl: d.logoUrl || DEFAULT.logoUrl,
+      }
+      cached = branding
+      return branding
+    })
+    .catch(() => DEFAULT)
+    .finally(() => {
+      pending = null
+    })
+  return pending
+}
 
 export function useBranding(): Branding {
   const [branding, setBranding] = useState<Branding>(cached ?? DEFAULT)
 
   useEffect(() => {
     if (cached) return
-    const hubUrl = getHubUrl()
-    const token = typeof window !== "undefined" ? getHubToken() || "" : ""
-    fetch(`${hubUrl}/api/hub-config`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then(d => {
-        const b: Branding = {
-          appName: d.appName || "ElasticClaw",
-          logoUrl: d.logoUrl || "",
-        }
-        cached = b
-        setBranding(b)
-      })
-      .catch(() => {})
+    loadBranding().then(setBranding)
   }, [])
 
   return branding

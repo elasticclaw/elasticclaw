@@ -1193,6 +1193,38 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	}
 }
 
+func TestBrandingEndpointIsPublicAndDoesNotExposeToken(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "hub-token",
+		Branding: &types.BrandingConfig{
+			AppName: "Customer Claw",
+			LogoURL: "https://example.com/logo.png",
+		},
+	}, "", "", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/branding", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleBranding(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["appName"] != "Customer Claw" {
+		t.Fatalf("appName = %q", body["appName"])
+	}
+	if body["logoUrl"] != "https://example.com/logo.png" {
+		t.Fatalf("logoUrl = %q", body["logoUrl"])
+	}
+	if _, ok := body["token"]; ok {
+		t.Fatalf("branding response exposed token: %#v", body)
+	}
+}
+
 func TestBroadcastToUsersFiltersGitHubSessionsByClawTags(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Auth: &types.AuthConfig{
