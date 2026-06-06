@@ -219,6 +219,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
+	mux.HandleFunc("/api/branding", s.handleBranding) // public — no auth required
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
@@ -594,6 +595,20 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{
 		"github_oauth_enabled":  githubOAuthEnabled,
 		"password_auth_enabled": passwordAuthEnabled,
+	})
+}
+
+func (s *Server) handleBranding(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	var appName, logoURL string
+	if s.hubCfg.Branding != nil {
+		appName = s.hubCfg.Branding.AppName
+		logoURL = s.hubCfg.Branding.LogoURL
+	}
+	s.mu.RUnlock()
+	jsonOK(w, map[string]string{
+		"appName": appName,
+		"logoUrl": logoURL,
 	})
 }
 
