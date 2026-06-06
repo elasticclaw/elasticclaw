@@ -143,6 +143,9 @@ async function patchSettings(patch: object): Promise<void> {
   if (!res.ok) throw new Error(await res.text())
 }
 
+// Sentinel value used in static-export paths to represent "select first workspace"
+const WORKSPACE_PLACEHOLDER = "_workspace"
+
 export default function SettingsSectionPage() {
   const params = useParams()
   const router = useRouter()
@@ -150,19 +153,27 @@ export default function SettingsSectionPage() {
   const firstPart = parts[0] ?? ""
   const secondPart = parts[1] ?? ""
   const firstPartIsSection = isValidSection(firstPart)
-  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection
-  const rawSection = hasRouteWorkspace ? (secondPart || "workspaces") : (firstPart || "workspaces")
+  const firstPartIsPlaceholder = firstPart === WORKSPACE_PLACEHOLDER
+  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection && !firstPartIsPlaceholder
+  const rawSection = (hasRouteWorkspace || firstPartIsPlaceholder) ? (secondPart || "workspaces") : (firstPart || "workspaces")
   const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
   const rawWorkspace = hasRouteWorkspace ? firstPart : ""
   const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
   const routeHasOverviewSlug = hasRouteWorkspace && secondPart === "workspaces"
 
-  // Redirect invalid sections to the workspace overview.
+  // Redirect unsupported paths to a safe fallback:
+  //   - Invalid section names → /settings/workspaces
+  //   - More than 2 path parts → /settings/workspaces
+  //   - Placeholder without workspace loaded yet → handled by workspace selection effect
   useEffect(() => {
+    if (parts.length > 2) {
+      router.replace("/settings/workspaces")
+      return
+    }
     if (!isValidSection(rawSection)) {
       router.replace("/settings/workspaces")
     }
-  }, [rawSection, router])
+  }, [parts.length, rawSection, router])
 
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [saving, setSaving] = useState(false)
@@ -210,6 +221,8 @@ export default function SettingsSectionPage() {
       })
   }, [routeWorkspace])
 
+  // When the "_workspace" placeholder is used (static-export sentinel) or no
+  // workspace is present in the URL, redirect to the actual first workspace.
   useEffect(() => {
     if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
     const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
@@ -217,10 +230,11 @@ export default function SettingsSectionPage() {
       : selectedWorkspace || workspaces[0].name
     const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
     const target = section === "workspaces" ? workspaceBase : `${workspaceBase}/${section}`
-    if ((!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug) {
+    const needsRedirect = (!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug || firstPartIsPlaceholder
+    if (needsRedirect) {
       router.replace(target)
     }
-  }, [routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
+  }, [firstPartIsPlaceholder, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)
