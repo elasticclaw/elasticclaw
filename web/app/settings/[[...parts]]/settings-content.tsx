@@ -1,6 +1,6 @@
 "use client"
 
-import { useParams, useRouter } from "next/navigation"
+import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
@@ -148,8 +148,15 @@ const WORKSPACE_PLACEHOLDER = "_workspace"
 
 export default function SettingsSectionPage() {
   const params = useParams()
+  const pathname = usePathname()
   const router = useRouter()
-  const parts = Array.isArray(params.parts) ? params.parts : []
+  const paramParts = Array.isArray(params.parts) ? params.parts : []
+  const pathnameParts = pathname
+    .split("/")
+    .filter(Boolean)
+    .slice(1)
+    .map((part) => decodeURIComponent(part))
+  const parts = pathname.startsWith("/settings") ? pathnameParts : paramParts
   const firstPart = parts[0] ?? ""
   const secondPart = parts[1] ?? ""
   const firstPartIsSection = isValidSection(firstPart)
