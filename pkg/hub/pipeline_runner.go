@@ -1259,6 +1259,11 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 	}
 	stage := pl.StageForMessageContains(message)
 	if stage == nil {
+		// Also check output_matches triggers against current pipeline outputs
+		outputs := s.loadPipelineOutputs(clawID)
+		stage = pl.StageForOutputMatches(outputs)
+	}
+	if stage == nil {
 		return false
 	}
 	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)

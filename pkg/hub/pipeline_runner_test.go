@@ -888,3 +888,74 @@ func TestLoadGateResult(t *testing.T) {
 		t.Fatalf("matched_value = %q, want passed", result.MatchedValue)
 	}
 }
+
+func TestCheckPipelineMessageTriggersOutputMatches(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-output-matches-trigger"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "", `["factory:test-factory"]`,
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Store a pipeline output that should match the output_matches trigger
+	s.persistPipelineOutput(clawID, "build-stage", "build_info", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"success","duration":"45s"}`,
+	})
+
+	// Create a factory with a pipeline that has an output_matches trigger
+	factory := &types.FactoryConfig{
+		Name:     "test-factory",
+		Template: "base",
+		PipelineYAML: `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: pr_ready
+    label: "PR Ready"
+    triggers:
+      - output_matches:
+          output: build_info
+          path: status
+          any_of:
+            - success
+            - passed
+    on_enter:
+      inject: "Build succeeded, create PR"
+`,
+	}
+
+	// Set the factory on the server config
+	s.hubCfg.Factories = []*types.FactoryConfig{factory}
+
+	// The claw should transition from working to pr_ready because build_info.status == "success"
+	// First, set the claw to the working stage
+	_, err = db.Exec(`UPDATE claws SET pipeline_stage='working' WHERE id=?`, clawID)
+	if err != nil {
+		t.Fatalf("update stage: %v", err)
+	}
+
+	// Now check triggers — this should find the output_matches trigger and transition
+	// We need to call checkPipelineMessageTriggers with a message that doesn't match message_contains
+	// so it falls through to output_matches
+	transitioned := s.checkPipelineMessageTriggers(clawID, "some random message that doesn't match anything")
+	if !transitioned {
+		t.Fatal("expected output_matches trigger to transition the stage")
+	}
+
+	// Verify the stage transitioned
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("get stage: %v", err)
+	}
+	if stage != "pr_ready" {
+		t.Fatalf("stage = %q, want pr_ready", stage)
+	}
+}
