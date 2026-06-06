@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -367,5 +368,264 @@ func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
+	}
+}
+
+func TestParseJudgeResponseValid(t *testing.T) {
+	raw := `{"verdict":"pass","summary":"Looks good","findings":[],"required_fixes":[]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != "Looks good" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseFail(t *testing.T) {
+	raw := `{"verdict":"fail","summary":"Issues found","findings":[{"file":"main.go","line":"42","comment":"nil pointer","severity":"high"}],"required_fixes":["fix nil pointer"]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "fail" {
+		t.Fatalf("verdict = %q, want fail", result.Verdict)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(result.Findings))
+	}
+	if result.Findings[0].File != "main.go" {
+		t.Fatalf("finding.file = %q", result.Findings[0].File)
+	}
+	if len(result.RequiredFixes) != 1 {
+		t.Fatalf("expected 1 required fix, got %d", len(result.RequiredFixes))
+	}
+}
+
+func TestParseJudgeResponseWithMarkdownFences(t *testing.T) {
+	raw := "```json\n{\"verdict\":\"pass\",\"summary\":\"Good\",\"findings\":[],\"required_fixes\":[]}\n```"
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+}
+
+func TestParseJudgeResponseWithTrailingText(t *testing.T) {
+	// LLM may add trailing text after the JSON object
+	raw := `{"verdict":"pass","summary":"Looks good"} Some trailing text here`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != "Looks good" {
+		t.Fatalf("summary = %q, want Looks good", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseWithNestedBraces(t *testing.T) {
+	// Nested braces in strings should not confuse the parser
+	raw := `{"verdict":"pass","summary":"Check {nested} braces","findings":[]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != "Check {nested} braces" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseWithEscapedQuotes(t *testing.T) {
+	// Escaped quotes should not confuse the parser
+	raw := `{"verdict":"pass","summary":"It said \"hello\"","findings":[]}`
+	result, err := parseJudgeResponse(raw)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.Summary != `It said "hello"` {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+}
+
+func TestParseJudgeResponseMissingVerdict(t *testing.T) {
+	raw := `{"summary":"No verdict"}`
+	_, err := parseJudgeResponse(raw)
+	if err == nil {
+		t.Fatal("expected error for missing verdict")
+	}
+}
+
+func TestParseJudgeResponseInvalidVerdict(t *testing.T) {
+	raw := `{"verdict":"maybe","summary":"Unclear"}`
+	_, err := parseJudgeResponse(raw)
+	if err == nil {
+		t.Fatal("expected error for invalid verdict")
+	}
+}
+
+func TestJudgeTimeoutDefault(t *testing.T) {
+	if d := judgeTimeout(""); d != 2*time.Minute {
+		t.Fatalf("default timeout = %v, want 2m", d)
+	}
+}
+
+func TestJudgeTimeoutCustom(t *testing.T) {
+	if d := judgeTimeout("5m"); d != 5*time.Minute {
+		t.Fatalf("custom timeout = %v, want 5m", d)
+	}
+}
+
+func TestJudgeTimeoutInvalid(t *testing.T) {
+	if d := judgeTimeout("invalid"); d != 2*time.Minute {
+		t.Fatalf("invalid timeout fallback = %v, want 2m", d)
+	}
+}
+
+func TestTruncateString(t *testing.T) {
+	if truncateString("hello", 10) != "hello" {
+		t.Fatal("short string should not be truncated")
+	}
+	if truncateString("hello world", 5) != "hello..." {
+		t.Fatalf("truncated = %q", truncateString("hello world", 5))
+	}
+}
+
+func TestRunOnEnterJudgeBlocksOnFail(t *testing.T) {
+	// This test verifies that when a judge stage fails and continue_on_error=false,
+	// runOnEnter returns early and does not process subsequent actions.
+	// We can't easily mock the LLM call, so we test the parsing and timeout
+	// functions directly above. The integration with runOnEnter is tested
+	// via the judge action being present in the stage and the flow logic.
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-judge-block"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Insert a test output for the judge to reference
+	s.persistPipelineOutput(clawID, "test-stage", "test_output", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   "PASS\nok  github.com/elasticclaw/elasticclaw/pkg/hub\t0.042s",
+	})
+
+	// Verify the output is stored
+	outputs := s.loadPipelineOutputs(clawID)
+	if outputs == nil {
+		t.Fatal("expected outputs")
+	}
+	if _, ok := outputs["test_output"]; !ok {
+		t.Fatal("expected test_output in outputs")
+	}
+
+	// Verify judge stage with required verdict would be processed
+	stage := pipeline.Stage{
+		ID:    "review",
+		Label: "Review",
+		OnEnter: pipeline.OnEnter{
+			Judge: pipeline.JudgeAction{
+				Instructions: "Review the code",
+				Inputs:       []pipeline.JudgeInput{pipeline.JudgeInputIssue},
+				Require:      pipeline.JudgeRequire{Verdict: "pass"},
+				Output:       "review_result",
+			},
+			Inject: "Continue to PR",
+		},
+	}
+
+	// The judge will fail because no LLM keys are configured, and
+	// continue_on_error=false, so runOnEnter should return early.
+	// We verify this by checking that no inject message was sent.
+	s.runOnEnter(clawID, stage, pipelineContext{})
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	// Should have 1 error message from the judge failure, not the inject message
+	if messageCount != 1 {
+		t.Fatalf("expected 1 message (judge error), got %d", messageCount)
+	}
+}
+
+func TestRunOnEnterJudgeContinueOnError(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-judge-continue"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "review",
+		Label: "Review",
+		OnEnter: pipeline.OnEnter{
+			Judge: pipeline.JudgeAction{
+				Instructions:    "Review the code",
+				Inputs:          []pipeline.JudgeInput{pipeline.JudgeInputIssue},
+				Require:         pipeline.JudgeRequire{Verdict: "pass"},
+				Output:          "review_result",
+				ContinueOnError: true,
+			},
+			Inject: "Continue to PR",
+		},
+	}
+
+	s.runOnEnter(clawID, stage, pipelineContext{})
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	// Should have 2 messages: judge error + inject message (because continue_on_error=true)
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (judge error + inject), got %d", messageCount)
+	}
+}
+
+func TestAutoTransitionAfterJudge(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-auto-judge"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "review",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// autoTransitionAfterJudge with no pipeline context should do nothing
+	s.autoTransitionAfterJudge(clawID, "pass", pipelineContext{})
+
+	// Stage should remain "review" since no pipeline was configured
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("get stage: %v", err)
+	}
+	if stage != "review" {
+		t.Fatalf("stage = %q, want review", stage)
 	}
 }

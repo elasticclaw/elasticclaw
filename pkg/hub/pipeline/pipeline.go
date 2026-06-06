@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,6 +33,9 @@ type Trigger struct {
 	PRClosed bool
 	// PRConditions transitions when all stated PR conditions are met.
 	PRConditions *PRConditionsTrigger `yaml:"pr_conditions"`
+	// JudgeVerdict transitions when the most recent judge stage produced the
+	// specified verdict ("pass" or "fail"). Used for automated retry loops.
+	JudgeVerdict string `yaml:"judge_verdict,omitempty"`
 }
 
 // PRConditionsTrigger specifies compound PR state conditions that must all pass.
@@ -78,6 +82,8 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 				}
 			}
 			t.PRConditions = &cond
+		case "judge_verdict":
+			t.JudgeVerdict = strings.ToLower(strings.TrimSpace(val.Value))
 		}
 	}
 	return nil
@@ -103,10 +109,52 @@ type RunAction struct {
 	Output string `yaml:"output,omitempty"`
 }
 
+// JudgeInput defines a constrained input source for a judge stage.
+type JudgeInput string
+
+const (
+	JudgeInputIssue      JudgeInput = "issue"
+	JudgeInputGitDiff    JudgeInput = "git_diff"
+	JudgeInputTestOutput JudgeInput = "test_output"
+	JudgeInputFiles      JudgeInput = "files"
+)
+
+// JudgeRequire defines the required verdict for a judge stage to pass.
+type JudgeRequire struct {
+	Verdict string `yaml:"verdict"`
+}
+
+// JudgeAction runs a model-backed review pass with constrained inputs and
+// produces a structured verdict. The verdict is stored as a pipeline output
+// so later stages can reference it via {{ .Outputs.<name>.verdict }}.
+type JudgeAction struct {
+	// Model is the LLM model to use for the judge (e.g. "anthropic/claude-sonnet-4-6").
+	// If empty, the hub's default model is used.
+	Model string `yaml:"model,omitempty"`
+	// Inputs lists the bounded inputs to provide to the judge.
+	Inputs []JudgeInput `yaml:"inputs"`
+	// Require specifies the required verdict for the stage to pass.
+	Require JudgeRequire `yaml:"require,omitempty"`
+	// Instructions is the system prompt / instructions for the judge.
+	Instructions string `yaml:"instructions"`
+	// Output names the output bucket for the verdict. When set, the structured
+	// judge response is parsed as JSON and stored under that name.
+	Output string `yaml:"output,omitempty"`
+	// ContinueOnError allows the pipeline to continue even if the judge fails
+	// (e.g. for advisory review stages).
+	ContinueOnError bool `yaml:"continue_on_error,omitempty"`
+	// MaxTokens limits the judge response length.
+	MaxTokens int `yaml:"max_tokens,omitempty"`
+	// Timeout limits how long the judge call may take (e.g. "2m").
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
 // OnEnter holds the actions to run when entering a stage.
 type OnEnter struct {
 	// Run executes a command in the agent workspace.
 	Run RunAction `yaml:"run,omitempty"`
+	// Judge runs a model-backed review pass with constrained inputs.
+	Judge JudgeAction `yaml:"judge,omitempty"`
 	// Inject sends this message to the claw as a user message.
 	Inject string `yaml:"inject"`
 	// MoveIssue moves the associated Linear/Shortcut issue to this status name.
@@ -127,6 +175,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	// Use a shadow type to avoid infinite recursion.
 	type rawOnEnter struct {
 		Run          RunAction `yaml:"run,omitempty"`
+		Judge        JudgeAction `yaml:"judge,omitempty"`
 		Inject       string    `yaml:"inject"`
 		MoveIssueRaw yaml.Node `yaml:"move_issue"`
 		MergePR      bool      `yaml:"merge_pr,omitempty"`
@@ -140,6 +189,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	oe.Run = raw.Run
+	oe.Judge = raw.Judge
 	oe.Inject = raw.Inject
 	oe.MergePR = raw.MergePR
 	oe.CloseIssue = raw.CloseIssue
@@ -225,6 +275,20 @@ func (p *Pipeline) StageForPRConditions() *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
 			if t.PRConditions != nil {
+				return &p.Stages[i]
+			}
+		}
+	}
+	return nil
+}
+
+// StageForJudgeVerdict returns the first stage that has a judge_verdict trigger
+// matching the given verdict ("pass" or "fail"). Returns nil if none match.
+func (p *Pipeline) StageForJudgeVerdict(verdict string) *Stage {
+	verdict = strings.ToLower(strings.TrimSpace(verdict))
+	for i := range p.Stages {
+		for _, t := range p.Stages[i].Triggers {
+			if t.JudgeVerdict != "" && strings.EqualFold(t.JudgeVerdict, verdict) {
 				return &p.Stages[i]
 			}
 		}

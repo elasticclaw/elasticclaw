@@ -160,3 +160,178 @@ func TestParseInvalid(t *testing.T) {
 		t.Fatal("expected parse error for invalid yaml")
 	}
 }
+
+func TestParseJudgeAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review
+    label: "Review"
+    on_enter:
+      judge:
+        model: anthropic/claude-sonnet-4-6
+        inputs:
+          - issue
+          - git_diff
+          - test_output
+        require:
+          verdict: pass
+        instructions: |
+          Review the diff for correctness, security, regressions, and missing tests.
+          Return pass/fail with specific required fixes.
+        output: review_result
+        continue_on_error: false
+        max_tokens: 4096
+        timeout: 2m
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if len(p.Stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(p.Stages))
+	}
+	judge := p.Stages[0].OnEnter.Judge
+	if judge.Instructions == "" {
+		t.Fatal("expected judge instructions")
+	}
+	if judge.Model != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("model = %q, want anthropic/claude-sonnet-4-6", judge.Model)
+	}
+	if len(judge.Inputs) != 3 {
+		t.Fatalf("expected 3 inputs, got %d", len(judge.Inputs))
+	}
+	if judge.Inputs[0] != pipeline.JudgeInputIssue {
+		t.Fatalf("input[0] = %q, want issue", judge.Inputs[0])
+	}
+	if judge.Inputs[1] != pipeline.JudgeInputGitDiff {
+		t.Fatalf("input[1] = %q, want git_diff", judge.Inputs[1])
+	}
+	if judge.Inputs[2] != pipeline.JudgeInputTestOutput {
+		t.Fatalf("input[2] = %q, want test_output", judge.Inputs[2])
+	}
+	if judge.Require.Verdict != "pass" {
+		t.Fatalf("require.verdict = %q, want pass", judge.Require.Verdict)
+	}
+	if judge.Output != "review_result" {
+		t.Fatalf("output = %q, want review_result", judge.Output)
+	}
+	if judge.ContinueOnError {
+		t.Fatal("expected continue_on_error=false")
+	}
+	if judge.MaxTokens != 4096 {
+		t.Fatalf("max_tokens = %d, want 4096", judge.MaxTokens)
+	}
+	if judge.Timeout != "2m" {
+		t.Fatalf("timeout = %q, want 2m", judge.Timeout)
+	}
+}
+
+func TestParseJudgeActionMinimal(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review
+    on_enter:
+      judge:
+        inputs:
+          - issue
+        instructions: "Review this"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	judge := p.Stages[0].OnEnter.Judge
+	if judge.Instructions != "Review this" {
+		t.Fatalf("instructions = %q", judge.Instructions)
+	}
+	if judge.Model != "" {
+		t.Fatalf("expected empty model, got %q", judge.Model)
+	}
+	if judge.Require.Verdict != "" {
+		t.Fatalf("expected empty require.verdict, got %q", judge.Require.Verdict)
+	}
+}
+
+func TestJudgeInputConstants(t *testing.T) {
+	if pipeline.JudgeInputIssue != "issue" {
+		t.Fatalf("JudgeInputIssue = %q", pipeline.JudgeInputIssue)
+	}
+	if pipeline.JudgeInputGitDiff != "git_diff" {
+		t.Fatalf("JudgeInputGitDiff = %q", pipeline.JudgeInputGitDiff)
+	}
+	if pipeline.JudgeInputTestOutput != "test_output" {
+		t.Fatalf("JudgeInputTestOutput = %q", pipeline.JudgeInputTestOutput)
+	}
+	if pipeline.JudgeInputFiles != "files" {
+		t.Fatalf("JudgeInputFiles = %q", pipeline.JudgeInputFiles)
+	}
+}
+
+func TestStageForJudgeVerdictPass(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review
+    on_enter:
+      judge:
+        instructions: "Review"
+        inputs: [issue]
+  - id: pr
+    triggers:
+      - judge_verdict: pass
+    on_enter:
+      inject: "Create PR"
+  - id: fix
+    triggers:
+      - judge_verdict: fail
+    on_enter:
+      inject: "Fix issues"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	passStage := p.StageForJudgeVerdict("pass")
+	if passStage == nil {
+		t.Fatal("expected stage for pass verdict")
+	}
+	if passStage.ID != "pr" {
+		t.Fatalf("pass stage id = %q, want pr", passStage.ID)
+	}
+	failStage := p.StageForJudgeVerdict("fail")
+	if failStage == nil {
+		t.Fatal("expected stage for fail verdict")
+	}
+	if failStage.ID != "fix" {
+		t.Fatalf("fail stage id = %q, want fix", failStage.ID)
+	}
+}
+
+func TestStageForJudgeVerdictNoMatch(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review
+    on_enter:
+      judge:
+        instructions: "Review"
+        inputs: [issue]
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if p.StageForJudgeVerdict("pass") != nil {
+		t.Fatal("expected nil for no match")
+	}
+}
+
+func TestStageForJudgeVerdictCaseInsensitive(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: pr
+    triggers:
+      - judge_verdict: PASS
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	stage := p.StageForJudgeVerdict("pass")
+	if stage == nil {
+		t.Fatal("expected case-insensitive match")
+	}
+}
