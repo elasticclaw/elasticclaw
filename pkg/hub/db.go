@@ -297,6 +297,20 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_claw ON pipeline_outputs(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_outputs_stage ON pipeline_outputs(claw_id, stage_id);
+
+	-- v10: pipeline_gate_results table for deterministic tool review gates
+	CREATE TABLE IF NOT EXISTS pipeline_gate_results (
+		claw_id      TEXT NOT NULL,
+		stage_id     TEXT NOT NULL,
+		output_name  TEXT NOT NULL,
+		verdict      TEXT NOT NULL,  -- 'pass', 'fail', 'skipped', 'error'
+		matched_path TEXT NOT NULL DEFAULT '',
+		matched_value TEXT NOT NULL DEFAULT '',
+		required     INTEGER NOT NULL DEFAULT 0,
+		created_at   DATETIME NOT NULL,
+		PRIMARY KEY (claw_id, stage_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_pipeline_gate_results_claw ON pipeline_gate_results(claw_id, created_at);
 	`)
 	return err
 }

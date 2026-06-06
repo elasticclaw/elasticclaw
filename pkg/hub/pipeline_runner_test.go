@@ -629,3 +629,250 @@ func TestAutoTransitionAfterJudge(t *testing.T) {
 		t.Fatalf("stage = %q, want review", stage)
 	}
 }
+
+func TestEvaluateGatePass(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-pass"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Store a test output
+	s.persistPipelineOutput(clawID, "test-stage", "build_info", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"passed","duration":"45s"}`,
+	})
+
+	gate := &pipeline.Gate{
+		Output: "build_info",
+		Pass: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"passed", "skipped"},
+		},
+		Fail: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"failed", "error"},
+		},
+		Required: true,
+	}
+
+	result := s.evaluateGate(clawID, "test-stage", gate)
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.MatchedPath != "status" {
+		t.Fatalf("matched_path = %q, want status", result.MatchedPath)
+	}
+	if result.MatchedValue != "passed" {
+		t.Fatalf("matched_value = %q, want passed", result.MatchedValue)
+	}
+
+	// Verify persisted in DB
+	var verdict string
+	if err := db.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, "test-stage").Scan(&verdict); err != nil {
+		t.Fatalf("select gate result: %v", err)
+	}
+	if verdict != "pass" {
+		t.Fatalf("db verdict = %q, want pass", verdict)
+	}
+}
+
+func TestEvaluateGateFail(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-fail"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.persistPipelineOutput(clawID, "test-stage", "build_info", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"failed","error":"compile error"}`,
+	})
+
+	gate := &pipeline.Gate{
+		Output: "build_info",
+		Pass: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"passed", "skipped"},
+		},
+		Fail: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"failed", "error"},
+		},
+		Required: true,
+	}
+
+	result := s.evaluateGate(clawID, "test-stage", gate)
+	if result.Verdict != "fail" {
+		t.Fatalf("verdict = %q, want fail", result.Verdict)
+	}
+	if result.MatchedPath != "status" {
+		t.Fatalf("matched_path = %q, want status", result.MatchedPath)
+	}
+	if result.MatchedValue != "failed" {
+		t.Fatalf("matched_value = %q, want failed", result.MatchedValue)
+	}
+
+	var verdict string
+	if err := db.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, "test-stage").Scan(&verdict); err != nil {
+		t.Fatalf("select gate result: %v", err)
+	}
+	if verdict != "fail" {
+		t.Fatalf("db verdict = %q, want fail", verdict)
+	}
+}
+
+func TestEvaluateGateSkippedAsPass(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-skipped"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// No output stored — output is missing
+	gate := &pipeline.Gate{
+		Output:             "missing_output",
+		TreatSkippedAsPass: true,
+	}
+
+	result := s.evaluateGate(clawID, "test-stage", gate)
+	if result.Verdict != "skipped" {
+		t.Fatalf("verdict = %q, want skipped", result.Verdict)
+	}
+
+	var verdict string
+	if err := db.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, "test-stage").Scan(&verdict); err != nil {
+		t.Fatalf("select gate result: %v", err)
+	}
+	if verdict != "skipped" {
+		t.Fatalf("db verdict = %q, want skipped", verdict)
+	}
+}
+
+func TestEvaluateGateErrorNoMatch(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-gate-error"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.persistPipelineOutput(clawID, "test-stage", "build_info", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"unknown"}`,
+	})
+
+	gate := &pipeline.Gate{
+		Output: "build_info",
+		Pass: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"passed"},
+		},
+		Fail: pipeline.GateCondition{
+			Path:   "status",
+			Values: []string{"failed"},
+		},
+	}
+
+	result := s.evaluateGate(clawID, "test-stage", gate)
+	if result.Verdict != "error" {
+		t.Fatalf("verdict = %q, want error", result.Verdict)
+	}
+
+	var verdict string
+	if err := db.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, "test-stage").Scan(&verdict); err != nil {
+		t.Fatalf("select gate result: %v", err)
+	}
+	if verdict != "error" {
+		t.Fatalf("db verdict = %q, want error", verdict)
+	}
+}
+
+func TestHasFailedRequiredGate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-required-gate"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if s.hasFailedRequiredGate(clawID) {
+		t.Fatal("expected no failed required gate initially")
+	}
+
+	// Insert a failed required gate
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		clawID, "test-stage", "build_info", "fail", "status", "failed", 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	if !s.hasFailedRequiredGate(clawID) {
+		t.Fatal("expected failed required gate")
+	}
+}
+
+func TestLoadGateResult(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-load-gate"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// No gate result yet
+	if s.loadGateResult(clawID, "test-stage") != nil {
+		t.Fatal("expected nil for missing gate result")
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		clawID, "test-stage", "build_info", "pass", "status", "passed", 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	result := s.loadGateResult(clawID, "test-stage")
+	if result == nil {
+		t.Fatal("expected gate result")
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", result.Verdict)
+	}
+	if result.MatchedPath != "status" {
+		t.Fatalf("matched_path = %q, want status", result.MatchedPath)
+	}
+	if result.MatchedValue != "passed" {
+		t.Fatalf("matched_value = %q, want passed", result.MatchedValue)
+	}
+}

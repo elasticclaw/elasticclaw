@@ -893,6 +893,33 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 	}
 
+	// Evaluate gate if configured
+	if stage.Gate != nil {
+		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
+		log.Printf("[pipeline] gate evaluated for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, gateResult.Verdict)
+		// Inject gate result into claw chat
+		if gateResult.Verdict == "pass" {
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
+		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+		} else {
+			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
+			if gateResult.MatchedPath != "" {
+				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
+			}
+			s.injectHubMessageByID(clawID, msg)
+		}
+		// Auto-transition to next stage if a gate_result trigger matches
+		go s.autoTransitionAfterGate(clawID, stage.ID, gateResult.Verdict, ctx)
+		// If gate is required and failed, block further on_enter actions
+		if stage.Gate.Required && gateResult.Verdict == "fail" {
+			msg := fmt.Sprintf("Required gate %q failed — blocking further pipeline actions", stage.ID)
+			log.Printf("[pipeline] %s", msg)
+			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			return
+		}
+	}
+
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
 
@@ -1299,6 +1326,134 @@ func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineCo
 		return
 	}
 	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after judge verdict=%s", clawID[:8], stage.ID, verdict)
+	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+}
+
+// GateEvaluationResult is the outcome of evaluating a gate.
+type GateEvaluationResult struct {
+	Verdict      string // "pass", "fail", "skipped", "error"
+	MatchedPath  string
+	MatchedValue string
+}
+
+// evaluateGate inspects a named pipeline output and evaluates the gate
+// conditions to produce a pass/fail/skipped/error verdict.
+func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *GateEvaluationResult {
+	result := &GateEvaluationResult{Verdict: "error"}
+
+	// Load the named output
+	outputs := s.loadPipelineOutputs(clawID)
+	out, ok := outputs[gate.Output]
+	if !ok {
+		if gate.TreatSkippedAsPass {
+			result.Verdict = "skipped"
+		} else {
+			result.Verdict = "error"
+		}
+		log.Printf("[pipeline] gate %q for claw %s: output %q not found, verdict=%s", stageID, clawID[:8], gate.Output, result.Verdict)
+		s.persistGateResult(clawID, stageID, gate, result)
+		return result
+	}
+
+	// Evaluate pass condition
+	if gate.Pass.Path != "" {
+		val := pipeline.GetJSONPath(out, gate.Pass.Path)
+		strVal := fmt.Sprintf("%v", val)
+		for _, expected := range gate.Pass.Values {
+			if strings.EqualFold(strVal, expected) {
+				result.Verdict = "pass"
+				result.MatchedPath = gate.Pass.Path
+				result.MatchedValue = strVal
+				log.Printf("[pipeline] gate %q for claw %s: pass matched path=%s value=%s", stageID, clawID[:8], gate.Pass.Path, strVal)
+				s.persistGateResult(clawID, stageID, gate, result)
+				return result
+			}
+		}
+	}
+
+	// Evaluate fail condition
+	if gate.Fail.Path != "" {
+		val := pipeline.GetJSONPath(out, gate.Fail.Path)
+		strVal := fmt.Sprintf("%v", val)
+		for _, expected := range gate.Fail.Values {
+			if strings.EqualFold(strVal, expected) {
+				result.Verdict = "fail"
+				result.MatchedPath = gate.Fail.Path
+				result.MatchedValue = strVal
+				log.Printf("[pipeline] gate %q for claw %s: fail matched path=%s value=%s", stageID, clawID[:8], gate.Fail.Path, strVal)
+				s.persistGateResult(clawID, stageID, gate, result)
+				return result
+			}
+		}
+	}
+
+	// Neither pass nor fail matched — error
+	log.Printf("[pipeline] gate %q for claw %s: no conditions matched, verdict=error", stageID, clawID[:8])
+	s.persistGateResult(clawID, stageID, gate, result)
+	return result
+}
+
+// persistGateResult stores a gate evaluation result in the DB.
+func (s *Server) persistGateResult(clawID, stageID string, gate *pipeline.Gate, result *GateEvaluationResult) {
+	_, err := s.db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(claw_id, stage_id) DO UPDATE SET
+			output_name=excluded.output_name,
+			verdict=excluded.verdict,
+			matched_path=excluded.matched_path,
+			matched_value=excluded.matched_value,
+			required=excluded.required,
+			created_at=excluded.created_at`,
+		clawID, stageID, gate.Output, result.Verdict, result.MatchedPath, result.MatchedValue, gate.Required, now())
+	if err != nil {
+		log.Printf("[pipeline] failed to persist gate result for claw %s stage %s: %v", clawID[:8], stageID, err)
+	}
+}
+
+// loadGateResult returns the most recent gate result for a given claw and stage.
+func (s *Server) loadGateResult(clawID, stageID string) *GateEvaluationResult {
+	var verdict, matchedPath, matchedValue string
+	var required bool
+	err := s.db.QueryRow(`
+		SELECT verdict, matched_path, matched_value, required
+		FROM pipeline_gate_results
+		WHERE claw_id=? AND stage_id=?`, clawID, stageID).Scan(&verdict, &matchedPath, &matchedValue, &required)
+	if err != nil {
+		return nil
+	}
+	return &GateEvaluationResult{
+		Verdict:      verdict,
+		MatchedPath:  matchedPath,
+		MatchedValue: matchedValue,
+	}
+}
+
+// hasFailedRequiredGate checks whether any required gate for this claw has failed.
+func (s *Server) hasFailedRequiredGate(clawID string) bool {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM pipeline_gate_results
+		WHERE claw_id=? AND verdict='fail' AND required=1`, clawID).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// autoTransitionAfterGate checks the pipeline for a stage with a gate_result
+// trigger matching the given stage ID and verdict, and transitions to it.
+func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pipelineContext) {
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return
+	}
+	stage := pl.StageForGateResult(stageID, verdict)
+	if stage == nil {
+		log.Printf("[pipeline] claw %s: no stage with gate_result stage=%s verdict=%s trigger found", clawID[:8], stageID, verdict)
+		return
+	}
+	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after gate stage=%s verdict=%s", clawID[:8], stage.ID, stageID, verdict)
 	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
 }
 

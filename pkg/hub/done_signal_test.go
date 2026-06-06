@@ -204,3 +204,84 @@ func TestValidateDonePRs_MergedIsNotOpen(t *testing.T) {
 		t.Fatal("expected non-empty reason")
 	}
 }
+
+// --- handleClawDoneSignal gate blocking ---
+
+func TestHandleClawDoneSignal_BlockedByFailedRequiredGate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-done-gate-block"
+	// Insert a claw with a linear issue (tenant "test-tenant-id" is already created by NewTestServerWithConfig)
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "ENG-123",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Insert a failed required gate
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		clawID, "android_validation", "android_validation", "fail", "status", "failed", 1)
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	// Call handleClawDoneSignal — should be blocked
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
+
+	// Verify no PR was stored
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count claw_prs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 PRs stored, got %d", count)
+	}
+
+	// Verify a message was injected to the claw (injectUserMessage uses role='user')
+	var msgCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user'`, clawID).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgCount != 1 {
+		t.Fatalf("expected 1 user message, got %d", msgCount)
+	}
+}
+
+func TestHandleClawDoneSignal_AllowedWhenNoFailedRequiredGate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-done-gate-allow"
+	// Insert a claw with a linear issue (tenant "test-tenant-id" is already created by NewTestServerWithConfig)
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "ENG-124",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Insert a passed required gate
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		clawID, "android_validation", "android_validation", "pass", "status", "passed", 1)
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	// Call handleClawDoneSignal — should proceed (no GH App, so no PR validation)
+	s.handleClawDoneSignal(clawID, "[DONE]")
+
+	// Verify no PR was stored (no GH App configured, but no gate blocking either)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count claw_prs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 PRs stored (no GH App), got %d", count)
+	}
+}
