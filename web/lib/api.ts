@@ -115,6 +115,24 @@ export async function fetchMessages(clawId: string, opts?: { before?: string; af
   return apiFetch<ApiMessage[]>(`/api/messages/${clawId}${qs}`)
 }
 
+export async function fetchMessageTimeline(clawId: string, opts?: { before?: string; limit?: number }): Promise<ApiMessage[]> {
+  const params = new URLSearchParams()
+  if (opts?.before) params.set('before', opts.before)
+  if (opts?.limit) params.set('limit', String(opts.limit))
+  const qs = params.toString() ? '?' + params.toString() : ''
+  return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/timeline${qs}`)
+}
+
+export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; limit?: number }): Promise<ApiMessage[]> {
+  const params = new URLSearchParams()
+  if (opts.from) params.set('from', opts.from)
+  if (opts.to) params.set('to', opts.to)
+  if (opts.before) params.set('before', opts.before)
+  if (opts.limit) params.set('limit', String(opts.limit))
+  const qs = params.toString() ? '?' + params.toString() : ''
+  return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/activity${qs}`)
+}
+
 
 export async function sendMessage(clawId: string, content: string): Promise<ApiMessage> {
   return apiFetch<ApiMessage>(`/api/messages/${clawId}`, {

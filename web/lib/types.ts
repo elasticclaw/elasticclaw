@@ -29,14 +29,21 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub" | "activity"
+  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
   activity?: AgentActivity
+  activitySummary?: ActivitySummary
   // API fields
   claw_id?: string
   tenant_id?: string
+}
+
+export interface ActivitySummary {
+  count: number
+  from?: string
+  to?: string
 }
 
 export interface AgentActivity {
@@ -76,7 +83,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub" | "activity"
+  role: "user" | "claw" | "hub" | "activity" | "activity_summary"
   content: string
   format?: string
   created_at: string

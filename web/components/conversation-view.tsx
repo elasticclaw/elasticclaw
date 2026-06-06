@@ -20,7 +20,7 @@ import {
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
-import { COLOR_CLASSES } from "@/lib/mappers"
+import { COLOR_CLASSES, mapApiMessage } from "@/lib/mappers"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -28,8 +28,8 @@ import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import type { Claw, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
+import type { ActivitySummary as ActivitySummaryMeta, Claw, Message, ClawStatus } from "@/lib/types"
+import { getTerminalWsUrl, fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -523,6 +523,7 @@ function ClawBoardCard({
                       item={item}
                       expanded={Boolean(expandedActivityGroups[item.id])}
                       onToggle={() => toggleActivityGroup(item.id)}
+                      clawId={claw.id}
                       variant="card"
                     />
                   )
@@ -943,7 +944,7 @@ function formatActivityAge(timestamp: Date, now: number): string {
 
 type ConversationItem =
   | { type: "message"; message: Message }
-  | { type: "activity-summary"; id: string; messages: Message[] }
+  | { type: "activity-summary"; id: string; messages: Message[]; summary?: ActivitySummaryMeta }
 
 function compactActivityRuns(messages: Message[]): ConversationItem[] {
   const items: ConversationItem[] = []
@@ -969,6 +970,11 @@ function compactActivityRuns(messages: Message[]): ConversationItem[] {
   }
 
   for (const message of messages) {
+    if (message.role === "activity_summary") {
+      flush()
+      items.push({ type: "activity-summary", id: message.id, messages: [], summary: message.activitySummary })
+      continue
+    }
     if (message.role === "activity") {
       run.push(message)
       continue
@@ -1008,7 +1014,10 @@ function coalesceActivityMessages(messages: Message[]): Message[] {
   return messages.filter((message) => !(isRunningActivity(message) && terminalKeys.has(activityGroupKey(message))))
 }
 
-function activitySummaryLabel(messages: Message[]): string {
+function activitySummaryLabel(messages: Message[], countOverride?: number): string {
+  if (countOverride && countOverride > 0) {
+    return `${countOverride} earlier tool call${countOverride === 1 ? "" : "s"}`
+  }
   const toolCount = messages.filter((message) => message.activity?.kind === "tool").length
   const noun = toolCount === messages.length ? "tool call" : "activity update"
   return `${messages.length} earlier ${noun}${messages.length === 1 ? "" : "s"}`
@@ -1108,24 +1117,45 @@ function ActivitySummary({
   item,
   expanded,
   onToggle,
+  clawId,
   variant = "full",
 }: {
   item: Extract<ConversationItem, { type: "activity-summary" }>
   expanded: boolean
   onToggle: () => void
+  clawId: string
   variant?: "card" | "full"
 }) {
-  const visibleMessages = coalesceActivityMessages(item.messages)
+  const [loadedMessages, setLoadedMessages] = useState<Message[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const visibleMessages = coalesceActivityMessages([...(item.messages || []), ...(loadedMessages || [])])
+  const countOverride = item.summary?.count
+  const handleToggle = () => {
+    onToggle()
+    if (expanded || !item.summary || loadedMessages || loading) return
+    setLoading(true)
+    fetchActivityMessages(clawId, {
+      from: item.summary.from,
+      to: item.summary.to,
+      limit: Math.max(200, Math.min(item.summary.count || 200, 500)),
+    })
+      .then((apiMsgs) => setLoadedMessages(apiMsgs.map(mapApiMessage)))
+      .catch(console.warn)
+      .finally(() => setLoading(false))
+  }
   if (variant === "card") {
     return (
       <div className="space-y-1">
         <button
           type="button"
-          onClick={onToggle}
+          onClick={handleToggle}
           className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-1 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
         >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages)}
+          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
         </button>
+        {expanded && loading && (
+          <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
+        )}
         {expanded && visibleMessages.map((message) => (
           <ActivityRow key={message.id} message={message} variant="card" />
         ))}
@@ -1139,13 +1169,16 @@ function ActivitySummary({
         <div className="flex-1 h-px bg-border/50" />
         <button
           type="button"
-          onClick={onToggle}
+          onClick={handleToggle}
           className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
         >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages)}
+          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
         </button>
         <div className="flex-1 h-px bg-border/50" />
       </div>
+      {expanded && loading && (
+        <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
+      )}
       {expanded && visibleMessages.map((message) => (
         <ActivityRow key={message.id} message={message} />
       ))}
@@ -1461,6 +1494,7 @@ function ClawChatView({
                   item={item}
                   expanded={Boolean(expandedActivityGroups[item.id])}
                   onToggle={() => toggleActivityGroup(item.id)}
+                  clawId={claw.id}
                 />
               ) : (
                 <MessageBubble key={item.message.id} message={item.message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />

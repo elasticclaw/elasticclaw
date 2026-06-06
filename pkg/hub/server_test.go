@@ -3,11 +3,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -707,6 +709,94 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].ID != "user-1" {
 		t.Fatalf("expected only user message, got %#v", msgs)
+	}
+}
+
+func TestMessageTimelineSummarizesActivityWithoutCrowdingConversation(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	insertMessage := func(id, role, content string, offsetSeconds int) {
+		t.Helper()
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "claw-1", "test-tenant-id", role, content, "", base.Add(time.Duration(offsetSeconds)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertMessage("user-1", "user", "start", 1)
+	for i := 0; i < 120; i++ {
+		insertMessage(fmt.Sprintf("activity-%03d", i), "activity", "tool", 2+i)
+	}
+	insertMessage("claw-1", "claw", "done", 200)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/timeline", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("timeline len = %d, want 3: %#v", len(msgs), msgs)
+	}
+	if msgs[0].ID != "user-1" || msgs[1].Role != "activity_summary" || msgs[2].ID != "claw-1" {
+		t.Fatalf("timeline did not preserve conversation with summary: %#v", msgs)
+	}
+	if !strings.Contains(msgs[1].Format, `"count":120`) {
+		t.Fatalf("summary format missing count: %s", msgs[1].Format)
+	}
+}
+
+func TestMessageActivityEndpointExpandsSummaryRange(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			fmt.Sprintf("activity-%d", i), "claw-1", "test-tenant-id", "activity", "tool", `activity:{"kind":"tool"}`, base.Add(time.Duration(i+1)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/activity?limit=2", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].ID != "activity-0" || msgs[1].ID != "activity-1" {
+		t.Fatalf("activity messages = %#v, want first two", msgs)
 	}
 }
 

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { fetchMessages } from "@/lib/api"
+import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import type { Message } from "@/lib/types"
 
@@ -12,7 +12,8 @@ const ROLE_ORDER: Record<Message["role"], number> = {
   hub: 1,
   claw: 2,
   activity: 3,
-  system: 4,
+  activity_summary: 4,
+  system: 5,
 }
 
 interface UseWindowedMessagesOptions {
@@ -45,7 +46,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     setHistoricalMsgs([])
     setHasOlder(false)
 
-    fetchMessages(clawId)
+    fetchMessageTimeline(clawId, { limit: PAGE_SIZE })
       .then((apiMsgs) => {
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
@@ -66,7 +67,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     const prevHeight = el?.scrollHeight ?? 0
 
     try {
-      const apiMsgs = await fetchMessages(clawId, { before: oldestTimestamp.current })
+      const apiMsgs = await fetchMessageTimeline(clawId, { before: oldestTimestamp.current, limit: PAGE_SIZE })
       const older = apiMsgs.map(mapApiMessage)
 
       if (older.length === 0) {

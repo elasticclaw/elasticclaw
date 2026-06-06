@@ -1312,7 +1312,24 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/messages/")
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/messages/"), "/")
+	parts := strings.Split(path, "/")
+	clawID := parts[0]
+	if clawID == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "timeline":
+			s.handleMessageTimeline(w, r, tenantID, clawID)
+		case "activity":
+			s.handleMessageActivity(w, r, tenantID, clawID)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+		return
+	}
 	ghLoginMsg := githubLoginFromContext(r.Context())
 	var accessCfgMsg *types.AccessConfig
 	if ghLoginMsg != "" {
@@ -1470,6 +1487,290 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		msgs = []types.HubMessage{}
 	}
 	jsonOK(w, msgs)
+}
+
+type activitySummaryMeta struct {
+	Count int    `json:"count"`
+	From  string `json:"from"`
+	To    string `json:"to,omitempty"`
+}
+
+func hiddenSystemMessagesArgs() []interface{} {
+	return []interface{}{
+		wakeMessageMarker,
+		defaultWakeContent,
+		initialPlanWakeContent,
+		initialPlanRequiredMarker,
+		initialPlanAcceptedMarker,
+		initialPlanCorrectionSentMarker,
+	}
+}
+
+func hiddenSystemMessagesSQL() string {
+	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))`
+}
+
+func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canViewMessages(w, r, tenantID, clawID) {
+		return
+	}
+
+	limit := parsePositiveLimit(r, 50, 100)
+	before := r.URL.Query().Get("before")
+	rows, err := s.queryConversationMessages(clawID, tenantID, before, limit)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(rows) == 0 {
+		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary == nil {
+			jsonOK(w, []types.HubMessage{})
+			return
+		}
+		jsonOK(w, []types.HubMessage{*summary})
+		return
+	}
+
+	timeline := make([]types.HubMessage, 0, len(rows)*2)
+	for i, msg := range rows {
+		timeline = append(timeline, msg)
+		lower := msg.CreatedAt
+		lowerCursor := lower.Format(time.RFC3339Nano)
+		var upper *time.Time
+		upperCursor := ""
+		if i+1 < len(rows) {
+			nextCreated := rows[i+1].CreatedAt
+			upper = &nextCreated
+			upperCursor = nextCreated.Format(time.RFC3339Nano)
+		} else if before != "" {
+			upper = parseTimeCursor(before)
+			upperCursor = before
+		}
+		summary, err := s.activitySummary(clawID, tenantID, &lower, upper, lowerCursor, upperCursor)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary != nil {
+			timeline = append(timeline, *summary)
+		}
+	}
+	jsonOK(w, timeline)
+}
+
+func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canViewMessages(w, r, tenantID, clawID) {
+		return
+	}
+
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	before := r.URL.Query().Get("before")
+	limit := parsePositiveLimit(r, 200, 500)
+
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+		FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
+	args := []interface{}{clawID, tenantID}
+	if from != "" {
+		query += ` AND created_at > ?`
+		if parsed := parseTimeCursor(from); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, from)
+		}
+	}
+	if to != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(to); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, to)
+		}
+	}
+	if before != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(before); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, before)
+		}
+	}
+	query += ` ORDER BY created_at ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	msgs, err := scanHubMessages(rows)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if msgs == nil {
+		msgs = []types.HubMessage{}
+	}
+	jsonOK(w, msgs)
+}
+
+func parsePositiveLimit(r *http.Request, def, max int) int {
+	limit := def
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > max {
+		return max
+	}
+	return limit
+}
+
+func parseTimeCursor(raw string) *time.Time {
+	if raw == "" {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return &parsed
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &parsed
+	}
+	return nil
+}
+
+func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
+	var msgs []types.HubMessage
+	for rows.Next() {
+		var m types.HubMessage
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' ` + hiddenSystemMessagesSQL()
+	args := []interface{}{clawID, tenantID}
+	args = append(args, hiddenSystemMessagesArgs()...)
+	if before != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(before); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, before)
+		}
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanHubMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
+func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {
+	query := `SELECT COUNT(*), COALESCE(MIN(created_at), ''), COALESCE(MAX(created_at), '')
+		FROM messages WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
+	args := []interface{}{clawID, tenantID}
+	if from != nil {
+		query += ` AND created_at > ?`
+		args = append(args, *from)
+	}
+	if to != nil {
+		query += ` AND created_at < ?`
+		args = append(args, *to)
+	}
+
+	var count int
+	var minCreated, maxCreated string
+	if err := s.db.QueryRow(query, args...).Scan(&count, &minCreated, &maxCreated); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	meta := activitySummaryMeta{Count: count, From: fromCursor, To: toCursor}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil, err
+	}
+	createdAt := now()
+	if maxCreated != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, maxCreated); err == nil {
+			createdAt = parsed
+		}
+	}
+	return &types.HubMessage{
+		ID:        "activity-summary-" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(clawID+"|"+fromCursor+"|"+toCursor)).String(),
+		ClawID:    clawID,
+		TenantID:  tenantID,
+		Role:      "activity_summary",
+		Content:   fmt.Sprintf("%d tool calls", count),
+		Format:    "activity_summary:" + string(data),
+		CreatedAt: createdAt,
+	}, nil
+}
+
+func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantID, clawID string) bool {
+	ghLoginMsg := githubLoginFromContext(r.Context())
+	if ghLoginMsg == "" {
+		return true
+	}
+	var accessCfgMsg *types.AccessConfig
+	s.mu.RLock()
+	if s.hubCfg.Auth != nil {
+		accessCfgMsg = s.hubCfg.Auth.Access
+	}
+	s.mu.RUnlock()
+
+	var tagsJSONMsg string
+	err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return false
+	}
+	var clawTagsMsg []string
+	_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // ─── Claw WebSocket ───────────────────────────────────────────────────────────
