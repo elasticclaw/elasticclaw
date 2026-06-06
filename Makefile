@@ -22,6 +22,7 @@ build-dev:
 build-web:
 	@command -v npm >/dev/null 2>&1 || (echo "❌ npm not found in PATH — install Node.js" && exit 1)
 	cd web && npm install && npm run build
+	cd web && ./scripts/check-static-export.sh out
 	mkdir -p internal/webui/out
 	rm -rf internal/webui/out && cp -r web/out internal/webui/out
 
