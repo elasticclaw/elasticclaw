@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { fetchMessages } from "@/lib/api"
+import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import type { Message } from "@/lib/types"
 
@@ -12,7 +12,24 @@ const ROLE_ORDER: Record<Message["role"], number> = {
   hub: 1,
   claw: 2,
   activity: 3,
-  system: 4,
+  activity_summary: 4,
+  system: 5,
+}
+
+function conversationMessages(messages: Message[]): Message[] {
+  return messages.filter((message) => message.role !== "activity" && message.role !== "activity_summary")
+}
+
+function oldestConversationCursor(messages: Message[]): string | null {
+  const oldest = conversationMessages(messages)[0]
+  if (!oldest) return null
+  return oldest.timestamp instanceof Date ? oldest.timestamp.toISOString() : String(oldest.timestamp)
+}
+
+function hasOlderConversationPage(messages: Message[], pageSize: number): boolean {
+  const conversations = conversationMessages(messages)
+  if (conversations.length < pageSize) return false
+  return messages[0]?.role !== "activity_summary"
 }
 
 interface UseWindowedMessagesOptions {
@@ -45,14 +62,12 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     setHistoricalMsgs([])
     setHasOlder(false)
 
-    fetchMessages(clawId)
+    fetchMessageTimeline(clawId, { limit: PAGE_SIZE })
       .then((apiMsgs) => {
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
-        if (msgs.length > 0) {
-          oldestTimestamp.current = msgs[0].timestamp instanceof Date ? msgs[0].timestamp.toISOString() : String(msgs[0].timestamp)
-        }
-        setHasOlder(apiMsgs.length >= PAGE_SIZE)
+        oldestTimestamp.current = oldestConversationCursor(msgs)
+        setHasOlder(hasOlderConversationPage(msgs, PAGE_SIZE))
       })
       .catch(console.warn)
   }, [clawId])
@@ -66,7 +81,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     const prevHeight = el?.scrollHeight ?? 0
 
     try {
-      const apiMsgs = await fetchMessages(clawId, { before: oldestTimestamp.current })
+      const apiMsgs = await fetchMessageTimeline(clawId, { before: oldestTimestamp.current, limit: PAGE_SIZE })
       const older = apiMsgs.map(mapApiMessage)
 
       if (older.length === 0) {
@@ -74,10 +89,8 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
         return
       }
 
-      setHasOlder(apiMsgs.length >= PAGE_SIZE)
-      if (older.length > 0) {
-        oldestTimestamp.current = older[0].timestamp instanceof Date ? older[0].timestamp.toISOString() : String(older[0].timestamp)
-      }
+      setHasOlder(hasOlderConversationPage(older, PAGE_SIZE))
+      oldestTimestamp.current = oldestConversationCursor(older)
 
       setHistoricalMsgs((prev) => {
         const combined = [...older, ...prev]
