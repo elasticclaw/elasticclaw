@@ -99,7 +99,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     () => analyticsFiltersFromParams(new URLSearchParams(searchParamsKey), workspaceScope),
     [searchParamsKey, workspaceScope]
   )
-  const [summary, setSummary] = useState<TaskRunAnalyticsSummary | null>(null)
+  const kpiFilters = useMemo<TaskRunAnalyticsFilters>(() => ({
+    analyticsEnabled: true,
+    requiresPr: true,
+    ...(workspaceScope ? { workspace: workspaceScope } : {}),
+  }), [workspaceScope])
+  const [kpiSummary, setKpiSummary] = useState<TaskRunAnalyticsSummary | null>(null)
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
   const [options, setOptions] = useState<TaskRunFilterOptions | null>(null)
   const [nextCursor, setNextCursor] = useState<string | undefined>()
@@ -122,24 +127,30 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     setError(null)
     try {
       const query = { ...filters, cursor }
-      const [summaryData, runsData, optionsData] = await Promise.all([
-        fetchTaskRunAnalyticsSummary(query),
+      if (append) {
+        const runsData = await fetchTaskRuns(query)
+        if (cancellation?.cancelled) return
+        setRuns((prev) => [...prev, ...runsData.runs])
+        setNextCursor(runsData.nextCursor)
+        return
+      }
+
+      const [kpiSummaryData, runsData, optionsData] = await Promise.all([
+        fetchTaskRunAnalyticsSummary(kpiFilters),
         fetchTaskRuns(query),
         optionsRef.current ? Promise.resolve(optionsRef.current) : fetchTaskRunFilterOptions(),
       ])
       if (cancellation?.cancelled) return
-      setSummary(summaryData)
-      setRuns((prev) => append ? [...prev, ...runsData.runs] : runsData.runs)
+      setKpiSummary(kpiSummaryData)
+      setRuns(runsData.runs)
       setNextCursor(runsData.nextCursor)
       if (!optionsRef.current) {
         optionsRef.current = optionsData
         setOptions(optionsData)
       }
-      if (!append) {
-        setSelectedRunId(null)
-        setDetails(null)
-        setDetailError(null)
-      }
+      setSelectedRunId(null)
+      setDetails(null)
+      setDetailError(null)
     } catch (err) {
       if (cancellation?.cancelled) return
       setError(err instanceof Error ? err.message : "Unable to load analytics")
@@ -147,7 +158,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
       if (cancellation?.cancelled) return
       setLoading(false)
     }
-  }, [filters])
+  }, [filters, kpiFilters])
 
   useEffect(() => {
     const cancellation: Cancellation = { cancelled: false }
@@ -258,12 +269,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             </div>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
-            <Metric label="Runs" value={summary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
-            <Metric label="Clean" value={summary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
-            <Metric label="Warning" value={summary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
-            <Metric label="Failed" value={summary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
-            <Metric label="Human touches" value={summary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
-            <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
+            <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
+            <Metric label="Clean" value={kpiSummary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
+            <Metric label="Warning" value={kpiSummary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
+            <Metric label="Failed" value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
+            <Metric label="Human touches" value={kpiSummary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
+            <Metric label="Merged PRs" value={kpiSummary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
