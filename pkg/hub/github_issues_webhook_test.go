@@ -3,7 +3,9 @@ package hub_test
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -295,12 +297,143 @@ func TestGitHubIssuesWorkflowPollQueriesEachWorkspaceToken(t *testing.T) {
 
 	s.PollIntegrationsForTest()
 
-	if got := ghi.AuthHeaderCount("Bearer token-a"); got != 1 {
-		t.Fatalf("poll used token-a %d times, want 1", got)
+	gotA := ghi.AuthHeaderCount("Bearer token-a")
+	gotB := ghi.AuthHeaderCount("Bearer token-b")
+	if gotA < 1 {
+		t.Fatalf("poll used token-a %d times, want at least 1", gotA)
 	}
-	if got := ghi.AuthHeaderCount("Bearer token-b"); got != 1 {
-		t.Fatalf("poll used token-b %d times, want 1", got)
+	if gotB < 1 {
+		t.Fatalf("poll used token-b %d times, want at least 1", gotB)
 	}
+	if gotA+gotB != 3 {
+		t.Fatalf("poll auth calls = token-a:%d token-b:%d, want two issue polls plus one comments fetch", gotA, gotB)
+	}
+}
+
+func TestGitHubIssuesWorkspaceWebhookContextIncludesAllIssueComments(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "secret"
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueWorkflowFixture(t, "workspace-a", "secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{Title: "Test Issue", Body: "Main issue body", State: "open"})
+	ghi.SetIssueComments("testorg/testrepo", 42, []factorytest.IssueCommentState{{
+		ID:        101,
+		Body:      "First existing comment",
+		User:      "alice",
+		CreatedAt: "2026-06-05T20:37:00Z",
+	}, {
+		ID:        102,
+		Body:      "Second existing comment",
+		User:      "bob",
+		CreatedAt: "2026-06-05T20:38:00Z",
+	}, {
+		ID:        103,
+		Body:      "Third existing comment",
+		User:      "carol",
+		CreatedAt: "2026-06-05T20:39:00Z",
+	}})
+	payload, _ := ghi.BuildWebhookPayload("testorg/testrepo", 42, "closed", "open")
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/github-issues", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", hmacSHA256(payload, "secret"))
+	req.Header.Set("X-GitHub-Delivery", "delivery-comments-context")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	context := waitForGitHubIssueContext(t, db, "testorg/testrepo/42")
+	for _, want := range []string{"Main issue body", "First existing comment", "Second existing comment", "Third existing comment", "**Author:** @alice", "**Author:** @bob", "**Author:** @carol"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("CONTEXT.md missing %q:\n%s", want, context)
+		}
+	}
+}
+
+func TestGitHubIssuesWorkflowPollContextIncludesAllIssueComments(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueLabeledWorkflowFixture(t, "workspace-a")
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{
+		Title:  "Test Issue",
+		Body:   "Main issue body",
+		State:  "open",
+		Labels: []string{"agent-ready"},
+	})
+	ghi.SetIssueComments("testorg/testrepo", 42, []factorytest.IssueCommentState{{
+		ID:        201,
+		Body:      "First poll comment",
+		User:      "alice",
+		CreatedAt: "2026-06-05T20:37:00Z",
+	}, {
+		ID:        202,
+		Body:      "Second poll comment",
+		User:      "bob",
+		CreatedAt: "2026-06-05T20:38:00Z",
+	}})
+
+	s.PollIntegrationsForTest()
+
+	context := waitForGitHubIssueContext(t, db, "testorg/testrepo/42")
+	for _, want := range []string{"Main issue body", "First poll comment", "Second poll comment", "**Author:** @alice", "**Author:** @bob"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("CONTEXT.md missing %q:\n%s", want, context)
+		}
+	}
+}
+
+func waitForGitHubIssueContext(t *testing.T, db *sql.DB, issueID string) string {
+	t.Helper()
+	var filesJSON string
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := db.QueryRow(`SELECT template_files FROM claws WHERE github_issue_id=? LIMIT 1`, issueID).Scan(&filesJSON)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("query claw template files for %s: %v", issueID, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		t.Fatalf("parse template files: %v", err)
+	}
+	return files["CONTEXT.md"]
 }
 
 func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
