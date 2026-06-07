@@ -113,7 +113,9 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
         setOptions(optionsData)
       }
       if (!append) {
-        setSelectedRunId(runsData.runs[0]?.runId ?? null)
+        setSelectedRunId(null)
+        setDetails(null)
+        setDetailError(null)
       }
     } catch (err) {
       if (cancellation?.cancelled) return
