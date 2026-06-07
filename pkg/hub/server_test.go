@@ -38,6 +38,39 @@ func TestSanitizeBootstrapOutputTruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestCleanWorkspaceFilePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    string
+		wantErr bool
+	}{
+		{name: "AGENTS.md", want: "AGENTS.md"},
+		{name: "scripts/run_android_codebuild.py", want: "scripts/run_android_codebuild.py"},
+		{name: "scripts/utils/helper.py", want: "scripts/utils/helper.py"},
+		{name: "../secret", wantErr: true},
+		{name: "scripts/../../secret", wantErr: true},
+		{name: "/tmp/secret", wantErr: true},
+		{name: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cleanWorkspaceFilePath(tt.name)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got path %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("path = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestServeWebUIMapsWorkspaceSettingsRoutesToStaticPlaceholder(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 	mux := http.NewServeMux()
