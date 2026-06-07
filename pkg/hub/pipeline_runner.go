@@ -450,12 +450,9 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		return
 	}
 	var parsedJSON string
-	if strings.TrimSpace(result.Stdout) != "" {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(result.Stdout), &parsed); err == nil {
-			b, _ := json.Marshal(parsed)
-			parsedJSON = string(b)
-		}
+	if parsed, ok := parsePipelineOutputJSON(result.Stdout); ok {
+		b, _ := json.Marshal(parsed)
+		parsedJSON = string(b)
 	}
 	if parsedJSON == "" {
 		parsedJSON = "{}"
@@ -476,6 +473,30 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	} else {
 		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
 	}
+}
+
+func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
+	parse := func(s string) (map[string]interface{}, bool) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, false
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+			return nil, false
+		}
+		return parsed, true
+	}
+	if parsed, ok := parse(stdout); ok {
+		return parsed, true
+	}
+	lines := strings.Split(stdout, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if parsed, ok := parse(lines[i]); ok {
+			return parsed, true
+		}
+	}
+	return nil, false
 }
 
 // loadPipelineOutputs returns all persisted outputs for a claw as a map of

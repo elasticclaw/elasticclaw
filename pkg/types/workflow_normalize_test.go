@@ -96,6 +96,59 @@ stages:
 	}
 }
 
+func TestWorkflowNormalizePreservesStageGate(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: linear-story
+trigger:
+  linear:
+    event: status_changed
+    workspace: Fasterway
+    states:
+      - Todo
+stages:
+  - id: android_validation
+    label: Android Validation
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      run:
+        command: python3 scripts/run_android_codebuild.py --source-dir next_mobile
+        output: android_validation
+    gate:
+      output: android_validation
+      pass:
+        path: status
+        values:
+          - passed
+          - skipped
+      fail:
+        path: status
+        values:
+          - failed
+          - error
+      required: true
+      treat_skipped_as_pass: true
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	for _, want := range []string{
+		"gate:",
+		"output: android_validation",
+		"path: status",
+		"treat_skipped_as_pass: true",
+	} {
+		if !strings.Contains(workflow.PipelineYAML, want) {
+			t.Fatalf("pipeline yaml did not contain %q: %s", want, workflow.PipelineYAML)
+		}
+	}
+}
+
 func TestWorkflowV1ShortcutTriggerValidates(t *testing.T) {
 	data := []byte(`
 schema_version: v1
