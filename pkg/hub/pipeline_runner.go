@@ -1260,16 +1260,17 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 // checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
 // and transitions to the matching stage if found. Returns true if a transition occurred.
 func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
-	ctx, ok := s.findPipelineContextForClaw(clawID)
+	ctx, stage, ok := s.pipelineStageForMessageContains(clawID, message)
 	if !ok {
-		return false
-	}
-	pl := parsePipelineForContext(ctx)
-	if pl == nil {
-		return false
-	}
-	stage := pl.StageForMessageContains(message)
-	if stage == nil {
+		ctx, ok = s.findPipelineContextForClaw(clawID)
+		if !ok {
+			return false
+		}
+		pl := parsePipelineForContext(ctx)
+		if pl == nil {
+			return false
+		}
+		stage = nil
 		// Also check output_matches triggers against current pipeline outputs.
 		// Only evaluate if the claw has not already visited this stage, to
 		// prevent persistent DB state from re-triggering backwards regressions
@@ -1284,6 +1285,27 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 		return false
 	}
 	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+}
+
+func (s *Server) hasPipelineMessageContainsTrigger(clawID, message string) bool {
+	_, _, ok := s.pipelineStageForMessageContains(clawID, message)
+	return ok
+}
+
+func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipelineContext, *pipeline.Stage, bool) {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return pipelineContext{}, nil, false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return pipelineContext{}, nil, false
+	}
+	stage := pl.StageForMessageContains(message)
+	if stage == nil {
+		return pipelineContext{}, nil, false
+	}
+	return ctx, stage, true
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {

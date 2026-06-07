@@ -2265,8 +2265,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
-				// Evaluate pipeline triggers for non-[DONE] messages
-				if !strings.Contains(hm.Content, "[DONE]") {
+				// Evaluate pipeline triggers. If a pipeline explicitly owns a
+				// [DONE] trigger, let it handle that signal instead of the
+				// legacy factory PR-URL completion path below.
+				pipelineHandledDone := false
+				if strings.Contains(hm.Content, "[DONE]") {
+					pipelineHandledDone = s.hasPipelineMessageContainsTrigger(clawID, hm.Content)
+				}
+				if !strings.Contains(hm.Content, "[DONE]") || pipelineHandledDone {
 					go s.checkPipelineMessageTriggers(clawID, hm.Content)
 				}
 				// Clear typing indicator now that response is complete
@@ -2284,7 +2290,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					}()
-					go s.handleClawDoneSignal(clawID, hm.Content)
+					if !pipelineHandledDone {
+						go s.handleClawDoneSignal(clawID, hm.Content)
+					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
 				if strings.Contains(hm.Content, "[TERMINATE]") {
