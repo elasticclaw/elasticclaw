@@ -218,7 +218,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             <Metric label="Human touches" value={summary?.humanInteractions ?? 0} />
             <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
             <FilterSelect label="Workflow" value={filters.workflow} values={options?.workflows} onChange={(value) => setFilter("workflow", value)} />
             <FilterSelect label="Repo" value={filters.repo} values={options?.repos} onChange={(value) => setFilter("repo", value)} />
@@ -333,7 +333,7 @@ function FilterSelect({ label, value, values, onChange }: { label: string; value
 
   return (
     <Select value={value ?? anyValue} onValueChange={(next) => onChange(next === anyValue ? undefined : next)}>
-      <SelectTrigger size="sm" className="w-[170px] bg-background">
+      <SelectTrigger size="sm" className="w-full bg-background">
         <span className="truncate">
           <span className="text-muted-foreground">{label}:</span> {displayValue}
         </span>
