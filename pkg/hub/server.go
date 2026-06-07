@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3502,6 +3504,104 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 	return fmt.Errorf("could not download ElasticClaw connector after %d attempts. Last error: %s", maxAttempts, sanitizeBootstrapError(lastErr))
 }
 
+type replicatedBootstrapRetryOptions struct {
+	Label      string
+	RetryLabel string
+	Attempts   int
+	Delays     []time.Duration
+	Sleep      func(time.Duration)
+	Run        func() error
+}
+
+func retryReplicatedBootstrapStep(s *Server, clawID string, opts replicatedBootstrapRetryOptions) error {
+	if opts.Attempts < 1 {
+		opts.Attempts = 1
+	}
+	if opts.Sleep == nil {
+		opts.Sleep = time.Sleep
+	}
+	if opts.RetryLabel == "" {
+		opts.RetryLabel = "Retrying " + strings.ToLower(opts.Label)
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= opts.Attempts; attempt++ {
+		if attempt > 1 {
+			delay := replicatedBootstrapDelay(opts.Delays, attempt-2)
+			if s != nil && clawID != "" {
+				s.setBootstrapStatus(clawID, fmt.Sprintf("%s in %s", opts.RetryLabel, formatRetryDelay(delay)))
+			}
+			log.Printf("[bootstrap] %s retry %d/%d in %s...", opts.Label, attempt, opts.Attempts, delay)
+			opts.Sleep(delay)
+		}
+		if s != nil && clawID != "" {
+			s.setBootstrapStatus(clawID, opts.Label)
+		}
+		if err := opts.Run(); err != nil {
+			lastErr = err
+			log.Printf("[bootstrap] %s attempt %d/%d failed: %s", opts.Label, attempt, opts.Attempts, sanitizeBootstrapError(err))
+			continue
+		}
+		return nil
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %s", opts.Label, opts.Attempts, sanitizeBootstrapError(lastErr))
+}
+
+func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
+	if len(delays) == 0 {
+		return 5 * time.Second
+	}
+	if idx < len(delays) {
+		return delays[idx]
+	}
+	return delays[len(delays)-1]
+}
+
+func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
+	if len(files) == 0 {
+		return "true"
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	for _, name := range names {
+		remotePath := strings.TrimRight(dir, "/") + "/" + name
+		b.WriteString("test -e ")
+		b.WriteString(shellDoubleQuote(remotePath))
+		b.WriteString(" || { echo ")
+		b.WriteString(shellQuote("missing workspace file: " + name))
+		b.WriteString("; exit 1; }\n")
+	}
+	b.WriteString("echo 'workspace files verified'\n")
+	return b.String()
+}
+
+func shellDoubleQuote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		if i == 0 && strings.HasPrefix(s, "$HOME") && (len(s) == len("$HOME") || s[len("$HOME")] == '/') {
+			b.WriteString("$HOME")
+			i += len("$HOME") - 1
+			continue
+		}
+		switch s[i] {
+		case '\\', '"', '`', '$':
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 func (s *Server) setBootstrapStatus(clawID, status string) {
 	s.setBootstrapStatusWithDiagnostic(clawID, status, "")
 }
@@ -4586,6 +4686,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
+	replicatedSSHDelays := []time.Duration{
+		5 * time.Second,
+		10 * time.Second,
+		20 * time.Second,
+		40 * time.Second,
+		60 * time.Second,
+	}
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
 	_, _ = s.db.Exec(
@@ -4653,10 +4760,17 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	}
 
 	if flakeFiles := templateFlakeFiles(files); len(flakeFiles) > 0 {
-		s.setBootstrapStatus(clawID, "Staging Nix flake")
-		if err := s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), flakeFiles); err != nil {
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Staging Nix flake",
+			RetryLabel: "Retrying Nix flake staging",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), flakeFiles)
+			},
+		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -4664,22 +4778,17 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// Run bootstrap script first — this installs OpenClaw and initializes the workspace.
 	// Template files must be written AFTER the script completes so openclaw onboard
 	// doesn't overwrite BOOTSTRAP.md and other workspace files.
-	var sshErr error
-	for attempt := 1; attempt <= 5; attempt++ {
-		if attempt > 1 {
-			s.setBootstrapStatus(clawID, "Retrying sandbox bootstrap in 10s")
-			log.Printf("Bootstrap retry %d/5 for claw %s in 10s...", attempt, clawName)
-			time.Sleep(10 * time.Second)
-		}
-		s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
-		if sshErr = s.sshRun(sshUser, sshHost, script); sshErr == nil {
-			break
-		}
-		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sanitizeBootstrapError(sshErr))
-	}
-	if sshErr != nil {
-		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sanitizeBootstrapError(sshErr))
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %s", sanitizeBootstrapError(sshErr)), false)
+	if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+		Label:      "Preparing ElasticClaw connector",
+		RetryLabel: "Retrying sandbox bootstrap",
+		Attempts:   5,
+		Delays:     []time.Duration{10 * time.Second},
+		Run: func() error {
+			return s.sshRun(sshUser, sshHost, script)
+		},
+	}); err != nil {
+		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -4691,17 +4800,33 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		for k := range files {
 			fileNames = append(fileNames, k)
 		}
+		sort.Strings(fileNames)
 		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
-		for attempt := 1; attempt <= 3; attempt++ {
-			if err := s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files); err == nil {
-				log.Printf("Template files written for claw %s", clawName)
-				break
-			} else if attempt == 3 {
-				log.Printf("Warning: failed to write template files: %v", err)
-			} else {
-				time.Sleep(5 * time.Second)
-			}
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Writing workspace files",
+			RetryLabel: "Retrying workspace file write",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files)
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
+			return
 		}
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Verifying workspace files",
+			RetryLabel: "Retrying workspace file verification",
+			Attempts:   3,
+			Delays:     []time.Duration{2 * time.Second, 5 * time.Second},
+			Run: func() error {
+				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(path.Join(sshHome, ".openclaw", "workspace"), files))
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
+			return
+		}
+		log.Printf("Template files written for claw %s", clawName)
 	}
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
@@ -4713,11 +4838,19 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
 	// but the hub token URL is publicly accessible so it works directly).
 	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
-		if err := s.sshRun(sshUser, sshHost, credHelper); err != nil {
-			log.Printf("[bootstrap] warning: cred helper setup failed: %v", err)
-		} else {
-			log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Configuring GitHub credentials",
+			RetryLabel: "Retrying GitHub credential setup",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshRun(sshUser, sshHost, credHelper)
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
+			return
 		}
+		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
@@ -5165,13 +5298,7 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 			sess.Close()
 			return fmt.Errorf("invalid template file path %q: %w", name, err)
 		}
-		targetPath := dir + "/" + safeName
-		targetDir := dir
-		if parent := path.Dir(safeName); parent != "." {
-			targetDir = dir + "/" + parent
-		}
-		// Use cat with heredoc to write the file safely
-		cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", shellQuote(targetDir), shellQuote(targetPath), content)
+		cmd := remoteWriteFileCommand(dir, safeName, content)
 		out, err := sess.CombinedOutput(cmd)
 		sess.Close()
 		if err != nil {
@@ -5179,6 +5306,17 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		}
 	}
 	return nil
+}
+
+func remoteWriteFileCommand(dir, name, content string) string {
+	remotePath := strings.TrimRight(dir, "/") + "/" + name
+	remoteDir := path.Dir(remotePath)
+	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << 'ELASTICCLAW_B64'\n%s\nELASTICCLAW_B64",
+		shellDoubleQuote(remoteDir),
+		shellDoubleQuote(remotePath),
+		encoded,
+	)
 }
 
 // ─── Terminal WebSocket ───────────────────────────────────────────────────────
