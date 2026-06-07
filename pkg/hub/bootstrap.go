@@ -140,6 +140,7 @@ if model.startswith('ollama/'):
         'baseUrl': 'http://ollama:11434',
         'api': 'ollama',
         'apiKey': 'OLLAMA_API_KEY',
+        'timeoutSeconds': 86400,
         'models': [{
             'id': model_id,
             'name': model_id,

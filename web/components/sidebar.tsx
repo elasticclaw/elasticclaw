@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3 } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -56,8 +56,6 @@ interface SidebarProps {
   onToggleCollapse: () => void
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
-  activeView?: "agents" | "analytics"
-  onSelectAnalytics?: () => void
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -113,8 +111,6 @@ export function Sidebar({
   onToggleCollapse,
   isAdmin = true,
   onSelectWorkflow,
-  activeView = "agents",
-  onSelectAnalytics,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
@@ -227,15 +223,6 @@ export function Sidebar({
               <Plus className="size-4" />
             </Button>
           )}
-          <Button
-            variant={activeView === "analytics" ? "secondary" : "ghost"}
-            size="icon"
-            className="size-8"
-            title="Task Run Analytics"
-            onClick={() => onSelectAnalytics?.()}
-          >
-            <BarChart3 className="size-4" />
-          </Button>
         </div>
         <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
           {allClaws.map((claw) => {
@@ -316,15 +303,6 @@ export function Sidebar({
       </div>
 
       <div className="p-3 border-b border-border space-y-2">
-        <Button
-          variant={activeView === "analytics" ? "secondary" : "ghost"}
-          size="sm"
-          className="w-full justify-start gap-2"
-          onClick={() => onSelectAnalytics?.()}
-        >
-          <BarChart3 className="size-4" />
-          Task Run Analytics
-        </Button>
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input

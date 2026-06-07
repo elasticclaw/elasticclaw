@@ -3,7 +3,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
-import { TaskRunAnalyticsView } from "@/components/task-run-analytics-view"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
@@ -25,7 +24,6 @@ export default function Home() {
   })
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
-  const [activeView, setActiveView] = useState<"agents" | "analytics">("agents")
 
   // Fetch admin status
   useEffect(() => {
@@ -156,7 +154,6 @@ export default function Home() {
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
-      setActiveView("agents")
       setSelectedClawId(id)
       localStorage.setItem('elasticclaw_selected_claw', id)
       hub.setUnreadCount(id, 0)
@@ -260,36 +257,23 @@ export default function Home() {
         onReorderClaws={reorderClaws}
         isAdmin={isAdmin}
         onSelectWorkflow={setSelectedWorkflow}
-        activeView={activeView}
-        onSelectAnalytics={() => {
-          setActiveView("analytics")
-          setSelectedClawId(null)
-          localStorage.removeItem('elasticclaw_selected_claw')
-          if (typeof window !== "undefined" && window.innerWidth < 768) {
-            setSidebarCollapsed(true)
-          }
-        }}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {activeView === "analytics" ? (
-          <TaskRunAnalyticsView />
-        ) : (
-          <ConversationView
-            claw={selectedClaw}
-            allClaws={claws}
-            messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
-            allMessages={mergedMessages}
-            onSendMessage={handleSendMessage}
-            onSendMessageToClaw={handleSendMessageToClaw}
-            onKill={handleKill}
-            onKillClaw={handleKillClaw}
-            onSelectClaw={handleSelectClaw}
-            onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
-            onReorderClaws={reorderClaws}
-            loading={loading}
-            hubError={hubError}
-          />
-        )}
+        <ConversationView
+          claw={selectedClaw}
+          allClaws={claws}
+          messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
+          allMessages={mergedMessages}
+          onSendMessage={handleSendMessage}
+          onSendMessageToClaw={handleSendMessageToClaw}
+          onKill={handleKill}
+          onKillClaw={handleKillClaw}
+          onSelectClaw={handleSelectClaw}
+          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+          onReorderClaws={reorderClaws}
+          loading={loading}
+          hubError={hubError}
+        />
       </div>
       <ManualTriggerModal
         open={!!selectedWorkflow}

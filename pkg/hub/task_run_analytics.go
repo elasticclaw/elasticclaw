@@ -326,10 +326,14 @@ func (s *Server) recordTaskRunEvent(input TaskRunEvent) error {
 		return err
 	}
 	defer tx.Rollback()
+	runTenantID, err := loadTaskRunTenantTx(tx, input.RunID)
+	if err != nil {
+		return err
+	}
 	if input.TenantID == "" {
-		if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, input.RunID).Scan(&input.TenantID); err != nil {
-			return err
-		}
+		input.TenantID = runTenantID
+	} else if input.TenantID != runTenantID {
+		return fmt.Errorf("record task run event: tenant mismatch for run %s", input.RunID)
 	}
 	if err := recordTaskRunEventTx(tx, input); err != nil {
 		return err
@@ -356,10 +360,14 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	}
 	defer tx.Rollback()
 
+	runTenantID, err := loadTaskRunTenantTx(tx, input.RunID)
+	if err != nil {
+		return err
+	}
 	if input.TenantID == "" {
-		if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, input.RunID).Scan(&input.TenantID); err != nil {
-			return err
-		}
+		input.TenantID = runTenantID
+	} else if input.TenantID != runTenantID {
+		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
 	if input.State == "" {
 		input.State = taskRunPRStateOpen
@@ -483,10 +491,21 @@ func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptI
 	return tenantID, runID, attemptID, true, nil
 }
 
+func loadTaskRunTenantTx(tx *sql.Tx, runID string) (string, error) {
+	var tenantID string
+	if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, runID).Scan(&tenantID); err != nil {
+		return "", err
+	}
+	return tenantID, nil
+}
+
 func (s *Server) recordTaskRunEventForClaw(clawID string, input TaskRunEvent) error {
 	tenantID, runID, attemptID, ok, err := s.taskRunContextForClaw(clawID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
+	}
+	if !ok {
+		return nil
 	}
 	if input.TenantID == "" {
 		input.TenantID = tenantID
@@ -713,7 +732,7 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 		input.InteractionRole = taskRunInteractionNeutral
 	}
 	if input.EventKey == "" {
-		input.EventKey = input.EventType + ":" + strconv.FormatInt(epochMillis(input.EventTime), 10)
+		input.EventKey = input.EventType + ":" + strconv.FormatInt(epochMillis(input.EventTime), 10) + ":" + uuid.New().String()[:8]
 	}
 	if input.TenantID == "" {
 		if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, input.RunID).Scan(&input.TenantID); err != nil {

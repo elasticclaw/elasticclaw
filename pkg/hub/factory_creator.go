@@ -376,7 +376,10 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		StartedAt:        now,
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {
-		_, _ = s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID)
+		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
+			log.Printf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+		}
+		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 

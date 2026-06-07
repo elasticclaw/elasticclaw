@@ -271,8 +271,9 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	}
 	var got struct {
 		Providers map[string]struct {
-			BaseURL string `json:"baseUrl"`
-			Models  []struct {
+			BaseURL        string `json:"baseUrl"`
+			TimeoutSeconds int    `json:"timeoutSeconds"`
+			Models         []struct {
 				ID            string `json:"id"`
 				BaseURL       string `json:"baseUrl"`
 				ContextWindow int    `json:"contextWindow"`
@@ -295,6 +296,9 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	local := got.Providers["ollama"]
 	if local.BaseURL != "http://ollama:11434" {
 		t.Fatalf("local baseUrl = %q", local.BaseURL)
+	}
+	if local.TimeoutSeconds != 86400 {
+		t.Fatalf("local timeoutSeconds = %d, want 86400", local.TimeoutSeconds)
 	}
 	if got.Providers["ollama-cloud"].BaseURL != "https://ollama.com" {
 		t.Fatalf("ollama-cloud was modified: %q", got.Providers["ollama-cloud"].BaseURL)

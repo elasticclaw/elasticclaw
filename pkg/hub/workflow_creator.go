@@ -243,7 +243,10 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		StartedAt:        now,
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {
-		_, _ = s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID)
+		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
+			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+		}
+		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 
@@ -288,6 +291,8 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		case "docker":
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes)
 		case "noop":
 			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")

@@ -43,7 +43,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 		RunID: "run-non-pr", AttemptID: "attempt-non-pr", ClawID: "claw-non-pr", TenantID: "test-tenant-id",
 		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "internal", Workflow: "note", Integration: "external", Repo: "elastic/internal", Model: "gpt-5",
-		StartedAt: ts + 8000, AnalyticsEnabled: boolPtr(false), RequiresPR: boolPtr(false), ExcludedReason: "not_pr_task",
+		StartedAt: ts + 8000, RequiresPR: boolPtr(false), ExcludedReason: "not_pr_task",
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-disabled", AttemptID: "attempt-disabled", ClawID: "claw-disabled", TenantID: "test-tenant-id",
@@ -138,7 +138,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	disabledRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary?analytics_enabled=false", "test-token")
 	var disabledSummary taskRunAnalyticsSummaryResponse
 	decodeTaskRunAnalyticsAPI(t, disabledRR, &disabledSummary)
-	if disabledSummary.TotalRuns != 2 || disabledSummary.ByStatus[taskRunStatusCleanSuccess] != 1 || disabledSummary.FailureBreakdown[taskRunFailureTimeout] != 1 {
+	if disabledSummary.TotalRuns != 1 || disabledSummary.ByStatus[taskRunStatusFailed] != 1 || disabledSummary.FailureBreakdown[taskRunFailureTimeout] != 1 {
 		t.Fatalf("analytics_enabled=false summary mismatch: %#v", disabledSummary)
 	}
 }

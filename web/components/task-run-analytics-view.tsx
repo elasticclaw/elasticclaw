@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AlertCircle, CheckCircle2, CircleDot, ExternalLink, Filter, GitPullRequest, RefreshCw, Search, XCircle } from "lucide-react"
 import {
   fetchTaskRunAnalyticsSummary,
@@ -40,12 +41,41 @@ const anyValue = "__any__"
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_DISPLAYED_EVENTS = 12
 
-export function TaskRunAnalyticsView() {
-  const [filters, setFilters] = useState<TaskRunAnalyticsFilters>({
+const urlFilterKeys = [
+  "status",
+  "factory",
+  "workflow",
+  "repo",
+  "model",
+  "warningType",
+  "failureType",
+] as const satisfies readonly (keyof TaskRunAnalyticsFilters)[]
+
+type UrlFilterKey = (typeof urlFilterKeys)[number]
+
+function analyticsFiltersFromParams(params: URLSearchParams, workspaceScope?: string): TaskRunAnalyticsFilters {
+  const filters: TaskRunAnalyticsFilters = {
     limit: DEFAULT_PAGE_LIMIT,
     analyticsEnabled: true,
     requiresPr: true,
-  })
+  }
+  if (workspaceScope) filters.workspace = workspaceScope
+  for (const key of urlFilterKeys) {
+    const value = params.get(key)
+    if (value) filters[key] = value
+  }
+  return filters
+}
+
+export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: string }) {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const searchParamsKey = searchParams.toString()
+  const filters = useMemo(
+    () => analyticsFiltersFromParams(new URLSearchParams(searchParamsKey), workspaceScope),
+    [searchParamsKey, workspaceScope]
+  )
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary | null>(null)
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
   const [options, setOptions] = useState<TaskRunFilterOptions | null>(null)
@@ -132,12 +162,33 @@ export function TaskRunAnalyticsView() {
     return () => { cancelled = true }
   }, [selectedRunId])
 
-  const setFilter = (key: keyof TaskRunAnalyticsFilters, value: string | undefined) => {
-    setFilters((prev) => ({ ...prev, [key]: value || undefined, cursor: undefined }))
+  const replaceFilterParams = useCallback((updates: Partial<Record<UrlFilterKey, string | undefined>>) => {
+    const params = new URLSearchParams(searchParamsKey)
+    for (const key of urlFilterKeys) {
+      if (!(key in updates)) continue
+      const value = updates[key]
+      if (value) {
+        params.set(key, value)
+      } else {
+        params.delete(key)
+      }
+    }
+    params.delete("cursor")
+    params.delete("workspace")
+    params.delete("limit")
+    params.delete("analyticsEnabled")
+    params.delete("requiresPr")
+    const query = params.toString()
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+  }, [pathname, router, searchParamsKey])
+
+  const setFilter = (key: UrlFilterKey, value: string | undefined) => {
+    replaceFilterParams({ [key]: value || undefined })
   }
 
   const clearFilters = () => {
-    setFilters({ limit: DEFAULT_PAGE_LIMIT, analyticsEnabled: true, requiresPr: true })
+    const updates = Object.fromEntries(urlFilterKeys.map((key) => [key, undefined])) as Partial<Record<UrlFilterKey, undefined>>
+    replaceFilterParams(updates)
   }
 
   return (
@@ -169,7 +220,6 @@ export function TaskRunAnalyticsView() {
           <div className="flex flex-wrap items-center gap-2">
             <Filter className="size-4 text-muted-foreground" />
             <FilterSelect label="Status" value={filters.status} values={options?.statuses} onChange={(value) => setFilter("status", value)} />
-            <FilterSelect label="Workspace" value={filters.workspace} values={options?.workspaces} onChange={(value) => setFilter("workspace", value)} />
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
             <FilterSelect label="Workflow" value={filters.workflow} values={options?.workflows} onChange={(value) => setFilter("workflow", value)} />
             <FilterSelect label="Repo" value={filters.repo} values={options?.repos} onChange={(value) => setFilter("repo", value)} />
@@ -297,6 +347,10 @@ function BreakdownPills({ label, entries }: { label: string; entries?: Record<st
 }
 
 function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
+  const selectValues = value && !(values ?? []).includes(value)
+    ? [value, ...(values ?? [])]
+    : (values ?? [])
+
   return (
     <Select value={value ?? anyValue} onValueChange={(next) => onChange(next === anyValue ? undefined : next)}>
       <SelectTrigger size="sm" className="w-[150px] bg-background">
@@ -304,7 +358,7 @@ function FilterSelect({ label, value, values, onChange }: { label: string; value
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={anyValue}>{label}: any</SelectItem>
-        {(values ?? []).map((item) => (
+        {selectValues.map((item) => (
           <SelectItem key={item} value={item}>{formatLabel(item)}</SelectItem>
         ))}
       </SelectContent>

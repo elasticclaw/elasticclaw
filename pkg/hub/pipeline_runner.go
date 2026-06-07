@@ -1044,21 +1044,24 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	// 1. Set terminal status and persist sanitized diagnostic
 	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
 	res, updateErr := s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
-	if updateErr == nil {
+	if updateErr != nil {
+		log.Printf("[stopAgent] failed to mark claw %s as error: %v", clawID[:8], updateErr)
+	} else {
 		rowsAffected, _ := res.RowsAffected()
-		if rowsAffected > 0 {
-			if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-				EventKey:        "agent_stopped:" + clawID,
-				Source:          taskRunSourceHub,
-				EventType:       taskRunEventAgentStopped,
-				ActorType:       taskRunActorSystem,
-				InteractionRole: taskRunInteractionTerminal,
-				FailureType:     taskRunFailureAgentStopped,
-				Detail:          map[string]any{"reason": safeReason},
-				OccurredAt:      now(),
-			}); err != nil {
-				log.Printf("[task-run-analytics] failed to record agent stop for claw %s: %v", clawID, err)
-			}
+		if rowsAffected == 0 {
+			return
+		}
+		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+			EventKey:        "agent_stopped:" + clawID,
+			Source:          taskRunSourceHub,
+			EventType:       taskRunEventAgentStopped,
+			ActorType:       taskRunActorSystem,
+			InteractionRole: taskRunInteractionTerminal,
+			FailureType:     taskRunFailureAgentStopped,
+			Detail:          map[string]any{"reason": safeReason},
+			OccurredAt:      now(),
+		}); err != nil {
+			log.Printf("[task-run-analytics] failed to record agent stop for claw %s: %v", clawID, err)
 		}
 	}
 

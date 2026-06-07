@@ -1963,6 +1963,7 @@ func patchOllamaLocalDevCatalogFile(path, baseURL, modelID string) error {
 	}
 
 	provider["baseUrl"] = baseURL
+	provider["timeoutSeconds"] = 86400
 	if models, ok := provider["models"].([]interface{}); ok {
 		for _, item := range models {
 			model, ok := item.(map[string]interface{})

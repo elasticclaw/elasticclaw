@@ -107,10 +107,14 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 
-	_, _ = s.db.Exec(
+	prID := uuid.New().String()
+	if _, err := s.db.Exec(
 		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
-	)
+		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
+	); err != nil {
+		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
+		return
+	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 	} else if ok {
@@ -123,7 +127,9 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			State:      taskRunPRStateOpen,
 			OccurredAt: now(),
 		}); err != nil {
+			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, prID)
 			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
+			return
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])

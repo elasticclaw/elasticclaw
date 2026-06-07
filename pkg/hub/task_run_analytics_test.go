@@ -502,7 +502,7 @@ func newTaskRunAnalyticsTestServer(t *testing.T, clawID string) (*Server, *sql.D
 	_, err := db.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, status, created_at, tags)
 		VALUES(?,?,?,?,?,?,?)`,
-		clawID, "test-tenant-id", clawID, "elasticclaw", "running", now(), `{"workspace":"eng"}`,
+		clawID, "test-tenant-id", clawID, "elasticclaw", "running", now(), `["workspace:eng"]`,
 	)
 	if err != nil {
 		t.Fatalf("insert claw: %v", err)

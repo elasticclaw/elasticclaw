@@ -453,7 +453,8 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	}()
 
 	templateFiles := cloneStringMap(workspace.Files)
-	templateFiles["CONTEXT.md"] = buildLinearContext(payload)
+	_, requiresPR, _ := taskRunAnalyticsContractForWorkflow(workflow)
+	templateFiles["CONTEXT.md"] = buildLinearContext(payload, requiresPR)
 
 	clawName := issueID
 	if workflow.NamePattern != "" {
@@ -527,7 +528,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	if err != nil {
 		return fmt.Errorf("template %q not found: %w", factory.Template, err)
 	}
-	issueContext := buildLinearContext(payload)
+	_, requiresPR, _ := taskRunAnalyticsContractForFactory(factory)
+	issueContext := buildLinearContext(payload, requiresPR)
 	templateFiles["CONTEXT.md"] = issueContext
 
 	// Create claw using shared factory creator, passing pre-built template files
@@ -1044,7 +1046,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	}
 }
 
-func buildLinearContext(payload linearWebhookPayload) string {
+func buildLinearContext(payload linearWebhookPayload, requiresPR bool) string {
 	d := payload.Data
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
@@ -1067,7 +1069,11 @@ func buildLinearContext(payload linearWebhookPayload) string {
 	b.WriteString("1. Read this file fully\n")
 	b.WriteString("2. Explore the codebase\n")
 	b.WriteString("3. Implement the feature/fix described above\n")
-	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
+	if requiresPR {
+		b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
+	} else {
+		b.WriteString("4. When complete, send exactly: `[DONE]`\n")
+	}
 	return b.String()
 }
 

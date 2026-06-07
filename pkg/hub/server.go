@@ -4895,9 +4895,32 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateDaytonaVM(vmID)
 	case "exedev":
 		s.terminateExedevVM(vmID)
+	case "docker":
+		s.terminateDockerVM(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
+}
+
+// terminateDockerVM destroys a Docker agent container by name/ID.
+func (s *Server) terminateDockerVM(vmID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["docker"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateDockerVM: no docker provider configured")
+		return
+	}
+	p, err := newDockerProvider(cfg)
+	if err != nil {
+		log.Printf("terminateDockerVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+		log.Printf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Docker container %s terminated", vmID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.
