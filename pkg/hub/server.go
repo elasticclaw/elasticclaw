@@ -22,6 +22,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
@@ -2269,10 +2270,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// [DONE] trigger, let it handle that signal instead of the
 				// legacy factory PR-URL completion path below.
 				pipelineHandledDone := false
+				var pipelineDoneCtx pipelineContext
+				var pipelineDoneStage *pipeline.Stage
 				if strings.Contains(hm.Content, "[DONE]") {
-					pipelineHandledDone = s.hasPipelineMessageContainsTrigger(clawID, hm.Content)
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, hm.Content)
 				}
-				if !strings.Contains(hm.Content, "[DONE]") || pipelineHandledDone {
+				if pipelineHandledDone {
+					prURLs := extractDonePRURLs(hm.Content)
+					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
+					go s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+				} else if !strings.Contains(hm.Content, "[DONE]") {
 					go s.checkPipelineMessageTriggers(clawID, hm.Content)
 				}
 				// Clear typing indicator now that response is complete
