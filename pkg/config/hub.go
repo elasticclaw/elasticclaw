@@ -298,34 +298,40 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 
 	// Include scripts/ directory if present — workspace scripts delivered to claws.
 	scriptsDir := filepath.Join(templateDir, "scripts")
-	if err := filepath.WalkDir(scriptsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	if stat, err := os.Stat(scriptsDir); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to stat scripts directory: %w", err)
 		}
-		if path == scriptsDir {
-			return nil
-		}
-		if entry.IsDir() {
-			if strings.HasPrefix(entry.Name(), ".") {
-				return filepath.SkipDir
+	} else if stat.IsDir() {
+		if err := filepath.WalkDir(scriptsDir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
 			}
+			if path == scriptsDir {
+				return nil
+			}
+			if entry.IsDir() {
+				if strings.HasPrefix(entry.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasPrefix(entry.Name(), ".") {
+				return nil
+			}
+			rel, err := filepath.Rel(templateDir, path)
+			if err != nil {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			files[filepath.ToSlash(rel)] = string(data)
 			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("failed to read scripts directory: %w", err)
 		}
-		if strings.HasPrefix(entry.Name(), ".") {
-			return nil
-		}
-		rel, err := filepath.Rel(templateDir, path)
-		if err != nil {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		files[filepath.ToSlash(rel)] = string(data)
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read scripts directory: %w", err)
 	}
 
 	return files, nil

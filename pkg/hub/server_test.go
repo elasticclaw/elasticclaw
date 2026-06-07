@@ -47,6 +47,7 @@ func TestCleanWorkspaceFilePath(t *testing.T) {
 		{name: "AGENTS.md", want: "AGENTS.md"},
 		{name: "scripts/run_android_codebuild.py", want: "scripts/run_android_codebuild.py"},
 		{name: "scripts/utils/helper.py", want: "scripts/utils/helper.py"},
+		{name: "scripts/my script.py", want: "scripts/my script.py"},
 		{name: "../secret", wantErr: true},
 		{name: "scripts/../../secret", wantErr: true},
 		{name: "/tmp/secret", wantErr: true},

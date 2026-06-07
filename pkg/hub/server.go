@@ -5151,7 +5151,7 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 			targetDir = dir + "/" + parent
 		}
 		// Use cat with heredoc to write the file safely
-		cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", targetDir, targetPath, content)
+		cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", shellQuote(targetDir), shellQuote(targetPath), content)
 		out, err := sess.CombinedOutput(cmd)
 		sess.Close()
 		if err != nil {
