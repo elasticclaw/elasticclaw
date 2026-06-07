@@ -1186,6 +1186,104 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 	}
 }
 
+func TestClawWSPipelineDoneTriggerTracksAnalytics(t *testing.T) {
+	ready := true
+	clawID := "claw-pipeline-done-ws"
+	cfg := &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "claw-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:     "faster_apps",
+				Template: "elasticclaw",
+				PipelineYAML: `
+stages:
+  - id: working
+    label: Working
+    entry: true
+  - id: android_validation
+    label: Android Validation
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: "Android validation started"
+`,
+			},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "NEXT-257", "elasticclaw", "connected", `["factory:faster_apps"]`, "NEXT-257", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clawWS, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw ws: %v", err)
+	}
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
+		Type: "register",
+		Payload: types.RegisterPayload{
+			ClawID:       clawID,
+			Name:         "NEXT-257",
+			Template:     "elasticclaw",
+			Token:        "claw-token",
+			GatewayReady: &ready,
+		},
+	}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(ctx, clawWS, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+	if registered.Type != "registered" {
+		t.Fatalf("registration ack type = %q, want registered", registered.Type)
+	}
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
+		Type: "message",
+		Payload: types.HubMessage{
+			Content: "[DONE]",
+		},
+	}); err != nil {
+		t.Fatalf("write done message: %v", err)
+	}
+
+	var stage string
+	var analyticsCount int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id=? AND issue_id=? AND factory_name=? AND action='done_signal'`, clawID, "NEXT-257", "factory:faster_apps").Scan(&analyticsCount)
+		if stage == "android_validation" && analyticsCount == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if stage != "android_validation" {
+		t.Fatalf("pipeline_stage = %q, want android_validation", stage)
+	}
+	if analyticsCount != 1 {
+		t.Fatalf("done_signal analytics count = %d, want 1", analyticsCount)
+	}
+
+	var noPRWarnings int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND content LIKE '%no PR URLs%'`, clawID).Scan(&noPRWarnings); err != nil {
+		t.Fatalf("count no-pr warnings: %v", err)
+	}
+	if noPRWarnings != 0 {
+		t.Fatalf("expected no PR URL warning to be suppressed, got %d", noPRWarnings)
+	}
+}
+
 func decodeActivitySummaryMeta(t *testing.T, msg types.HubMessage) activitySummaryMeta {
 	t.Helper()
 	if !strings.HasPrefix(msg.Format, "activity_summary:") {

@@ -1091,6 +1091,12 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
 	prURLs := extractDonePRURLs(rawMessage)
 
+	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
+		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+		return
+	}
+
 	// Validate PRs via GitHub API if we have a token.
 	ghToken := s.resolveGitHubToken()
 	if ghToken != "" {

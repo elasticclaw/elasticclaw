@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -248,6 +249,63 @@ func TestHandleClawDoneSignal_BlockedByFailedRequiredGate(t *testing.T) {
 	}
 	if msgCount != 1 {
 		t.Fatalf("expected 1 user message, got %d", msgCount)
+	}
+}
+
+func TestHandleClawDoneSignal_PipelineDoneTriggerDoesNotRequirePRURL(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.hubCfg.Factories = []*types.FactoryConfig{
+		{
+			Name:     "faster_apps",
+			Template: "elasticclaw",
+			PipelineYAML: `
+stages:
+  - id: working
+    label: Working
+    entry: true
+  - id: android_validation
+    label: Android Validation
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: "Android validation started"
+`,
+		},
+	}
+
+	const clawID = "claw-done-pipeline"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "NEXT-257", "elasticclaw", "connected", `["factory:faster_apps"]`, "NEXT-257", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE]")
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select pipeline_stage: %v", err)
+	}
+	if stage != "android_validation" {
+		t.Fatalf("pipeline_stage = %q, want android_validation", stage)
+	}
+
+	var noPRWarnings int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND content LIKE '%no PR URLs%'`, clawID).Scan(&noPRWarnings); err != nil {
+		t.Fatalf("count no-pr warnings: %v", err)
+	}
+	if noPRWarnings != 0 {
+		t.Fatalf("expected no PR URL warning to be suppressed, got %d", noPRWarnings)
+	}
+
+	var injected string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&injected); err != nil {
+		t.Fatalf("select injected message: %v", err)
+	}
+	if !strings.Contains(injected, "Android validation started") {
+		t.Fatalf("injected message = %q, want validation inject", injected)
 	}
 }
 
