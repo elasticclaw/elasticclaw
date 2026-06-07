@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, CheckCircle2, CircleDot, ExternalLink, Filter, GitPullRequest, RefreshCw, Search, XCircle } from "lucide-react"
+import { AlertCircle, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, RefreshCw, Search, XCircle } from "lucide-react"
 import {
   fetchTaskRunAnalyticsSummary,
   fetchTaskRunAttempts,
@@ -202,10 +202,13 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
               <h2 className="text-lg font-semibold tracking-tight">Task Run Analytics</h2>
               <p className="text-sm text-muted-foreground">PR-scoped run outcomes, warnings, and delivery failures.</p>
             </div>
-            <Button variant="outline" size="sm" className="w-fit gap-2" onClick={() => load()}>
-              <RefreshCw className={cn("size-4", loading && "animate-spin")} />
-              Refresh
-            </Button>
+            <div className="flex w-fit items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={clearFilters}>Reset</Button>
+              <Button variant="outline" size="sm" className="gap-2" onClick={() => load()}>
+                <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+                Refresh
+              </Button>
+            </div>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <Metric label="Runs" value={summary?.totalRuns ?? 0} />
@@ -216,15 +219,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Filter className="size-4 text-muted-foreground" />
-            <FilterSelect label="Status" value={filters.status} values={options?.statuses} onChange={(value) => setFilter("status", value)} />
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
             <FilterSelect label="Workflow" value={filters.workflow} values={options?.workflows} onChange={(value) => setFilter("workflow", value)} />
             <FilterSelect label="Repo" value={filters.repo} values={options?.repos} onChange={(value) => setFilter("repo", value)} />
             <FilterSelect label="Model" value={filters.model} values={options?.models} onChange={(value) => setFilter("model", value)} />
             <FilterSelect label="Warning" value={filters.warningType} values={options?.warningTypes} onChange={(value) => setFilter("warningType", value)} />
             <FilterSelect label="Failure" value={filters.failureType} values={options?.failureTypes} onChange={(value) => setFilter("failureType", value)} />
-            <Button variant="ghost" size="sm" onClick={clearFilters}>Reset</Button>
           </div>
         </header>
 
