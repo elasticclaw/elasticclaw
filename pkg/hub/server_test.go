@@ -72,6 +72,37 @@ func TestCleanWorkspaceFilePath(t *testing.T) {
 	}
 }
 
+func TestSSHHomeDir(t *testing.T) {
+	tests := []struct {
+		user    string
+		want    string
+		wantErr bool
+	}{
+		{user: "elasticclaw", want: "/home/elasticclaw"},
+		{user: "root", want: "/root"},
+		{user: " elasticclaw ", want: "/home/elasticclaw"},
+		{user: "", wantErr: true},
+		{user: "bad/user", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.user, func(t *testing.T) {
+			got, err := sshHomeDir(tt.user)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got home %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("home = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestServeWebUIMapsWorkspaceSettingsRoutesToStaticPlaceholder(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 	mux := http.NewServeMux()
