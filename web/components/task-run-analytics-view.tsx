@@ -23,7 +23,7 @@ import type {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 
@@ -215,10 +215,6 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             <Metric label="Human touches" value={summary?.humanInteractions ?? 0} />
             <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} />
           </div>
-          <div className="grid gap-2 lg:grid-cols-2">
-            <BreakdownPills label="Warning types" entries={summary?.warningBreakdown} />
-            <BreakdownPills label="Failure types" entries={summary?.failureBreakdown} />
-          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Filter className="size-4 text-muted-foreground" />
             <FilterSelect label="Status" value={filters.status} values={options?.statuses} onChange={(value) => setFilter("status", value)} />
@@ -329,34 +325,18 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: "
   )
 }
 
-function BreakdownPills({ label, entries }: { label: string; entries?: Record<string, number> }) {
-  const visibleEntries = Object.entries(entries ?? {}).filter(([, count]) => count > 0)
-  return (
-    <div className="flex min-h-10 flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-xs">
-      <span className="font-medium text-muted-foreground">{label}</span>
-      {visibleEntries.length === 0 ? (
-        <span className="text-muted-foreground">None</span>
-      ) : (
-        visibleEntries.map(([name, count]) => (
-          <Badge key={name} variant="outline" className="gap-1">
-            {formatLabel(name)}
-            <span className="text-muted-foreground">{count}</span>
-          </Badge>
-        ))
-      )}
-    </div>
-  )
-}
-
 function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
   const selectValues = value && !(values ?? []).includes(value)
     ? [value, ...(values ?? [])]
     : (values ?? [])
+  const displayValue = value ? formatLabel(value) : "any"
 
   return (
     <Select value={value ?? anyValue} onValueChange={(next) => onChange(next === anyValue ? undefined : next)}>
-      <SelectTrigger size="sm" className="w-[150px] bg-background">
-        <SelectValue placeholder={label} />
+      <SelectTrigger size="sm" className="w-[170px] bg-background">
+        <span className="truncate">
+          <span className="text-muted-foreground">{label}:</span> {displayValue}
+        </span>
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={anyValue}>{label}: any</SelectItem>
