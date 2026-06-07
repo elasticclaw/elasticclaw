@@ -359,6 +359,8 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
     ["model", filters.model],
     ["warningType", filters.warningType],
     ["failureType", filters.failureType],
+    ["humanTouched", filters.humanTouched],
+    ["mergedPrs", filters.mergedPrs],
     ["analyticsEnabled", filters.analyticsEnabled],
     ["requiresPr", filters.requiresPr],
     ["from", filters.from],

@@ -108,6 +108,8 @@ export interface TaskRunAnalyticsFilters {
   model?: string
   warningType?: string
   failureType?: string
+  humanTouched?: boolean
+  mergedPrs?: boolean
   analyticsEnabled?: boolean
   requiresPr?: boolean
   from?: string

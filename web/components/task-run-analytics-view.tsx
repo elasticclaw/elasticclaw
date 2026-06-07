@@ -51,7 +51,19 @@ const urlFilterKeys = [
   "failureType",
 ] as const satisfies readonly (keyof TaskRunAnalyticsFilters)[]
 
-type UrlFilterKey = (typeof urlFilterKeys)[number]
+const urlBooleanFilterKeys = [
+  "humanTouched",
+  "mergedPrs",
+] as const satisfies readonly (keyof TaskRunAnalyticsFilters)[]
+
+const allUrlFilterKeys = [
+  ...urlFilterKeys,
+  ...urlBooleanFilterKeys,
+] as const satisfies readonly (keyof TaskRunAnalyticsFilters)[]
+
+type UrlFilterKey = (typeof allUrlFilterKeys)[number]
+type UrlStringFilterKey = (typeof urlFilterKeys)[number]
+type KpiFilter = "runs" | "clean" | "warning" | "failed" | "humanTouches" | "mergedPrs"
 
 function analyticsFiltersFromParams(params: URLSearchParams, workspaceScope?: string): TaskRunAnalyticsFilters {
   const filters: TaskRunAnalyticsFilters = {
@@ -64,7 +76,18 @@ function analyticsFiltersFromParams(params: URLSearchParams, workspaceScope?: st
     const value = params.get(key)
     if (value) filters[key] = value
   }
+  for (const key of urlBooleanFilterKeys) {
+    const value = booleanParam(params, key)
+    if (value !== undefined) filters[key] = value
+  }
   return filters
+}
+
+function booleanParam(params: URLSearchParams, key: string) {
+  const value = params.get(key)
+  if (value === "true") return true
+  if (value === "false") return false
+  return undefined
 }
 
 export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: string }) {
@@ -164,13 +187,13 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     return () => { cancelled = true }
   }, [selectedRunId])
 
-  const replaceFilterParams = useCallback((updates: Partial<Record<UrlFilterKey, string | undefined>>) => {
+  const replaceFilterParams = useCallback((updates: Partial<Record<UrlFilterKey, string | boolean | undefined>>) => {
     const params = new URLSearchParams(searchParamsKey)
-    for (const key of urlFilterKeys) {
+    for (const key of allUrlFilterKeys) {
       if (!(key in updates)) continue
       const value = updates[key]
-      if (value) {
-        params.set(key, value)
+      if (value !== undefined && value !== "") {
+        params.set(key, String(value))
       } else {
         params.delete(key)
       }
@@ -184,14 +207,38 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
   }, [pathname, router, searchParamsKey])
 
-  const setFilter = (key: UrlFilterKey, value: string | undefined) => {
+  const setFilter = (key: UrlStringFilterKey, value: string | undefined) => {
     replaceFilterParams({ [key]: value || undefined })
   }
 
   const clearFilters = () => {
-    const updates = Object.fromEntries(urlFilterKeys.map((key) => [key, undefined])) as Partial<Record<UrlFilterKey, undefined>>
+    const updates = Object.fromEntries(allUrlFilterKeys.map((key) => [key, undefined])) as Partial<Record<UrlFilterKey, undefined>>
     replaceFilterParams(updates)
   }
+
+  const applyKpiFilter = (kpi: KpiFilter) => {
+    const updates: Partial<Record<UrlFilterKey, string | boolean | undefined>> = {
+      status: undefined,
+      humanTouched: undefined,
+      mergedPrs: undefined,
+    }
+    if (kpi === "clean") updates.status = "clean_success"
+    if (kpi === "warning") updates.status = "warning_success"
+    if (kpi === "failed") updates.status = "failed"
+    if (kpi === "humanTouches") updates.humanTouched = true
+    if (kpi === "mergedPrs") updates.mergedPrs = true
+    replaceFilterParams(updates)
+  }
+
+  const activeKpi = useMemo<KpiFilter | null>(() => {
+    if (filters.humanTouched === true) return "humanTouches"
+    if (filters.mergedPrs === true) return "mergedPrs"
+    if (filters.status === "clean_success") return "clean"
+    if (filters.status === "warning_success") return "warning"
+    if (filters.status === "failed") return "failed"
+    if (!filters.status && filters.humanTouched === undefined && filters.mergedPrs === undefined) return "runs"
+    return null
+  }, [filters.humanTouched, filters.mergedPrs, filters.status])
 
   return (
     <main className="flex h-full min-w-0 bg-background">
@@ -211,12 +258,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             </div>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
-            <Metric label="Runs" value={summary?.totalRuns ?? 0} />
-            <Metric label="Clean" value={summary?.byStatus.clean_success ?? 0} tone="success" />
-            <Metric label="Warnings" value={summary?.byStatus.warning_success ?? 0} tone="warning" />
-            <Metric label="Failed" value={summary?.byStatus.failed ?? 0} tone="danger" />
-            <Metric label="Human touches" value={summary?.humanInteractions ?? 0} />
-            <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} />
+            <Metric label="Runs" value={summary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
+            <Metric label="Clean" value={summary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
+            <Metric label="Warning" value={summary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
+            <Metric label="Failed" value={summary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
+            <Metric label="Human touches" value={summary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
+            <Metric label="Merged PRs" value={summary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
@@ -311,9 +358,17 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   )
 }
 
-function Metric({ label, value, tone }: { label: string; value: number; tone?: "success" | "warning" | "danger" }) {
+function Metric({ label, value, tone, active, onClick }: { label: string; value: number; tone?: "success" | "warning" | "danger"; active?: boolean; onClick: () => void }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2">
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        active && "border-primary/60 bg-accent"
+      )}
+    >
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className={cn(
         "mt-1 text-xl font-semibold",
@@ -321,7 +376,7 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: "
         tone === "warning" && "text-amber-600 dark:text-amber-400",
         tone === "danger" && "text-red-600 dark:text-red-400"
       )}>{value}</div>
-    </div>
+    </button>
   )
 }
 

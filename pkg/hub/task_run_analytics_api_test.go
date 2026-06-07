@@ -37,7 +37,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 		RunID: "run-running", AttemptID: "attempt-running", ClawID: "claw-running", TenantID: "test-tenant-id",
 		Status: taskRunStatusRunning, Phase: taskRunPhaseWaitingForMerge, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "platform", Workflow: "review", Integration: "linear", Repo: "elastic/api", Model: "gpt-5",
-		StartedAt: ts, PRCount: 1, OpenPRCount: 1,
+		StartedAt: ts, HumanInteractions: 1, PRCount: 1, OpenPRCount: 1,
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-non-pr", AttemptID: "attempt-non-pr", ClawID: "claw-non-pr", TenantID: "test-tenant-id",
@@ -74,7 +74,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	if allSummary.TotalRuns != 4 || allSummary.ByStatus[taskRunStatusCleanSuccess] != 1 || allSummary.ByStatus[taskRunStatusWarningSuccess] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
 		t.Fatalf("summary should include only authenticated tenant runs, got %#v", allSummary)
 	}
-	if allSummary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 || allSummary.HumanInteractions != 2 {
+	if allSummary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 || allSummary.HumanInteractions != 3 {
 		t.Fatalf("summary warning/human counts mismatch: %#v", allSummary)
 	}
 	if allSummary.PRCounts.Total != 4 || allSummary.PRCounts.Open != 1 || allSummary.PRCounts.Merged != 2 || allSummary.PRCounts.Closed != 1 {
@@ -126,6 +126,26 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	decodeTaskRunAnalyticsAPI(t, ownerRR, &ownerPage)
 	if len(ownerPage.Runs) != 2 || ownerPage.Runs[0].RunID != "run-clean" || ownerPage.Runs[1].RunID != "run-failed" {
 		t.Fatalf("owner filter mismatch: %#v", ownerPage)
+	}
+
+	humanTouchedRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?humanTouched=true", "test-token")
+	var humanTouchedPage taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, humanTouchedRR, &humanTouchedPage)
+	if len(humanTouchedPage.Runs) != 2 || humanTouchedPage.Runs[0].RunID != "run-warning" || humanTouchedPage.Runs[1].RunID != "run-running" {
+		t.Fatalf("humanTouched filter mismatch: %#v", humanTouchedPage)
+	}
+
+	mergedPRsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary?mergedPrs=true", "test-token")
+	var mergedPRsSummary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, mergedPRsRR, &mergedPRsSummary)
+	if mergedPRsSummary.TotalRuns != 2 || mergedPRsSummary.PRCounts.Merged != 2 || mergedPRsSummary.ByStatus[taskRunStatusCleanSuccess] != 1 || mergedPRsSummary.ByStatus[taskRunStatusWarningSuccess] != 1 {
+		t.Fatalf("mergedPrs summary mismatch: %#v", mergedPRsSummary)
+	}
+	mergedPRsRunsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?mergedPrs=true", "test-token")
+	var mergedPRsPage taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, mergedPRsRunsRR, &mergedPRsPage)
+	if len(mergedPRsPage.Runs) != 2 || mergedPRsPage.Runs[0].RunID != "run-clean" || mergedPRsPage.Runs[1].RunID != "run-warning" {
+		t.Fatalf("mergedPrs runs mismatch: %#v", mergedPRsPage)
 	}
 
 	nonPRRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?requires_pr=false", "test-token")

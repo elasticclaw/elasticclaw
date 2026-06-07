@@ -203,6 +203,8 @@ type taskRunAnalyticsFilters struct {
 	Model            []string
 	WarningType      []string
 	FailureType      []string
+	HumanTouched     *bool
+	MergedPRs        *bool
 	RequiresPR       *bool
 	AnalyticsEnabled *bool
 }
@@ -357,6 +359,12 @@ func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, err
 		return filters, err
 	}
 	if filters.AnalyticsEnabled, err = parseOptionalTaskRunAnalyticsBool(q, "analytics_enabled", "analyticsEnabled"); err != nil {
+		return filters, err
+	}
+	if filters.HumanTouched, err = parseOptionalTaskRunAnalyticsBool(q, "human_touched", "humanTouched"); err != nil {
+		return filters, err
+	}
+	if filters.MergedPRs, err = parseOptionalTaskRunAnalyticsBool(q, "merged_prs", "mergedPrs"); err != nil {
 		return filters, err
 	}
 	return filters, nil
@@ -660,6 +668,20 @@ func taskRunAnalyticsSummaryWhere(filters taskRunAnalyticsFilters) (string, []an
 	for _, warningType := range filters.WarningType {
 		where = append(where, `EXISTS (SELECT 1 FROM json_each(warning_types) WHERE value=?)`)
 		args = append(args, warningType)
+	}
+	if filters.HumanTouched != nil {
+		if *filters.HumanTouched {
+			where = append(where, `human_interaction_count > 0`)
+		} else {
+			where = append(where, `human_interaction_count = 0`)
+		}
+	}
+	if filters.MergedPRs != nil {
+		if *filters.MergedPRs {
+			where = append(where, `merged_pr_count > 0`)
+		} else {
+			where = append(where, `merged_pr_count = 0`)
+		}
 	}
 	if filters.FromStartedAt > 0 {
 		where = append(where, `started_at >= ?`)
