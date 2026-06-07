@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -430,9 +433,33 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 	case "failing":
 		// Test-only provider that always fails workflow run actions
 		return &pipelineRunResult{ExitCode: 1, Stderr: "failing provider simulated run failure"}, fmt.Errorf("failing provider simulated run failure")
+	case "testexec":
+		// Test-only provider used by integration tests to exercise real run
+		// commands without provisioning a sandbox.
+		if os.Getenv("ELASTICCLAW_TESTEXEC_PROVIDER") == "" {
+			return &pipelineRunResult{ExitCode: 1, Stderr: "testexec provider requires ELASTICCLAW_TESTEXEC_PROVIDER=1"}, fmt.Errorf("testexec provider disabled")
+		}
+		return executeLocalPipelineRun(ctx, workspaceCommand)
 	default:
 		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
 	}
+}
+
+func executeLocalPipelineRun(ctx context.Context, command string) (*pipelineRunResult, error) {
+	cmd := osexec.CommandContext(ctx, "bash", "-lc", command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		var exitErr *osexec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	return &pipelineRunResult{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()}, err
 }
 
 func (s *Server) executeReplicatedPipelineRun(user, host, command string, timeout time.Duration) (*pipelineRunResult, error) {
@@ -450,12 +477,9 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		return
 	}
 	var parsedJSON string
-	if strings.TrimSpace(result.Stdout) != "" {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(result.Stdout), &parsed); err == nil {
-			b, _ := json.Marshal(parsed)
-			parsedJSON = string(b)
-		}
+	if parsed, ok := parsePipelineOutputJSON(result.Stdout); ok {
+		b, _ := json.Marshal(parsed)
+		parsedJSON = string(b)
 	}
 	if parsedJSON == "" {
 		parsedJSON = "{}"
@@ -476,6 +500,30 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	} else {
 		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
 	}
+}
+
+func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
+	parse := func(s string) (map[string]interface{}, bool) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, false
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+			return nil, false
+		}
+		return parsed, true
+	}
+	if parsed, ok := parse(stdout); ok {
+		return parsed, true
+	}
+	lines := strings.Split(stdout, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if parsed, ok := parse(lines[i]); ok {
+			return parsed, true
+		}
+	}
+	return nil, false
 }
 
 // loadPipelineOutputs returns all persisted outputs for a claw as a map of

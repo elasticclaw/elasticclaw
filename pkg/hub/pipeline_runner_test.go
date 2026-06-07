@@ -191,6 +191,51 @@ func TestPersistPipelineOutputNonJSON(t *testing.T) {
 	}
 }
 
+func TestParsePipelineOutputJSONUsesLastJSONLine(t *testing.T) {
+	stdout := `$ git rev-parse --is-inside-work-tree
+$ git status --porcelain
+{"reason": "next_mobile matches main", "source_dir": "/home/daytona/.openclaw/workspace/next_mobile", "status": "skipped"}
+`
+	parsed, ok := parsePipelineOutputJSON(stdout)
+	if !ok {
+		t.Fatal("expected noisy stdout with final JSON line to parse")
+	}
+	if parsed["status"] != "skipped" {
+		t.Fatalf("status = %v, want skipped", parsed["status"])
+	}
+	if parsed["reason"] != "next_mobile matches main" {
+		t.Fatalf("reason = %v, want next_mobile matches main", parsed["reason"])
+	}
+}
+
+func TestPersistPipelineOutputNoisyJSON(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-output-noisy-json"
+	_, err := s.db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.persistPipelineOutput(clawID, "stage-1", "android_validation", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout: `$ git status --porcelain
+{"status":"skipped","reason":"next_mobile matches main"}`,
+	})
+
+	outputs := s.loadPipelineOutputs(clawID)
+	validation, ok := outputs["android_validation"]
+	if !ok {
+		t.Fatal("expected android_validation in outputs")
+	}
+	if validation["status"] != "skipped" {
+		t.Fatalf("status = %v, want skipped", validation["status"])
+	}
+}
+
 func TestPersistPipelineOutputOverwrite(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
