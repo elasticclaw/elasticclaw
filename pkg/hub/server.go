@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -3045,11 +3046,18 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		for name, content := range templateFiles {
 			name := name
 			content := content
+			safeName, err := cleanWorkspaceFilePath(name)
+			if err != nil {
+				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
+				continue
+			}
+			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+			targetDir := path.Dir(targetPath)
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
 %s
 ELASTICCLAW_EOF`,
-				name, content)
+				shellQuote(targetDir), shellQuote(targetPath), content)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
 			}
@@ -4571,6 +4579,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Replicated uses the comment from the SSH public key as the Linux username.
 	// Our key comment is "elasticclaw@hub", so the username is "elasticclaw".
 	sshUser := replicatedpkg.SSHUserFromPublicKey(s.identity.PublicKey)
+	sshHome, err := sshHomeDir(sshUser)
+	if err != nil {
+		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
+		return
+	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
@@ -4640,7 +4654,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 	if flakeFiles := templateFlakeFiles(files); len(flakeFiles) > 0 {
 		s.setBootstrapStatus(clawID, "Staging Nix flake")
-		if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/workspace", flakeFiles); err != nil {
+		if err := s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), flakeFiles); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", sanitizeBootstrapError(err)), false)
 			return
@@ -4679,7 +4693,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
 		for attempt := 1; attempt <= 3; attempt++ {
-			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
+			if err := s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files); err == nil {
 				log.Printf("Template files written for claw %s", clawName)
 				break
 			} else if attempt == 3 {
@@ -5098,6 +5112,35 @@ func (s *Server) sshRunWithTimeout(user, host, script string, timeout time.Durat
 	return output, nil
 }
 
+func cleanWorkspaceFilePath(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if strings.Contains(trimmed, "\x00") {
+		return "", fmt.Errorf("path contains NUL byte")
+	}
+	cleaned := path.Clean(filepath.ToSlash(trimmed))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return "", fmt.Errorf("path must stay inside workspace")
+	}
+	return cleaned, nil
+}
+
+func sshHomeDir(user string) (string, error) {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return "", fmt.Errorf("empty SSH user")
+	}
+	if strings.ContainsAny(user, "/\x00") {
+		return "", fmt.Errorf("SSH user contains invalid characters")
+	}
+	if user == "root" {
+		return "/root", nil
+	}
+	return "/home/" + user, nil
+}
+
 // sshWriteFiles writes a map of filename->content to a remote directory via SSH.
 func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) error {
 	sshCfg := &gossh.ClientConfig{
@@ -5117,8 +5160,18 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		if err != nil {
 			return fmt.Errorf("ssh session: %w", err)
 		}
+		safeName, err := cleanWorkspaceFilePath(name)
+		if err != nil {
+			sess.Close()
+			return fmt.Errorf("invalid template file path %q: %w", name, err)
+		}
+		targetPath := dir + "/" + safeName
+		targetDir := dir
+		if parent := path.Dir(safeName); parent != "." {
+			targetDir = dir + "/" + parent
+		}
 		// Use cat with heredoc to write the file safely
-		cmd := fmt.Sprintf("mkdir -p %s && cat > %s/%s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", dir, dir, name, content)
+		cmd := fmt.Sprintf("mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", shellQuote(targetDir), shellQuote(targetPath), content)
 		out, err := sess.CombinedOutput(cmd)
 		sess.Close()
 		if err != nil {

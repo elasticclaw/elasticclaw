@@ -191,6 +191,7 @@ provider: replicated
 		"SOUL.md":                 false,
 		"scripts/analyze.py":      false,
 		"scripts/deploy.sh":       false,
+		"scripts/utils/helper.py": false,
 	}
 
 	for path := range files {
