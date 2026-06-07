@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 func TestSanitizeBootstrapOutputDropsExportedEnvironment(t *testing.T) {
@@ -979,6 +981,208 @@ func TestMessageTimelinePreservesDisplayedStateAcrossActivityRuns(t *testing.T) 
 				t.Fatalf("timeline[%d] expanded activity len = %d, want %d", i, len(expanded), wantItem.count)
 			}
 		}
+	}
+}
+
+func TestStreamingSegmentsPersistAroundActivityForRefreshTimeline(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	cc := &clawConn{id: "claw-1", tenantID: "test-tenant-id"}
+	persistSegment := func(id, content string, offsetSeconds int) {
+		t.Helper()
+		cc.mu.Lock()
+		cc.streamingMsgID = id
+		cc.streamingBuf.WriteString(content)
+		cc.mu.Unlock()
+		if err := s.flushStreamingSegment("claw-1", "test-tenant-id", cc); err != nil {
+			t.Fatal(err)
+		}
+		_, err := db.Exec(`UPDATE messages SET created_at=? WHERE id=?`, base.Add(time.Duration(offsetSeconds)*time.Second), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertActivity := func(id string, offsetSeconds int) {
+		t.Helper()
+		_, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "claw-1", "test-tenant-id", "activity", "exec", `activity:{"kind":"tool","tool":"exec"}`, base.Add(time.Duration(offsetSeconds)*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	persistSegment("seg-1", "Assistant segment 1", 1)
+	insertActivity("activity-1", 2)
+	persistSegment("seg-2", "Assistant segment 2", 3)
+	insertActivity("activity-2", 4)
+	_, err = db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"seg-3", "claw-1", "test-tenant-id", "claw", "Assistant segment 3", "", base.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/timeline", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+
+	s.handleMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var timeline []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&timeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 5 {
+		t.Fatalf("timeline len = %d, want 5: %#v", len(timeline), timeline)
+	}
+	wantRoles := []string{"claw", "activity_summary", "claw", "activity_summary", "claw"}
+	wantIDs := []string{"seg-1", "", "seg-2", "", "seg-3"}
+	for i := range wantRoles {
+		if timeline[i].Role != wantRoles[i] {
+			t.Fatalf("timeline[%d].role = %q, want %q; timeline=%#v", i, timeline[i].Role, wantRoles[i], timeline)
+		}
+		if wantIDs[i] != "" && timeline[i].ID != wantIDs[i] {
+			t.Fatalf("timeline[%d].id = %q, want %q", i, timeline[i].ID, wantIDs[i])
+		}
+		if timeline[i].Role == "activity_summary" {
+			meta := decodeActivitySummaryMeta(t, timeline[i])
+			if meta.Count != 1 {
+				t.Fatalf("timeline[%d] activity count = %d, want 1", i, meta.Count)
+			}
+		}
+	}
+}
+
+func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
+	ready := true
+	clawID := "claw-ghost-final-message"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	userCtx, cancelUser := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelUser()
+	userWS, _, err := websocket.Dial(userCtx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws?token=test-token", nil)
+	if err != nil {
+		t.Fatalf("dial user ws: %v", err)
+	}
+	t.Cleanup(func() { _ = userWS.Close(websocket.StatusNormalClosure, "done") })
+
+	clawCtx, cancelClaw := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelClaw()
+	clawWS, _, err := websocket.Dial(clawCtx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw ws: %v", err)
+	}
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if err := wsjson.Write(clawCtx, clawWS, types.WSMessage{
+		Type: "register",
+		Payload: types.RegisterPayload{
+			ClawID:       clawID,
+			Name:         "claw 1",
+			Template:     "elasticclaw",
+			Token:        "claw-token",
+			GatewayReady: &ready,
+		},
+	}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(clawCtx, clawWS, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+	if registered.Type != "registered" {
+		t.Fatalf("registration ack type = %q, want registered", registered.Type)
+	}
+
+	if err := wsjson.Write(clawCtx, clawWS, types.WSMessage{
+		Type:    "chunk",
+		Payload: map[string]string{"content": "Assistant segment 1"},
+	}); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+	if err := wsjson.Write(clawCtx, clawWS, types.WSMessage{
+		Type: "agent_activity",
+		Payload: map[string]interface{}{
+			"kind":    "tool",
+			"tool":    "exec",
+			"command": "echo split",
+		},
+	}); err != nil {
+		t.Fatalf("write activity: %v", err)
+	}
+	finalContent := "Assistant segment 1\nAssistant segment 2"
+	if err := wsjson.Write(clawCtx, clawWS, types.WSMessage{
+		Type: "message",
+		Payload: types.HubMessage{
+			Content: finalContent,
+		},
+	}); err != nil {
+		t.Fatalf("write final message: %v", err)
+	}
+
+	seenIdle := false
+	seenGhostMessage := false
+	readUntil := time.Now().Add(2 * time.Second)
+	for time.Now().Before(readUntil) && !seenIdle {
+		readCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		var msg types.WSMessage
+		err := wsjson.Read(readCtx, userWS, &msg)
+		cancel()
+		if err != nil {
+			continue
+		}
+		switch msg.Type {
+		case "message":
+			payload, _ := json.Marshal(msg.Payload)
+			var hm types.HubMessage
+			if err := json.Unmarshal(payload, &hm); err == nil && hm.Content == finalContent {
+				seenGhostMessage = true
+			}
+		case "agent_typing":
+			payload, _ := json.Marshal(msg.Payload)
+			var typing struct {
+				ClawID string `json:"claw_id"`
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(payload, &typing); err == nil && typing.ClawID == clawID && typing.Status == "idle" {
+				seenIdle = true
+			}
+		}
+	}
+	if !seenIdle {
+		t.Fatal("did not observe final idle typing event")
+	}
+	if seenGhostMessage {
+		t.Fatal("observed unpersisted final full-response message over user websocket")
+	}
+
+	var finalRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='claw' AND content=?`, clawID, finalContent).Scan(&finalRows); err != nil {
+		t.Fatal(err)
+	}
+	if finalRows != 0 {
+		t.Fatalf("final full-response rows = %d, want 0", finalRows)
+	}
+	var segmentRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='claw' AND content=?`, clawID, "Assistant segment 1").Scan(&segmentRows); err != nil {
+		t.Fatal(err)
+	}
+	if segmentRows != 1 {
+		t.Fatalf("persisted segment rows = %d, want 1", segmentRows)
 	}
 }
 
