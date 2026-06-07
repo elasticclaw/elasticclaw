@@ -687,9 +687,6 @@ type ProviderConfig struct {
 	DefaultMemory string `yaml:"default_memory,omitempty"` // e.g. "4GB"
 	DefaultDisk   string `yaml:"default_disk,omitempty"`   // e.g. "20GB"
 
-	// local provider
-	Enabled bool `yaml:"enabled,omitempty"`
-
 	// docker (local) provider
 	// Image is the agent container image to run (default: elasticclaw/claw-agent:dev).
 	Image string `yaml:"image,omitempty"`

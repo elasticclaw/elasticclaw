@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
@@ -81,6 +85,7 @@ type clawConn struct {
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
 	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID        string          // pre-assigned message ID for the current stream
+	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
 	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
@@ -120,9 +125,34 @@ func (cc *clawConn) isBusyLocked() bool {
 func (cc *clawConn) finishTurnLocked() {
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
+	cc.streamingSplit = false
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
+}
+
+func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
+	cc.mu.Lock()
+	if cc.streamingBuf.Len() == 0 {
+		cc.mu.Unlock()
+		return nil
+	}
+	msgID := cc.streamingMsgID
+	if msgID == "" {
+		msgID = uuid.New().String()
+	}
+	content := cc.streamingBuf.String()
+	cc.streamingMsgID = ""
+	cc.streamingBuf.Reset()
+	cc.streamingSplit = true
+	cc.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+		msgID, clawID, tenantID, "claw", content, now(),
+	)
+	return err
 }
 
 type userConn struct {
@@ -219,6 +249,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
+	mux.HandleFunc("/api/branding", s.handleBranding) // public — no auth required
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
@@ -598,6 +629,20 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{
 		"github_oauth_enabled":  githubOAuthEnabled,
 		"password_auth_enabled": passwordAuthEnabled,
+	})
+}
+
+func (s *Server) handleBranding(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	var appName, logoURL string
+	if s.hubCfg.Branding != nil {
+		appName = s.hubCfg.Branding.AppName
+		logoURL = s.hubCfg.Branding.LogoURL
+	}
+	s.mu.RUnlock()
+	jsonOK(w, map[string]string{
+		"appName": appName,
+		"logoUrl": logoURL,
 	})
 }
 
@@ -1324,7 +1369,24 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/messages/")
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/messages/"), "/")
+	parts := strings.Split(path, "/")
+	clawID := parts[0]
+	if clawID == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "timeline":
+			s.handleMessageTimeline(w, r, tenantID, clawID)
+		case "activity":
+			s.handleMessageActivity(w, r, tenantID, clawID)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+		return
+	}
 	ghLoginMsg := githubLoginFromContext(r.Context())
 	var accessCfgMsg *types.AccessConfig
 	if ghLoginMsg != "" {
@@ -1483,6 +1545,327 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		msgs = []types.HubMessage{}
 	}
 	jsonOK(w, msgs)
+}
+
+type activitySummaryMeta struct {
+	Count int    `json:"count"`
+	From  string `json:"from"`
+	To    string `json:"to,omitempty"`
+}
+
+func hiddenSystemMessagesArgs() []interface{} {
+	return []interface{}{
+		wakeMessageMarker,
+		defaultWakeContent,
+		initialPlanWakeContent,
+		initialPlanRequiredMarker,
+		initialPlanAcceptedMarker,
+		initialPlanCorrectionSentMarker,
+	}
+}
+
+func hiddenSystemMessagesSQL() string {
+	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))`
+}
+
+func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canViewMessages(w, r, tenantID, clawID) {
+		return
+	}
+
+	limit := parsePositiveLimit(r, 50, 100)
+	before := r.URL.Query().Get("before")
+	rows, err := s.queryConversationMessages(clawID, tenantID, before, limit)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(rows) == 0 {
+		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary == nil {
+			jsonOK(w, []types.HubMessage{})
+			return
+		}
+		jsonOK(w, []types.HubMessage{*summary})
+		return
+	}
+
+	timeline := make([]types.HubMessage, 0, len(rows)*2)
+	firstCreated := rows[0].CreatedAt
+	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if !hasOlderConversation {
+		firstCursor := firstCreated.Format(time.RFC3339Nano)
+		summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary != nil {
+			timeline = append(timeline, *summary)
+		}
+	}
+	for i, msg := range rows {
+		timeline = append(timeline, msg)
+		lower := msg.CreatedAt
+		lowerCursor := lower.Format(time.RFC3339Nano)
+		var upper *time.Time
+		upperCursor := ""
+		if i+1 < len(rows) {
+			nextCreated := rows[i+1].CreatedAt
+			upper = &nextCreated
+			upperCursor = nextCreated.Format(time.RFC3339Nano)
+		} else if before != "" {
+			upper = parseTimeCursor(before)
+			upperCursor = before
+		}
+		summary, err := s.activitySummary(clawID, tenantID, &lower, upper, lowerCursor, upperCursor)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if summary != nil {
+			timeline = append(timeline, *summary)
+		}
+	}
+	jsonOK(w, timeline)
+}
+
+func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canViewMessages(w, r, tenantID, clawID) {
+		return
+	}
+
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	before := r.URL.Query().Get("before")
+	limit := parsePositiveLimit(r, 200, 500)
+	order := strings.ToLower(r.URL.Query().Get("order"))
+	if order != "desc" {
+		order = "asc"
+	}
+
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+		FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
+	args := []interface{}{clawID, tenantID}
+	if from != "" {
+		query += ` AND created_at > ?`
+		if parsed := parseTimeCursor(from); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, from)
+		}
+	}
+	if to != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(to); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, to)
+		}
+	}
+	if before != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(before); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, before)
+		}
+	}
+	if order == "desc" {
+		query += ` ORDER BY created_at DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY created_at ASC LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	msgs, err := scanHubMessages(rows)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if msgs == nil {
+		msgs = []types.HubMessage{}
+	}
+	jsonOK(w, msgs)
+}
+
+func parsePositiveLimit(r *http.Request, def, max int) int {
+	limit := def
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > max {
+		return max
+	}
+	return limit
+}
+
+func parseTimeCursor(raw string) *time.Time {
+	if raw == "" {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return &parsed
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &parsed
+	}
+	return nil
+}
+
+func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
+	var msgs []types.HubMessage
+	for rows.Next() {
+		var m types.HubMessage
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' ` + hiddenSystemMessagesSQL()
+	args := []interface{}{clawID, tenantID}
+	args = append(args, hiddenSystemMessagesArgs()...)
+	if before != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(before); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, before)
+		}
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanHubMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
+func (s *Server) hasConversationBefore(clawID, tenantID string, before time.Time) (bool, error) {
+	query := `SELECT COUNT(*) FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' AND created_at < ? ` + hiddenSystemMessagesSQL()
+	args := []interface{}{clawID, tenantID, before}
+	args = append(args, hiddenSystemMessagesArgs()...)
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {
+	query := `SELECT COUNT(*), COALESCE(MIN(created_at), ''), COALESCE(MAX(created_at), '')
+		FROM messages WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
+	args := []interface{}{clawID, tenantID}
+	if from != nil {
+		query += ` AND created_at > ?`
+		args = append(args, *from)
+	}
+	if to != nil {
+		query += ` AND created_at < ?`
+		args = append(args, *to)
+	}
+
+	var count int
+	var minCreated, maxCreated string
+	if err := s.db.QueryRow(query, args...).Scan(&count, &minCreated, &maxCreated); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	meta := activitySummaryMeta{Count: count, From: fromCursor, To: toCursor}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil, err
+	}
+	createdAt := now()
+	if maxCreated != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, maxCreated); err == nil {
+			createdAt = parsed
+		}
+	}
+	return &types.HubMessage{
+		ID:        "activity-summary-" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(clawID+"|"+fromCursor+"|"+toCursor)).String(),
+		ClawID:    clawID,
+		TenantID:  tenantID,
+		Role:      "activity_summary",
+		Content:   fmt.Sprintf("%d tool calls", count),
+		Format:    "activity_summary:" + string(data),
+		CreatedAt: createdAt,
+	}, nil
+}
+
+func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantID, clawID string) bool {
+	ghLoginMsg := githubLoginFromContext(r.Context())
+	if ghLoginMsg == "" {
+		return true
+	}
+	var accessCfgMsg *types.AccessConfig
+	s.mu.RLock()
+	if s.hubCfg.Auth != nil {
+		accessCfgMsg = s.hubCfg.Auth.Access
+	}
+	s.mu.RUnlock()
+
+	var tagsJSONMsg string
+	err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return false
+	}
+	var clawTagsMsg []string
+	_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
+	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // ─── Claw WebSocket ───────────────────────────────────────────────────────────
@@ -1817,6 +2200,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if msg.Type == "agent_activity" {
 				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
+					if err := s.flushStreamingSegment(clawID, tenantID, cc); err != nil {
+						log.Printf("[agent_activity] flush streaming segment for %s: %v", clawID[:8], err)
+					}
 					if isBusyAgentActivity(activity) {
 						cc.mu.Lock()
 						if cc.streamingStartedAt.IsZero() {
@@ -1895,10 +2281,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Use the outer cc (this goroutine's connection), not a fresh lookup.
 				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
 				cc.mu.Lock()
+				persistContent := hm.Content
+				skipPersist := false
 				if cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
+					if cc.streamingBuf.Len() > 0 {
+						persistContent = cc.streamingBuf.String()
+					}
 				} else {
 					hm.ID = uuid.New().String()
+					skipPersist = cc.streamingSplit
 				}
 				cc.finishTurnLocked()
 				cc.mu.Unlock()
@@ -1918,15 +2310,29 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.drainPendingCheckpoint(clawID)
 					continue
 				}
-				_, _ = s.db.Exec(
-					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
-				)
-				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				if !skipPersist && strings.TrimSpace(persistContent) != "" {
+					_, _ = s.db.Exec(
+						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+						 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt,
+					)
+					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				}
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
-				// Evaluate pipeline triggers for non-[DONE] messages
-				if !strings.Contains(hm.Content, "[DONE]") {
+				// Evaluate pipeline triggers. If a pipeline explicitly owns a
+				// [DONE] trigger, let it handle that signal instead of the
+				// legacy factory PR-URL completion path below.
+				pipelineHandledDone := false
+				var pipelineDoneCtx pipelineContext
+				var pipelineDoneStage *pipeline.Stage
+				if strings.Contains(hm.Content, "[DONE]") {
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, hm.Content)
+				}
+				if pipelineHandledDone {
+					prURLs := extractDonePRURLs(hm.Content)
+					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
+					go s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+				} else if !strings.Contains(hm.Content, "[DONE]") {
 					go s.checkPipelineMessageTriggers(clawID, hm.Content)
 				}
 				// Clear typing indicator now that response is complete
@@ -1944,7 +2350,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					}()
-					go s.handleClawDoneSignal(clawID, hm.Content)
+					if !pipelineHandledDone {
+						go s.handleClawDoneSignal(clawID, hm.Content)
+					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
 				if strings.Contains(hm.Content, "[TERMINATE]") {
@@ -2654,11 +3062,18 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		for name, content := range templateFiles {
 			name := name
 			content := content
+			safeName, err := cleanWorkspaceFilePath(name)
+			if err != nil {
+				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
+				continue
+			}
+			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+			targetDir := path.Dir(targetPath)
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/%s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
 %s
 ELASTICCLAW_EOF`,
-				name, content)
+				shellQuote(targetDir), shellQuote(targetPath), content)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
 			}
@@ -3101,6 +3516,104 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 	}
 
 	return fmt.Errorf("could not download ElasticClaw connector after %d attempts. Last error: %s", maxAttempts, sanitizeBootstrapError(lastErr))
+}
+
+type replicatedBootstrapRetryOptions struct {
+	Label      string
+	RetryLabel string
+	Attempts   int
+	Delays     []time.Duration
+	Sleep      func(time.Duration)
+	Run        func() error
+}
+
+func retryReplicatedBootstrapStep(s *Server, clawID string, opts replicatedBootstrapRetryOptions) error {
+	if opts.Attempts < 1 {
+		opts.Attempts = 1
+	}
+	if opts.Sleep == nil {
+		opts.Sleep = time.Sleep
+	}
+	if opts.RetryLabel == "" {
+		opts.RetryLabel = "Retrying " + strings.ToLower(opts.Label)
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= opts.Attempts; attempt++ {
+		if attempt > 1 {
+			delay := replicatedBootstrapDelay(opts.Delays, attempt-2)
+			if s != nil && clawID != "" {
+				s.setBootstrapStatus(clawID, fmt.Sprintf("%s in %s", opts.RetryLabel, formatRetryDelay(delay)))
+			}
+			log.Printf("[bootstrap] %s retry %d/%d in %s...", opts.Label, attempt, opts.Attempts, delay)
+			opts.Sleep(delay)
+		}
+		if s != nil && clawID != "" {
+			s.setBootstrapStatus(clawID, opts.Label)
+		}
+		if err := opts.Run(); err != nil {
+			lastErr = err
+			log.Printf("[bootstrap] %s attempt %d/%d failed: %s", opts.Label, attempt, opts.Attempts, sanitizeBootstrapError(err))
+			continue
+		}
+		return nil
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %s", opts.Label, opts.Attempts, sanitizeBootstrapError(lastErr))
+}
+
+func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
+	if len(delays) == 0 {
+		return 5 * time.Second
+	}
+	if idx < len(delays) {
+		return delays[idx]
+	}
+	return delays[len(delays)-1]
+}
+
+func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
+	if len(files) == 0 {
+		return "true"
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	for _, name := range names {
+		remotePath := strings.TrimRight(dir, "/") + "/" + name
+		b.WriteString("test -e ")
+		b.WriteString(shellDoubleQuote(remotePath))
+		b.WriteString(" || { echo ")
+		b.WriteString(shellQuote("missing workspace file: " + name))
+		b.WriteString("; exit 1; }\n")
+	}
+	b.WriteString("echo 'workspace files verified'\n")
+	return b.String()
+}
+
+func shellDoubleQuote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		if i == 0 && strings.HasPrefix(s, "$HOME") && (len(s) == len("$HOME") || s[len("$HOME")] == '/') {
+			b.WriteString("$HOME")
+			i += len("$HOME") - 1
+			continue
+		}
+		switch s[i] {
+		case '\\', '"', '`', '$':
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 func (s *Server) setBootstrapStatus(clawID, status string) {
@@ -3550,7 +4063,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		Name:         req.ProviderName, // stable ec-<shortid>
 		InstanceType: req.InstanceType,
 		TTL:          req.TTL,
-	}, nil, env)
+	}, nil, nil)
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
@@ -4180,7 +4693,20 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Replicated uses the comment from the SSH public key as the Linux username.
 	// Our key comment is "elasticclaw@hub", so the username is "elasticclaw".
 	sshUser := replicatedpkg.SSHUserFromPublicKey(s.identity.PublicKey)
+	sshHome, err := sshHomeDir(sshUser)
+	if err != nil {
+		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
+		return
+	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
+	replicatedSSHDelays := []time.Duration{
+		5 * time.Second,
+		10 * time.Second,
+		20 * time.Second,
+		40 * time.Second,
+		60 * time.Second,
+	}
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
 	_, _ = s.db.Exec(
@@ -4248,10 +4774,17 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	}
 
 	if flakeFiles := templateFlakeFiles(files); len(flakeFiles) > 0 {
-		s.setBootstrapStatus(clawID, "Staging Nix flake")
-		if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/workspace", flakeFiles); err != nil {
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Staging Nix flake",
+			RetryLabel: "Retrying Nix flake staging",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), flakeFiles)
+			},
+		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -4259,22 +4792,17 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// Run bootstrap script first — this installs OpenClaw and initializes the workspace.
 	// Template files must be written AFTER the script completes so openclaw onboard
 	// doesn't overwrite BOOTSTRAP.md and other workspace files.
-	var sshErr error
-	for attempt := 1; attempt <= 5; attempt++ {
-		if attempt > 1 {
-			s.setBootstrapStatus(clawID, "Retrying sandbox bootstrap in 10s")
-			log.Printf("Bootstrap retry %d/5 for claw %s in 10s...", attempt, clawName)
-			time.Sleep(10 * time.Second)
-		}
-		s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
-		if sshErr = s.sshRun(sshUser, sshHost, script); sshErr == nil {
-			break
-		}
-		log.Printf("Bootstrap attempt %d/5 failed: %v", attempt, sanitizeBootstrapError(sshErr))
-	}
-	if sshErr != nil {
-		log.Printf("Bootstrap failed for claw %s after 5 attempts: %v", clawID, sanitizeBootstrapError(sshErr))
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed after 5 attempts: %s", sanitizeBootstrapError(sshErr)), false)
+	if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+		Label:      "Preparing ElasticClaw connector",
+		RetryLabel: "Retrying sandbox bootstrap",
+		Attempts:   5,
+		Delays:     []time.Duration{10 * time.Second},
+		Run: func() error {
+			return s.sshRun(sshUser, sshHost, script)
+		},
+	}); err != nil {
+		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -4286,17 +4814,33 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		for k := range files {
 			fileNames = append(fileNames, k)
 		}
+		sort.Strings(fileNames)
 		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
-		for attempt := 1; attempt <= 3; attempt++ {
-			if err := s.sshWriteFiles(sshUser, sshHost, "$HOME/.openclaw/workspace", files); err == nil {
-				log.Printf("Template files written for claw %s", clawName)
-				break
-			} else if attempt == 3 {
-				log.Printf("Warning: failed to write template files: %v", err)
-			} else {
-				time.Sleep(5 * time.Second)
-			}
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Writing workspace files",
+			RetryLabel: "Retrying workspace file write",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files)
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
+			return
 		}
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Verifying workspace files",
+			RetryLabel: "Retrying workspace file verification",
+			Attempts:   3,
+			Delays:     []time.Duration{2 * time.Second, 5 * time.Second},
+			Run: func() error {
+				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(path.Join(sshHome, ".openclaw", "workspace"), files))
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
+			return
+		}
+		log.Printf("Template files written for claw %s", clawName)
 	}
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
@@ -4308,11 +4852,19 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
 	// but the hub token URL is publicly accessible so it works directly).
 	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
-		if err := s.sshRun(sshUser, sshHost, credHelper); err != nil {
-			log.Printf("[bootstrap] warning: cred helper setup failed: %v", err)
-		} else {
-			log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
+			Label:      "Configuring GitHub credentials",
+			RetryLabel: "Retrying GitHub credential setup",
+			Attempts:   6,
+			Delays:     replicatedSSHDelays,
+			Run: func() error {
+				return s.sshRun(sshUser, sshHost, credHelper)
+			},
+		}); err != nil {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
+			return
 		}
+		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
@@ -4707,6 +5259,35 @@ func (s *Server) sshRunWithTimeout(user, host, script string, timeout time.Durat
 	return output, nil
 }
 
+func cleanWorkspaceFilePath(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if strings.Contains(trimmed, "\x00") {
+		return "", fmt.Errorf("path contains NUL byte")
+	}
+	cleaned := path.Clean(filepath.ToSlash(trimmed))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return "", fmt.Errorf("path must stay inside workspace")
+	}
+	return cleaned, nil
+}
+
+func sshHomeDir(user string) (string, error) {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return "", fmt.Errorf("empty SSH user")
+	}
+	if strings.ContainsAny(user, "/\x00") {
+		return "", fmt.Errorf("SSH user contains invalid characters")
+	}
+	if user == "root" {
+		return "/root", nil
+	}
+	return "/home/" + user, nil
+}
+
 // sshWriteFiles writes a map of filename->content to a remote directory via SSH.
 func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) error {
 	sshCfg := &gossh.ClientConfig{
@@ -4726,8 +5307,12 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		if err != nil {
 			return fmt.Errorf("ssh session: %w", err)
 		}
-		// Use cat with heredoc to write the file safely
-		cmd := fmt.Sprintf("mkdir -p %s && cat > %s/%s << 'ELASTICCLAW_EOF'\n%s\nELASTICCLAW_EOF", dir, dir, name, content)
+		safeName, err := cleanWorkspaceFilePath(name)
+		if err != nil {
+			sess.Close()
+			return fmt.Errorf("invalid template file path %q: %w", name, err)
+		}
+		cmd := remoteWriteFileCommand(dir, safeName, content)
 		out, err := sess.CombinedOutput(cmd)
 		sess.Close()
 		if err != nil {
@@ -4735,6 +5320,17 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 		}
 	}
 	return nil
+}
+
+func remoteWriteFileCommand(dir, name, content string) string {
+	remotePath := strings.TrimRight(dir, "/") + "/" + name
+	remoteDir := path.Dir(remotePath)
+	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << 'ELASTICCLAW_B64'\n%s\nELASTICCLAW_B64",
+		shellDoubleQuote(remoteDir),
+		shellDoubleQuote(remotePath),
+		encoded,
+	)
 }
 
 // ─── Terminal WebSocket ───────────────────────────────────────────────────────

@@ -331,13 +331,7 @@ type GitHubAppPatch struct {
 
 func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	hasProvider := false
-	for _, p := range s.hubCfg.Providers {
-		if p.Token != "" || p.APIKey != "" || p.AccessToken != "" || p.Enabled {
-			hasProvider = true
-			break
-		}
-	}
+	hasProvider := hasConfiguredProvider(s.hubCfg.Providers)
 	hasLLMKey := len(s.hubCfg.LLMKeys) > 0
 	hasGitHub := len(s.hubCfg.GitHubApps) > 0
 	s.mu.RUnlock()
@@ -347,6 +341,32 @@ func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 		HasLLMKey:   hasLLMKey,
 		HasGitHub:   hasGitHub,
 	})
+}
+
+func hasConfiguredProvider(providers map[string]types.ProviderConfig) bool {
+	for name, p := range providers {
+		providerType := p.Type
+		if providerType == "" {
+			providerType = name
+		}
+		switch providerType {
+		case "daytona":
+			if p.APIKey != "" {
+				return true
+			}
+		case "replicated":
+			if p.Token != "" {
+				return true
+			}
+		case "exedev", "docker":
+			return true
+		default:
+			if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

@@ -12,7 +12,6 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
-	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
@@ -217,15 +216,6 @@ func runChatDirect(instanceName string, rest []string) error {
 		if pErr != nil {
 			return fmt.Errorf("failed to initialize daytona provider: %w", pErr)
 		}
-		execFn = func(ctx context.Context, cmdArgs []string) (string, error) {
-			result, err := p.Exec(ctx, instance.Name, cmdArgs)
-			if err != nil {
-				return "", err
-			}
-			return result.Stdout, nil
-		}
-	case "local":
-		p := local.New()
 		execFn = func(ctx context.Context, cmdArgs []string) (string, error) {
 			result, err := p.Exec(ctx, instance.Name, cmdArgs)
 			if err != nil {

@@ -11,7 +11,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -58,6 +61,19 @@ type githubIssuesWebhookPayload struct {
 		} `json:"body,omitempty"`
 	} `json:"changes,omitempty"`
 	// GitHub sends X-GitHub-Delivery header as unique delivery ID
+}
+
+type githubIssueCommentUser struct {
+	Login string `json:"login"`
+	Type  string `json:"type"`
+}
+
+type githubIssueComment struct {
+	ID        int64                  `json:"id"`
+	Body      string                 `json:"body"`
+	HTMLURL   string                 `json:"html_url"`
+	CreatedAt string                 `json:"created_at"`
+	User      githubIssueCommentUser `json:"user"`
 }
 
 func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +444,8 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	}()
 
 	templateFiles := cloneStringMap(workspace.Files)
-	templateFiles["CONTEXT.md"] = buildGitHubIssuesContext(payload)
+	ghToken := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+	templateFiles["CONTEXT.md"] = s.buildGitHubIssuesContextWithComments(payload, ghToken)
 
 	clawName := issueID
 	if workflow.NamePattern != "" {
@@ -508,7 +525,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	// Build context file
-	ctxFile := buildGitHubIssuesContext(payload)
+	ctxFile := s.buildGitHubIssuesContextWithComments(payload, ghToken)
 	templateFiles["CONTEXT.md"] = ctxFile
 
 	// Build claw name
@@ -876,7 +893,20 @@ func (s *Server) resolveGitHubIssuesTokenForWorkflow(workspaceName string, workf
 	return ""
 }
 
-func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
+func (s *Server) buildGitHubIssuesContextWithComments(payload githubIssuesWebhookPayload, token string) string {
+	base := s.githubBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	comments, err := fetchGitHubIssueComments(base, payload.Repository.FullName, payload.Issue.Number, token)
+	if err != nil {
+		log.Printf("[github-issues] failed to fetch comments for %s#%d: %v", payload.Repository.FullName, payload.Issue.Number, err)
+		return buildGitHubIssuesContext(payload, nil, "Issue comments could not be loaded automatically. Review the issue URL for additional context.")
+	}
+	return buildGitHubIssuesContext(payload, comments, "")
+}
+
+func buildGitHubIssuesContext(payload githubIssuesWebhookPayload, comments []githubIssueComment, commentWarning string) string {
 	i := payload.Issue
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
@@ -892,8 +922,8 @@ func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 	}
 	if len(i.Labels) > 0 {
 		b.WriteString("**Labels:** ")
-		for i, l := range i.Labels {
-			if i > 0 {
+		for idx, l := range i.Labels {
+			if idx > 0 {
 				b.WriteString(", ")
 			}
 			b.WriteString(l.Name)
@@ -905,13 +935,122 @@ func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 		b.WriteString(i.Body)
 		b.WriteString("\n")
 	}
+	if len(comments) > 0 || commentWarning != "" {
+		b.WriteString("\n## Comments\n\n")
+		if commentWarning != "" {
+			b.WriteString(commentWarning)
+			b.WriteString("\n\n")
+		}
+		for idx, comment := range comments {
+			b.WriteString(fmt.Sprintf("### Comment %d\n\n", idx+1))
+			if comment.User.Login != "" {
+				b.WriteString(fmt.Sprintf("**Author:** @%s\n\n", comment.User.Login))
+			}
+			if comment.CreatedAt != "" {
+				b.WriteString(fmt.Sprintf("**Created:** %s\n\n", comment.CreatedAt))
+			}
+			if comment.HTMLURL != "" {
+				b.WriteString(fmt.Sprintf("**URL:** %s\n\n", comment.HTMLURL))
+			}
+			if strings.TrimSpace(comment.Body) != "" {
+				b.WriteString(comment.Body)
+				b.WriteString("\n\n")
+			}
+		}
+	}
 	b.WriteString("\n---\n\n")
 	b.WriteString("## Instructions\n\n")
 	b.WriteString("1. Read this file fully\n")
 	b.WriteString("2. Explore the codebase\n")
 	b.WriteString("3. Implement the feature/fix described above\n")
-	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
+	b.WriteString("4. Follow the PR Completion Policy below\n")
+	appendDefaultFactoryPRPolicy(&b)
 	return b.String()
+}
+
+func fetchGitHubIssueComments(baseURL, repo string, issueNumber int, token string) ([]githubIssueComment, error) {
+	if token == "" {
+		return nil, nil
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", repo, issueNumber)
+	var comments []githubIssueComment
+	pagesRemaining := 100
+	for path != "" && pagesRemaining > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		page, next, err := fetchGitHubIssueCommentsPage(ctx, baseURL, path, token)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, page...)
+		path = next
+		pagesRemaining--
+	}
+	if path != "" {
+		return nil, fmt.Errorf("github comments pagination exceeded 100 pages for %s#%d", repo, issueNumber)
+	}
+	sort.SliceStable(comments, func(i, j int) bool {
+		if comments[i].CreatedAt != "" && comments[j].CreatedAt != "" && comments[i].CreatedAt != comments[j].CreatedAt {
+			return comments[i].CreatedAt < comments[j].CreatedAt
+		}
+		return comments[i].ID < comments[j].ID
+	})
+	return comments, nil
+}
+
+func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token string) ([]githubIssueComment, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/"+path, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("github comments response read error: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("github comments API returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var comments []githubIssueComment
+	if err := json.Unmarshal(body, &comments); err != nil {
+		return nil, "", fmt.Errorf("github comments parse error: %w", err)
+	}
+	return comments, nextGitHubPagePath(resp.Header.Get("Link"), baseURL), nil
+}
+
+func nextGitHubPagePath(linkHeader, baseURL string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.Contains(part, `rel="next"`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start < 0 || end <= start {
+			return ""
+		}
+		u, err := url.Parse(part[start+1 : end])
+		if err != nil {
+			return ""
+		}
+		base, baseErr := url.Parse(baseURL + "/")
+		if baseErr != nil || (base.Host != "" && u.Host != "" && u.Host != base.Host) {
+			return ""
+		}
+		nextPath := strings.TrimPrefix(u.Path, "/")
+		if u.RawQuery != "" {
+			nextPath += "?" + u.RawQuery
+		}
+		return nextPath
+	}
+	return ""
 }
 
 // commentGitHubIssue adds a comment to a GitHub issue.

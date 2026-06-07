@@ -3,14 +3,15 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
 )
 
 var httpGet = http.Get
@@ -295,22 +296,41 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 		}
 	}
 
-	// Include scripts/ directory if present — workspace scripts delivered to claws
+	// Include scripts/ directory if present — workspace scripts delivered to claws.
 	scriptsDir := filepath.Join(templateDir, "scripts")
-	if entries, err := os.ReadDir(scriptsDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if strings.HasPrefix(name, ".") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(scriptsDir, name))
+	if stat, err := os.Stat(scriptsDir); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to stat scripts directory: %w", err)
+		}
+	} else if stat.IsDir() {
+		if err := filepath.WalkDir(scriptsDir, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
-				continue
+				return err
 			}
-			files["scripts/"+name] = string(data)
+			if path == scriptsDir {
+				return nil
+			}
+			if entry.IsDir() {
+				if strings.HasPrefix(entry.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasPrefix(entry.Name(), ".") {
+				return nil
+			}
+			rel, err := filepath.Rel(templateDir, path)
+			if err != nil {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			files[filepath.ToSlash(rel)] = string(data)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("failed to read scripts directory: %w", err)
 		}
 	}
 

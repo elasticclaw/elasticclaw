@@ -114,6 +114,7 @@ type WorkflowStage struct {
 	Terminal bool                     `yaml:"terminal,omitempty" json:"terminal,omitempty"`
 	Triggers []map[string]interface{} `yaml:"triggers,omitempty" json:"triggers,omitempty"`
 	OnEnter  map[string]interface{}   `yaml:"on_enter,omitempty" json:"onEnter,omitempty"`
+	Gate     map[string]interface{}   `yaml:"gate,omitempty" json:"gate,omitempty"`
 }
 
 func (w *WorkspaceConfig) Validate() error {

@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -430,9 +433,33 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 	case "failing":
 		// Test-only provider that always fails workflow run actions
 		return &pipelineRunResult{ExitCode: 1, Stderr: "failing provider simulated run failure"}, fmt.Errorf("failing provider simulated run failure")
+	case "testexec":
+		// Test-only provider used by integration tests to exercise real run
+		// commands without provisioning a sandbox.
+		if os.Getenv("ELASTICCLAW_TESTEXEC_PROVIDER") == "" {
+			return &pipelineRunResult{ExitCode: 1, Stderr: "testexec provider requires ELASTICCLAW_TESTEXEC_PROVIDER=1"}, fmt.Errorf("testexec provider disabled")
+		}
+		return executeLocalPipelineRun(ctx, workspaceCommand)
 	default:
 		return nil, fmt.Errorf("provider %q does not support workflow run actions", providerName)
 	}
+}
+
+func executeLocalPipelineRun(ctx context.Context, command string) (*pipelineRunResult, error) {
+	cmd := osexec.CommandContext(ctx, "bash", "-lc", command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		var exitErr *osexec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	return &pipelineRunResult{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()}, err
 }
 
 func (s *Server) executeReplicatedPipelineRun(user, host, command string, timeout time.Duration) (*pipelineRunResult, error) {
@@ -450,12 +477,9 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		return
 	}
 	var parsedJSON string
-	if result.ExitCode == 0 && strings.TrimSpace(result.Stdout) != "" {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(result.Stdout), &parsed); err == nil {
-			b, _ := json.Marshal(parsed)
-			parsedJSON = string(b)
-		}
+	if parsed, ok := parsePipelineOutputJSON(result.Stdout); ok {
+		b, _ := json.Marshal(parsed)
+		parsedJSON = string(b)
 	}
 	if parsedJSON == "" {
 		parsedJSON = "{}"
@@ -476,6 +500,30 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	} else {
 		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
 	}
+}
+
+func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
+	parse := func(s string) (map[string]interface{}, bool) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, false
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+			return nil, false
+		}
+		return parsed, true
+	}
+	if parsed, ok := parse(stdout); ok {
+		return parsed, true
+	}
+	lines := strings.Split(stdout, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if parsed, ok := parse(lines[i]); ok {
+			return parsed, true
+		}
+	}
+	return nil, false
 }
 
 // loadPipelineOutputs returns all persisted outputs for a claw as a map of
@@ -502,6 +550,241 @@ func (s *Server) loadPipelineOutputs(clawID string) map[string]map[string]interf
 		log.Printf("[pipeline] rows error loading outputs for claw %s: %v", clawID[:8], err)
 	}
 	return outputs
+}
+
+// JudgeFinding is a single structured finding from a judge review.
+type JudgeFinding struct {
+	File     string `json:"file,omitempty"`
+	Line     string `json:"line,omitempty"`
+	Comment  string `json:"comment"`
+	Severity string `json:"severity,omitempty"`
+}
+
+// JudgeResult is the structured output of a judge stage.
+type JudgeResult struct {
+	Verdict       string         `json:"verdict"`
+	Summary       string         `json:"summary"`
+	Findings      []JudgeFinding `json:"findings,omitempty"`
+	RequiredFixes []string       `json:"required_fixes,omitempty"`
+	RawJSON       string         `json:"-"`
+}
+
+// executeJudgeAction runs a model-backed review with constrained inputs.
+func (s *Server) executeJudgeAction(clawID string, action pipeline.JudgeAction, ctx pipelineContext) (*JudgeResult, error) {
+	// Build system prompt with instructions and output schema
+	systemPrompt := action.Instructions + `
+
+You must respond with a single JSON object in this exact schema:
+{
+  "verdict": "pass" or "fail",
+  "summary": "brief summary of the review",
+  "findings": [
+    {"file": "path", "line": "1-10", "comment": "description", "severity": "low|medium|high|critical"}
+  ],
+  "required_fixes": ["fix 1", "fix 2"]
+}
+Do not include any markdown formatting, code fences, or explanatory text outside the JSON object.`
+
+	// Collect bounded inputs
+	var userContent strings.Builder
+	for _, input := range action.Inputs {
+		switch input {
+		case pipeline.JudgeInputIssue:
+			issueText := s.loadIssueTextForJudge(clawID, ctx)
+			if issueText != "" {
+				userContent.WriteString("## Issue Context\n\n")
+				userContent.WriteString(issueText)
+				userContent.WriteString("\n\n")
+			}
+		case pipeline.JudgeInputGitDiff:
+			diff, err := s.executePipelineRunAction(clawID, pipeline.RunAction{
+				Command: `cd "$HOME/.openclaw/workspace" && git diff --stat && echo "---" && git diff`,
+				Timeout: "30s",
+			})
+			if err == nil && diff != nil {
+				userContent.WriteString("## Git Diff\n\n```diff\n")
+				userContent.WriteString(strings.TrimSpace(diff.Stdout))
+				userContent.WriteString("\n```\n\n")
+			}
+		case pipeline.JudgeInputTestOutput:
+			// Look for prior stage output named "test_output" or similar
+			outputs := s.loadPipelineOutputs(clawID)
+			if testOut, ok := outputs["test_output"]; ok {
+				if stdout, ok := testOut["stdout"].(string); ok && stdout != "" {
+					userContent.WriteString("## Test Output\n\n```\n")
+					userContent.WriteString(stdout)
+					userContent.WriteString("\n```\n\n")
+				}
+			} else if testOut, ok := outputs["tests"]; ok {
+				if stdout, ok := testOut["stdout"].(string); ok && stdout != "" {
+					userContent.WriteString("## Test Output\n\n```\n")
+					userContent.WriteString(stdout)
+					userContent.WriteString("\n```\n\n")
+				}
+			}
+		case pipeline.JudgeInputFiles:
+			// List changed files
+			filesResult, err := s.executePipelineRunAction(clawID, pipeline.RunAction{
+				Command: `cd "$HOME/.openclaw/workspace" && git diff --name-only`,
+				Timeout: "10s",
+			})
+			if err == nil && filesResult != nil {
+				userContent.WriteString("## Changed Files\n\n")
+				userContent.WriteString(filesResult.Stdout)
+				userContent.WriteString("\n\n")
+			}
+		}
+	}
+
+	if userContent.Len() == 0 {
+		return nil, fmt.Errorf("no judge inputs could be collected")
+	}
+
+	// Call LLM
+	model := action.Model
+	if model == "" {
+		model = s.hubCfg.DefaultModel
+	}
+	llmKeys := s.hubCfg.LLMKeys
+	if len(llmKeys) == 0 {
+		return nil, fmt.Errorf("no LLM keys configured for judge")
+	}
+
+	msgs := []aiChatMessage{{Role: "user", Content: userContent.String()}}
+	ctx2, cancel := context.WithTimeout(context.Background(), judgeTimeout(action.Timeout))
+	defer cancel()
+
+	var rawResponse string
+	err := streamLLMWithSystemPrompt(ctx2, systemPrompt, msgs, llmKeys, model, func(token string) {
+		rawResponse += token
+	})
+	if err != nil {
+		return nil, fmt.Errorf("judge LLM call failed: %w", err)
+	}
+
+	// Parse structured JSON response
+	result, err := parseJudgeResponse(rawResponse)
+	if err != nil {
+		return nil, fmt.Errorf("judge response parse failed: %w (raw: %s)", err, truncateString(rawResponse, 500))
+	}
+	result.RawJSON = rawResponse
+	return result, nil
+}
+
+func judgeTimeout(timeoutStr string) time.Duration {
+	if timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			return d
+		}
+	}
+	return 2 * time.Minute
+}
+
+func parseJudgeResponse(raw string) (*JudgeResult, error) {
+	// Extract JSON from possible markdown fences by finding the first '{' and
+	// then matching the corresponding closing '}' using brace counting.
+	jsonStr := raw
+	if idx := strings.Index(raw, "{"); idx >= 0 {
+		jsonStr = raw[idx:]
+	}
+	// Find the matching closing brace, not just the last one
+	depth := 0
+	endIdx := -1
+	inString := false
+	escapeNext := false
+	for i, ch := range jsonStr {
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escapeNext = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				endIdx = i
+				break
+			}
+		}
+	}
+	if endIdx >= 0 {
+		jsonStr = jsonStr[:endIdx+1]
+	}
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	var result JudgeResult
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return nil, err
+	}
+	if result.Verdict == "" {
+		return nil, fmt.Errorf("missing verdict field")
+	}
+	// Normalize verdict
+	result.Verdict = strings.ToLower(result.Verdict)
+	if result.Verdict != "pass" && result.Verdict != "fail" {
+		return nil, fmt.Errorf("invalid verdict: %q", result.Verdict)
+	}
+	return &result, nil
+}
+
+func (s *Server) loadIssueTextForJudge(clawID string, ctx pipelineContext) string {
+	// Try to get issue details from the pipeline context
+	issueID := ctx.IssueID
+	if issueID == "" {
+		return ""
+	}
+	if strings.HasPrefix(issueID, "sc-") {
+		return "Shortcut story: " + issueID
+	}
+	if strings.Contains(issueID, "/") {
+		// GitHub issue
+		parts := strings.Split(issueID, "/")
+		if len(parts) == 3 {
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+			if ghToken != "" {
+				repo := parts[0] + "/" + parts[1]
+				var issueNum int
+				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					details, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
+					if err == nil && details != nil {
+						return fmt.Sprintf("**%s**\n%s\n\n%s", details.Identifier, details.Title, details.Description)
+					}
+				}
+			}
+		}
+		return "GitHub issue: " + issueID
+	}
+	// Linear issue
+	linearToken := s.resolveLinearTokenForPipeline(ctx)
+	if linearToken != "" {
+		details, err := s.fetchLinearIssueDetails(linearToken, issueID)
+		if err == nil && details != nil {
+			return fmt.Sprintf("**%s: %s**\n%s\n\n%s", details.Identifier, details.Title, details.URL, details.Description)
+		}
+	}
+	return "Linear issue: " + issueID
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // validateScriptCommand checks that a workflow run command doesn't attempt path
@@ -586,9 +869,18 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
+		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
+		if stage.OnEnter.Run.Output != "" && result != nil {
+			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
+		}
 		if err != nil || (result != nil && result.ExitCode != 0) {
 			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
-			if stage.OnEnter.Run.ContinueOnError {
+			// If this stage has a gate, treat nonzero exit as a normal validation
+			// failure so the gate can still evaluate the captured JSON output.
+			if stage.Gate != nil && stage.OnEnter.Run.Output != "" && result != nil {
+				log.Printf("[pipeline] %s; continuing because stage has a gate configured", msg)
+				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+			} else if stage.OnEnter.Run.ContinueOnError {
 				log.Printf("[pipeline] %s; continuing because continue_on_error=true", msg)
 				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
 			} else {
@@ -599,9 +891,94 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
 		}
-		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
-		if stage.OnEnter.Run.Output != "" && result != nil {
-			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
+	}
+
+	// Execute judge action if configured
+	if stage.OnEnter.Judge.Instructions != "" {
+		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
+		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
+		if err != nil {
+			msg := fmt.Sprintf("Judge stage failed: %v", err)
+			log.Printf("[pipeline] %s", msg)
+			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			if !stage.OnEnter.Judge.ContinueOnError {
+				return
+			}
+		} else {
+			log.Printf("[pipeline] judge completed for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, judgeResult.Verdict)
+			// Persist judge output so later stages can reference it
+			if stage.OnEnter.Judge.Output != "" {
+				result := &pipelineRunResult{
+					ExitCode: 0,
+					Stdout:   judgeResult.RawJSON,
+					Stderr:   "",
+				}
+				s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Judge.Output, result)
+			}
+			// Inject judge result into claw chat
+			if judgeResult.Verdict == "pass" {
+				s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Review passed: %s", judgeResult.Summary))
+			} else {
+				findingsMsg := fmt.Sprintf("[hub] Review failed: %s\n\nRequired fixes:\n", judgeResult.Summary)
+				for _, fix := range judgeResult.RequiredFixes {
+					findingsMsg += fmt.Sprintf("- %s\n", fix)
+				}
+				if len(judgeResult.Findings) > 0 {
+					findingsMsg += "\nFindings:\n"
+					for _, f := range judgeResult.Findings {
+						findingsMsg += fmt.Sprintf("- %s (%s): %s\n", f.File, f.Severity, f.Comment)
+					}
+				}
+				s.injectHubMessageByID(clawID, findingsMsg)
+			}
+			// Auto-transition to next stage if a judge_verdict trigger matches
+			go s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx)
+			// Check required verdict
+			if stage.OnEnter.Judge.Require.Verdict != "" &&
+				!strings.EqualFold(judgeResult.Verdict, stage.OnEnter.Judge.Require.Verdict) {
+				msg := fmt.Sprintf("Judge verdict %q does not match required %q", judgeResult.Verdict, stage.OnEnter.Judge.Require.Verdict)
+				log.Printf("[pipeline] %s", msg)
+				if !stage.OnEnter.Judge.ContinueOnError {
+					s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+					return
+				}
+			}
+		}
+	}
+
+	// Evaluate gate if configured
+	if stage.Gate != nil {
+		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
+		log.Printf("[pipeline] gate evaluated for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, gateResult.Verdict)
+		// Inject gate result into claw chat
+		if gateResult.Verdict == "pass" {
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
+		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+		} else if gateResult.Verdict == "error" {
+			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
+			s.injectHubMessageByID(clawID, msg)
+		} else {
+			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
+			if gateResult.MatchedPath != "" {
+				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
+			}
+			s.injectHubMessageByID(clawID, msg)
+		}
+		// Auto-transition to next stage if a gate_result trigger matches.
+		// Normalise "skipped" → "pass" when TreatSkippedAsPass is set so that
+		// gate_result: { verdict: pass } stages are correctly reached.
+		autoTransitionVerdict := gateResult.Verdict
+		if autoTransitionVerdict == "skipped" && stage.Gate.TreatSkippedAsPass {
+			autoTransitionVerdict = "pass"
+		}
+		go s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx)
+		// If gate is required and failed (or errored), block further on_enter actions
+		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
+			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
+			log.Printf("[pipeline] %s", msg)
+			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			return
 		}
 	}
 
@@ -931,19 +1308,52 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 // checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
 // and transitions to the matching stage if found. Returns true if a transition occurred.
 func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
-	ctx, ok := s.findPipelineContextForClaw(clawID)
+	ctx, stage, ok := s.pipelineStageForMessageContains(clawID, message)
 	if !ok {
-		return false
+		ctx, ok = s.findPipelineContextForClaw(clawID)
+		if !ok {
+			return false
+		}
+		pl := parsePipelineForContext(ctx)
+		if pl == nil {
+			return false
+		}
+		stage = nil
+		// Also check output_matches triggers against current pipeline outputs.
+		// Only evaluate if the claw has not already visited this stage, to
+		// prevent persistent DB state from re-triggering backwards regressions
+		// on every subsequent message.
+		outputs := s.loadPipelineOutputs(clawID)
+		stage = pl.StageForOutputMatches(outputs)
+		if stage != nil && s.hasVisitedPipelineStage(clawID, stage.ID) {
+			stage = nil
+		}
 	}
-	pl := parsePipelineForContext(ctx)
-	if pl == nil {
-		return false
-	}
-	stage := pl.StageForMessageContains(message)
 	if stage == nil {
 		return false
 	}
 	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+}
+
+func (s *Server) hasPipelineMessageContainsTrigger(clawID, message string) bool {
+	_, _, ok := s.pipelineStageForMessageContains(clawID, message)
+	return ok
+}
+
+func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipelineContext, *pipeline.Stage, bool) {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return pipelineContext{}, nil, false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return pipelineContext{}, nil, false
+	}
+	stage := pl.StageForMessageContains(message)
+	if stage == nil {
+		return pipelineContext{}, nil, false
+	}
+	return ctx, stage, true
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
@@ -951,6 +1361,9 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false
 	}
+	// Record that this claw has visited this stage, so one-shot triggers
+	// (like output_matches) don't re-fire on subsequent messages.
+	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	s.runOnEnter(clawID, stage, ctx)
 
@@ -995,6 +1408,153 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		}
 	}
 	return true
+}
+
+// autoTransitionAfterJudge checks the pipeline for a stage with a judge_verdict
+// trigger matching the given verdict and transitions to it. This enables
+// automated retry loops: judge fail → fix stage → retest → final judge.
+func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineContext) {
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return
+	}
+	stage := pl.StageForJudgeVerdict(verdict)
+	if stage == nil {
+		log.Printf("[pipeline] claw %s: no stage with judge_verdict=%q trigger found", clawID[:8], verdict)
+		return
+	}
+	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after judge verdict=%s", clawID[:8], stage.ID, verdict)
+	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+}
+
+// GateEvaluationResult is the outcome of evaluating a gate.
+type GateEvaluationResult struct {
+	Verdict      string // "pass", "fail", "skipped", "error"
+	MatchedPath  string
+	MatchedValue string
+}
+
+// evaluateGate inspects a named pipeline output and evaluates the gate
+// conditions to produce a pass/fail/skipped/error verdict.
+func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *GateEvaluationResult {
+	result := &GateEvaluationResult{Verdict: "error"}
+
+	// Load the named output
+	outputs := s.loadPipelineOutputs(clawID)
+	out, ok := outputs[gate.Output]
+	if !ok {
+		if gate.TreatSkippedAsPass {
+			result.Verdict = "skipped"
+		} else {
+			result.Verdict = "error"
+		}
+		log.Printf("[pipeline] gate %q for claw %s: output %q not found, verdict=%s", stageID, clawID[:8], gate.Output, result.Verdict)
+		s.persistGateResult(clawID, stageID, gate, result)
+		return result
+	}
+
+	// Evaluate pass condition
+	if gate.Pass.Path != "" {
+		val := pipeline.GetJSONPath(out, gate.Pass.Path)
+		strVal := fmt.Sprintf("%v", val)
+		for _, expected := range gate.Pass.Values {
+			if strings.EqualFold(strVal, expected) {
+				result.Verdict = "pass"
+				result.MatchedPath = gate.Pass.Path
+				result.MatchedValue = strVal
+				log.Printf("[pipeline] gate %q for claw %s: pass matched path=%s value=%s", stageID, clawID[:8], gate.Pass.Path, strVal)
+				s.persistGateResult(clawID, stageID, gate, result)
+				return result
+			}
+		}
+	}
+
+	// Evaluate fail condition
+	if gate.Fail.Path != "" {
+		val := pipeline.GetJSONPath(out, gate.Fail.Path)
+		strVal := fmt.Sprintf("%v", val)
+		for _, expected := range gate.Fail.Values {
+			if strings.EqualFold(strVal, expected) {
+				result.Verdict = "fail"
+				result.MatchedPath = gate.Fail.Path
+				result.MatchedValue = strVal
+				log.Printf("[pipeline] gate %q for claw %s: fail matched path=%s value=%s", stageID, clawID[:8], gate.Fail.Path, strVal)
+				s.persistGateResult(clawID, stageID, gate, result)
+				return result
+			}
+		}
+	}
+
+	// Neither pass nor fail matched — error
+	log.Printf("[pipeline] gate %q for claw %s: no conditions matched, verdict=error", stageID, clawID[:8])
+	s.persistGateResult(clawID, stageID, gate, result)
+	return result
+}
+
+// persistGateResult stores a gate evaluation result in the DB.
+func (s *Server) persistGateResult(clawID, stageID string, gate *pipeline.Gate, result *GateEvaluationResult) {
+	_, err := s.db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(claw_id, stage_id) DO UPDATE SET
+			output_name=excluded.output_name,
+			verdict=excluded.verdict,
+			matched_path=excluded.matched_path,
+			matched_value=excluded.matched_value,
+			required=excluded.required,
+			created_at=excluded.created_at`,
+		clawID, stageID, gate.Output, result.Verdict, result.MatchedPath, result.MatchedValue, gate.Required, now())
+	if err != nil {
+		log.Printf("[pipeline] failed to persist gate result for claw %s stage %s: %v", clawID[:8], stageID, err)
+	}
+}
+
+// loadGateResult returns the most recent gate result for a given claw and stage.
+// Currently used by tests and available for future UI / dashboard display of gate history.
+func (s *Server) loadGateResult(clawID, stageID string) *GateEvaluationResult {
+	var verdict, matchedPath, matchedValue string
+	var required bool
+	err := s.db.QueryRow(`
+		SELECT verdict, matched_path, matched_value, required
+		FROM pipeline_gate_results
+		WHERE claw_id=? AND stage_id=?`, clawID, stageID).Scan(&verdict, &matchedPath, &matchedValue, &required)
+	if err != nil {
+		return nil
+	}
+	return &GateEvaluationResult{
+		Verdict:      verdict,
+		MatchedPath:  matchedPath,
+		MatchedValue: matchedValue,
+	}
+}
+
+// hasFailedRequiredGate checks whether any required gate for this claw has failed
+// or errored (i.e. produced a non-pass verdict that should block PR creation).
+func (s *Server) hasFailedRequiredGate(clawID string) bool {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM pipeline_gate_results
+		WHERE claw_id=? AND verdict IN ('fail','error') AND required=1`, clawID).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// autoTransitionAfterGate checks the pipeline for a stage with a gate_result
+// trigger matching the given stage ID and verdict, and transitions to it.
+func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pipelineContext) {
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return
+	}
+	stage := pl.StageForGateResult(stageID, verdict)
+	if stage == nil {
+		log.Printf("[pipeline] claw %s: no stage with gate_result stage=%s verdict=%s trigger found", clawID[:8], stageID, verdict)
+		return
+	}
+	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after gate stage=%s verdict=%s", clawID[:8], stage.ID, stageID, verdict)
+	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
 }
 
 // initializePipelineEntryIfNeeded transitions a claw into its entry pipeline stage

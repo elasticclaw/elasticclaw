@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import type { AgentActivity, Claw, Message, CreateClawRequest } from "@/lib/types"
 import {
   fetchClaws,
-  fetchMessages,
+  fetchMessageTimeline,
   sendMessage as apiSendMessage,
   createClaw as apiCreateClaw,
   killClaw as apiKillClaw,
@@ -250,7 +250,7 @@ export function useHub(selectedClawId: string | null): HubState {
 
   const loadMessages = useCallback(async (clawId: string) => {
     try {
-      const apiMsgs = await fetchMessages(clawId)
+      const apiMsgs = await fetchMessageTimeline(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
       
       // Capture existing IDs before updating so we can diff outside the updater.

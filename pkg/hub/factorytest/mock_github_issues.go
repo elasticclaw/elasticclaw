@@ -24,6 +24,14 @@ type IssueState struct {
 	UpdatedAt string // RFC3339
 }
 
+type IssueCommentState struct {
+	ID        int64
+	Body      string
+	User      string
+	CreatedAt string
+	HTMLURL   string
+}
+
 // MockGitHubIssues is a REST-style mock for the GitHub Issues API and webhook
 // delivery. It currently handles:
 //   - GET /repos/{owner}/{repo}/issues?since=...&state=all&sort=updated&direction=desc
@@ -36,6 +44,7 @@ type MockGitHubIssues struct {
 	mu            sync.Mutex
 	Issues        map[string]IssueState // key: "owner/repo#number"
 	IssueEvents   map[string][]map[string]interface{}
+	IssueComments map[string][]IssueCommentState
 	Calls         []string
 	AuthHeaders   []string
 	WebhookSecret string
@@ -44,8 +53,9 @@ type MockGitHubIssues struct {
 func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 	t.Helper()
 	m := &MockGitHubIssues{
-		Issues:      make(map[string]IssueState),
-		IssueEvents: make(map[string][]map[string]interface{}),
+		Issues:        make(map[string]IssueState),
+		IssueEvents:   make(map[string][]map[string]interface{}),
+		IssueComments: make(map[string][]IssueCommentState),
 	}
 	mux := http.NewServeMux()
 
@@ -81,6 +91,17 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 				m.mu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(events)
+				return
+			}
+			if len(parts2) == 3 && parts2[0] == "issues" && parts2[2] == "comments" {
+				var num int
+				fmt.Sscanf(parts2[1], "%d", &num)
+				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
+				m.mu.Lock()
+				comments := append([]IssueCommentState(nil), m.IssueComments[key]...)
+				m.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(issueCommentsToMaps(comments, owner, repo, num))
 				return
 			}
 			// Single issue fetch: /repos/{owner}/{repo}/issues/{number}
@@ -142,6 +163,13 @@ func (m *MockGitHubIssues) SetIssueEvents(repo string, number int, events []map[
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.IssueEvents[fmt.Sprintf("%s#%d", repo, number)] = append([]map[string]interface{}(nil), events...)
+}
+
+func (m *MockGitHubIssues) SetIssueComments(repo string, number int, comments []IssueCommentState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// repo must be in "owner/repo" format to match handler lookup keys.
+	m.IssueComments[fmt.Sprintf("%s#%d", repo, number)] = append([]IssueCommentState(nil), comments...)
 }
 
 func (m *MockGitHubIssues) SetIssueState(repo string, number int, state string) {
@@ -279,6 +307,36 @@ func issueToMap(number int, issue IssueState, owner, repo string) map[string]int
 		"assignee":   assignee,
 		"user":       map[string]interface{}{"login": "testuser"},
 	}
+}
+
+func issueCommentsToMaps(comments []IssueCommentState, owner, repo string, number int) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(comments))
+	for idx, comment := range comments {
+		id := comment.ID
+		if id == 0 {
+			id = int64(idx + 1)
+		}
+		user := comment.User
+		if user == "" {
+			user = "testuser"
+		}
+		createdAt := comment.CreatedAt
+		if createdAt == "" {
+			createdAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		htmlURL := comment.HTMLURL
+		if htmlURL == "" {
+			htmlURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d#issuecomment-%d", owner, repo, number, id)
+		}
+		out = append(out, map[string]interface{}{
+			"id":         id,
+			"body":       comment.Body,
+			"html_url":   htmlURL,
+			"created_at": createdAt,
+			"user":       map[string]interface{}{"login": user, "type": "User"},
+		})
+	}
+	return out
 }
 
 func labelsToNameMaps(labels []string) []map[string]interface{} {
