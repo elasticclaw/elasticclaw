@@ -238,15 +238,25 @@ type VMCreateRequest struct {
 	TTL          string // e.g. 2h, 24h (overrides provider default, max 48h)
 }
 
-// ProvisionClaw creates a VM, waits for it to be running, then installs and
-// starts the OpenClaw agent with hub connection env vars.
-// templateFiles and env are injected into the workspace.
+// ProvisionClaw creates a VM and returns the VM ID. The hub's poller monitors
+// VM status and triggers bootstrapReplicated separately once the VM is running.
+//
+// Neither templateFiles nor env can be injected at creation time because the
+// Replicated CMX API only provisions the VM — SSH is not available until the VM
+// is running. The hub's bootstrapReplicated path handles both file and env
+// injection separately after the VM is running via SSH.
 func (p *Provider) ProvisionClaw(
 	ctx context.Context,
 	req VMCreateRequest,
 	templateFiles map[string][]byte,
 	env map[string]string,
 ) (string, error) {
+	if len(templateFiles) > 0 {
+		return "", fmt.Errorf("replicated provider does not support templateFiles in ProvisionClaw: files must be injected after VM is running via SSH")
+	}
+	if len(env) > 0 {
+		return "", fmt.Errorf("replicated provider does not support env in ProvisionClaw: environment variables must be set after VM is running via SSH")
+	}
 	vmID, err := p.CreateVM(ctx, req)
 	if err != nil {
 		return "", err
@@ -310,7 +320,19 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 
 // Create implements the types.Provider interface used by the existing cmd layer.
 // For CMX VMs we create the VM and return a placeholder instance.
+//
+// Note: Replicated CMX VMs cannot inject TemplateFiles or Env at creation time
+// because the VM must be running before SSH is available. The hub's
+// bootstrapReplicated path handles file injection separately after the VM is
+// running. If TemplateFiles or Env are provided here, an error is returned
+// to avoid silent data loss.
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
+	if len(req.TemplateFiles) > 0 {
+		return nil, fmt.Errorf("replicated provider does not support TemplateFiles in Create: files must be injected after VM is running via SSH")
+	}
+	if len(req.Env) > 0 {
+		return nil, fmt.Errorf("replicated provider does not support Env in Create: environment variables must be set after VM is running via SSH")
+	}
 	vmID, err := p.CreateVM(ctx, VMCreateRequest{Name: req.Name})
 	if err != nil {
 		return nil, err

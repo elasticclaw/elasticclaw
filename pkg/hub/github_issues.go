@@ -910,7 +910,8 @@ func buildGitHubIssuesContext(payload githubIssuesWebhookPayload) string {
 	b.WriteString("1. Read this file fully\n")
 	b.WriteString("2. Explore the codebase\n")
 	b.WriteString("3. Implement the feature/fix described above\n")
-	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
+	b.WriteString("4. Follow the PR Completion Policy below\n")
+	appendDefaultFactoryPRPolicy(&b)
 	return b.String()
 }
 

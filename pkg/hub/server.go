@@ -82,6 +82,7 @@ type clawConn struct {
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
 	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID        string          // pre-assigned message ID for the current stream
+	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
 	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
@@ -121,9 +122,34 @@ func (cc *clawConn) isBusyLocked() bool {
 func (cc *clawConn) finishTurnLocked() {
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
+	cc.streamingSplit = false
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
+}
+
+func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
+	cc.mu.Lock()
+	if cc.streamingBuf.Len() == 0 {
+		cc.mu.Unlock()
+		return nil
+	}
+	msgID := cc.streamingMsgID
+	if msgID == "" {
+		msgID = uuid.New().String()
+	}
+	content := cc.streamingBuf.String()
+	cc.streamingMsgID = ""
+	cc.streamingBuf.Reset()
+	cc.streamingSplit = true
+	cc.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+		msgID, clawID, tenantID, "claw", content, now(),
+	)
+	return err
 }
 
 type userConn struct {
@@ -2158,6 +2184,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if msg.Type == "agent_activity" {
 				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
+					if err := s.flushStreamingSegment(clawID, tenantID, cc); err != nil {
+						log.Printf("[agent_activity] flush streaming segment for %s: %v", clawID[:8], err)
+					}
 					if isBusyAgentActivity(activity) {
 						cc.mu.Lock()
 						if cc.streamingStartedAt.IsZero() {
@@ -2236,10 +2265,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Use the outer cc (this goroutine's connection), not a fresh lookup.
 				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
 				cc.mu.Lock()
+				persistContent := hm.Content
+				skipPersist := false
 				if cc.streamingMsgID != "" {
 					hm.ID = cc.streamingMsgID
+					if cc.streamingBuf.Len() > 0 {
+						persistContent = cc.streamingBuf.String()
+					}
 				} else {
 					hm.ID = uuid.New().String()
+					skipPersist = cc.streamingSplit
 				}
 				cc.finishTurnLocked()
 				cc.mu.Unlock()
@@ -2259,12 +2294,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.drainPendingCheckpoint(clawID)
 					continue
 				}
-				_, _ = s.db.Exec(
-					`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-					 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-					hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
-				)
-				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				if !skipPersist && strings.TrimSpace(persistContent) != "" {
+					_, _ = s.db.Exec(
+						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
+						 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
+						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt,
+					)
+					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
+				}
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
@@ -3904,7 +3941,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		Name:         req.ProviderName, // stable ec-<shortid>
 		InstanceType: req.InstanceType,
 		TTL:          req.TTL,
-	}, nil, env)
+	}, nil, nil)
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
