@@ -1,0 +1,51 @@
+name: deterministic-gate-retry
+entry: entry
+
+stages:
+  - id: entry
+    label: Entry
+    entry: true
+    on_enter:
+      inject: |
+        Starting deterministic validation. Say [DONE] to run the validator.
+
+  - id: validation
+    label: Validation
+    triggers:
+      - message_contains: "[DONE]"
+      - message_contains: "[RETRY]"
+    on_enter:
+      run:
+        command: "python3 scripts/deterministic_gate.py --mode retry"
+        output: validation
+    gate:
+      output: validation
+      pass:
+        path: status
+        values:
+          - clean
+      fail:
+        path: status
+        values:
+          - issues
+      required: true
+
+  - id: fix
+    label: Fix
+    triggers:
+      - gate_result:
+          stage: validation
+          verdict: fail
+    on_enter:
+      inject: |
+        1 issue found. Apply the deterministic fix and say [RETRY].
+
+  - id: complete
+    label: Complete
+    triggers:
+      - gate_result:
+          stage: validation
+          verdict: pass
+    on_enter:
+      inject: |
+        No issues found. Workflow complete.

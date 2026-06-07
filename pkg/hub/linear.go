@@ -1066,7 +1066,8 @@ func buildLinearContext(payload linearWebhookPayload) string {
 	b.WriteString("1. Read this file fully\n")
 	b.WriteString("2. Explore the codebase\n")
 	b.WriteString("3. Implement the feature/fix described above\n")
-	b.WriteString("4. When complete, send exactly: `[DONE] https://github.com/org/repo/pull/N` (with your PR URL)\n")
+	b.WriteString("4. Follow the PR Completion Policy below\n")
+	appendDefaultFactoryPRPolicy(&b)
 	return b.String()
 }
 
@@ -1090,6 +1091,12 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
 	prURLs := extractDonePRURLs(rawMessage)
 
+	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
+		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+		return
+	}
+
 	// Validate PRs via GitHub API if we have a token.
 	ghToken := s.resolveGitHubToken()
 	if ghToken != "" {
@@ -1101,6 +1108,14 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	} else if len(prURLs) == 0 {
 		// No GH App configured, but still require at least one PR URL in the signal.
 		s.injectUserMessage(clawID, "[factory] `[DONE]` received with no PR URLs. Please open a PR and resend: `[DONE] https://github.com/org/repo/pull/N`")
+		return
+	}
+
+	// Block PR creation if any required gate has failed.
+	if s.hasFailedRequiredGate(clawID) {
+		msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
+		log.Printf("[factory] claw %s [DONE] blocked by failed required gate", clawID[:8])
+		s.injectUserMessage(clawID, msg)
 		return
 	}
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
-	"github.com/elasticclaw/elasticclaw/pkg/provider/local"
 	"github.com/elasticclaw/elasticclaw/pkg/state"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
@@ -126,16 +125,6 @@ func checkHealth(ctx context.Context, instance *types.Instance) *types.InstanceH
 		} else {
 			health.Status = types.StatusUnhealthy
 			health.Message = result.Stdout
-		}
-
-	case "local":
-		p := local.New()
-		status, err := p.Status(ctx, instance.Name)
-		if err != nil {
-			health.Status = types.StatusUnknown
-			health.Message = err.Error()
-		} else {
-			health.Status = status
 		}
 
 	default:
