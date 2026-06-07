@@ -2299,8 +2299,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
 						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt,
 					)
+					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
-				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
 				// Evaluate pipeline triggers for non-[DONE] messages
 				if !strings.Contains(hm.Content, "[DONE]") {
