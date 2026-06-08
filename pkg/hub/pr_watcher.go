@@ -127,9 +127,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			State:      taskRunPRStateOpen,
 			OccurredAt: now(),
 		}); err != nil {
-			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, prID)
 			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
-			return
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])

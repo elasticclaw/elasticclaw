@@ -862,6 +862,29 @@ func TestTaskRunPRMentionInstrumentationAssociatesPROpenedEvent(t *testing.T) {
 	assertTaskRunEventExists(t, db, runID, taskRunEventPROpened, taskRunInteractionNeutral)
 }
 
+func TestTaskRunPRMentionAnalyticsFailureDoesNotRollbackPRTracking(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-mention-failure")
+	startTaskRunForTest(t, s, "claw-pr-mention-failure", "mention-failure")
+	if _, err := db.Exec(`DROP TABLE task_run_prs`); err != nil {
+		t.Fatalf("drop task_run_prs: %v", err)
+	}
+
+	s.storePRMention("claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76")
+
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*)
+		  FROM claw_prs
+		 WHERE claw_id=? AND repo=? AND pr_number=? AND pr_url=?`,
+		"claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76",
+	).Scan(&count); err != nil {
+		t.Fatalf("count tracked PR: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected PR tracking row to survive analytics failure, got %d", count)
+	}
+}
+
 func TestTaskRunPRMergeAndCloseInstrumentationMaterializesStatus(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-lifecycle")
 	runID, _ := startTaskRunForTest(t, s, "claw-pr-lifecycle", "pr-lifecycle")
