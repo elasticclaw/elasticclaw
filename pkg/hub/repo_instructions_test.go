@@ -1,13 +1,18 @@
 package hub
 
 import (
+	"context"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 func TestRepoInstructionFileNamesIncludesAgents(t *testing.T) {
@@ -114,6 +119,82 @@ func TestBootstrapWakeRequiresBootstrapOKForManagedProviders(t *testing.T) {
 	if !allowWakeBeforeBootstrap("noop", 0) {
 		t.Fatalf("non-managed provider should preserve existing wake behavior")
 	}
+}
+
+func TestManagedProviderReadyRegistrationPromotesAfterBootstrapOK(t *testing.T) {
+	ready := true
+	clawID := "claw-replicated-ready-before-bootstrap"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, provider, status, bootstrap_ok, tags, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "replicated claw", "elasticclaw", "replicated", "starting", 0, `[]`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clawWS, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw ws: %v", err)
+	}
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
+		Type: "register",
+		Payload: types.RegisterPayload{
+			ClawID:       clawID,
+			Name:         "replicated claw",
+			Template:     "elasticclaw",
+			Token:        "claw-token",
+			GatewayReady: &ready,
+		},
+	}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(ctx, clawWS, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+	if registered.Type != "registered" {
+		t.Fatalf("registration ack type = %q, want registered", registered.Type)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "starting" {
+		t.Fatalf("status after gated registration = %q, want starting", status)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
+		Type: "heartbeat",
+		Payload: map[string]interface{}{
+			"gateway_healthy": true,
+			"gateway_ready":   true,
+			"context_usage":   0,
+		},
+	}); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status == "connected" {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("status after bootstrap_ok heartbeat = %q, want connected", status)
 }
 
 func runBashScript(t *testing.T, script string) {

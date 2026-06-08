@@ -2106,13 +2106,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
-						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
-							cc.gatewayReady = true
+						if gatewayReadyBool(hb.GatewayReady) {
 							res, execErr := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
 							}
+							cc.gatewayReady = true
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
@@ -2123,7 +2123,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								wakeConn = cc
 								go s.requestBootstrapCheckpoint(clawID)
 							}
-						} else if !hb.GatewayHealthy {
+						}
+						if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
 							if cc.gatewayUnhealthyCount == 1 {
 								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
