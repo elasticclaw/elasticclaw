@@ -358,7 +358,7 @@ func TestBuildOpenClawProviderConfig_ConfiguresOllamaProviderBaseURL(t *testing.
 	assertContains(t, snippet, "agent_defaults.setdefault('experimental', {})['localModelLean'] = True", "uses lean mode for weak local dev models")
 	assertContains(t, snippet, "'baseUrl': 'http://ollama:11434'", "uses Compose Ollama service URL")
 	assertContains(t, snippet, "'apiKey': 'OLLAMA_API_KEY'", "keeps Ollama API key env reference")
-	assertContains(t, snippet, "'timeoutSeconds': 86400", "removes interactive timeout pressure for slow local Ollama")
+	assertNotContains(t, snippet, "timeoutSeconds", "does not override OpenClaw's default Ollama timeout")
 	assertContains(t, snippet, "'contextWindow': 32768", "keeps OpenClaw local model prompt budget within Docker Ollama limits")
 	assertContains(t, snippet, "'maxTokens': 1024", "keeps local dev generation bounded")
 	assertContains(t, snippet, "'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'}", "sets native Ollama runtime context explicitly")
