@@ -1128,16 +1128,17 @@ function ActivitySummary({
 }) {
   const [loadedMessages, setLoadedMessages] = useState<Message[] | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState("")
   const visibleMessages = coalesceActivityMessages([...(item.messages || []), ...(loadedMessages || [])])
   const countOverride = item.summary?.count
   const loadedCount = loadedMessages?.length ?? item.messages.length
   const isPartial = Boolean(countOverride && loadedMessages && loadedCount < countOverride)
-  const handleToggle = () => {
-    onToggle()
-    if (expanded || !item.summary || loadedMessages || loading) return
+  const loadActivityMessages = () => {
+    if (!item.summary || loadedMessages || loading) return
     const summaryCount = item.summary.count || 0
     const limit = Math.max(200, Math.min(summaryCount || 200, 500))
     const newestFirst = summaryCount > limit
+    setLoadError("")
     setLoading(true)
     fetchActivityMessages(clawId, {
       from: item.summary.from,
@@ -1149,8 +1150,16 @@ function ActivitySummary({
         const mapped = apiMsgs.map(mapApiMessage)
         setLoadedMessages(newestFirst ? mapped.reverse() : mapped)
       })
-      .catch(console.warn)
+      .catch((err) => {
+        console.warn(err)
+        setLoadError(err instanceof Error ? err.message : "Failed to load tool calls")
+      })
       .finally(() => setLoading(false))
+  }
+  const handleToggle = () => {
+    onToggle()
+    if (expanded) return
+    loadActivityMessages()
   }
   if (variant === "card") {
     return (
@@ -1164,6 +1173,14 @@ function ActivitySummary({
         </button>
         {expanded && loading && (
           <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
+        )}
+        {expanded && loadError && (
+          <div className="flex items-center justify-between gap-2 px-1.5 text-[10px] text-destructive">
+            <span className="min-w-0 truncate">{loadError}</span>
+            <button type="button" onClick={loadActivityMessages} className="shrink-0 underline">
+              Retry
+            </button>
+          </div>
         )}
         {expanded && isPartial && (
           <div className="px-1.5 text-[10px] text-muted-foreground">
@@ -1192,6 +1209,15 @@ function ActivitySummary({
       </div>
       {expanded && loading && (
         <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
+      )}
+      {expanded && loadError && (
+        <div className="flex items-center justify-center gap-2 text-xs text-destructive">
+          <AlertCircle className="size-3 shrink-0" />
+          <span className="max-w-[32rem] truncate">{loadError}</span>
+          <button type="button" onClick={loadActivityMessages} className="shrink-0 underline">
+            Retry
+          </button>
+        </div>
       )}
       {expanded && isPartial && (
         <div className="text-center text-xs text-muted-foreground">

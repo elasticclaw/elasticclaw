@@ -321,11 +321,11 @@ func ReadTemplateFiles(templateDir string) (map[string]string, error) {
 			}
 			rel, err := filepath.Rel(templateDir, path)
 			if err != nil {
-				return nil
+				return err
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
-				return nil
+				return err
 			}
 			files[filepath.ToSlash(rel)] = string(data)
 			return nil

@@ -1903,7 +1903,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
 		desiredStatus := initialStatus(rp.GatewayReady)
-		if provider == "daytona" && bootstrapOK != 1 {
+		if !allowWakeBeforeBootstrap(provider, bootstrapOK) {
 			desiredStatus = "starting"
 		}
 		currentStatus = desiredStatus
@@ -1926,7 +1926,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var registrationTagsJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
-	allowWake := bootstrapOK == 1 || provider != "daytona"
+	allowWake := allowWakeBeforeBootstrap(provider, bootstrapOK)
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 
@@ -3267,6 +3267,12 @@ gh auth status`
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}
+			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
+				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
+					return fmt.Errorf("discover repo instructions: %w", err)
+				}
+				log.Printf("[daytona] repo instruction discovery done")
+			}
 		}
 	}
 
@@ -3614,6 +3620,15 @@ func repoDirectoryName(repoFullName string) string {
 	return repoFullName
 }
 
+func allowWakeBeforeBootstrap(provider string, bootstrapOK int) bool {
+	switch provider {
+	case "daytona", "replicated", "exedev":
+		return bootstrapOK == 1
+	default:
+		return true
+	}
+}
+
 func daytonaRepoReadinessSnippet(repoFullName string) string {
 	repoName := repoDirectoryName(repoFullName)
 	return fmt.Sprintf("echo %s; [ -d %s/.git ] || { echo %s; exit 1; }; echo %s; ",
@@ -3920,6 +3935,13 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
+	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
+			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
+		}
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+	}
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
@@ -4852,6 +4874,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
@@ -5068,6 +5091,71 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	return b.String()
 }
 
+var repoInstructionFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
+
+const repoInstructionsIndexName = "REPO_INSTRUCTIONS.md"
+
+const repoInstructionsAgentsSection = `## Repository Instructions
+
+If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cloned repository. It lists repository-owned instruction files such as ` + "`AGENTS.md`" + `, ` + "`CLAUDE.md`" + `, and ` + "`GEMINI.md`" + `.`
+
+func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `set -euo pipefail
+WORKSPACE_DIR=%s
+mkdir -p "$WORKSPACE_DIR"
+cd "$WORKSPACE_DIR"
+TMP="$(mktemp "$WORKSPACE_DIR/.repo-instructions.XXXXXX")"
+FOUND=0
+{
+  printf '%%s\n\n' '# Repository Instructions'
+  printf '%%s\n\n' 'ElasticClaw detected repository-owned agent instruction files. Read the relevant files before making changes in that repository.'
+`, shellDoubleQuote(workspaceDir))
+	for _, repo := range repos {
+		repoName := repoDirectoryName(repo.Repo)
+		fmt.Fprintf(&b, `  REPO_DIR=%s
+  REPO_FOUND=0
+  if [ -d "$REPO_DIR" ]; then
+`, shellQuote(repoName))
+		for _, fileName := range repoInstructionFileNames {
+			repoPath := repoName + "/" + fileName
+			fmt.Fprintf(&b, "    if [ -f \"$REPO_DIR/%s\" ]; then\n", fileName)
+			fmt.Fprintf(&b, "      if [ \"$REPO_FOUND\" -eq 0 ]; then\n")
+			fmt.Fprintf(&b, "        printf '\\n## %%s\\n\\n' %s\n", shellQuote(repoName))
+			fmt.Fprintf(&b, "        REPO_FOUND=1\n")
+			fmt.Fprintf(&b, "        FOUND=1\n")
+			fmt.Fprintf(&b, "      fi\n")
+			fmt.Fprintf(&b, "      printf -- '- `%%s`\\n' %s\n", shellQuote(repoPath))
+			fmt.Fprintf(&b, "    fi\n")
+		}
+		b.WriteString("  fi\n")
+	}
+	fmt.Fprintf(&b, `} > "$TMP"
+if [ "$FOUND" -eq 1 ]; then
+  mv "$TMP" "$WORKSPACE_DIR/%s"
+else
+  rm -f "$TMP" "$WORKSPACE_DIR/%s"
+fi
+
+AGENTS_FILE="$WORKSPACE_DIR/AGENTS.md"
+SECTION='## Repository Instructions'
+if [ ! -f "$AGENTS_FILE" ]; then
+  cat > "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+%s
+ELASTICCLAW_REPO_AGENTS
+elif ! grep -Fqx "$SECTION" "$AGENTS_FILE"; then
+  cat >> "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+
+%s
+ELASTICCLAW_REPO_AGENTS
+fi
+`, repoInstructionsIndexName, repoInstructionsIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection)
+	return b.String()
+}
+
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
@@ -5149,7 +5237,8 @@ set +e
 FAILED=0
 %s
 exit $FAILED
-) || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
+) || echo "Warning: repo clone failed — agent can retry after bridge connects"
+%s`, tokenURL, buildGitHubCloneScript(repos), buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
