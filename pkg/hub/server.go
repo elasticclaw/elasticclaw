@@ -2798,7 +2798,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
 
-	exec := func(label string, timeout time.Duration, cmd string) error {
+	execResult := func(label string, timeout time.Duration, cmd string) (*types.ExecResult, error) {
 		s.setBootstrapStatus(clawID, daytonaBootstrapStatusForStep(label))
 		const maxAttempts = 3
 		var lastErr error
@@ -2824,9 +2824,14 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				continue
 			}
 			log.Printf("[daytona] %s done", label)
-			return nil
+			return result, nil
 		}
-		return lastErr
+		return nil, lastErr
+	}
+
+	exec := func(label string, timeout time.Duration, cmd string) error {
+		_, err := execResult(label, timeout, cmd)
+		return err
 	}
 
 	// Step 1: Install pinned OpenClaw version.
@@ -2844,16 +2849,34 @@ echo uninstalled`); err != nil {
 	}
 
 	const daytonaOpenClawVersion = "2026.6.1"
-	if err := exec("install openclaw", 3*time.Minute,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
-hash -r; \
-echo 'install done'`, daytonaOpenClawVersion)); err != nil {
+	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
+	}
+	deadline := time.Now().Add(4 * time.Minute)
+	var lastInstallStatus string
+	installComplete := false
+	for !installComplete {
+		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand(daytonaOpenClawVersion))
+		if err != nil {
+			lastInstallStatus = err.Error()
+		} else {
+			lastInstallStatus = strings.TrimSpace(result.Stdout)
+			switch {
+			case strings.Contains(result.Stdout, "openclaw-install-status=ok"):
+				installComplete = true
+			case strings.Contains(result.Stdout, "openclaw-install-status=failed"),
+				strings.Contains(result.Stdout, "openclaw-install-status=missing"),
+				strings.Contains(result.Stdout, "openclaw-install-status=unknown"):
+				return fmt.Errorf("install openclaw failed: %s", sanitizeBootstrapOutput(result.Stdout))
+			}
+		}
+		if installComplete {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("install openclaw timed out: %s", sanitizeBootstrapOutput(lastInstallStatus))
+		}
+		time.Sleep(10 * time.Second)
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
@@ -3426,6 +3449,66 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
 fi
 echo "claw-bridge not running"
 exit 1`
+}
+
+func daytonaStartOpenClawInstallCommand(version string) string {
+	installScript := fmt.Sprintf(`set -o pipefail
+export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+NPM="$NVM_DIR/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+echo "npm=$NPM prefix=$PREFIX"
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; then
+  hash -r
+  echo ok > "$STATUS"
+  echo "install done"
+else
+  rc=$?
+  echo "failed:$rc" > "$STATUS"
+  exit "$rc"
+fi`, version)
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+rm -f "$LOG" "$STATUS"
+setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
+echo "openclaw-install-status=started"`, shellQuote(installScript))
+}
+
+func daytonaOpenClawInstallStatusCommand(version string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+if [ -s "$STATUS" ]; then
+  status="$(cat "$STATUS")"
+  case "$status" in
+    ok)
+      echo "openclaw-install-status=ok"
+      exit 0
+      ;;
+    failed:*)
+      echo "openclaw-install-status=failed"
+      echo "$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+    *)
+      echo "openclaw-install-status=unknown:$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+  esac
+fi
+if pgrep -af %s >/dev/null 2>&1; then
+  echo "openclaw-install-status=pending"
+  tail -n 20 "$LOG" 2>/dev/null || true
+  exit 0
+fi
+echo "openclaw-install-status=missing"
+tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
 }
 
 func daytonaPrepareBridgeCommand() string {
