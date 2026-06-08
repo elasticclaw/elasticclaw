@@ -1006,8 +1006,6 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
 				details = &linearIssueDetails{Identifier: issueID}
 			}
-			log.Printf("[pipeline] fetched issue %s: identifier=%s title=%s", issueID, details.Identifier, details.Title)
-			log.Printf("[pipeline] RAW TEMPLATE for claw %s:\n%s", clawID[:8], injectMsg)
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
 				s.warnPipelineRender(clawID, "%s: inject template parse failed: %v", ctx.Name(), err)
@@ -1017,13 +1015,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			data := s.injectTemplateData(clawID, map[string]interface{}{
 				"Issue": details,
 			})
-			log.Printf("[pipeline] template DATA for claw %s: Issue.Identifier=%q Issue.Title=%q Issue.URL=%q", clawID[:8], details.Identifier, details.Title, details.URL)
 			if err := tmpl.Execute(&buf, data); err != nil {
 				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
 				goto injectMessage
 			}
 			injectMsg = buf.String()
-			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
 		} else if strings.Contains(issueID, "/") {
 			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
 			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
@@ -1071,7 +1067,6 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				goto injectMessage
 			}
 			injectMsg = buf.String()
-			log.Printf("[pipeline] template RENDERED for claw %s:\n%s", clawID[:8], injectMsg)
 		} else {
 			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
 		}
@@ -1090,7 +1085,6 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 					})
 					if err := tmpl.Execute(&buf, data); err == nil {
 						injectMsg = buf.String()
-						log.Printf("[pipeline] template RENDERED with inputs for claw %s", clawID[:8])
 					}
 				}
 			}
