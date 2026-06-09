@@ -14,7 +14,7 @@ import { WorkflowSetupShell } from "@/components/workflow-setup/workflow-setup-s
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
-import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type SaveResponse, type Workspace, type Workflow } from "@/lib/api"
+import { fetchWorkspaces, previewWorkflowSetupFactoryConversion, updateWorkflowControls, type ConvertPreviewResponse, type RepositoryAccess, type SaveResponse, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -202,7 +202,7 @@ export default function SettingsSectionPage() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   useEffect(() => {
     const hubUrl = getHubUrl()
@@ -1238,7 +1238,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
   }, [hubUrl, workspace, workspaceGitHubPath])
 
   useEffect(() => {
-    loadWorkspaceApps()
+    queueMicrotask(() => void loadWorkspaceApps())
   }, [loadWorkspaceApps])
 
   async function runTest() {
@@ -1649,7 +1649,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   <h3 className="font-medium">Test Recommended</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  You haven't tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
+                  You haven&apos;t tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
                 </p>
               </>
             ) : (
@@ -1978,7 +1978,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   }, [hubUrl, issueTrackersPath, selectedWorkspace])
 
   useEffect(() => {
-    loadTrackers()
+    queueMicrotask(() => void loadTrackers())
   }, [loadTrackers])
 
   useEffect(() => {
@@ -2501,7 +2501,7 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   const visibleWorkspaces = workspaces.filter((workspace) => workspace.name === selectedWorkspace)
 
@@ -2786,6 +2786,9 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [previewingFactory, setPreviewingFactory] = useState<string | null>(null)
+  const [conversionPreview, setConversionPreview] = useState<ConvertPreviewResponse | null>(null)
+  const [conversionError, setConversionError] = useState("")
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -2807,7 +2810,26 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
+
+  const previewLegacyFactoryConversion = useCallback(async (factoryName: string) => {
+    if (!selectedWorkspace) {
+      setConversionPreview(null)
+      setConversionError("Select a workspace to preview legacy factory conversion.")
+      return
+    }
+    setPreviewingFactory(factoryName)
+    setConversionPreview(null)
+    setConversionError("")
+    try {
+      const preview = await previewWorkflowSetupFactoryConversion(factoryName, { workspace: selectedWorkspace })
+      setConversionPreview(preview)
+    } catch (e) {
+      setConversionError(e instanceof Error ? e.message : "Failed to preview conversion")
+    } finally {
+      setPreviewingFactory(null)
+    }
+  }, [selectedWorkspace])
 
   const scopedToWorkspace = selectedWorkspace !== undefined
   const workflowNames = new Set(
@@ -2860,13 +2882,67 @@ function AnalyticsSection({ selectedWorkspace }: { selectedWorkspace?: string })
                       {summary.totalTriggers} triggers · {summary.successRate.toFixed(0)}% create success · {summary.prMergeRate.toFixed(0)}% PR merge
                     </p>
                   </div>
-                  <div className="shrink-0 text-right text-xs text-muted-foreground">
-                    {summary.errors} errors
+                  <div className="flex shrink-0 flex-col items-end gap-2 text-right text-xs text-muted-foreground">
+                    <span>{summary.errors} errors</span>
+                    {scopedToWorkspace && selectedWorkspace && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        disabled={previewingFactory !== null}
+                        onClick={() => void previewLegacyFactoryConversion(summary.factoryName)}
+                      >
+                        {previewingFactory === summary.factoryName ? "Previewing..." : "Preview legacy factory"}
+                      </Button>
+                    )}
                   </div>
                 </div>
               </div>
             ))}
           </div>
+          {scopedToWorkspace && selectedWorkspace && (conversionPreview || conversionError) && (
+            <div className="rounded-lg border border-border p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-medium">Legacy factory conversion preview</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Preview only. No workflow or settings data is saved.
+                  </p>
+                </div>
+                {conversionPreview && (
+                  <span className={cn(
+                    "rounded-full px-2 py-0.5 text-xs",
+                    conversionPreview.status === "ready"
+                      ? "bg-emerald-500/10 text-emerald-600"
+                      : "bg-amber-500/10 text-amber-600"
+                  )}>
+                    {conversionPreview.status}
+                  </span>
+                )}
+              </div>
+              {conversionError ? (
+                <p className="mt-3 text-sm text-red-500">{conversionError}</p>
+              ) : conversionPreview ? (
+                <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Workflow</p>
+                    <p className="mt-1 font-medium">{conversionPreview.workflowName}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Config hash</p>
+                    <p className="mt-1 font-mono text-xs">{conversionPreview.configHash}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Diagnostics</p>
+                    <p className="mt-1">
+                      {conversionPreview.summary.critical} critical, {conversionPreview.summary.warning} warning, {conversionPreview.summary.info} info
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -3159,18 +3235,23 @@ function AIConfigSection() {
   const [backupPath, setBackupPath] = useState<string | null>(null)
   // Restore from sessionStorage after mount (client-only)
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(SS_CHAT_KEY)
-      if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
-      const yaml = sessionStorage.getItem(SS_YAML_KEY)
-      if (yaml) {
-        setProposedYaml(yaml)
-        setPlaceholders(extractYamlPlaceholders(yaml))
-        setSecretValues({})
-      }
-      const backup = sessionStorage.getItem(SS_BACKUP_KEY)
-      if (backup) setBackupPath(backup)
-    } catch { /* ignore */ }
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      try {
+        const raw = sessionStorage.getItem(SS_CHAT_KEY)
+        if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
+        const yaml = sessionStorage.getItem(SS_YAML_KEY)
+        if (yaml) {
+          setProposedYaml(yaml)
+          setPlaceholders(extractYamlPlaceholders(yaml))
+          setSecretValues({})
+        }
+        const backup = sessionStorage.getItem(SS_BACKUP_KEY)
+        if (backup) setBackupPath(backup)
+      } catch { /* ignore */ }
+    })
+    return () => { cancelled = true }
   }, [])
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
@@ -4316,7 +4397,7 @@ function DoctorSection() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   const failedChecks = report?.checks?.filter((c: any) => !c.ok) || []
   const passedChecks = report?.checks?.filter((c: any) => c.ok) || []

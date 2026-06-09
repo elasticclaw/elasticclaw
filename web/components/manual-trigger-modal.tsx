@@ -29,22 +29,28 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
 
   // Seed defaults when workflow changes
   useEffect(() => {
-    if (!workflow?.inputs) {
-      setInputValues({})
-      return
-    }
-    const defaults: Record<string, string> = {}
-    for (const input of workflow.inputs) {
-      if (input.default) {
-        defaults[input.name] = input.default
-      } else if (input.type === "bool") {
-        defaults[input.name] = "false"
-      } else if (input.type === "enum" && input.options && input.options.length > 0) {
-        defaults[input.name] = input.options[0]
+    let cancelled = false
+    const seedDefaults = () => {
+      if (cancelled) return
+      if (!workflow?.inputs) {
+        setInputValues({})
+        return
       }
+      const defaults: Record<string, string> = {}
+      for (const input of workflow.inputs) {
+        if (input.default) {
+          defaults[input.name] = input.default
+        } else if (input.type === "bool") {
+          defaults[input.name] = "false"
+        } else if (input.type === "enum" && input.options && input.options.length > 0) {
+          defaults[input.name] = input.options[0]
+        }
+      }
+      setInputValues(defaults)
+      setTriggerError(null)
     }
-    setInputValues(defaults)
-    setTriggerError(null)
+    queueMicrotask(seedDefaults)
+    return () => { cancelled = true }
   }, [workflow])
 
   const handleTrigger = useCallback(async () => {

@@ -107,7 +107,7 @@ export function useHub(selectedClawId: string | null): HubState {
     split: splitTypewriter,
     clear: clearTypewriter,
   } = useTypewriter()
-  const [configured, setConfigured] = useState(false)
+  const [configured] = useState(() => isConfigured())
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
   const segmentedStreamRef = useRef<Record<string, boolean>>({})
@@ -153,6 +153,7 @@ export function useHub(selectedClawId: string | null): HubState {
     } catch {}
   }, [])
   const wsRef = useRef<WebSocket | null>(null)
+  const connectWebSocketRef = useRef<() => void>(() => {})
   const reconnectTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
   const shouldReconnectRef = useRef(false)
@@ -175,7 +176,7 @@ export function useHub(selectedClawId: string | null): HubState {
       if (saved) pinnedRef.current = JSON.parse(saved)
     } catch {}
     orderRef.current = loadSavedOrder()
-    loadCachedMessages()
+    queueMicrotask(loadCachedMessages)
   }, [loadCachedMessages])
 
   const savePinned = useCallback((pinned: Record<string, boolean>) => {
@@ -325,7 +326,7 @@ export function useHub(selectedClawId: string | null): HubState {
         )
       }
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
+      reconnectTimerRef.current = window.setTimeout(() => connectWebSocketRef.current(), delayMs)
     }
 
     ws.onerror = () => {
@@ -499,14 +500,17 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [clearTypewriter, finalizeTypewriter, nextClientMessageId, persistMessages, pushChunk, refreshClaws, splitTypewriter])
 
+  useEffect(() => {
+    connectWebSocketRef.current = connectWebSocket
+  }, [connectWebSocket])
+
   // Initialize
   useEffect(() => {
     const cfg = isConfigured()
-    setConfigured(cfg)
     if (!cfg) return
 
     // Initial fetch + eager-load all message histories
-    refreshClaws().then(() => {})
+    queueMicrotask(() => void refreshClaws())
 
     // Poll every 30s
     pollIntervalRef.current = setInterval(refreshClaws, 10_000)
@@ -525,7 +529,7 @@ export function useHub(selectedClawId: string | null): HubState {
         wsRef.current.close()
       }
     }
-  }, []) // run once on mount
+  }, [connectWebSocket, refreshClaws])
 
   const send = useCallback(async (clawId: string, content: string) => {
     if (!clawId || !content.trim()) return

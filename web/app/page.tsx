@@ -18,14 +18,9 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(null)
+  const [configuredState, setConfiguredState] = useState<boolean | null>(() => isConfigured())
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
-
-  // Check configured on mount (needs browser for localStorage)
-  useEffect(() => {
-    setConfiguredState(isConfigured())
-  }, [])
 
   // Fetch admin status
   useEffect(() => {
@@ -151,7 +146,7 @@ export default function Home() {
     for (const c of claws) {
       hub.loadMessages(c.id)
     }
-  }, [claws]) // re-runs when claws first populate
+  }, [claws, hub]) // re-runs when claws first populate
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(

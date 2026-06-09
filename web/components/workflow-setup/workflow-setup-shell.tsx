@@ -833,9 +833,8 @@ function WorkflowSetupShellInner({
             </Button>
             <Button
               type="button"
-              className={cn("w-full sm:w-auto", !canSaveWorkflow && "opacity-50")}
-              aria-disabled={!canSaveWorkflow}
-              disabled={savePending}
+              className="w-full sm:w-auto"
+              disabled={!canSaveWorkflow}
               onClick={() => void handleSave(false)}
             >
               {savePending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
@@ -856,9 +855,8 @@ function WorkflowSetupShellInner({
                 <Button
                   type="button"
                   variant="secondary"
-                  className={cn("w-full sm:w-auto", !canSaveWithWarnings && "opacity-50")}
-                  aria-disabled={!canSaveWithWarnings}
-                  disabled={savePending}
+                  className="w-full sm:w-auto"
+                  disabled={!canSaveWithWarnings}
                   onClick={() => void handleSave(true)}
                 >
                   Save with warnings

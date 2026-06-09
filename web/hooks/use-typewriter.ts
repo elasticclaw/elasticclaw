@@ -34,8 +34,10 @@ export interface TypewriterState {
 
 export function useTypewriter() {
   const entries = useRef<Record<string, TypewriterEntry>>({})
+  const onDrainCallbacks = useRef<Record<string, () => void>>({})
   const rafRef = useRef<number | null>(null)
   const lastTickRef = useRef<number>(0)
+  const tickRef = useRef<(now: number) => void>(() => {})
   const [displayBuffers, setDisplayBuffers] = useState<Record<string, TypewriterState>>({})
 
   const tick = useCallback((now: number) => {
@@ -52,7 +54,8 @@ export function useTypewriter() {
           // All drained — fire callback then remove
           const cb = onDrainCallbacks.current[entry.clawId]
           if (cb) {
-            delete onDrainCallbacks.current[entry.clawId]
+            const { [entry.clawId]: _removed, ...remainingCallbacks } = onDrainCallbacks.current
+            onDrainCallbacks.current = remainingCallbacks
             cb()
           }
           delete entries.current[entry.clawId]
@@ -99,18 +102,22 @@ export function useTypewriter() {
       (e) => e.queue.length > 0 || (e.hadChunks && !e.done && e.pausedAt !== null)
     )
     if (anyActive || anyPending) {
-      rafRef.current = requestAnimationFrame(tick)
+      rafRef.current = requestAnimationFrame((nextNow) => tickRef.current(nextNow))
     } else {
       rafRef.current = null
     }
   }, [])
 
+  useEffect(() => {
+    tickRef.current = tick
+  }, [tick])
+
   const ensureRunning = useCallback(() => {
     if (!rafRef.current) {
       lastTickRef.current = 0
-      rafRef.current = requestAnimationFrame(tick)
+      rafRef.current = requestAnimationFrame((now) => tickRef.current(now))
     }
-  }, [tick])
+  }, [])
 
   const pushChunk = useCallback((clawId: string, chunk: string) => {
     if (!entries.current[clawId]) {
@@ -124,15 +131,12 @@ export function useTypewriter() {
     ensureRunning()
   }, [ensureRunning])
 
-  // onDrain callbacks: fired once when entry fully drains after finalize()
-  const onDrainCallbacks = useRef<Record<string, () => void>>({})
-
   /** Call when the final complete message arrives from WS.
    *  onDrain is called once the typewriter has fully drained. */
   const finalize = useCallback((clawId: string, onDrain?: () => void) => {
     if (entries.current[clawId]) {
       entries.current[clawId].done = true
-      if (onDrain) onDrainCallbacks.current[clawId] = onDrain
+      if (onDrain) onDrainCallbacks.current = { ...onDrainCallbacks.current, [clawId]: onDrain }
     } else {
       // No active entry — fire immediately
       onDrain?.()
@@ -159,7 +163,8 @@ export function useTypewriter() {
     if (!entry) return ""
     const text = entry.shown + entry.queue
     delete entries.current[clawId]
-    delete onDrainCallbacks.current[clawId]
+    const { [clawId]: _removed, ...remainingCallbacks } = onDrainCallbacks.current
+    onDrainCallbacks.current = remainingCallbacks
     setDisplayBuffers((prev) => {
       const next = { ...prev }
       delete next[clawId]
