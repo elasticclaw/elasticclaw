@@ -46,6 +46,17 @@ stages:
 	}
 }
 
+func TestWorkflowConfigRejectsInvalidRunKind(t *testing.T) {
+	workflow := &WorkflowConfig{Name: "invalid-kind", RunKind: "typo"}
+	err := workflow.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid run_kind") {
+		t.Fatalf("Validate() error = %v, want invalid run_kind", err)
+	}
+}
+
 func TestWorkflowV1LinearTriggerValidates(t *testing.T) {
 	data := []byte(`
 schema_version: v1

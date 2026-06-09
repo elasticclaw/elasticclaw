@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams, usePathname, useRouter } from "next/navigation"
-import React, { useEffect, useState, useCallback, useRef } from "react"
+import React, { Suspense, useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { TaskRunAnalyticsView } from "@/components/task-run-analytics-view"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
@@ -289,7 +290,6 @@ export default function SettingsSectionPage() {
         { id: "runtimes", label: "Sandboxes", icon: Cpu },
         { id: "models", label: "Models", icon: Key },
         { id: "authentication", label: "Authentication", icon: Shield },
-        { id: "analytics", label: "Analytics", icon: BarChart3 },
         { id: "ai-config", label: "Configure with AI", icon: Sparkles },
       ],
     },
@@ -385,7 +385,7 @@ export default function SettingsSectionPage() {
         </aside>
 
         {/* Content */}
-        <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
+        <main className={(section === "ai-config" || section === "troubleshoot" || section === "workspace-analytics") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -411,7 +411,9 @@ export default function SettingsSectionPage() {
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "workspace-analytics" && (
-            <AnalyticsSection selectedWorkspace={selectedWorkspace} />
+            <Suspense fallback={<div className="flex-1 p-6 text-sm text-muted-foreground">Loading analytics...</div>}>
+              <TaskRunAnalyticsView workspaceScope={selectedWorkspace} />
+            </Suspense>
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />

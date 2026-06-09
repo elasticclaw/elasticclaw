@@ -77,8 +77,8 @@ func TestFactoryContextsIncludeDefaultPRPolicy(t *testing.T) {
 	}
 
 	cases := map[string]string{
-		"linear issue":            buildLinearContext(linearPayload),
-		"github issue":            buildGitHubIssuesContext(githubIssuesPayload),
+		"linear issue":            buildLinearContext(linearPayload, true),
+		"github issue":            buildGitHubIssuesContext(githubIssuesPayload, nil, ""),
 		"shortcut story":          buildShortcutContext(shortcut, "128"),
 		"external event":          buildExternalEventContext(externalPayload, externalFactory),
 		"manual factory trigger":  buildManualTriggerContext(manualFactory, map[string]string{"task": "fix issue 128"}),

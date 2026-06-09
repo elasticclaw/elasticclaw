@@ -576,6 +576,9 @@ type FactoryConfig struct {
 	WebhookSecret    string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"`         // HMAC-SHA256 secret for validating webhooks
 	Tags             []string `yaml:"tags,omitempty" json:"tags,omitempty"`                             // tags applied to created claws
 	Color            string   `yaml:"color,omitempty" json:"color,omitempty"`                           // color applied to created claws
+	RunKind          string   `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                     // analytics run kind: "code_task" or "pr_task"
+	AnalyticsEnabled *bool    `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`   // nil = infer from integration
+	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
 	// Labels: all must be present on the issue to trigger (AND)
 	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
