@@ -3307,9 +3307,10 @@ gh auth status`
 			}
 			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
 				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
-					return fmt.Errorf("discover repo instructions: %w", err)
+					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
+				} else {
+					log.Printf("[daytona] repo instruction discovery done")
 				}
-				log.Printf("[daytona] repo instruction discovery done")
 			}
 		}
 	}
@@ -5301,6 +5302,17 @@ fi
 	return b.String()
 }
 
+func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	discoveryScript := buildRepoInstructionDiscoveryScript(workspaceDir, repos)
+	if discoveryScript == "" {
+		return ""
+	}
+	return fmt.Sprintf(`(
+%s
+) || echo "Warning: repo instruction discovery failed; continuing"
+`, discoveryScript)
+}
+
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
@@ -5383,7 +5395,7 @@ FAILED=0
 %s
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
-%s`, tokenURL, buildGitHubCloneScript(repos), buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.

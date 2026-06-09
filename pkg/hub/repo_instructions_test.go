@@ -87,6 +87,14 @@ func TestBuildRepoInstructionDiscoveryScriptRemovesStaleIndexWhenNoInstructionFi
 	}
 }
 
+func TestBestEffortRepoInstructionDiscoveryScriptDoesNotPropagateFailure(t *testing.T) {
+	script := buildBestEffortRepoInstructionDiscoveryScript("/dev/null/workspace", []types.GitHubRepoAccess{{Repo: "elasticclaw/elasticclaw"}})
+	if !strings.Contains(script, "Warning: repo instruction discovery failed; continuing") {
+		t.Fatalf("best-effort script missing warning:\n%s", script)
+	}
+	runBashScript(t, script)
+}
+
 func TestBuildGitHubCredentialHelperRunsRepoInstructionDiscoveryAfterClone(t *testing.T) {
 	cfg := &types.HubConfig{
 		GitHubApps: []*types.GitHubAppConfig{{AppID: 123}},
@@ -104,6 +112,9 @@ func TestBuildGitHubCredentialHelperRunsRepoInstructionDiscoveryAfterClone(t *te
 	}
 	if discoveryIdx < cloneIdx {
 		t.Fatalf("repo instruction discovery must run after clone/pull")
+	}
+	if !strings.Contains(script, "Warning: repo instruction discovery failed; continuing") {
+		t.Fatalf("credential helper should make repo instruction discovery best-effort:\n%s", script)
 	}
 }
 
