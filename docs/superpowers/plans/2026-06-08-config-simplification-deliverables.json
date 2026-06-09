@@ -1,0 +1,753 @@
+{
+  "schema_version": "v1",
+  "created_at": "2026-06-08",
+  "source_spec": "docs/superpowers/specs/2026-06-08-config-simplification-design.md",
+  "goal": "Quebrar a simplificacao de configuracao de factories/workflows em entregaveis pequenos, verificaveis e seguros para implantacoes novas e workspaces existentes.",
+  "execution_principles": [
+    "Cada entregavel deve ser testavel isoladamente.",
+    "Nenhum entregavel pode alterar comportamento runtime existente sem teste de regressao.",
+    "A experiencia nova deve usar workflow, workspace e workflow pattern como linguagem principal.",
+    "Legacy factory aparece apenas em migracao e compatibilidade.",
+    "Secrets, tokens, chaves privadas e credenciais nunca devem aparecer em respostas de API, logs de diagnostico ou UI.",
+    "Salvar workflows pelo fluxo guiado deve preservar o YAML autoral validado."
+  ],
+  "global_acceptance_criteria": [
+    "Workflows existentes continuam validos e executando pelo caminho atual.",
+    "Factories legadas continuam carregando e executando pelo caminho atual.",
+    "Os comandos existentes workspace push, workflow push, factory, template e create nao mudam de comportamento por causa do novo fluxo.",
+    "Novas validacoes bloqueiam apenas o save guiado quando ha falhas criticas.",
+    "Doctor e endpoints existentes podem reportar warnings, mas nao impedem runtime existente.",
+    "make test passa ao final de cada fase backend.",
+    "cd web && npm run lint passa ao final de cada fase frontend."
+  ],
+  "deliverables": [
+    {
+      "id": "D01",
+      "title": "Extrair parser de pipeline para pacote neutro",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Permitir que runtime, CLI, doctor e workflowsetup validem pipelines sem depender de pkg/hub.",
+      "scope": [
+        "Mover ou duplicar temporariamente o parser de pkg/hub/pipeline para um pacote neutro como pkg/workflow/pipeline ou pkg/pipeline.",
+        "Atualizar imports do hub para usar o pacote neutro.",
+        "Manter comportamento de parse identico ao atual."
+      ],
+      "main_files": [
+        "pkg/hub/pipeline/pipeline.go",
+        "pkg/hub/pipeline_runner.go",
+        "pkg/hub/workflow_creator.go",
+        "pkg/workflow/pipeline"
+      ],
+      "depends_on": [],
+      "acceptance_criteria": [
+        "Nenhum pacote compartilhado novo importa caminhos sob pkg/hub.",
+        "O runtime continua parseando os mesmos YAMLs de pipeline que antes.",
+        "Testes existentes de pipeline e hub continuam passando.",
+        "go test ./pkg/hub/... passa.",
+        "go test ./pkg/workflow/... passa se o novo pacote existir."
+      ],
+      "verification": [
+        "go test ./pkg/hub/...",
+        "go test ./pkg/workflow/..."
+      ],
+      "out_of_scope": [
+        "Alterar semantica de stages.",
+        "Adicionar novas actions de pipeline."
+      ]
+    },
+    {
+      "id": "D02",
+      "title": "Criar contratos de workflowsetup",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Definir tipos compartilhados para render, validate, save, diagnostics, pattern metadata e hashes.",
+      "scope": [
+        "Criar pacote pkg/workflowsetup.",
+        "Definir structs de request e response alinhadas com API e frontend.",
+        "Definir Diagnostic com id, category, severity, ok, blocking, step, fieldPath, title, detail, fixTarget, fixLabel, retryable e status.",
+        "Definir grammar de slug e funcao de configHash."
+      ],
+      "main_files": [
+        "pkg/workflowsetup/types.go",
+        "pkg/workflowsetup/diagnostics.go",
+        "pkg/workflowsetup/hash.go",
+        "pkg/workflowsetup/slug.go"
+      ],
+      "depends_on": [],
+      "acceptance_criteria": [
+        "O pacote compila sem importar pkg/hub.",
+        "Diagnostics nao possuem campos para valores secretos.",
+        "configHash e deterministico para o mesmo YAML.",
+        "Slug aceita apenas ^[a-z0-9][a-z0-9_-]{0,62}$.",
+        "go test ./pkg/workflowsetup passa."
+      ],
+      "verification": [
+        "go test ./pkg/workflowsetup"
+      ],
+      "out_of_scope": [
+        "Implementar endpoints HTTP.",
+        "Salvar arquivos no storage externo."
+      ]
+    },
+    {
+      "id": "D03",
+      "title": "Renderizar workflow patterns built-in",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Gerar YAML v1 editavel para os patterns github-issue, linear-status, shortcut-status e manual-task.",
+      "scope": [
+        "Implementar pattern metadata backend-driven.",
+        "Implementar renderer para cada pattern.",
+        "Gerar YAML sem campos derivados desnecessarios.",
+        "Incluir issue_number obrigatorio quando github-issue tem manual trigger habilitado."
+      ],
+      "main_files": [
+        "pkg/workflowsetup/patterns.go",
+        "pkg/workflowsetup/render.go",
+        "pkg/workflowsetup/render_test.go"
+      ],
+      "depends_on": [
+        "D02"
+      ],
+      "acceptance_criteria": [
+        "Cada pattern retorna label, description, required fields, advanced fields, defaults e validation field paths.",
+        "github-issue renderiza repo exato owner/repo e input issue_number quando manual trigger esta habilitado.",
+        "linear-status e shortcut-status renderizam lifecycle com working, pr_opened, merged e closed_no_merge.",
+        "manual-task renderiza workflow manual com inputs configuraveis.",
+        "YAML gerado parseia como types.WorkflowConfig.",
+        "go test ./pkg/workflowsetup -run TestRender passa."
+      ],
+      "verification": [
+        "go test ./pkg/workflowsetup -run TestRender"
+      ],
+      "out_of_scope": [
+        "UI wizard.",
+        "Validacao contra hub real."
+      ]
+    },
+    {
+      "id": "D04",
+      "title": "Implementar validacao estatica de workspace e workflow",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Validar YAML, normalizacao, stages, triggers, inputs e referencias sem mutar disco.",
+      "scope": [
+        "Parsear elasticclaw-config.yaml como WorkspaceConfig e TemplateConfig.",
+        "Validar provider precedence workflow.provider > workspace runtime provider > hub default provider.",
+        "Normalizar clone de WorkflowConfig.",
+        "Parsear PipelineYAML efetivo pelo parser neutro.",
+        "Validar entry stage unico, stage IDs, gate_result.stage, output_matches.output, move_issue e inputs manuais."
+      ],
+      "main_files": [
+        "pkg/workflowsetup/validate_static.go",
+        "pkg/workflowsetup/workspace_parse.go",
+        "pkg/workflowsetup/validate_static_test.go"
+      ],
+      "depends_on": [
+        "D01",
+        "D02"
+      ],
+      "acceptance_criteria": [
+        "Workspace YAML invalido retorna diagnostic critical com fieldPath.",
+        "Workflow YAML invalido retorna diagnostic critical com fieldPath.",
+        "Workflow com zero ou multiplos entry stages e bloqueado.",
+        "PipelineYAML efetivo com parse error e bloqueado.",
+        "Github issue manual sem issue_number e bloqueado.",
+        "Nomes fora da slug grammar sao bloqueados.",
+        "go test ./pkg/workflowsetup -run TestValidateStatic passa."
+      ],
+      "verification": [
+        "go test ./pkg/workflowsetup -run TestValidateStatic"
+      ],
+      "out_of_scope": [
+        "Checar credenciais reais.",
+        "Salvar workflow validado."
+      ]
+    },
+    {
+      "id": "D05",
+      "title": "Criar snapshot sanitizado do ambiente do hub",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Fornecer readiness data ao workflowsetup sem expor HubConfig mutavel ou valores sensiveis.",
+      "scope": [
+        "Implementar adapter do hub para Environment.",
+        "Construir SetupEnvironmentSnapshot sob lock.",
+        "Expor apenas nomes, tipos e booleans de presenca.",
+        "Adicionar loaders de workspace, workflow raw, secrets, issue trackers, GitHub Apps e factories."
+      ],
+      "main_files": [
+        "pkg/hub/workflow_setup_adapter.go",
+        "pkg/workflowsetup/environment.go",
+        "pkg/hub/workspace_managed.go",
+        "pkg/hub/external_storage.go"
+      ],
+      "depends_on": [
+        "D02"
+      ],
+      "acceptance_criteria": [
+        "workflowsetup nao recebe *types.HubConfig.",
+        "Snapshot nao contem secret values, API keys, provider tokens ou private keys.",
+        "Snapshot inclui provider names, provider type, credential presence, default provider/model, LLM key metadata, concurrency groups e hub secret names.",
+        "LoadWorkflowRaw retorna YAML autoral quando existir.",
+        "ListFactories e LoadFactory retornam dados suficientes para conversao sem expor secrets.",
+        "go test ./pkg/hub/... -run TestWorkflowSetupSnapshot passa."
+      ],
+      "verification": [
+        "go test ./pkg/hub/... -run TestWorkflowSetupSnapshot"
+      ],
+      "out_of_scope": [
+        "Endpoints HTTP.",
+        "Network probes contra provedores."
+      ]
+    },
+    {
+      "id": "D06",
+      "title": "Implementar readiness validation",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P0",
+      "objective": "Detectar bloqueadores runtime antes de salvar workflows pelo fluxo guiado.",
+      "scope": [
+        "Validar claw_token, provider resolvido, LLM key, modelo, concurrency group, secrets, issue source, webhook signing secret e conflitos de trigger.",
+        "Aplicar matriz de providers provisionaveis.",
+        "Tratar network checks como not_checked por padrao.",
+        "Reportar conflitos incertos como warning."
+      ],
+      "main_files": [
+        "pkg/workflowsetup/validate_readiness.go",
+        "pkg/workflowsetup/trigger_overlap.go",
+        "pkg/workflowsetup/validate_readiness_test.go"
+      ],
+      "depends_on": [
+        "D04",
+        "D05"
+      ],
+      "acceptance_criteria": [
+        "replicated, daytona e exedev passam como provisionaveis quando configurados.",
+        "docker nao passa workflow readiness ate o runtime suportar.",
+        "noop so passa em modo explicitamente habilitado para teste.",
+        "Todos os refs workspace env.*.secret, workspace secret_refs e workflow secret_refs sao checados.",
+        "Automatic issue-source workflow sem webhook signing secret gera critical.",
+        "Conflito provado entre workflows enabled gera diagnostic de conflito.",
+        "Conflito incerto gera warning, nao critical.",
+        "go test ./pkg/workflowsetup -run TestValidateReadiness passa."
+      ],
+      "verification": [
+        "go test ./pkg/workflowsetup -run TestValidateReadiness"
+      ],
+      "out_of_scope": [
+        "Chamadas reais para GitHub, Linear, Shortcut ou providers."
+      ]
+    },
+    {
+      "id": "D07",
+      "title": "Adicionar APIs de setup para patterns, context, render e validate",
+      "phase": 2,
+      "track": "backend",
+      "priority": "P1",
+      "objective": "Expor o workflowsetup para UI e CLI remota com auth e respostas seguras.",
+      "scope": [
+        "Adicionar GET /api/workflow-setup/patterns.",
+        "Adicionar GET /api/workflow-setup/workspaces/{workspace}/context.",
+        "Adicionar POST /api/workflow-setup/render.",
+        "Adicionar POST /api/workflow-setup/validate.",
+        "Aplicar web admin auth ou escopo futuro equivalente.",
+        "Garantir que nenhuma resposta exponha secrets."
+      ],
+      "main_files": [
+        "pkg/hub/server.go",
+        "pkg/hub/workflow_setup_api.go",
+        "pkg/hub/workflow_setup_api_test.go"
+      ],
+      "depends_on": [
+        "D03",
+        "D06"
+      ],
+      "acceptance_criteria": [
+        "Patterns endpoint retorna metadata completa e TypeScript-friendly.",
+        "Context endpoint retorna repos, env names, secret names, webhook secret names, issue tracker refs, GitHub App refs, provider/model readiness e concurrency groups.",
+        "Render endpoint retorna workflowName, config, configHash e warnings.",
+        "Validate endpoint retorna ok, configHash, summary e checks.",
+        "Usuarios sem auth de configuracao nao acessam endpoints.",
+        "Respostas nao incluem valores de tokens, keys, secrets ou private keys.",
+        "go test ./pkg/hub/... -run TestWorkflowSetupAPI passa."
+      ],
+      "verification": [
+        "go test ./pkg/hub/... -run TestWorkflowSetupAPI"
+      ],
+      "out_of_scope": [
+        "Salvar workflow.",
+        "UI wizard."
+      ]
+    },
+    {
+      "id": "D08",
+      "title": "Adicionar save guiado seguro",
+      "phase": 2,
+      "track": "backend",
+      "priority": "P1",
+      "objective": "Persistir workflows validados preservando YAML autoral e protegendo contra validacao stale.",
+      "scope": [
+        "Adicionar POST /api/workflow-setup/save.",
+        "Revalidar sempre antes de persistir.",
+        "Bloquear critical failures.",
+        "Permitir warnings apenas com allowWarnings true.",
+        "Rejeitar validatedConfigHash divergente.",
+        "Persistir bytes de YAML autoral."
+      ],
+      "main_files": [
+        "pkg/hub/workflow_setup_api.go",
+        "pkg/hub/external_storage.go",
+        "pkg/hub/workflow_setup_save_test.go"
+      ],
+      "depends_on": [
+        "D07"
+      ],
+      "acceptance_criteria": [
+        "Save com critical failure retorna erro e nao escreve arquivo.",
+        "Save com warnings e allowWarnings false retorna erro e nao escreve arquivo.",
+        "Save com warnings e allowWarnings true escreve workflow.",
+        "Save com hash stale retorna erro e nao escreve arquivo.",
+        "Arquivo salvo preserva YAML de entrada sem campos derivados adicionados.",
+        "Workspace-managed secrets, GitHub Apps e issue trackers nao sao removidos.",
+        "Endpoint existente POST /api/workspaces/{workspace}/workflows continua funcionando como antes.",
+        "go test ./pkg/hub/... -run TestWorkflowSetupSave passa."
+      ],
+      "verification": [
+        "go test ./pkg/hub/... -run TestWorkflowSetupSave"
+      ],
+      "out_of_scope": [
+        "Canonizar YAML.",
+        "Criar ou editar workspace inline."
+      ]
+    },
+    {
+      "id": "D09",
+      "title": "Adicionar comandos CLI workflow create, validate e setup",
+      "phase": 1,
+      "track": "cli",
+      "priority": "P1",
+      "objective": "Permitir criacao e validacao guiada por CLI sem obrigar UI.",
+      "scope": [
+        "Adicionar workflow create usando os patterns de workflowsetup.",
+        "Adicionar workflow validate com saida humana e JSON.",
+        "Adicionar workflow setup conservador com prompts, validacao e escrita local.",
+        "Manter workflow push existente como caminho de persistencia remota."
+      ],
+      "main_files": [
+        "cmd/workflow.go",
+        "cmd/workflow_setup.go",
+        "cmd/workflow_setup_test.go",
+        "pkg/workflowsetup"
+      ],
+      "depends_on": [
+        "D03",
+        "D04",
+        "D06"
+      ],
+      "acceptance_criteria": [
+        "elasticclaw workflow create github-issue gera YAML no path informado.",
+        "Default output path segue .elasticclaw/workspaces/<workspace>/workflows/<workflow>.yaml.",
+        "Comando aponta workspace create quando o diretorio local nao existe.",
+        "workflow validate retorna exit code 0 sem critical failures.",
+        "workflow validate retorna exit code 1 com critical failures.",
+        "workflow validate --json usa a mesma shape da API.",
+        "workflow setup nao escreve secrets de hub via prompt no primeiro release.",
+        "go test ./cmd -run TestWorkflowSetupCLI passa."
+      ],
+      "verification": [
+        "go test ./cmd -run TestWorkflowSetupCLI",
+        "go test ./pkg/workflowsetup"
+      ],
+      "out_of_scope": [
+        "Mudancas no workflow push existente.",
+        "Network checks obrigatorios."
+      ]
+    },
+    {
+      "id": "D10",
+      "title": "Adicionar checks workflow-focused ao doctor",
+      "phase": 1,
+      "track": "backend",
+      "priority": "P2",
+      "objective": "Reusar validacoes do workflowsetup no doctor sem bloquear runtime existente.",
+      "scope": [
+        "Adicionar checks de workflow readiness ao doctor.",
+        "Reportar warnings para workflows existentes.",
+        "Nao impedir runtime nem alterar arquivos."
+      ],
+      "main_files": [
+        "cmd/doctor.go",
+        "pkg/workflowsetup",
+        "cmd/doctor_test.go"
+      ],
+      "depends_on": [
+        "D06"
+      ],
+      "acceptance_criteria": [
+        "Doctor consegue reportar missing provider/model/secrets/webhook para workflows existentes.",
+        "Doctor nao bloqueia execucao de workflows existentes.",
+        "Doctor nao muta workspace, workflow ou factory files.",
+        "Saida JSON do doctor inclui diagnostic ids estaveis.",
+        "go test ./cmd -run TestDoctorWorkflowReadiness passa."
+      ],
+      "verification": [
+        "go test ./cmd -run TestDoctorWorkflowReadiness"
+      ],
+      "out_of_scope": [
+        "Criar workflows pelo doctor.",
+        "Migrar factories pelo doctor."
+      ]
+    },
+    {
+      "id": "D11",
+      "title": "Adicionar cliente frontend tipado para workflow setup",
+      "phase": 2,
+      "track": "frontend",
+      "priority": "P1",
+      "objective": "Centralizar chamadas da UI aos novos endpoints com tipos alinhados ao backend.",
+      "scope": [
+        "Adicionar types TypeScript para Pattern, SetupContext, RenderRequest, ValidateRequest, SaveRequest e Diagnostic.",
+        "Adicionar helpers em web/lib/api.ts.",
+        "Reusar tratamento existente de auth e erro.",
+        "Preparar suporte a configHash e responses stale."
+      ],
+      "main_files": [
+        "web/lib/api.ts"
+      ],
+      "depends_on": [
+        "D07",
+        "D08"
+      ],
+      "acceptance_criteria": [
+        "Nenhuma tela faz fetch direto para workflow setup fora de web/lib/api.ts.",
+        "Tipos TypeScript representam todos os campos do contrato backend.",
+        "Helpers propagam erros HTTP com mensagens acionaveis.",
+        "Helpers nao modelam secret values.",
+        "cd web && npm run lint passa."
+      ],
+      "verification": [
+        "cd web && npm run lint"
+      ],
+      "out_of_scope": [
+        "Criar componentes visuais do wizard."
+      ]
+    },
+    {
+      "id": "D12",
+      "title": "Criar shell do wizard e empty states",
+      "phase": 2,
+      "track": "frontend",
+      "priority": "P1",
+      "objective": "Adicionar entrada New Workflow e fluxo visual seguro para workspaces existentes.",
+      "scope": [
+        "Adicionar New Workflow no header da lista de workflows em settings.",
+        "Criar full settings subroute ou full-height sheet.",
+        "Preselecionar e fixar workspace atual quando lancado de um workspace.",
+        "Exibir empty states obrigatorios para no workspace e no workflow.",
+        "Preservar draft ao navegar para settings fixes."
+      ],
+      "main_files": [
+        "web/app/settings/[[...parts]]/settings-content.tsx",
+        "web/components/workflow-setup"
+      ],
+      "depends_on": [
+        "D11"
+      ],
+      "acceptance_criteria": [
+        "Workflows settings mostra acao New Workflow quando ha workspace selecionado.",
+        "Sem workspace, a UI mostra CTA para workspace setup e nao abre wizard.",
+        "Sem workflow no workspace, a UI mostra CTA New Workflow.",
+        "Workspace atual aparece selecionado e pinned no wizard.",
+        "Change workspace existe apenas como acao secundaria.",
+        "Draft e mantido ao sair para paginas de settings e voltar.",
+        "cd web && npm run lint passa."
+      ],
+      "verification": [
+        "cd web && npm run lint",
+        "Manual browser check em desktop e mobile"
+      ],
+      "out_of_scope": [
+        "Salvar workflow.",
+        "Executar trigger manual."
+      ]
+    },
+    {
+      "id": "D13",
+      "title": "Implementar passos Pattern, Access, Trigger, Lifecycle e Review",
+      "phase": 2,
+      "track": "frontend",
+      "priority": "P1",
+      "objective": "Permitir configurar workflow pattern e revisar YAML gerado com validacao continua.",
+      "scope": [
+        "Consumir pattern metadata do backend.",
+        "Mostrar Access apenas com recursos exigidos pelo pattern.",
+        "Agrupar recursos em available, missing e not used.",
+        "Renderizar YAML read-only com copy.",
+        "Rodar validate apos pattern + workspace e a cada alteracao relevante.",
+        "Ignorar responses stale usando configHash."
+      ],
+      "main_files": [
+        "web/components/workflow-setup",
+        "web/lib/api.ts",
+        "web/app/settings/[[...parts]]/settings-content.tsx"
+      ],
+      "depends_on": [
+        "D12"
+      ],
+      "acceptance_criteria": [
+        "Frontend nao hardcoda defaults de patterns que o backend ja fornece.",
+        "Access mostra somente recursos necessarios ao pattern selecionado.",
+        "Missing provider/model/secret/issue source mostra CTA correto.",
+        "YAML preview e read-only no primeiro release.",
+        "Save fica desabilitado durante render ou validate pending.",
+        "Save fica desabilitado quando current configHash nao bate com a ultima validacao.",
+        "Warnings exigem confirmacao Save with warnings.",
+        "Diagnostics criticos sao agrupados primeiro.",
+        "cd web && npm run lint passa."
+      ],
+      "verification": [
+        "cd web && npm run lint",
+        "Manual browser check em desktop e mobile"
+      ],
+      "out_of_scope": [
+        "Editor raw de YAML no wizard.",
+        "Builder visual de stage graph."
+      ]
+    },
+    {
+      "id": "D14",
+      "title": "Implementar save, finish, trigger manual e acessibilidade do wizard",
+      "phase": 2,
+      "track": "frontend",
+      "priority": "P1",
+      "objective": "Concluir a jornada UI distinguindo draft salvo, pronto para rodar e teste manual real.",
+      "scope": [
+        "Chamar save guiado com validatedConfigHash e allowWarnings.",
+        "Atualizar lista de workflows apos save.",
+        "Distinguir Saved as draft de Ready to run.",
+        "Mostrar form de trigger manual quando prerequisitos estiverem satisfeitos.",
+        "Incluir issue_number em GitHub Issue manual trigger.",
+        "Aplicar aria-invalid, live validation region, foco no primeiro erro e layout mobile."
+      ],
+      "main_files": [
+        "web/components/workflow-setup",
+        "web/app/settings/[[...parts]]/settings-content.tsx",
+        "web/lib/api.ts"
+      ],
+      "depends_on": [
+        "D13",
+        "D08"
+      ],
+      "acceptance_criteria": [
+        "Save chama validate server-side via endpoint de save antes de persistir.",
+        "Warning-only save exige confirmacao explicita.",
+        "Apos save, lista de workflows e atualizada e novo workflow fica visivel.",
+        "Finish mostra Saved as draft quando ainda ha prerequisitos pendentes.",
+        "Finish mostra Ready to run apenas sem critical checks e com workflow habilitavel.",
+        "GitHub Issue manual trigger exige issue_number e so mostra sucesso apos endpoint retornar sucesso.",
+        "Primeiro diagnostic critical fixavel recebe foco quando o usuario tenta salvar.",
+        "Wizard e navegavel por teclado.",
+        "Layout nao quebra em viewport mobile.",
+        "cd web && npm run lint passa."
+      ],
+      "verification": [
+        "cd web && npm run lint",
+        "Manual browser check em desktop e mobile"
+      ],
+      "out_of_scope": [
+        "Network e2e real contra GitHub/Linear/Shortcut.",
+        "Edicao de secrets inline."
+      ]
+    },
+    {
+      "id": "D15",
+      "title": "Implementar conversao de legacy factory no core e CLI",
+      "phase": 3,
+      "track": "backend_cli",
+      "priority": "P1",
+      "objective": "Converter factories legadas suportadas em workflows draft sem quebrar factories atuais.",
+      "scope": [
+        "Implementar conversor para GitHub Issues, Linear e Shortcut.",
+        "Recusar GitHub PR, external e factories ambiguas com critical diagnostic.",
+        "Validar pipeline.yaml via parser neutro.",
+        "Validar paridade de template/runtime com workspace target.",
+        "Gerar workflow disabled por padrao.",
+        "Adicionar elasticclaw factory convert."
+      ],
+      "main_files": [
+        "pkg/workflowsetup/factory_convert.go",
+        "pkg/workflowsetup/factory_convert_test.go",
+        "cmd/factory.go",
+        "cmd/factory_convert_test.go"
+      ],
+      "depends_on": [
+        "D01",
+        "D06",
+        "D09"
+      ],
+      "acceptance_criteria": [
+        "Factory GitHub Issues suportada gera workflow v1 disabled por padrao.",
+        "Factory Linear suportada gera workflow v1 disabled por padrao.",
+        "Factory Shortcut suportada gera workflow v1 disabled por padrao.",
+        "Factory GitHub PR retorna unsupported critical diagnostic.",
+        "Factory external retorna unsupported critical diagnostic.",
+        "Conversao sem paridade de template/workspace retorna critical diagnostic e nao salva como ready.",
+        "Comando nao deleta nem desabilita a legacy factory.",
+        "go test ./pkg/workflowsetup -run TestFactoryConvert passa.",
+        "go test ./cmd -run TestFactoryConvert passa."
+      ],
+      "verification": [
+        "go test ./pkg/workflowsetup -run TestFactoryConvert",
+        "go test ./cmd -run TestFactoryConvert"
+      ],
+      "out_of_scope": [
+        "Converter GitHub PR automatico.",
+        "Remover comando factory legado."
+      ]
+    },
+    {
+      "id": "D16",
+      "title": "Adicionar convert-preview API e acao UI legada",
+      "phase": 3,
+      "track": "backend_frontend",
+      "priority": "P2",
+      "objective": "Permitir preview seguro de conversao sem mutar factories ou workflows.",
+      "scope": [
+        "Adicionar POST /api/workflow-setup/factories/{factory}/convert-preview.",
+        "Retornar YAML preview, diagnostics e readiness status.",
+        "Nao persistir workflow no preview.",
+        "Adicionar acao de conversao somente em superficies legadas se ainda forem exibidas."
+      ],
+      "main_files": [
+        "pkg/hub/workflow_setup_api.go",
+        "pkg/hub/workflow_setup_convert_test.go",
+        "web/app/settings/[[...parts]]/settings-content.tsx",
+        "web/lib/api.ts"
+      ],
+      "depends_on": [
+        "D15"
+      ],
+      "acceptance_criteria": [
+        "Preview endpoint requer auth de configuracao.",
+        "Preview endpoint nao muta factory, workspace ou workflow.",
+        "Preview de factory suportada retorna YAML disabled e diagnostics.",
+        "Preview de factory unsupported retorna critical diagnostic.",
+        "UI so usa linguagem legacy factory na superficie de migracao.",
+        "go test ./pkg/hub/... -run TestWorkflowSetupConvertPreview passa.",
+        "cd web && npm run lint passa se a UI for implementada nesta entrega."
+      ],
+      "verification": [
+        "go test ./pkg/hub/... -run TestWorkflowSetupConvertPreview",
+        "cd web && npm run lint"
+      ],
+      "out_of_scope": [
+        "Executar migracao automatica em massa.",
+        "Desabilitar factories legadas."
+      ]
+    },
+    {
+      "id": "D17",
+      "title": "Adicionar docs, exemplos e gates de rollout",
+      "phase": 3,
+      "track": "docs_release",
+      "priority": "P2",
+      "objective": "Documentar o novo fluxo e fechar criterios de rollout sem aumentar risco operacional.",
+      "scope": [
+        "Adicionar docs de workflow setup para CLI e UI.",
+        "Adicionar exemplos de YAML gerado para os quatro patterns.",
+        "Documentar limites de factory conversion.",
+        "Documentar estrategia de warnings vs critical.",
+        "Adicionar checklist de release por fase."
+      ],
+      "main_files": [
+        "README.md",
+        "docs",
+        ".elasticclaw/workflows"
+      ],
+      "depends_on": [
+        "D09",
+        "D14",
+        "D16"
+      ],
+      "acceptance_criteria": [
+        "Docs nao apresentam factory como caminho principal para novos usuarios.",
+        "CLI docs mostram workflow create, workflow validate e workflow setup.",
+        "UI docs explicam Saved as draft e Ready to run.",
+        "Factory conversion docs explicam integracoes suportadas e casos recusados.",
+        "Exemplos de workflows parseiam como WorkflowConfig.",
+        "make test passa antes de marcar rollout backend como pronto.",
+        "cd web && npm run lint passa antes de marcar rollout frontend como pronto."
+      ],
+      "verification": [
+        "make test",
+        "cd web && npm run lint"
+      ],
+      "out_of_scope": [
+        "E2E real contra terceiros sem credenciais dedicadas."
+      ]
+    }
+  ],
+  "recommended_batches": [
+    {
+      "batch": "B1_backend_foundation",
+      "deliverables": [
+        "D01",
+        "D02",
+        "D03",
+        "D04"
+      ],
+      "ship_condition": "Render e validacao estatica funcionam sem hub adapter e sem UI."
+    },
+    {
+      "batch": "B2_readiness_and_cli",
+      "deliverables": [
+        "D05",
+        "D06",
+        "D09",
+        "D10"
+      ],
+      "ship_condition": "CLI consegue gerar e validar workflows com diagnostics estruturados."
+    },
+    {
+      "batch": "B3_api_and_safe_save",
+      "deliverables": [
+        "D07",
+        "D08"
+      ],
+      "ship_condition": "API consegue renderizar, validar e salvar YAML autoral com auth e sem vazar secrets."
+    },
+    {
+      "batch": "B4_ui_existing_workspace",
+      "deliverables": [
+        "D11",
+        "D12",
+        "D13",
+        "D14"
+      ],
+      "ship_condition": "UI adiciona workflow a workspace existente sem editar hub YAML ou criar workspace inline."
+    },
+    {
+      "batch": "B5_legacy_factory_migration",
+      "deliverables": [
+        "D15",
+        "D16",
+        "D17"
+      ],
+      "ship_condition": "Conversao de factory e segura, preview-first, disabled-by-default e documentada."
+    }
+  ],
+  "parallelization_notes": [
+    "D01 e D02 podem iniciar em paralelo se D02 nao importar parser.",
+    "D03 e D04 podem iniciar apos D02, mas D04 depende de D01 para pipeline parse neutro.",
+    "D11 pode iniciar apos o contrato de D07/D08 estar estavel, antes de endpoints estarem completos.",
+    "D12 pode iniciar com mocks dos helpers de D11.",
+    "D15 deve aguardar D06 para evitar conversao sem readiness/paridade."
+  ]
+}

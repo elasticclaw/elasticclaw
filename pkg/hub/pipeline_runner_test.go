@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 )
 
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {

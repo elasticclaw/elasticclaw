@@ -1,5 +1,7 @@
 schema_version: v1
 name: github-issue
+enable_manual_trigger: true
+concurrency_group: example-github-issue
 
 trigger:
   github_issues:
@@ -13,7 +15,12 @@ trigger:
     labelers:
       - "example-user"
 
-concurrency_group: example-github-issue
+inputs:
+  - name: issue_number
+    type: number
+    required: true
+    description: GitHub issue number to run manually.
+    min: 1
 
 stages:
   - id: working
@@ -65,6 +72,7 @@ stages:
         - done
       remove_labels:
         - "in review"
+      close_issue: true
     triggers:
       - pr_merged: {}
     terminal: true
@@ -77,7 +85,7 @@ stages:
       add_labels:
         - wontfix
       remove_labels:
-        - inreview
+        - "in review"
       inject: |
         PR was closed without merging. Terminate the agent.
     terminal: true

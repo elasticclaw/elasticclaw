@@ -515,6 +515,67 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	return nil
 }
 
+func loadExternalWorkflowRaw(workspaceName, workflowName string) (string, error) {
+	if err := validateName(workspaceName); err != nil {
+		return "", err
+	}
+	workflowName = strings.TrimSuffix(workflowName, ".yaml")
+	if err := validateName(workflowName); err != nil {
+		return "", err
+	}
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("workflow %q not found in workspace %q", workflowName, workspaceName)
+		}
+		return "", fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".yaml")
+		if !strings.EqualFold(name, workflowName) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(workflowDir, entry.Name()))
+		if err != nil {
+			return "", fmt.Errorf("read workflow %s: %w", entry.Name(), err)
+		}
+		return string(data), nil
+	}
+	return "", fmt.Errorf("workflow %q not found in workspace %q", workflowName, workspaceName)
+}
+
+func externalWorkflowExists(workspaceName, workflowName string) (bool, error) {
+	if err := validateName(workspaceName); err != nil {
+		return false, err
+	}
+	workflowName = strings.TrimSuffix(workflowName, ".yaml")
+	if err := validateName(workflowName); err != nil {
+		return false, err
+	}
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read workflows dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".yaml")
+		if strings.EqualFold(name, workflowName) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func removeCaseVariantWorkflowFiles(workflowDir, workflowName, targetPath string) error {
 	entries, err := os.ReadDir(workflowDir)
 	if err != nil {

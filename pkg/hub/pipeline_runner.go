@@ -17,8 +17,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 )
 
 // githubIssueDetails holds the fields we fetch for pipeline template rendering.

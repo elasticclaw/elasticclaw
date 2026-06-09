@@ -19,9 +19,14 @@ import (
 
 func WorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "workflow",
-		Short: "Manage elasticclaw workflows",
+		Use:           "workflow",
+		Short:         "Manage elasticclaw workflows",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
+	cmd.AddCommand(workflowCreateCmd())
+	cmd.AddCommand(workflowValidateCmd())
+	cmd.AddCommand(workflowSetupCmd())
 	cmd.AddCommand(workflowListCmd())
 	cmd.AddCommand(workflowShowCmd())
 	cmd.AddCommand(workflowPushCmd())

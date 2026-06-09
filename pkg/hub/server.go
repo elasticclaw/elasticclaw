@@ -25,11 +25,11 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
-	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
@@ -254,6 +254,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
+	mux.HandleFunc("/api/workflow-setup/patterns", s.withWebAdminAuth(s.handleWorkflowSetupPatterns))
+	mux.HandleFunc("/api/workflow-setup/workspaces/{workspace}/context", s.withWebAdminAuth(s.handleWorkflowSetupContext))
+	mux.HandleFunc("/api/workflow-setup/factories/{factory}/convert-preview", s.withWebAdminAuth(s.handleWorkflowSetupConvertPreview))
+	mux.HandleFunc("/api/workflow-setup/render", s.withWebAdminAuth(s.handleWorkflowSetupRender))
+	mux.HandleFunc("/api/workflow-setup/validate", s.withWebAdminAuth(s.handleWorkflowSetupValidate))
+	mux.HandleFunc("/api/workflow-setup/save", s.withWebAdminAuth(s.handleWorkflowSetupSave))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))

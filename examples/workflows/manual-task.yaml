@@ -1,0 +1,37 @@
+schema_version: v1
+name: manual-task
+enable_manual_trigger: true
+concurrency_group: example-manual-task
+
+inputs:
+  - name: task
+    type: string
+    required: true
+    description: Task to complete.
+  - name: priority
+    type: enum
+    required: false
+    description: Triage priority.
+    options:
+      - low
+      - normal
+      - high
+    default: normal
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      inject: |
+        Complete the manual task described in the input.
+        When the task is complete, say [DONE].
+
+  - id: complete
+    label: Complete
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: |
+        Workflow complete.
+    terminal: true

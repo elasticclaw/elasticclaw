@@ -38,7 +38,7 @@ Each running agent runs [OpenClaw](https://github.com/openclaw/openclaw), connec
 
 ```mermaid
 flowchart LR
-    A[Issue or event] --> B{Factory filters}
+    A[Issue or event] --> B{Workflow filters}
     B -->|match| C[Workspace]
     C --> D[Sandbox]
     D --> E[Agent works]
@@ -119,6 +119,7 @@ ElasticClaw Server owns policy. Providers own compute. OpenClaw owns the coding 
 - [Installation](https://elasticclaw.ai/docs/installation)
 - [Workspaces](https://elasticclaw.ai/docs/workspaces)
 - [Workflows](https://elasticclaw.ai/docs/workflows)
+- [Workflow setup](docs/workflow-setup.md)
 - [Providers](https://elasticclaw.ai/docs/providers)
 - [GitHub integration](https://elasticclaw.ai/docs/github-integration)
 - [Linear integration](https://elasticclaw.ai/docs/linear-integration)

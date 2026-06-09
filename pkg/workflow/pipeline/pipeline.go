@@ -262,14 +262,14 @@ type OnEnter struct {
 func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	// Use a shadow type to avoid infinite recursion.
 	type rawOnEnter struct {
-		Run          RunAction `yaml:"run,omitempty"`
+		Run          RunAction   `yaml:"run,omitempty"`
 		Judge        JudgeAction `yaml:"judge,omitempty"`
-		Inject       string    `yaml:"inject"`
-		MoveIssueRaw yaml.Node `yaml:"move_issue"`
-		MergePR      bool      `yaml:"merge_pr,omitempty"`
-		CloseIssue   bool      `yaml:"close_issue,omitempty"`
-		AddLabels    []string  `yaml:"add_labels,omitempty"`
-		RemoveLabels []string  `yaml:"remove_labels,omitempty"`
+		Inject       string      `yaml:"inject"`
+		MoveIssueRaw yaml.Node   `yaml:"move_issue"`
+		MergePR      bool        `yaml:"merge_pr,omitempty"`
+		CloseIssue   bool        `yaml:"close_issue,omitempty"`
+		AddLabels    []string    `yaml:"add_labels,omitempty"`
+		RemoveLabels []string    `yaml:"remove_labels,omitempty"`
 	}
 	var raw rawOnEnter
 	if err := value.Decode(&raw); err != nil {

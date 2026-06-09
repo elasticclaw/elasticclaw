@@ -1,0 +1,51 @@
+schema_version: v1
+name: shortcut-status
+concurrency_group: example-shortcut-status
+
+trigger:
+  shortcut:
+    event: status_changed
+    workspace: product
+    states:
+      - Ready for Agent
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      move_issue:
+        status: In Progress
+      inject: |
+        Read the Shortcut story context, inspect the repository, and implement the requested change.
+        When the pull request is ready, say [DONE] and include the PR URL.
+
+  - id: pr_opened
+    label: PR Opened
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      move_issue:
+        status: In Review
+      inject: |
+        PR created. Watch CI and review comments.
+
+  - id: merged
+    label: Merged
+    triggers:
+      - pr_merged: {}
+    on_enter:
+      move_issue:
+        status: Done
+    terminal: true
+
+  - id: closed_no_merge
+    label: Closed Without Merge
+    triggers:
+      - pr_closed: {}
+    on_enter:
+      move_issue:
+        status: Needs Attention
+      inject: |
+        PR was closed without merging. Review the story and decide whether it should be retried manually.
+    terminal: true

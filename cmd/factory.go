@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflowsetup"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -29,6 +31,7 @@ func FactoryCmd() *cobra.Command {
 	cmd.AddCommand(factoryListCmd())
 	cmd.AddCommand(factoryShowCmd())
 	cmd.AddCommand(factoryRmCmd())
+	cmd.AddCommand(factoryConvertCmd())
 	cmd.AddCommand(factoryTriggerCmd())
 	return cmd
 }
@@ -429,6 +432,227 @@ func runFactoryRm(name string) error {
 
 	fmt.Printf("Removed factory %q from hub.\n", name)
 	return nil
+}
+
+// ── factory convert ───────────────────────────────────────────────────────────
+
+type factoryConvertOptions struct {
+	Name      string
+	Workspace string
+	Output    string
+}
+
+type factoryConvertResult struct {
+	WorkflowName string                     `json:"workflowName"`
+	Workspace    string                     `json:"workspace"`
+	Path         string                     `json:"path,omitempty"`
+	ConfigHash   string                     `json:"configHash"`
+	Status       string                     `json:"status"`
+	Summary      workflowsetup.Summary      `json:"summary"`
+	Diagnostics  []workflowsetup.Diagnostic `json:"diagnostics"`
+}
+
+type factoryConvertError struct {
+	critical int
+}
+
+func (e factoryConvertError) Error() string {
+	return fmt.Sprintf("factory conversion blocked: %d critical diagnostic(s)", e.critical)
+}
+
+func factoryConvertCmd() *cobra.Command {
+	opts := factoryConvertOptions{}
+	cmd := &cobra.Command{
+		Use:           "convert <name>",
+		Short:         "Convert a local legacy factory to a workflow YAML file",
+		Args:          cobra.ExactArgs(1),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.Name = args[0]
+			return runFactoryConvert(cmd.OutOrStdout(), opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Workspace, "workspace", "", "target workspace name [required]")
+	cmd.Flags().StringVar(&opts.Output, "output", "", "output workflow YAML path")
+	return cmd
+}
+
+func runFactoryConvert(out io.Writer, opts factoryConvertOptions) error {
+	workspace := strings.TrimSpace(opts.Workspace)
+	if workspace == "" {
+		return fmt.Errorf("--workspace is required")
+	}
+	if err := validateWorkspaceNameArg(workspace); err != nil {
+		return err
+	}
+
+	factoryDir := localFactoryDir(opts.Name)
+	factory, err := readLocalFactoryForConvert(opts.Name)
+	if err != nil {
+		return err
+	}
+	templateFiles, err := readFactoryConvertDirectoryFiles(factoryDir)
+	if err != nil {
+		return fmt.Errorf("read legacy factory/template files: %w", err)
+	}
+	workspaceConfig, err := readLocalWorkflowWorkspaceConfig(workspace)
+	if err != nil {
+		return err
+	}
+	workspaceFiles, err := readFactoryConvertDirectoryFiles(localWorkflowWorkspaceDir(workspace))
+	if err != nil {
+		return fmt.Errorf("read workspace files: %w", err)
+	}
+
+	resp := workflowsetup.ConvertFactory(workflowsetup.FactoryConvertRequest{
+		Factory:         factory,
+		WorkspaceName:   workspace,
+		WorkspaceConfig: workspaceConfig,
+		TemplateFiles:   templateFiles,
+		WorkspaceFiles:  workspaceFiles,
+	})
+
+	outputPath := strings.TrimSpace(opts.Output)
+	if outputPath == "" {
+		outputPath = filepath.Join(localWorkflowWorkspaceDir(workspace), "workflows", resp.WorkflowName+".yaml")
+	}
+
+	result := factoryConvertResult{
+		WorkflowName: resp.WorkflowName,
+		Workspace:    workspace,
+		Path:         outputPath,
+		ConfigHash:   resp.ConfigHash,
+		Status:       resp.Status,
+		Summary:      resp.Summary,
+		Diagnostics:  resp.Diagnostics,
+	}
+
+	if resp.Summary.Critical > 0 {
+		if jsonOut {
+			if err := json.NewEncoder(out).Encode(result); err != nil {
+				return err
+			}
+		} else {
+			printFactoryConvertResult(out, result)
+		}
+		return factoryConvertError{critical: resp.Summary.Critical}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("create workflow output directory: %w", err)
+	}
+	if err := os.WriteFile(outputPath, []byte(resp.Config), 0644); err != nil {
+		return fmt.Errorf("write workflow YAML: %w", err)
+	}
+
+	if jsonOut {
+		return json.NewEncoder(out).Encode(result)
+	}
+	printFactoryConvertResult(out, result)
+	return nil
+}
+
+func readLocalFactoryForConvert(name string) (*types.FactoryConfig, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("factory name is required")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return nil, fmt.Errorf("factory name must not be a path")
+	}
+
+	dir := localFactoryDir(name)
+	factoryPath := filepath.Join(dir, "factory.yaml")
+	data, err := os.ReadFile(factoryPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", factoryPath, err)
+	}
+	var factory types.FactoryConfig
+	if err := yaml.Unmarshal(data, &factory); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", factoryPath, err)
+	}
+	if strings.TrimSpace(factory.Name) == "" {
+		factory.Name = name
+	}
+
+	pipelinePath := filepath.Join(dir, "pipeline.yaml")
+	pipelineData, err := os.ReadFile(pipelinePath)
+	if err == nil {
+		factory.PipelineYAML = string(pipelineData)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read %s: %w", pipelinePath, err)
+	}
+
+	return &factory, nil
+}
+
+func localFactoryDir(name string) string {
+	return filepath.Join(".elasticclaw", "factories", name)
+}
+
+func readFactoryConvertDirectoryFiles(root string) (map[string]string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s exists but is not a directory", root)
+	}
+
+	files := map[string]string{}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func printFactoryConvertResult(out io.Writer, result factoryConvertResult) {
+	if result.Status == workflowsetup.FactoryConvertStatusReady {
+		fmt.Fprintf(out, "Converted factory %q to workflow %q at %s\n", result.WorkflowName, result.WorkflowName, result.Path)
+	} else {
+		fmt.Fprintf(out, "Factory conversion blocked for %q\n", result.WorkflowName)
+	}
+	fmt.Fprintf(out, "Summary: %d critical, %d warning, %d info\n", result.Summary.Critical, result.Summary.Warning, result.Summary.Info)
+	for _, diagnostic := range result.Diagnostics {
+		field := diagnostic.FieldPath
+		if field == "" {
+			field = diagnostic.Category
+		}
+		fmt.Fprintf(out, "- %s %s: %s", diagnostic.Severity, field, diagnostic.Title)
+		if diagnostic.Detail != "" {
+			fmt.Fprintf(out, " - %s", diagnostic.Detail)
+		}
+		fmt.Fprintln(out)
+	}
 }
 
 // ── factory trigger ───────────────────────────────────────────────────────────

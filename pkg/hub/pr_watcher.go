@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
 )

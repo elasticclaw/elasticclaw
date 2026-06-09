@@ -4,15 +4,17 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { WorkflowSetupShell } from "@/components/workflow-setup/workflow-setup-shell"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
-import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
+import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type SaveResponse, type Workspace, type Workflow } from "@/lib/api"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -2534,10 +2536,12 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
 }
 
 function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) {
+  const router = useRouter()
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [savingWorkflow, setSavingWorkflow] = useState("")
+  const [workflowSetupOpen, setWorkflowSetupOpen] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -2551,11 +2555,24 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) void load()
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [load])
 
-  const workflows = workspaces.flatMap((workspace) =>
-    (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
-  ).filter((workflow) => workflow.workspaceName === selectedWorkspace)
+  const selectedWorkspaceRecord = workspaces.find((workspace) => workspace.name === selectedWorkspace)
+  const workspaceExists = Boolean(selectedWorkspaceRecord)
+  const workflows = selectedWorkspaceRecord
+    ? (selectedWorkspaceRecord.workflows || []).map((workflow) => ({
+      ...workflow,
+      workspaceName: workflow.workspaceName || selectedWorkspaceRecord.name,
+    }))
+    : []
 
   const patchWorkflow = useCallback(async (workflow: Workflow, patch: { enabled?: boolean; enableManualTrigger?: boolean }) => {
     const key = `${workflow.workspaceName}/${workflow.name}`
@@ -2579,13 +2596,50 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
     }
   }, [])
 
+  const openWorkflowSetup = () => {
+    if (!workspaceExists) return
+    setWorkflowSetupOpen(true)
+  }
+
+  const changeWorkflowSetupWorkspace = () => {
+    setWorkflowSetupOpen(false)
+    router.push("/settings/workspaces")
+  }
+
+  const handleWorkflowSaved = useCallback((response: SaveResponse) => {
+    const savedWorkflow = {
+      ...response.workflow,
+      workspaceName: response.workflow.workspaceName || response.workspace,
+    }
+    setWorkspaces(current => current.map(workspace => {
+      if (workspace.name !== response.workspace) return workspace
+      const workflows = workspace.workflows || []
+      const exists = workflows.some(workflow => workflow.name === savedWorkflow.name)
+      return {
+        ...workspace,
+        workflows: exists
+          ? workflows.map(workflow => workflow.name === savedWorkflow.name ? savedWorkflow : workflow)
+          : [...workflows, savedWorkflow],
+      }
+    }))
+    void load()
+  }, [load])
+
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-base font-semibold mb-1">Workflows</h2>
-        <p className="text-sm text-muted-foreground">
-          Workflows define triggers and runtime behavior within this workspace.
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold mb-1">Workflows</h2>
+          <p className="text-sm text-muted-foreground">
+            Workflows define triggers and runtime behavior within this workspace.
+          </p>
+        </div>
+        {workspaceExists && (
+          <Button type="button" onClick={openWorkflowSetup}>
+            <Plus className="size-4" />
+            New Workflow
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -2596,8 +2650,44 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
 
       {loading && workflows.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-6 text-center animate-pulse">Loading workflows…</p>
+      ) : !workspaceExists ? (
+        <Empty className="border border-border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <LayoutTemplate className="size-5" />
+            </EmptyMedia>
+            <EmptyTitle>No workspace selected</EmptyTitle>
+            <EmptyDescription>
+              Push or select a workspace before creating workflows. The workflow wizard only opens from an existing workspace.
+            </EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button asChild>
+              <Link href="/settings/workspaces">
+                <LayoutTemplate className="size-4" />
+                Open workspace setup
+              </Link>
+            </Button>
+          </EmptyContent>
+        </Empty>
       ) : workflows.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-6 text-center">No workflows configured.</p>
+        <Empty className="border border-border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <GitBranch className="size-5" />
+            </EmptyMedia>
+            <EmptyTitle>No workflows configured</EmptyTitle>
+            <EmptyDescription>
+              Create a workflow draft for {selectedWorkspaceRecord?.name} using the setup wizard.
+            </EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button type="button" onClick={openWorkflowSetup}>
+              <Plus className="size-4" />
+              New Workflow
+            </Button>
+          </EmptyContent>
+        </Empty>
       ) : (
         <div className="border border-border rounded-lg divide-y divide-border">
           {workflows.map((workflow) => (
@@ -2609,6 +2699,18 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
             />
           ))}
         </div>
+      )}
+
+      {selectedWorkspaceRecord && (
+        <WorkflowSetupShell
+          key={selectedWorkspaceRecord.name}
+          open={workflowSetupOpen}
+          onOpenChange={setWorkflowSetupOpen}
+          onChangeWorkspace={changeWorkflowSetupWorkspace}
+          onWorkflowSaved={handleWorkflowSaved}
+          workspaceName={selectedWorkspaceRecord.name}
+          workspaces={workspaces}
+        />
       )}
     </div>
   )

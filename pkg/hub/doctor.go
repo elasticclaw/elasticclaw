@@ -6,23 +6,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/elasticclaw/elasticclaw/pkg/workflowsetup"
 )
 
 // DoctorCheck is a single diagnostic check result.
 type DoctorCheck struct {
-	Category    string     `json:"category"` // "auth", "models", "sandboxes", "factories", "integrations", "mcp", "templates"
-	Severity    string     `json:"severity"` // "critical", "warning", "info"
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	OK          bool       `json:"ok"`
-	Error       string     `json:"error,omitempty"`
-	FixAction   *FixAction `json:"fixAction,omitempty"` // nil if no auto-fix available
+	ID          string            `json:"id,omitempty"`
+	Category    string            `json:"category"` // "auth", "models", "sandboxes", "factories", "integrations", "mcp", "templates", "workflows"
+	Severity    string            `json:"severity"` // "critical", "warning", "info"
+	Details     map[string]string `json:"details,omitempty"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
+	OK          bool              `json:"ok"`
+	Error       string            `json:"error,omitempty"`
+	FixAction   *FixAction        `json:"fixAction,omitempty"` // nil if no auto-fix available
 }
 
 // FixAction describes an actionable fix the user can take.
@@ -109,6 +113,9 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 
 	// --- Templates ---
 	checks = append(checks, s.checkTemplates(hubCfg, diskCfg)...)
+
+	// --- Workflows ---
+	checks = append(checks, s.checkWorkflowReadiness(ctx)...)
 
 	// --- Integrations ---
 	checks = append(checks, s.checkIntegrations(hubCfg, diskCfg)...)
@@ -750,6 +757,239 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	}
 
 	return checks
+}
+
+// ==================== WORKFLOW CHECKS ====================
+
+func (s *Server) checkWorkflowReadiness(ctx context.Context) []DoctorCheck {
+	workspaces, err := loadExternalWorkspaces()
+	if err != nil {
+		return []DoctorCheck{{
+			ID:          "workflow-readiness:workspaces:list",
+			Category:    "workflows",
+			Severity:    "warning",
+			Title:       "Could not list workflows",
+			Description: fmt.Sprintf("Workflow readiness checks could not list persisted workspaces: %v", err),
+			OK:          false,
+		}}
+	}
+
+	sort.Slice(workspaces, func(i, j int) bool {
+		return strings.ToLower(workflowReadinessWorkspaceName(workspaces[i])) < strings.ToLower(workflowReadinessWorkspaceName(workspaces[j]))
+	})
+
+	var checks []DoctorCheck
+	workflowCount := 0
+	env := s.WorkflowSetupEnvironment()
+	for _, workspace := range workspaces {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return append(checks, DoctorCheck{
+					ID:          "workflow-readiness:cancelled",
+					Category:    "workflows",
+					Severity:    "warning",
+					Title:       "Workflow readiness checks were cancelled",
+					Description: ctx.Err().Error(),
+					OK:          false,
+				})
+			default:
+			}
+		}
+		if workspace == nil {
+			continue
+		}
+		workspaceName := strings.TrimSpace(workspace.Name)
+		if workspaceName == "" {
+			continue
+		}
+		workflows := append([]*types.WorkflowConfig(nil), workspace.Workflows...)
+		sort.Slice(workflows, func(i, j int) bool {
+			return strings.ToLower(workflowReadinessWorkflowName(workflows[i])) < strings.ToLower(workflowReadinessWorkflowName(workflows[j]))
+		})
+		if len(workflows) == 0 {
+			continue
+		}
+
+		workspaceRaw, err := workflowSetupLoadWorkspaceRawConfig(env, workspaceName)
+		if err != nil {
+			checks = append(checks, DoctorCheck{
+				ID:       workflowReadinessCheckID(workspaceName, "workspace", "workspace-config-load-failed"),
+				Category: "workflows",
+				Severity: "warning",
+				Details: map[string]string{
+					"workspace": workspaceName,
+				},
+				Title:       fmt.Sprintf("Workspace %q readiness could not be checked", workspaceName),
+				Description: fmt.Sprintf("Workspace config could not be loaded for workflow readiness checks: %v", err),
+				OK:          false,
+			})
+			continue
+		}
+
+		for _, workflow := range workflows {
+			if workflow == nil {
+				continue
+			}
+			workflowCount++
+			workflowName := workflowReadinessWorkflowName(workflow)
+			rawConfig := workflow.RawConfig
+			if strings.TrimSpace(rawConfig) == "" {
+				var err error
+				rawConfig, err = env.LoadWorkflowRaw(workspaceName, workflowName)
+				if err != nil {
+					checks = append(checks, DoctorCheck{
+						ID:       workflowReadinessCheckID(workspaceName, workflowName, "workflow-config-load-failed"),
+						Category: "workflows",
+						Severity: "warning",
+						Details: map[string]string{
+							"workspace": workspaceName,
+							"workflow":  workflowName,
+						},
+						Title:       fmt.Sprintf("Workflow %q readiness could not be checked", workflowReadinessLabel(workspaceName, workflowName)),
+						Description: fmt.Sprintf("Workflow config could not be loaded for readiness checks: %v", err),
+						OK:          false,
+					})
+					continue
+				}
+			}
+
+			readiness := workflowsetup.ValidateReadiness(workflowsetup.ValidateRequest{
+				WorkflowName:    workflowName,
+				Config:          rawConfig,
+				WorkspaceConfig: workspaceRaw,
+			}, env)
+			for _, diagnostic := range readiness.Checks {
+				if check, ok := workflowReadinessDiagnosticCheck(workspaceName, workflowName, diagnostic); ok {
+					checks = append(checks, check)
+				}
+			}
+		}
+	}
+
+	if workflowCount > 0 && len(checks) == 0 {
+		checks = append(checks, DoctorCheck{
+			ID:          "workflow-readiness:all",
+			Category:    "workflows",
+			Severity:    "info",
+			Title:       "Workflow readiness checks passed",
+			Description: fmt.Sprintf("%d workflow(s) checked with no local readiness issues detected.", workflowCount),
+			OK:          true,
+		})
+	}
+	return checks
+}
+
+func workflowReadinessDiagnosticCheck(workspaceName, workflowName string, diagnostic workflowsetup.Diagnostic) (DoctorCheck, bool) {
+	if diagnostic.OK {
+		return DoctorCheck{}, false
+	}
+	severity := string(diagnostic.Severity)
+	if severity != "critical" && severity != "warning" {
+		return DoctorCheck{}, false
+	}
+
+	details := map[string]string{
+		"workspace":    workspaceName,
+		"workflow":     workflowName,
+		"diagnosticId": diagnostic.ID,
+	}
+	if diagnostic.Category != "" {
+		details["diagnosticCategory"] = diagnostic.Category
+	}
+	if diagnostic.Step != "" {
+		details["step"] = diagnostic.Step
+	}
+	if diagnostic.FieldPath != "" {
+		details["fieldPath"] = diagnostic.FieldPath
+	}
+	if diagnostic.FixTarget != "" {
+		details["fixTarget"] = diagnostic.FixTarget
+	}
+	if diagnostic.Status != "" {
+		details["status"] = diagnostic.Status
+	}
+	if diagnostic.Blocking {
+		details["blocking"] = "true"
+	} else {
+		details["blocking"] = "false"
+	}
+
+	return DoctorCheck{
+		ID:          workflowReadinessCheckID(workspaceName, workflowName, diagnostic.ID),
+		Category:    "workflows",
+		Severity:    severity,
+		Details:     details,
+		Title:       fmt.Sprintf("Workflow %q readiness: %s", workflowReadinessLabel(workspaceName, workflowName), diagnostic.Title),
+		Description: diagnostic.Detail,
+		OK:          false,
+	}, true
+}
+
+func workflowReadinessCheckID(workspaceName, workflowName, diagnosticID string) string {
+	return fmt.Sprintf("workflow-readiness:%s:%s:%s",
+		workflowReadinessIDPart(workspaceName),
+		workflowReadinessIDPart(workflowName),
+		workflowReadinessIDPart(diagnosticID),
+	)
+}
+
+func workflowReadinessIDPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.'
+		if allowed {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	trimmed := strings.Trim(b.String(), "-")
+	if trimmed == "" {
+		return "unknown"
+	}
+	return trimmed
+}
+
+func workflowReadinessWorkflowName(workflow *types.WorkflowConfig) string {
+	if workflow == nil {
+		return "unknown"
+	}
+	if name := strings.TrimSpace(workflow.Name); name != "" {
+		return name
+	}
+	return "unknown"
+}
+
+func workflowReadinessWorkspaceName(workspace *types.WorkspaceConfig) string {
+	if workspace == nil {
+		return "unknown"
+	}
+	if name := strings.TrimSpace(workspace.Name); name != "" {
+		return name
+	}
+	return "unknown"
+}
+
+func workflowReadinessLabel(workspaceName, workflowName string) string {
+	workspaceName = strings.TrimSpace(workspaceName)
+	workflowName = strings.TrimSpace(workflowName)
+	if workspaceName == "" {
+		workspaceName = "unknown"
+	}
+	if workflowName == "" {
+		workflowName = "unknown"
+	}
+	return workspaceName + "/" + workflowName
 }
 
 // ==================== INTEGRATION CHECKS ====================

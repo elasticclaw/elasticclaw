@@ -259,6 +259,178 @@ export interface WorkflowInput {
   max?: number
 }
 
+export type DiagnosticSeverity = "critical" | "warning" | "info"
+
+export interface Diagnostic {
+  id: string
+  category: string
+  severity: DiagnosticSeverity
+  ok: boolean
+  blocking: boolean
+  step: string
+  fieldPath: string
+  title: string
+  detail: string
+  fixTarget: string
+  fixLabel: string
+  retryable: boolean
+  status: string
+}
+
+export interface Summary {
+  critical: number
+  warning: number
+  info: number
+}
+
+export interface PatternField {
+  path: string
+  label: string
+  description: string
+}
+
+export interface PatternMetadata {
+  id: string
+  label: string
+  description: string
+  requiredFields: PatternField[]
+  advancedFields: PatternField[]
+  defaults: Record<string, unknown>
+  validationFieldPaths: string[]
+}
+
+export interface SetupProviderRef {
+  name: string
+  type: string
+  provisionable: boolean
+  credentialsSet: boolean
+  apiKeySet?: boolean
+  tokenSet?: boolean
+  accessTokenSet?: boolean
+  sshKeySet?: boolean
+}
+
+export interface SetupLLMKeyRef {
+  name: string
+  provider: string
+  keySet: boolean
+  default: boolean
+  defaultModel?: string
+}
+
+export interface SetupConcurrencyGroupRef {
+  name: string
+  limit: number
+}
+
+export interface SetupIssueTrackerRef {
+  type: string
+  workspace: string
+  tokenSet: boolean
+  webhookSecretSet: boolean
+}
+
+export interface SetupGitHubAppRef {
+  name?: string
+  appId: number
+  url?: string
+  installation?: string
+  installations?: string[]
+  privateKeySet: boolean
+}
+
+export interface SetupContext {
+  workspace: {
+    name: string
+    repositories: RepositoryAccess[]
+    envNames: string[]
+    secretNames: string[]
+    declaredSecretNames: string[]
+    webhookSecretNames: string[]
+    issueTrackers: SetupIssueTrackerRef[]
+    githubApps: SetupGitHubAppRef[]
+  }
+  hub: {
+    secretNames: string[]
+    issueTrackers: SetupIssueTrackerRef[]
+    githubApps: SetupGitHubAppRef[]
+  }
+  readiness: {
+    clawTokenSet: boolean
+    providers: SetupProviderRef[]
+    defaultProvider?: string
+    providerReady: boolean
+    defaultModel?: string
+    llmKeys: SetupLLMKeyRef[]
+    modelReady: boolean
+    concurrencyGroups: SetupConcurrencyGroupRef[]
+  }
+  concurrencyGroups: SetupConcurrencyGroupRef[]
+}
+
+export interface RenderRequest {
+  workflowName: string
+  patternId: string
+  config: Record<string, unknown>
+}
+
+export interface RenderResponse {
+  workflowName: string
+  config: string
+  configHash: string
+  warnings: Diagnostic[]
+}
+
+export interface ValidateRequest {
+  workflowName: string
+  config: string
+  workspace?: string
+  workspaceConfig?: string
+}
+
+export interface ValidateResponse {
+  ok: boolean
+  configHash: string
+  summary: Summary
+  checks: Diagnostic[]
+}
+
+export type SaveMode = "create" | "update" | "upsert"
+
+export interface SaveRequest {
+  workspace: string
+  workflow: {
+    name: string
+    config: string
+  }
+  mode: SaveMode
+  validatedConfigHash: string
+  allowWarnings: boolean
+}
+
+export interface SaveResponse {
+  saved: boolean
+  workspace: string
+  mode: SaveMode
+  workflow: Workflow
+  readiness: ValidateResponse
+}
+
+export type ConvertPreviewStatus = "ready" | "blocked"
+
+export interface ConvertPreviewRequest {
+  workspace: string
+}
+
+export interface ConvertPreviewResponse {
+  workflowName: string
+  config: string
+  configHash: string
+  diagnostics: Diagnostic[]
+  summary: Summary
+  status: ConvertPreviewStatus
+}
+
 export interface RepositoryAccess {
   repo: string
   permissions?: string
@@ -300,6 +472,42 @@ export interface Workspace {
 
 export async function fetchWorkspaces(): Promise<Workspace[]> {
   return apiFetch<Workspace[]>("/api/workspaces")
+}
+
+export async function fetchWorkflowSetupPatterns(): Promise<PatternMetadata[]> {
+  return apiFetch<PatternMetadata[]>("/api/workflow-setup/patterns")
+}
+
+export async function fetchWorkflowSetupContext(workspaceName: string): Promise<SetupContext> {
+  return apiFetch<SetupContext>(`/api/workflow-setup/workspaces/${encodeURIComponent(workspaceName)}/context`)
+}
+
+export async function renderWorkflowSetup(req: RenderRequest): Promise<RenderResponse> {
+  return apiFetch<RenderResponse>("/api/workflow-setup/render", {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function validateWorkflowSetup(req: ValidateRequest): Promise<ValidateResponse> {
+  return apiFetch<ValidateResponse>("/api/workflow-setup/validate", {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function saveWorkflowSetup(req: SaveRequest): Promise<SaveResponse> {
+  return apiFetch<SaveResponse>("/api/workflow-setup/save", {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function previewWorkflowSetupFactoryConversion(factoryName: string, req: ConvertPreviewRequest): Promise<ConvertPreviewResponse> {
+  return apiFetch<ConvertPreviewResponse>(`/api/workflow-setup/factories/${encodeURIComponent(factoryName)}/convert-preview`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
 }
 
 export async function fetchWorkflows(workspaceName: string): Promise<Workflow[]> {
