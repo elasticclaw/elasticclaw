@@ -256,7 +256,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	)
 	if err != nil {
 		log.Printf("[cron] failed to create claw for %s: %v", key, err)
-		cs.recordRun(runID, sw, "failed", "", fmt.Sprintf("failed to create claw: %v", err))
+		cs.failRun(runID, fmt.Sprintf("failed to create claw: %v", err))
 		return
 	}
 
@@ -303,6 +303,18 @@ func (cs *cronScheduler) finishRun(runID, result string) {
 	)
 	if err != nil {
 		log.Printf("[cron] failed to finish run %s: %v", runID, err)
+	}
+}
+
+// failRun marks a workflow run as failed with a result message.
+func (cs *cronScheduler) failRun(runID, result string) {
+	now := time.Now().UTC()
+	_, err := cs.srv.db.Exec(
+		`UPDATE workflow_runs SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
+		"failed", result, now, runID,
+	)
+	if err != nil {
+		log.Printf("[cron] failed to mark run %s as failed: %v", runID, err)
 	}
 }
 
