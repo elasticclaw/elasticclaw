@@ -121,30 +121,30 @@ func (s *Server) handleWorkflowSetupContext(w http.ResponseWriter, r *http.Reque
 	resp := workflowSetupContextResponse{
 		Workspace: workflowSetupWorkspaceContext{
 			Name:                workspace.Name,
-			Repositories:        append([]types.GitHubRepoAccess(nil), workspace.Repositories...),
-			EnvNames:            workspaceEnvNames(workspace.Env),
-			SecretNames:         append([]string(nil), workspaceSecretNames...),
+			Repositories:        jsonArray(workspace.Repositories),
+			EnvNames:            jsonArray(workspaceEnvNames(workspace.Env)),
+			SecretNames:         jsonArray(workspaceSecretNames),
 			DeclaredSecretNames: sortedStringCopy(workspace.Secrets),
 			WebhookSecretNames:  sortedStringCopy(workspace.WebhookSecrets),
-			IssueTrackers:       workspaceIssueTrackers,
-			GitHubApps:          workspaceGitHubApps,
+			IssueTrackers:       jsonArray(workspaceIssueTrackers),
+			GitHubApps:          jsonArray(workspaceGitHubApps),
 		},
 		Hub: workflowSetupHubContext{
-			SecretNames:   append([]string(nil), snapshot.HubSecretNames...),
-			IssueTrackers: append([]workflowsetup.IssueTrackerRef(nil), snapshot.IssueTrackers...),
-			GitHubApps:    append([]workflowsetup.GitHubAppRef(nil), snapshot.GitHubApps...),
+			SecretNames:   jsonArray(snapshot.HubSecretNames),
+			IssueTrackers: jsonArray(snapshot.IssueTrackers),
+			GitHubApps:    jsonArray(snapshot.GitHubApps),
 		},
 		Readiness: workflowSetupReadinessContext{
 			ClawTokenSet:      snapshot.ClawTokenSet,
-			Providers:         append([]workflowsetup.ProviderRef(nil), snapshot.Providers...),
+			Providers:         jsonArray(snapshot.Providers),
 			DefaultProvider:   snapshot.DefaultProvider,
 			ProviderReady:     workflowSetupProviderReady(snapshot),
 			DefaultModel:      snapshot.DefaultModel,
-			LLMKeys:           append([]workflowsetup.LLMKeyRef(nil), snapshot.LLMKeys...),
+			LLMKeys:           jsonArray(snapshot.LLMKeys),
 			ModelReady:        workflowSetupModelReady(snapshot),
-			ConcurrencyGroups: append([]workflowsetup.ConcurrencyGroupRef(nil), snapshot.ConcurrencyGroups...),
+			ConcurrencyGroups: jsonArray(snapshot.ConcurrencyGroups),
 		},
-		ConcurrencyGroups: append([]workflowsetup.ConcurrencyGroupRef(nil), snapshot.ConcurrencyGroups...),
+		ConcurrencyGroups: jsonArray(snapshot.ConcurrencyGroups),
 	}
 	jsonOK(w, resp)
 }
@@ -537,7 +537,14 @@ func workflowSetupModelReady(snapshot workflowsetup.SetupEnvironmentSnapshot) bo
 }
 
 func sortedStringCopy(values []string) []string {
-	copied := append([]string(nil), values...)
+	copied := jsonArray(values)
 	sort.Strings(copied)
 	return copied
+}
+
+func jsonArray[T any](values []T) []T {
+	if len(values) == 0 {
+		return []T{}
+	}
+	return append([]T(nil), values...)
 }

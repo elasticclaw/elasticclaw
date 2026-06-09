@@ -41,6 +41,7 @@ import {
   type RenderResponse,
   type SaveResponse,
   type SetupContext,
+  type SetupIssueTrackerRef,
   type ValidateResponse,
   type Workflow as SavedWorkflow,
   type WorkflowInput,
@@ -1073,10 +1074,10 @@ function TriggerStep({
   }
 
   const defaults = selectedPattern.defaults
-  const repositoryOptions = setupContext?.workspace.repositories.map((repository) => repository.repo) ?? []
+  const repositoryOptions = arrayValue(setupContext?.workspace.repositories).map((repository) => repository.repo)
   const linearWorkspaces = issueTrackerWorkspaces(setupContext, "linear")
   const shortcutWorkspaces = issueTrackerWorkspaces(setupContext, "shortcut")
-  const concurrencyGroups = setupContext?.concurrencyGroups.map((group) => group.name) ?? []
+  const concurrencyGroups = arrayValue(setupContext?.concurrencyGroups).map((group) => group.name)
   const effectiveManualTrigger = draft.enableManualTrigger ?? booleanDefault(defaults, "enableManualTrigger", false)
   const effectiveManualRequired = draft.manualInputRequired ?? manualInputDefault(selectedPattern, "required", false)
 
@@ -2155,7 +2156,8 @@ function buildAccessRequirements(
   if (!pattern || !context || !contextReady) return []
 
   const providerReady = context.readiness.providerReady
-  const modelReady = context.readiness.modelReady && context.readiness.llmKeys.some((key) => key.keySet)
+  const llmKeys = arrayValue(context.readiness.llmKeys)
+  const modelReady = context.readiness.modelReady && llmKeys.some((key) => key.keySet)
   const requirements: AccessRequirement[] = [
     {
       id: "runtime-provider",
@@ -2183,7 +2185,7 @@ function buildAccessRequirements(
 
   if (pattern.id === "github-issue") {
     const selectedRepo = draft.repository.trim()
-    const repositories = context.workspace.repositories.map((repository) => repository.repo)
+    const repositories = arrayValue(context.workspace.repositories).map((repository) => repository.repo)
     const repoAvailable =
       repositories.length > 0 && (selectedRepo === "" || repositories.includes(selectedRepo))
     const tracker = findBestIssueTracker(context, "github-issues", "")
@@ -2230,14 +2232,16 @@ function buildAccessRequirements(
     })
   }
 
-  const secretCount = context.workspace.declaredSecretNames.length + context.workspace.secretNames.length
+  const declaredSecretNames = arrayValue(context.workspace.declaredSecretNames)
+  const secretNames = arrayValue(context.workspace.secretNames)
+  const secretCount = declaredSecretNames.length + secretNames.length
   if (secretCount > 0) {
     requirements.push({
       id: "workspace-secrets",
       label: "Workspace secrets",
       description: "Secrets are referenced by name only and values are never shown here.",
-      detail: `${context.workspace.secretNames.length} available, ${context.workspace.declaredSecretNames.length} declared.`,
-      status: context.workspace.declaredSecretNames.every((secretName) => context.workspace.secretNames.includes(secretName))
+      detail: `${secretNames.length} available, ${declaredSecretNames.length} declared.`,
+      status: declaredSecretNames.every((secretName) => secretNames.includes(secretName))
         ? "available"
         : "missing",
       settingsHref: SETTINGS_SECTIONS.secrets,
@@ -2248,7 +2252,7 @@ function buildAccessRequirements(
   const defaultGroup = stringDefault(pattern.defaults, "concurrencyGroup")
   const group = draft.concurrencyGroup.trim() || defaultGroup
   if (group && group !== defaultGroup) {
-    const found = context.concurrencyGroups.some((candidate) => candidate.name === group)
+    const found = arrayValue(context.concurrencyGroups).some((candidate) => candidate.name === group)
     requirements.push({
       id: "concurrency-group",
       label: "Concurrency group",
@@ -2591,19 +2595,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function issueTrackerWorkspaces(context: SetupContext | null, type: string): string[] {
   if (!context) return []
   const workspaces = new Set<string>()
-  for (const tracker of [...context.workspace.issueTrackers, ...context.hub.issueTrackers]) {
+  for (const tracker of issueTrackersForContext(context)) {
     if (tracker.type === type && tracker.workspace.trim()) workspaces.add(tracker.workspace)
   }
   return [...workspaces]
 }
 
 function findBestIssueTracker(context: SetupContext, type: string, workspace: string) {
-  const trackers = [...context.workspace.issueTrackers, ...context.hub.issueTrackers].filter((tracker) => tracker.type === type)
+  const trackers = issueTrackersForContext(context).filter((tracker) => tracker.type === type)
   const requested = workspace.trim()
   if (requested) {
     return trackers.find((tracker) => tracker.workspace === requested)
   }
   return trackers[0]
+}
+
+function issueTrackersForContext(context: SetupContext): SetupIssueTrackerRef[] {
+  return [
+    ...arrayValue(context.workspace?.issueTrackers),
+    ...arrayValue(context.hub?.issueTrackers),
+  ]
 }
 
 function issueTrackerDetail(
@@ -2619,12 +2630,17 @@ function issueTrackerDetail(
 function providerDetail(context: SetupContext): string {
   const defaultProvider = context.readiness.defaultProvider
   if (defaultProvider) return `${defaultProvider} is the default provider.`
-  return `${context.readiness.providers.length} provider${context.readiness.providers.length === 1 ? "" : "s"} configured.`
+  const providers = arrayValue(context.readiness.providers)
+  return `${providers.length} provider${providers.length === 1 ? "" : "s"} configured.`
 }
 
 function modelDetail(context: SetupContext): string {
   const defaultModel = context.readiness.defaultModel
   if (defaultModel) return `${defaultModel} is the default model.`
-  const configuredKeys = context.readiness.llmKeys.filter((key) => key.keySet).length
+  const configuredKeys = arrayValue(context.readiness.llmKeys).filter((key) => key.keySet).length
   return `${configuredKeys} configured LLM key${configuredKeys === 1 ? "" : "s"}.`
+}
+
+function arrayValue<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
 }

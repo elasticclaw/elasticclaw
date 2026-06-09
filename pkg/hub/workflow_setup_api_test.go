@@ -216,6 +216,59 @@ func TestWorkflowSetupAPIContextMasksWorkspaceData(t *testing.T) {
 	}
 }
 
+func TestWorkflowSetupAPIContextReturnsArraysForEmptyCollections(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "empty",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: empty\n",
+			},
+		},
+		nil,
+	)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	rr := workflowSetupAPIRequest(s, http.MethodGet, "/api/workflow-setup/workspaces/empty/context", nil, true)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+
+	workspace := raw["workspace"].(map[string]interface{})
+	hub := raw["hub"].(map[string]interface{})
+	readiness := raw["readiness"].(map[string]interface{})
+	for _, tt := range []struct {
+		name  string
+		value interface{}
+	}{
+		{"workspace.repositories", workspace["repositories"]},
+		{"workspace.envNames", workspace["envNames"]},
+		{"workspace.secretNames", workspace["secretNames"]},
+		{"workspace.declaredSecretNames", workspace["declaredSecretNames"]},
+		{"workspace.webhookSecretNames", workspace["webhookSecretNames"]},
+		{"workspace.issueTrackers", workspace["issueTrackers"]},
+		{"workspace.githubApps", workspace["githubApps"]},
+		{"hub.secretNames", hub["secretNames"]},
+		{"hub.issueTrackers", hub["issueTrackers"]},
+		{"hub.githubApps", hub["githubApps"]},
+		{"readiness.providers", readiness["providers"]},
+		{"readiness.llmKeys", readiness["llmKeys"]},
+		{"readiness.concurrencyGroups", readiness["concurrencyGroups"]},
+		{"concurrencyGroups", raw["concurrencyGroups"]},
+	} {
+		if _, ok := tt.value.([]interface{}); !ok {
+			t.Fatalf("%s encoded as %T (%#v), want JSON array; body = %s", tt.name, tt.value, tt.value, rr.Body.String())
+		}
+	}
+}
+
 func TestWorkflowSetupAPIRenderReturnsConfigHash(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
