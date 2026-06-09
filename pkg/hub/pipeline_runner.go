@@ -864,7 +864,7 @@ func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResu
 //
 // issueID is the default issue from the trigger; it can be overridden by
 // MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
-func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) {
+func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	issueID := ctx.IssueID
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
@@ -886,7 +886,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			} else {
 				log.Printf("[pipeline] %s", msg)
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-				return
+				return false
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
@@ -902,7 +902,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			if !stage.OnEnter.Judge.ContinueOnError {
-				return
+				return false
 			}
 		} else {
 			log.Printf("[pipeline] judge completed for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, judgeResult.Verdict)
@@ -940,7 +940,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				log.Printf("[pipeline] %s", msg)
 				if !stage.OnEnter.Judge.ContinueOnError {
 					s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-					return
+					return false
 				}
 			}
 		}
@@ -978,7 +978,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-			return
+			return false
 		}
 	}
 
@@ -1141,7 +1141,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	targetStatus := stage.OnEnter.MoveIssue.Status
 	if targetStatus == "" {
-		return
+		return true
 	}
 
 	// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
@@ -1222,7 +1222,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	}
 issueResolved:
 	if resolvedIssueID == "" {
-		return
+		return true
 	}
 
 	// Determine issue tracker: explicit workflow/factory integration takes precedence,
@@ -1247,7 +1247,7 @@ issueResolved:
 		scToken := s.resolveShortcutTokenForPipeline(ctx)
 		if scToken == "" {
 			log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return
+			return true
 		}
 		if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
@@ -1259,18 +1259,18 @@ issueResolved:
 		ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 		if ghToken == "" {
 			log.Printf("[pipeline] %s: no GitHub Issues token for move_issue, skipping", ctx.Name())
-			return
+			return true
 		}
 		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) != 3 {
 			log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return
+			return true
 		}
 		repo := parts[0] + "/" + parts[1]
 		var issueNum int
 		if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
 			log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return
+			return true
 		}
 		if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
 			log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
@@ -1282,13 +1282,49 @@ issueResolved:
 		linearToken := s.resolveLinearTokenForPipeline(ctx)
 		if linearToken == "" {
 			log.Printf("[pipeline] %s: no Linear token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return
+			return true
 		}
 		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
 		} else {
 			log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
 		}
+	}
+	return true
+}
+
+func pipelineTerminalWorkflowRunResult(stage pipeline.Stage, stageActionsSucceeded bool) (status, result string) {
+	if !stageActionsSucceeded || pipelineTerminalStageIndicatesFailure(stage) {
+		return "failed", "pipeline terminal stage failed"
+	}
+	return "completed", "pipeline terminal stage"
+}
+
+func pipelineTerminalStageIndicatesFailure(stage pipeline.Stage) bool {
+	for _, trigger := range stage.Triggers {
+		if pipelineFailureVerdict(trigger.JudgeVerdict) {
+			return true
+		}
+		if trigger.GateResult != nil && pipelineFailureVerdict(trigger.GateResult.Verdict) {
+			return true
+		}
+		if trigger.OutputMatches != nil {
+			for _, value := range trigger.OutputMatches.AnyOf {
+				if pipelineFailureVerdict(value) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func pipelineFailureVerdict(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "fail", "failed", "failure", "error", "errored":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1359,7 +1395,7 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
-	s.runOnEnter(clawID, stage, ctx)
+	stageActionsSucceeded := s.runOnEnter(clawID, stage, ctx)
 
 	// If this is a terminal stage, terminate the claw
 	if stage.Terminal {
@@ -1385,6 +1421,10 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		s.checkpointBeforeTermination(clawID, "pipeline-terminal")
 
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			status, result := pipelineTerminalWorkflowRunResult(stage, stageActionsSucceeded)
+			s.cronScheduler.finishRunByClawID(clawID, status, result)
+		}
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
 			cc.conn.Close(1000, "pipeline terminal stage")
@@ -1616,6 +1656,9 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 			OccurredAt:      now(),
 		}); err != nil {
 			log.Printf("[task-run-analytics] failed to record agent stop for claw %s: %v", clawID, err)
+		}
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", safeReason)
 		}
 	}
 

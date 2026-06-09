@@ -329,6 +329,9 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 
 	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
 		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
 			factory.Name, triggerKey, err)
 		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),

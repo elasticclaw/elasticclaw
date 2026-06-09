@@ -652,6 +652,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "shortcut", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
@@ -764,6 +767,9 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false

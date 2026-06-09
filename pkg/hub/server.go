@@ -71,6 +71,9 @@ type Server struct {
 	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
 	// multiple terminating claws each read active < max and promote, exceeding limit.
 	promoteMu sync.Mutex
+
+	// cronScheduler manages scheduled workflow runs
+	cronScheduler *cronScheduler
 }
 
 type clawConn struct {
@@ -197,6 +200,12 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	srv.startPRWatcher()
+
+	// Start cron scheduler for workflow triggers
+	srv.cronScheduler = newCronScheduler(srv)
+	if err := srv.cronScheduler.start(); err != nil {
+		log.Printf("[cron] failed to start scheduler: %v", err)
+	}
 	srv.startIntegrationPoller()
 
 	return srv, nil
@@ -283,6 +292,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))     // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))          // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAuth(s.handleWorkspaceSecretsCRUD))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAuth(s.handleWorkspaceGitHubAppsCRUD))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAuth(s.handleWorkspaceIssueTrackersCRUD))
@@ -1299,6 +1311,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if clawStatus != "error" {
 			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
+		}
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
 		}
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{

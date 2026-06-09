@@ -473,6 +473,9 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false
@@ -539,6 +542,9 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
@@ -620,6 +626,9 @@ func (s *Server) terminateClawForIssue(issueID string) {
 	}
 	s.mu.Unlock()
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "canceled", "issue left trigger status")
+	}
 	// Notify dashboards so the card disappears immediately
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -1253,6 +1262,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			log.Printf("[factory] non-pr completion skipped for claw %s: already deleted or terminal", clawID[:8])
 		}
 		return
+	}
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
