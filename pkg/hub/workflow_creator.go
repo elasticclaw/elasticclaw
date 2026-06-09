@@ -224,6 +224,32 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
 	}
 
+	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForWorkflow(workflow)
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind:          taskRunKindForWorkflow(workflow),
+		OwnerType:        taskRunOwnerWorkflow,
+		OwnerName:        workspace.Name + "/" + workflow.Name,
+		OwnerDisplayName: workflow.Name,
+		WorkspaceName:    workspace.Name,
+		WorkflowName:     workflow.Name,
+		Integration:      workflow.Integration,
+		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID),
+		Model:            defaultModel,
+		LLMKey:           llmKey,
+		Source:           taskRunSourceWorkflow,
+		AnalyticsEnabled: analyticsEnabled,
+		RequiresPR:       requiresPR,
+		ExcludedReason:   excludedReason,
+		StartedAt:        now,
+		EventKey:         "task_start:claw:" + clawID,
+	}); err != nil {
+		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
+			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+		}
+		go s.promotePendingClaws()
+		return "", false, fmt.Errorf("task run analytics: %w", err)
+	}
+
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -265,6 +291,8 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		case "docker":
+			provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes)
 		case "noop":
 			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")

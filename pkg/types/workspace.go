@@ -37,6 +37,9 @@ type WorkflowConfig struct {
 	NamePattern         string            `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`
 	Tags                []string          `yaml:"tags,omitempty" json:"tags,omitempty"`
 	Color               string            `yaml:"color,omitempty" json:"color,omitempty"`
+	RunKind             string            `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`
+	AnalyticsEnabled    *bool             `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`
+	RequiresPR          *bool             `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
 	Labels              []string          `yaml:"labels,omitempty" json:"labels,omitempty"`
 	AssignedTo          string            `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AllowedLabelers     []string          `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`

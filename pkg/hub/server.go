@@ -284,7 +284,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
-	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD))                   // workspace CRUD
+	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
@@ -1250,8 +1254,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Look up provider info before marking deleted so we can terminate the VM.
-		var provider, providerID string
-		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
+		var provider, providerID, clawStatus string
+		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(status,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID, &clawStatus)
 
 		// Post a comment on the linked issue/story when a factory-created claw is killed manually
 		factory, issueID := s.findFactoryForClaw(clawID)
@@ -1294,11 +1298,19 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		_, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
+		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
 			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 			return
+		}
+		rowsAffected, err := res.RowsAffected()
+		if err != nil || rowsAffected == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if clawStatus != "error" {
+			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
 		}
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
@@ -1440,6 +1452,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
+		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
 		// Forward to claw if connected (or queue if busy)
 		s.mu.RLock()
 		cc := s.claws[clawID]
@@ -2622,6 +2635,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 			)
+			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()
 			cc := s.claws[hm.ClawID]
 			s.mu.RUnlock()
@@ -2799,7 +2813,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
 
-	exec := func(label string, timeout time.Duration, cmd string) error {
+	execResult := func(label string, timeout time.Duration, cmd string) (*types.ExecResult, error) {
 		s.setBootstrapStatus(clawID, daytonaBootstrapStatusForStep(label))
 		const maxAttempts = 3
 		var lastErr error
@@ -2825,9 +2839,14 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				continue
 			}
 			log.Printf("[daytona] %s done", label)
-			return nil
+			return result, nil
 		}
-		return lastErr
+		return nil, lastErr
+	}
+
+	exec := func(label string, timeout time.Duration, cmd string) error {
+		_, err := execResult(label, timeout, cmd)
+		return err
 	}
 
 	// Step 1: Install pinned OpenClaw version.
@@ -2845,16 +2864,34 @@ echo uninstalled`); err != nil {
 	}
 
 	const daytonaOpenClawVersion = "2026.6.1"
-	if err := exec("install openclaw", 3*time.Minute,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
-hash -r; \
-echo 'install done'`, daytonaOpenClawVersion)); err != nil {
+	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
+	}
+	deadline := time.Now().Add(4 * time.Minute)
+	var lastInstallStatus string
+	installComplete := false
+	for !installComplete {
+		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand(daytonaOpenClawVersion))
+		if err != nil {
+			lastInstallStatus = err.Error()
+		} else {
+			lastInstallStatus = strings.TrimSpace(result.Stdout)
+			switch {
+			case strings.Contains(result.Stdout, "openclaw-install-status=ok"):
+				installComplete = true
+			case strings.Contains(result.Stdout, "openclaw-install-status=failed"),
+				strings.Contains(result.Stdout, "openclaw-install-status=missing"),
+				strings.Contains(result.Stdout, "openclaw-install-status=unknown"):
+				return fmt.Errorf("install openclaw failed: %s", sanitizeBootstrapOutput(result.Stdout))
+			}
+		}
+		if installComplete {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("install openclaw timed out: %s", sanitizeBootstrapOutput(lastInstallStatus))
+		}
+		time.Sleep(10 * time.Second)
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
@@ -3427,6 +3464,66 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
 fi
 echo "claw-bridge not running"
 exit 1`
+}
+
+func daytonaStartOpenClawInstallCommand(version string) string {
+	installScript := fmt.Sprintf(`set -o pipefail
+export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+NPM="$NVM_DIR/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+echo "npm=$NPM prefix=$PREFIX"
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; then
+  hash -r
+  echo ok > "$STATUS"
+  echo "install done"
+else
+  rc=$?
+  echo "failed:$rc" > "$STATUS"
+  exit "$rc"
+fi`, version)
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+rm -f "$LOG" "$STATUS"
+setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
+echo "openclaw-install-status=started"`, shellQuote(installScript))
+}
+
+func daytonaOpenClawInstallStatusCommand(version string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+if [ -s "$STATUS" ]; then
+  status="$(cat "$STATUS")"
+  case "$status" in
+    ok)
+      echo "openclaw-install-status=ok"
+      exit 0
+      ;;
+    failed:*)
+      echo "openclaw-install-status=failed"
+      echo "$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+    *)
+      echo "openclaw-install-status=unknown:$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+  esac
+fi
+if pgrep -af %s >/dev/null 2>&1; then
+  echo "openclaw-install-status=pending"
+  tail -n 20 "$LOG" 2>/dev/null || true
+  exit 0
+fi
+echo "openclaw-install-status=missing"
+tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
 }
 
 func daytonaPrepareBridgeCommand() string {
@@ -5492,9 +5589,32 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateDaytonaVM(vmID)
 	case "exedev":
 		s.terminateExedevVM(vmID)
+	case "docker":
+		s.terminateDockerVM(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
+}
+
+// terminateDockerVM destroys a Docker agent container by name/ID.
+func (s *Server) terminateDockerVM(vmID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["docker"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateDockerVM: no docker provider configured")
+		return
+	}
+	p, err := newDockerProvider(cfg)
+	if err != nil {
+		log.Printf("terminateDockerVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+		log.Printf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Docker container %s terminated", vmID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.

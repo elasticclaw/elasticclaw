@@ -37,6 +37,10 @@ var validFactoryInputTypes = map[string]bool{
 	"string": true, "number": true, "bool": true, "enum": true,
 }
 
+var validTaskRunKinds = map[string]bool{
+	"code_task": true, "pr_task": true,
+}
+
 // Valid GitHub trigger actions
 var validGitHubTriggerActions = map[string]bool{
 	"opened": true, "synchronize": true, "reopened": true, "closed": true,
@@ -65,6 +69,13 @@ var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
 // Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
 var namePatternRegex = regexp.MustCompile(`^([a-zA-Z0-9_-]*\{[a-zA-Z0-9_]+\})*[a-zA-Z0-9_-]*$`)
 
+func validateRunKind(entityType, entityName, runKind string) error {
+	if runKind != "" && !validTaskRunKinds[runKind] {
+		return fmt.Errorf("%s %q: invalid run_kind %q (must be one of: code_task, pr_task)", entityType, entityName, runKind)
+	}
+	return nil
+}
+
 // Validate validates a FactoryConfig and returns an error if invalid.
 func (f *FactoryConfig) Validate() error {
 	if f == nil {
@@ -92,6 +103,9 @@ func (f *FactoryConfig) Validate() error {
 	// Validate color if provided
 	if f.Color != "" && !validColors[f.Color] {
 		return fmt.Errorf("factory %q: invalid color %q", f.Name, f.Color)
+	}
+	if err := validateRunKind("factory", f.Name, f.RunKind); err != nil {
+		return err
 	}
 
 	// Validate name_pattern if provided
@@ -170,6 +184,9 @@ func (w *WorkflowConfig) Validate() error {
 	}
 	if w.Color != "" && !validColors[w.Color] {
 		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
+	}
+	if err := validateRunKind("workflow", w.Name, w.RunKind); err != nil {
+		return err
 	}
 	if w.NamePattern != "" && !namePatternRegex.MatchString(w.NamePattern) {
 		return fmt.Errorf("workflow %q: invalid name_pattern %q (must contain only alphanumeric, hyphens, underscores, and {placeholders})", w.Name, w.NamePattern)
