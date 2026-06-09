@@ -335,7 +335,7 @@ func (cs *cronScheduler) manualTrigger(workspaceName, workflowName string) (stri
 				continue
 			}
 			if wf.Trigger == nil || wf.Trigger.Cron == nil {
-				return "", fmt.Errorf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)
+				return "", &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)}
 			}
 
 			sw := &scheduledWorkflow{
@@ -349,7 +349,16 @@ func (cs *cronScheduler) manualTrigger(workspaceName, workflowName string) (stri
 		}
 	}
 
-	return "", fmt.Errorf("workflow %s/%s not found", workspaceName, workflowName)
+	return "", &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s not found", workspaceName, workflowName)}
+}
+
+// cronTriggerNotFoundError is returned when a workflow is not found or not cron-triggered.
+type cronTriggerNotFoundError struct {
+	msg string
+}
+
+func (e *cronTriggerNotFoundError) Error() string {
+	return e.msg
 }
 
 // getNextRuns returns the next scheduled run times for all cron workflows.

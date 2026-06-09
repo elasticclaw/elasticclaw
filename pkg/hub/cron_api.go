@@ -26,7 +26,11 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 
 	key, err := s.cronScheduler.manualTrigger(workspace, workflow)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		if _, ok := err.(*cronTriggerNotFoundError); ok {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
