@@ -1385,6 +1385,9 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		s.checkpointBeforeTermination(clawID, "pipeline-terminal")
 
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "completed", "pipeline terminal stage")
+		}
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
 			cc.conn.Close(1000, "pipeline terminal stage")
@@ -1598,6 +1601,9 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	// 1. Set terminal status and persist sanitized diagnostic
 	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
 	_, _ = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "failed", safeReason)
+	}
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{

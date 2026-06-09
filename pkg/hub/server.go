@@ -1300,6 +1300,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 			return
 		}
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
+		}
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type:    "claw_status",

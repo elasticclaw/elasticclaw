@@ -970,6 +970,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "completed", "PR merged")
+	}
 
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {

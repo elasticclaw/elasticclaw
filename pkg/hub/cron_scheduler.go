@@ -304,6 +304,22 @@ func (cs *cronScheduler) finishRun(runID, result string) {
 	}
 }
 
+// finishRunByClawID marks a workflow run as completed by claw ID.
+// Called when a claw reaches a terminal status (idle, deleted, error).
+func (cs *cronScheduler) finishRunByClawID(clawID, status, result string) {
+	if cs == nil {
+		return
+	}
+	now := time.Now().UTC()
+	_, err := cs.srv.db.Exec(
+		`UPDATE workflow_runs SET status = ?, result = ?, finished_at = ? WHERE claw_id = ? AND status = 'running'`,
+		status, result, now, clawID,
+	)
+	if err != nil {
+		log.Printf("[cron] failed to finish run for claw %s: %v", clawID, err)
+	}
+}
+
 // manualTrigger triggers a workflow run manually.
 func (cs *cronScheduler) manualTrigger(workspaceName, workflowName string) (string, error) {
 	workspaces, err := cs.srv.loadAllWorkspaces()
@@ -382,9 +398,10 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 	for rows.Next() {
 		var r types.WorkflowRun
 		var finishedAt sql.NullTime
+		var runContextJSON string
 		err := rows.Scan(
 			&r.ID, &r.TenantID, &r.WorkflowName, &r.WorkspaceName, &r.TriggerType,
-			&r.Status, &r.Result, &r.ClawID, &r.RunContext,
+			&r.Status, &r.Result, &r.ClawID, &runContextJSON,
 			&r.StartedAt, &finishedAt, &r.CreatedAt,
 		)
 		if err != nil {
@@ -392,6 +409,9 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 		}
 		if finishedAt.Valid {
 			r.FinishedAt = &finishedAt.Time
+		}
+		if runContextJSON != "" && runContextJSON != "{}" {
+			_ = json.Unmarshal([]byte(runContextJSON), &r.RunContext)
 		}
 		runs = append(runs, r)
 	}
