@@ -197,6 +197,77 @@ func TestManagedProviderReadyRegistrationPromotesAfterBootstrapOK(t *testing.T) 
 	t.Fatalf("status after bootstrap_ok heartbeat = %q, want connected", status)
 }
 
+func TestMarkBootstrapReadyPromotesAndWakesConnectedManagedProvider(t *testing.T) {
+	ready := true
+	clawID := "claw-replicated-wake-after-bootstrap"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, provider, status, bootstrap_ok, tags, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "replicated claw", "elasticclaw", "replicated", "starting", 0, `[]`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clawWS, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw ws: %v", err)
+	}
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
+		Type: "register",
+		Payload: types.RegisterPayload{
+			ClawID:       clawID,
+			Name:         "replicated claw",
+			Template:     "elasticclaw",
+			Token:        "claw-token",
+			GatewayReady: &ready,
+		},
+	}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(ctx, clawWS, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+	if registered.Type != "registered" {
+		t.Fatalf("registration ack type = %q, want registered", registered.Type)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "starting" {
+		t.Fatalf("status after gated registration = %q, want starting", status)
+	}
+
+	s.markBootstrapReady(clawID)
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	for {
+		var wake types.WSMessage
+		if err := wsjson.Read(readCtx, clawWS, &wake); err != nil {
+			t.Fatalf("read bootstrap wake: %v", err)
+		}
+		if wake.Type == "message" {
+			break
+		}
+	}
+
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "connected" {
+		t.Fatalf("status after markBootstrapReady = %q, want connected", status)
+	}
+}
+
 func runBashScript(t *testing.T, script string) {
 	t.Helper()
 	cmd := exec.Command("bash")

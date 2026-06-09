@@ -3305,7 +3305,7 @@ gh auth status`
 		log.Printf("[daytona] workspace readiness verified for claw %s", clawID)
 	}
 
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.markBootstrapReady(clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
 	s.setBootstrapStatus(clawID, "Connecting to hub")
 
@@ -3630,6 +3630,53 @@ func allowWakeBeforeBootstrap(provider string, bootstrapOK int) bool {
 	}
 }
 
+func (s *Server) markBootstrapReady(clawID string) {
+	if clawID == "" {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.promoteBootstrapReadyClaw(clawID)
+}
+
+func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return false
+	}
+
+	cc.mu.RLock()
+	gatewayReady := cc.gatewayReady
+	tenantID := cc.tenantID
+	cc.mu.RUnlock()
+	if !gatewayReady {
+		return false
+	}
+
+	res, err := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
+	if err != nil {
+		return false
+	}
+	rowsUpdated, _ := res.RowsAffected()
+	if rowsUpdated == 0 {
+		return false
+	}
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
+	})
+	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
+	go s.requestBootstrapCheckpoint(clawID)
+	if s.initializePipelineEntryIfNeeded(clawID) {
+		go s.sendInitialPlanInstruction(cc, clawID)
+	} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
+		go s.sendWakeMessage(cc, clawID)
+	}
+	return true
+}
+
 func daytonaRepoReadinessSnippet(repoFullName string) string {
 	repoName := repoDirectoryName(repoFullName)
 	return fmt.Sprintf("echo %s; [ -d %s/.git ] || { echo %s; exit 1; }; echo %s; ",
@@ -3942,7 +3989,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		}
 		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
 	}
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.markBootstrapReady(clawID)
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
@@ -4875,7 +4922,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.markBootstrapReady(clawID)
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
