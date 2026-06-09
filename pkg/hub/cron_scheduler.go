@@ -193,7 +193,8 @@ func (j *cronJob) Run() {
 }
 
 // runWorkflow executes a scheduled workflow run.
-func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
+// Returns true if a run was actually started, false if it was skipped or failed.
+func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) bool {
 	key := sw.key
 
 	// Check overlap policy
@@ -204,20 +205,20 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 			cs.runningMu.Unlock()
 			log.Printf("[cron] skipping %s (%d run(s) still active)", key, cs.running[key])
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) still active", cs.running[key]))
-			return
+			return false
 		case "queue":
 			// Queue is not implemented in v1; treat as skip
 			cs.runningMu.Unlock()
 			log.Printf("[cron] skipping %s (queue not implemented, %d run(s) active)", key, cs.running[key])
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) active, queue not implemented", cs.running[key]))
-			return
+			return false
 		case "parallel":
 			// Allow parallel execution
 		default:
 			cs.runningMu.Unlock()
 			log.Printf("[cron] unknown overlap policy %q for %s, skipping", sw.trigger.OverlapPolicy, key)
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", "unknown overlap policy")
-			return
+			return false
 		}
 	}
 	cs.running[key]++
@@ -261,7 +262,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 			cs.running[key] = 0
 		}
 		cs.runningMu.Unlock()
-		return
+		return false
 	}
 
 	// Update run with claw ID
@@ -273,6 +274,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	cs.clawWorkflowMu.Unlock()
 
 	log.Printf("[cron] started run %s for %s (claw %s)", runID, key, clawID)
+	return true
 }
 
 // recordRun inserts a workflow run record.
@@ -386,7 +388,10 @@ func (cs *cronScheduler) manualTrigger(workspaceName, workflowName string) (stri
 				trigger:   wf.Trigger.Cron,
 				key:       workspaceName + "/" + workflowName,
 			}
-			cs.runWorkflow(sw)
+			started := cs.runWorkflow(sw)
+			if !started {
+				return "", &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
+			}
 			return sw.key, nil
 		}
 	}
@@ -400,6 +405,15 @@ type cronTriggerNotFoundError struct {
 }
 
 func (e *cronTriggerNotFoundError) Error() string {
+	return e.msg
+}
+
+// cronTriggerSkippedError is returned when a manual trigger is skipped due to overlap policy.
+type cronTriggerSkippedError struct {
+	msg string
+}
+
+func (e *cronTriggerSkippedError) Error() string {
 	return e.msg
 }
 

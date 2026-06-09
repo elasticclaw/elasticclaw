@@ -28,6 +28,8 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if _, ok := err.(*cronTriggerNotFoundError); ok {
 			http.Error(w, err.Error(), http.StatusNotFound)
+		} else if _, ok := err.(*cronTriggerSkippedError); ok {
+			http.Error(w, err.Error(), http.StatusConflict)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
