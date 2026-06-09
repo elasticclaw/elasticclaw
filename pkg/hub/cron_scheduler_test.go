@@ -101,19 +101,19 @@ func TestTZScheduleNext(t *testing.T) {
 
 func TestCronOverlapPolicy(t *testing.T) {
 	cs := &cronScheduler{
-		running: make(map[string]bool),
+		running: make(map[string]int),
 	}
 
 	key := "test/workspace"
 
 	// Test skip policy - mark as running and verify
-	cs.running[key] = true
+	cs.running[key] = 2
 
 	cs.runningMu.Lock()
 	isRunning := cs.running[key]
 	cs.runningMu.Unlock()
 
-	if !isRunning {
+	if isRunning == 0 {
 		t.Fatal("Expected workflow to be marked as running")
 	}
 }

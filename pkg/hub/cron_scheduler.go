@@ -22,8 +22,8 @@ type cronScheduler struct {
 	entries   map[string]cron.EntryID       // workflow key -> cron entry ID
 	workflows map[string]*scheduledWorkflow // workflow key -> workflow
 
-	// running tracks active runs to enforce overlap policies
-	running   map[string]bool // workflow key -> has active run
+	// running tracks active runs to enforce overlap policies (counter for parallel support)
+	running   map[string]int // workflow key -> active run count
 	runningMu sync.Mutex
 }
 
@@ -39,7 +39,7 @@ func newCronScheduler(srv *Server) *cronScheduler {
 		srv:       srv,
 		entries:   make(map[string]cron.EntryID),
 		workflows: make(map[string]*scheduledWorkflow),
-		running:   make(map[string]bool),
+		running:   make(map[string]int),
 	}
 }
 
@@ -192,18 +192,18 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 
 	// Check overlap policy
 	cs.runningMu.Lock()
-	if cs.running[key] {
+	if cs.running[key] > 0 {
 		switch sw.trigger.OverlapPolicy {
 		case "skip", "":
 			cs.runningMu.Unlock()
-			log.Printf("[cron] skipping %s (previous run still active)", key)
-			cs.recordRun(uuid.New().String(), sw, "skipped", "", "previous run still active")
+			log.Printf("[cron] skipping %s (%d run(s) still active)", key, cs.running[key])
+			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) still active", cs.running[key]))
 			return
 		case "queue":
 			// Queue is not implemented in v1; treat as skip
 			cs.runningMu.Unlock()
-			log.Printf("[cron] skipping %s (queue not implemented, previous run active)", key)
-			cs.recordRun(uuid.New().String(), sw, "skipped", "", "previous run still active, queue not implemented")
+			log.Printf("[cron] skipping %s (queue not implemented, %d run(s) active)", key, cs.running[key])
+			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) active, queue not implemented", cs.running[key]))
 			return
 		case "parallel":
 			// Allow parallel execution
@@ -214,12 +214,15 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 			return
 		}
 	}
-	cs.running[key] = true
+	cs.running[key]++
 	cs.runningMu.Unlock()
 
 	defer func() {
 		cs.runningMu.Lock()
-		cs.running[key] = false
+		cs.running[key]--
+		if cs.running[key] < 0 {
+			cs.running[key] = 0
+		}
 		cs.runningMu.Unlock()
 	}()
 
