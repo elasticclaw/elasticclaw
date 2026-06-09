@@ -179,7 +179,7 @@ func TestCronWorkflowTriggerValidation(t *testing.T) {
 				Timezone:      "Invalid/Timezone",
 				OverlapPolicy: "skip",
 			},
-			wantErr: false, // timezone is validated at runtime, not in struct validation
+			wantErr: true, // timezone is validated during workflow validation
 		},
 	}
 

@@ -89,6 +89,7 @@ type CronWorkflowTrigger struct {
 // WorkflowRun represents a single execution of a workflow.
 type WorkflowRun struct {
 	ID            string                 `json:"id"`
+	TenantID      string                 `json:"tenant_id,omitempty"`
 	WorkflowName  string                 `json:"workflow_name"`
 	WorkspaceName string                 `json:"workspace_name"`
 	TriggerType   string                 `json:"trigger_type"`   // "cron", "manual"

@@ -366,7 +366,7 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
 
 	rows, err := cs.srv.db.Query(
-		`SELECT id, workflow_name, workspace_name, trigger_type, status, result, claw_id, run_context, started_at, finished_at, created_at
+		`SELECT id, tenant_id, workflow_name, workspace_name, trigger_type, status, result, claw_id, run_context, started_at, finished_at, created_at
 		 FROM workflow_runs
 		 WHERE tenant_id = ? AND workspace_name = ? AND workflow_name = ?
 		 ORDER BY created_at DESC
@@ -383,7 +383,7 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 		var r types.WorkflowRun
 		var finishedAt sql.NullTime
 		err := rows.Scan(
-			&r.ID, &r.WorkflowName, &r.WorkspaceName, &r.TriggerType,
+			&r.ID, &r.TenantID, &r.WorkflowName, &r.WorkspaceName, &r.TriggerType,
 			&r.Status, &r.Result, &r.ClawID, &r.RunContext,
 			&r.StartedAt, &finishedAt, &r.CreatedAt,
 		)
