@@ -1,9 +1,10 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import type { AgentActivity, Claw, Message, CreateClawRequest } from "@/lib/types"
+import type { AgentActivity, ApiClaw, Claw, DependencyStatus, Message } from "@/lib/types"
 import {
   fetchClaws,
+  fetchDependencyStatus,
   fetchMessageTimeline,
   sendMessage as apiSendMessage,
   createClaw as apiCreateClaw,
@@ -14,11 +15,12 @@ import {
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
 import { isTerminalAssistantMessage } from "@/lib/messages"
-import type { ApiClaw } from "@/lib/types"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
 export interface HubState {
   claws: Claw[]
+  dependencies: DependencyStatus[]
+  downtimeDependencies: DependencyStatus[]
   messages: Record<string, Message[]>
   streamingBuffers: Record<string, TypewriterState>
   connected: boolean
@@ -96,6 +98,7 @@ function saveOrder(ids: string[]) {
 
 export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
+  const [dependencies, setDependencies] = useState<DependencyStatus[]>([])
   const orderRef = useRef<string[]>([])
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const messagesRef = useRef<Record<string, Message[]>>({})
@@ -158,6 +161,7 @@ export function useHub(selectedClawId: string | null): HubState {
   const shouldReconnectRef = useRef(false)
   const lastWsErrorLogRef = useRef(0)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const dependencyPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const selectedClawIdRef = useRef<string | null>(selectedClawId)
 
   useEffect(() => {
@@ -247,6 +251,19 @@ export function useHub(selectedClawId: string | null): HubState {
       setLoading(false)
     }
   }, [mergeClaws])
+
+  const refreshDependencies = useCallback(async (): Promise<void> => {
+    try {
+      const snapshot = await fetchDependencyStatus()
+      const sorted = [...(snapshot.dependencies || [])].sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind.localeCompare(b.kind)
+        return a.name.localeCompare(b.name)
+      })
+      setDependencies(sorted)
+    } catch (err) {
+      console.warn("Failed to load dependency status:", err)
+    }
+  }, [])
 
   const loadMessages = useCallback(async (clawId: string) => {
     try {
@@ -507,9 +524,11 @@ export function useHub(selectedClawId: string | null): HubState {
 
     // Initial fetch + eager-load all message histories
     refreshClaws().then(() => {})
+    refreshDependencies().then(() => {})
 
-    // Poll every 30s
+    // Poll claws frequently; dependency status is slower-moving and separately cached by the hub.
     pollIntervalRef.current = setInterval(refreshClaws, 10_000)
+    dependencyPollIntervalRef.current = setInterval(refreshDependencies, 60_000)
 
     // Wait for token then connect WS
     shouldReconnectRef.current = true
@@ -518,6 +537,7 @@ export function useHub(selectedClawId: string | null): HubState {
     return () => {
       shouldReconnectRef.current = false
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+      if (dependencyPollIntervalRef.current) clearInterval(dependencyPollIntervalRef.current)
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       if (wsRef.current) {
         wsRef.current.onclose = null
@@ -592,8 +612,12 @@ export function useHub(selectedClawId: string | null): HubState {
 
   }, [persistMessages])
 
+  const downtimeDependencies = dependencies.filter((dependency) => dependency.status === "downtime")
+
   return {
     claws,
+    dependencies,
+    downtimeDependencies,
     messages,
     streamingBuffers,
     connected,

@@ -46,14 +46,15 @@ func NewTestServerWithConfig(t interface {
 	}
 
 	s := &Server{
-		db:              db,
-		hubCfg:          cfg,
-		claws:           make(map[string]*clawConn),
-		users:           make(map[string]*userConn),
-		webhookDedup:    make(map[string]time.Time),
-		githubBaseURL:   githubBaseURL,
-		linearBaseURL:   linearBaseURL,
-		shortcutBaseURL: shortcutBaseURL,
+		db:               db,
+		hubCfg:           cfg,
+		claws:            make(map[string]*clawConn),
+		users:            make(map[string]*userConn),
+		dependencyStatus: newDependencyStatusService(cfg),
+		webhookDedup:     make(map[string]time.Time),
+		githubBaseURL:    githubBaseURL,
+		linearBaseURL:    linearBaseURL,
+		shortcutBaseURL:  shortcutBaseURL,
 	}
 	// Register routes (same as Run but without serving web UI or starting relay)
 	mux := http.NewServeMux()

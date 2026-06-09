@@ -2,6 +2,7 @@ import type {
   ApiClaw,
   ApiMessage,
   CreateClawRequest,
+  DependencyStatusResponse,
   TaskRunAnalyticsFilters,
   TaskRunAnalyticsSummary,
   TaskRunAttempt,
@@ -257,6 +258,10 @@ export interface ClawPR {
 
 export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
   return apiFetch<ClawPR[]>(`/api/claws/${clawId}/prs`)
+}
+
+export async function fetchDependencyStatus(): Promise<DependencyStatusResponse> {
+  return apiFetch<DependencyStatusResponse>("/api/dependencies/status")
 }
 
 export interface WorkflowInput {

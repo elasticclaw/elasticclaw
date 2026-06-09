@@ -28,7 +28,7 @@ import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import type { ActivitySummary as ActivitySummaryMeta, Claw, Message, ClawStatus } from "@/lib/types"
+import type { ActivitySummary as ActivitySummaryMeta, Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl, fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
@@ -38,6 +38,7 @@ import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 import { isTerminalAssistantMessage } from "@/lib/messages"
+import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -49,6 +50,7 @@ interface ConversationViewProps {
   hubError?: string | null
   claw: Claw | null
   allClaws: Claw[]
+  downtimeDependencies: DependencyStatus[]
   messages: Message[]
   allMessages: Record<string, Message[]>
   onSendMessage: (content: string) => void
@@ -1648,6 +1650,7 @@ function ClawChatView({
 export function ConversationView({
   claw,
   allClaws,
+  downtimeDependencies,
   loading = false,
   hubError = null,
   messages,
@@ -1734,7 +1737,8 @@ export function ConversationView({
               {loading ? "Agents" : `${allClaws.length} Active Agents`}
             </h2>
           </div>
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
+            <DependencyDowntimeBanner dependencies={downtimeDependencies} />
             <div className="flex items-center gap-1.5">
               <span className="size-2 rounded-full bg-green-500" />
               <span>Connected</span>
