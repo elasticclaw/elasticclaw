@@ -22,6 +22,8 @@ function dependencyKindLabel(kind: DependencyKind): string {
       return "sandbox"
     case DependencyKind.IssueTracker:
       return "issue tracker"
+    default:
+      return kind
   }
 }
 

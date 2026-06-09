@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,29 @@ type stubDependencyChecker struct {
 
 func (c stubDependencyChecker) CheckDependencyStatus(context.Context, dependencyStatusTarget) (DependencyStatus, error) {
 	return c.status, c.err
+}
+
+type blockingDependencyChecker struct {
+	calls   atomic.Int32
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingDependencyChecker) CheckDependencyStatus(ctx context.Context, target dependencyStatusTarget) (DependencyStatus, error) {
+	c.calls.Add(1)
+	c.once.Do(func() { close(c.started) })
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return DependencyStatus{}, ctx.Err()
+	}
+	return DependencyStatus{
+		ID:     target.ID,
+		Name:   target.Name,
+		Kind:   target.Kind,
+		Status: dependencyStatusDowntime,
+	}, nil
 }
 
 func TestDependencyStatusDiscoversConfiguredDependencies(t *testing.T) {
@@ -111,6 +136,53 @@ func TestDependencyStatusKeepsLastDowntimeSnapshotWhenRefreshFails(t *testing.T)
 	}
 	if second.Dependencies[0].Status != dependencyStatusDowntime {
 		t.Fatalf("status = %q, want cached downtime", second.Dependencies[0].Status)
+	}
+}
+
+func TestDependencyStatusCoalescesConcurrentRefreshes(t *testing.T) {
+	service := newDependencyStatusService(&types.HubConfig{
+		LLMKeys: types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-test"}},
+	})
+	checker := &blockingDependencyChecker{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	service.checkers["model:anthropic"] = checker
+
+	const callers = 20
+	start := make(chan struct{})
+	results := make(chan DependencyStatusResponse, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- service.snapshot(context.Background())
+		}()
+	}
+
+	close(start)
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("checker was not called")
+	}
+	time.Sleep(25 * time.Millisecond)
+	close(checker.release)
+	wg.Wait()
+	close(results)
+
+	if got := checker.calls.Load(); got != 1 {
+		t.Fatalf("checker calls = %d, want 1", got)
+	}
+	for resp := range results {
+		if resp.DowntimeCount != 1 {
+			t.Fatalf("DowntimeCount = %d, want 1", resp.DowntimeCount)
+		}
+		if len(resp.Dependencies) != 1 || resp.Dependencies[0].Status != dependencyStatusDowntime {
+			t.Fatalf("dependencies = %#v, want one downtime dependency", resp.Dependencies)
+		}
 	}
 }
 

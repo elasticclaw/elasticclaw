@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -57,6 +58,7 @@ type dependencyStatusService struct {
 	checkers map[string]dependencyStatusChecker
 	cache    *DependencyStatusResponse
 	cacheTTL time.Duration
+	refresh  singleflight.Group
 }
 
 func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
@@ -82,19 +84,46 @@ func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
 }
 
 func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatusResponse {
-	s.mu.Lock()
-	if s.cache != nil && time.Since(s.cache.CheckedAt) < s.cacheTTL {
-		resp := cloneDependencyStatusResponse(*s.cache)
-		s.mu.Unlock()
+	if resp, ok := s.freshSnapshot(); ok {
 		return resp
 	}
-	cached := (*DependencyStatusResponse)(nil)
+
+	value, _, _ := s.refresh.Do("snapshot", func() (interface{}, error) {
+		if resp, ok := s.freshSnapshot(); ok {
+			return resp, nil
+		}
+
+		return s.refreshSnapshot(ctx), nil
+	})
+	if resp, ok := value.(DependencyStatusResponse); ok {
+		return cloneDependencyStatusResponse(resp)
+	}
+
+	return DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()}
+}
+
+func (s *dependencyStatusService) freshSnapshot() (DependencyStatusResponse, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache != nil && time.Since(s.cache.CheckedAt) < s.cacheTTL {
+		resp := cloneDependencyStatusResponse(*s.cache)
+		return resp, true
+	}
+	return DependencyStatusResponse{}, false
+}
+
+func (s *dependencyStatusService) cachedSnapshot() *DependencyStatusResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.cache != nil {
 		copy := cloneDependencyStatusResponse(*s.cache)
-		cached = &copy
+		return &copy
 	}
-	s.mu.Unlock()
+	return nil
+}
 
+func (s *dependencyStatusService) refreshSnapshot(ctx context.Context) DependencyStatusResponse {
+	cached := s.cachedSnapshot()
 	targets := s.discoverTargets()
 	if len(targets) == 0 {
 		resp := DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()}
