@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -74,6 +75,30 @@ type WorkflowTrigger struct {
 	GitHubIssues *GitHubIssuesWorkflowTrigger `yaml:"github_issues,omitempty" json:"github_issues,omitempty"`
 	Linear       *LinearWorkflowTrigger       `yaml:"linear,omitempty" json:"linear,omitempty"`
 	Shortcut     *ShortcutWorkflowTrigger     `yaml:"shortcut,omitempty" json:"shortcut,omitempty"`
+	Cron         *CronWorkflowTrigger         `yaml:"cron,omitempty" json:"cron,omitempty"`
+}
+
+// CronWorkflowTrigger defines a cron-based schedule for a workflow.
+type CronWorkflowTrigger struct {
+	Schedule       string `yaml:"schedule" json:"schedule"`                             // cron expression, e.g. "0 9 * * 1"
+	Timezone       string `yaml:"timezone,omitempty" json:"timezone,omitempty"`           // IANA timezone, e.g. "America/Chicago"
+	OverlapPolicy  string `yaml:"overlap_policy,omitempty" json:"overlap_policy,omitempty"` // skip, queue, parallel (default: skip)
+	Timeout        string `yaml:"timeout,omitempty" json:"timeout,omitempty"`             // e.g. "2h", "30m"
+}
+
+// WorkflowRun represents a single execution of a workflow.
+type WorkflowRun struct {
+	ID            string                 `json:"id"`
+	WorkflowName  string                 `json:"workflow_name"`
+	WorkspaceName string                 `json:"workspace_name"`
+	TriggerType   string                 `json:"trigger_type"`   // "cron", "manual"
+	Status        string                 `json:"status"`         // "running", "completed", "failed", "skipped", "timed_out", "canceled"
+	Result        string                 `json:"result,omitempty"` // "success", "failure", "skipped", "timed_out", "canceled"
+	ClawID        string                 `json:"claw_id,omitempty"`
+	RunContext    map[string]interface{} `json:"run_context,omitempty"`
+	StartedAt     *time.Time             `json:"started_at,omitempty"`
+	FinishedAt    *time.Time             `json:"finished_at,omitempty"`
+	CreatedAt     time.Time              `json:"created_at"`
 }
 
 type GitHubIssuesWorkflowTrigger struct {

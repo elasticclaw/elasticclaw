@@ -49,6 +49,11 @@ var validExternalTriggerSources = map[string]bool{
 	"github-release": true, "generic-webhook": true,
 }
 
+// Valid cron overlap policies
+var validCronOverlapPolicies = map[string]bool{
+	"skip": true, "queue": true, "parallel": true,
+}
+
 // repoRegex validates owner/repo format
 var repoRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
@@ -214,6 +219,9 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Shortcut != nil {
 		nestedCount++
 	}
+	if trigger.Cron != nil {
+		nestedCount++
+	}
 	if nestedCount != 1 {
 		return fmt.Errorf("workflow %q: trigger must define exactly one source", workflowName)
 	}
@@ -223,7 +231,20 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Linear != nil {
 		return validateLinearWorkflowTrigger(workflowName, trigger.Linear)
 	}
+	if trigger.Cron != nil {
+		return validateCronWorkflowTrigger(workflowName, trigger.Cron)
+	}
 	return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
+}
+
+func validateCronWorkflowTrigger(workflowName string, trigger *CronWorkflowTrigger) error {
+	if trigger.Schedule == "" {
+		return fmt.Errorf("workflow %q: cron trigger requires schedule", workflowName)
+	}
+	if trigger.OverlapPolicy != "" && !validCronOverlapPolicies[trigger.OverlapPolicy] {
+		return fmt.Errorf("workflow %q: invalid cron overlap_policy %q (must be one of: skip, queue, parallel)", workflowName, trigger.OverlapPolicy)
+	}
+	return nil
 }
 
 func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIssuesWorkflowTrigger) error {
