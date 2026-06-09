@@ -1,7 +1,7 @@
 "use client"
 
 import { AlertTriangle } from "lucide-react"
-import type { DependencyStatus } from "@/lib/types"
+import { DependencyKind, type DependencyStatus } from "@/lib/types"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
@@ -14,16 +14,14 @@ function bannerText(count: number): string {
   return count === 1 ? "1 dependency with downtime" : `${count} dependencies with downtime`
 }
 
-function dependencyKindLabel(kind: string): string {
+function dependencyKindLabel(kind: DependencyKind): string {
   switch (kind) {
-    case "model":
+    case DependencyKind.Model:
       return "model"
-    case "sandbox":
+    case DependencyKind.Sandbox:
       return "sandbox"
-    case "issue_tracker":
+    case DependencyKind.IssueTracker:
       return "issue tracker"
-    default:
-      return kind
   }
 }
 

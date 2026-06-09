@@ -254,10 +254,16 @@ export interface TaskRunFilterOptions {
 
 export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "unknown"
 
+export enum DependencyKind {
+  Model = "model",
+  Sandbox = "sandbox",
+  IssueTracker = "issue_tracker",
+}
+
 export interface DependencyStatus {
   id: string
   name: string
-  kind: "model" | "sandbox" | "issue_tracker" | string
+  kind: DependencyKind
   status: DependencyStatusValue
   message?: string
   source?: string
