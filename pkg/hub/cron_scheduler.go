@@ -25,6 +25,11 @@ type cronScheduler struct {
 	// running tracks active runs to enforce overlap policies (counter for parallel support)
 	running   map[string]int // workflow key -> active run count
 	runningMu sync.Mutex
+
+	// clawWorkflow tracks which workflow key a claw belongs to, so we can
+	// decrement the running counter when the claw actually finishes.
+	clawWorkflow   map[string]string // clawID -> workflow key
+	clawWorkflowMu sync.Mutex
 }
 
 type scheduledWorkflow struct {
@@ -36,10 +41,11 @@ type scheduledWorkflow struct {
 
 func newCronScheduler(srv *Server) *cronScheduler {
 	return &cronScheduler{
-		srv:       srv,
-		entries:   make(map[string]cron.EntryID),
-		workflows: make(map[string]*scheduledWorkflow),
-		running:   make(map[string]int),
+		srv:          srv,
+		entries:      make(map[string]cron.EntryID),
+		workflows:    make(map[string]*scheduledWorkflow),
+		running:      make(map[string]int),
+		clawWorkflow: make(map[string]string),
 	}
 }
 
@@ -217,15 +223,6 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	cs.running[key]++
 	cs.runningMu.Unlock()
 
-	defer func() {
-		cs.runningMu.Lock()
-		cs.running[key]--
-		if cs.running[key] < 0 {
-			cs.running[key] = 0
-		}
-		cs.runningMu.Unlock()
-	}()
-
 	// Generate run context
 	runID := uuid.New().String()
 	now := time.Now().UTC()
@@ -257,11 +254,23 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	if err != nil {
 		log.Printf("[cron] failed to create claw for %s: %v", key, err)
 		cs.failRun(runID, fmt.Sprintf("failed to create claw: %v", err))
+		// No claw was created, so decrement the running counter immediately
+		cs.runningMu.Lock()
+		cs.running[key]--
+		if cs.running[key] < 0 {
+			cs.running[key] = 0
+		}
+		cs.runningMu.Unlock()
 		return
 	}
 
 	// Update run with claw ID
 	cs.updateRun(runID, clawID, "running")
+
+	// Track this claw so we can decrement the running counter when it finishes
+	cs.clawWorkflowMu.Lock()
+	cs.clawWorkflow[clawID] = key
+	cs.clawWorkflowMu.Unlock()
 
 	log.Printf("[cron] started run %s for %s (claw %s)", runID, key, clawID)
 }
@@ -331,6 +340,24 @@ func (cs *cronScheduler) finishRunByClawID(clawID, status, result string) {
 	)
 	if err != nil {
 		log.Printf("[cron] failed to finish run for claw %s: %v", clawID, err)
+	}
+
+	// Decrement the running counter for this workflow so overlap policy
+	// is enforced against actual claw execution time, not creation time.
+	cs.clawWorkflowMu.Lock()
+	key, ok := cs.clawWorkflow[clawID]
+	if ok {
+		delete(cs.clawWorkflow, clawID)
+	}
+	cs.clawWorkflowMu.Unlock()
+
+	if ok {
+		cs.runningMu.Lock()
+		cs.running[key]--
+		if cs.running[key] < 0 {
+			cs.running[key] = 0
+		}
+		cs.runningMu.Unlock()
 	}
 }
 
