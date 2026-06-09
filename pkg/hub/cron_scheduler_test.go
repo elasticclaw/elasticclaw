@@ -118,6 +118,45 @@ func TestCronOverlapPolicy(t *testing.T) {
 	}
 }
 
+func TestWorkflowEnabledForCronScheduling(t *testing.T) {
+	enabled := true
+	disabled := false
+
+	tests := []struct {
+		name     string
+		workflow *types.WorkflowConfig
+		want     bool
+	}{
+		{
+			name:     "nil defaults to enabled",
+			workflow: &types.WorkflowConfig{},
+			want:     true,
+		},
+		{
+			name: "enabled true",
+			workflow: &types.WorkflowConfig{
+				Enabled: &enabled,
+			},
+			want: true,
+		},
+		{
+			name: "enabled false",
+			workflow: &types.WorkflowConfig{
+				Enabled: &disabled,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWorkflowEnabled(tt.workflow); got != tt.want {
+				t.Fatalf("isWorkflowEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCronWorkflowTriggerValidation(t *testing.T) {
 	tests := []struct {
 		name    string
