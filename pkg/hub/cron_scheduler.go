@@ -197,20 +197,20 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 		case "skip", "":
 			cs.runningMu.Unlock()
 			log.Printf("[cron] skipping %s (previous run still active)", key)
-			cs.recordRun(sw, "skipped", "", "previous run still active")
+			cs.recordRun(uuid.New().String(), sw, "skipped", "", "previous run still active")
 			return
 		case "queue":
 			// Queue is not implemented in v1; treat as skip
 			cs.runningMu.Unlock()
 			log.Printf("[cron] skipping %s (queue not implemented, previous run active)", key)
-			cs.recordRun(sw, "skipped", "", "previous run still active, queue not implemented")
+			cs.recordRun(uuid.New().String(), sw, "skipped", "", "previous run still active, queue not implemented")
 			return
 		case "parallel":
 			// Allow parallel execution
 		default:
 			cs.runningMu.Unlock()
 			log.Printf("[cron] unknown overlap policy %q for %s, skipping", sw.trigger.OverlapPolicy, key)
-			cs.recordRun(sw, "skipped", "", "unknown overlap policy")
+			cs.recordRun(uuid.New().String(), sw, "skipped", "", "unknown overlap policy")
 			return
 		}
 	}
@@ -236,7 +236,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	contextJSON, _ := json.Marshal(contextData)
 
 	// Record run start
-	cs.recordRun(sw, "running", "", string(contextJSON))
+	cs.recordRun(runID, sw, "running", "", string(contextJSON))
 
 	// Build inputs (empty for cron, but could be extended)
 	inputs := make(map[string]string)
@@ -253,7 +253,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 	)
 	if err != nil {
 		log.Printf("[cron] failed to create claw for %s: %v", key, err)
-		cs.recordRun(sw, "failed", "", fmt.Sprintf("failed to create claw: %v", err))
+		cs.recordRun(runID, sw, "failed", "", fmt.Sprintf("failed to create claw: %v", err))
 		return
 	}
 
@@ -264,8 +264,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) {
 }
 
 // recordRun inserts a workflow run record.
-func (cs *cronScheduler) recordRun(sw *scheduledWorkflow, status, clawID, context string) {
-	runID := uuid.New().String()
+func (cs *cronScheduler) recordRun(runID string, sw *scheduledWorkflow, status, clawID, context string) {
 	now := time.Now().UTC()
 
 	var tenantID string
