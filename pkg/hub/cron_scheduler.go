@@ -268,10 +268,13 @@ func (cs *cronScheduler) recordRun(sw *scheduledWorkflow, status, clawID, contex
 	runID := uuid.New().String()
 	now := time.Now().UTC()
 
+	var tenantID string
+	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+
 	_, err := cs.srv.db.Exec(
-		`INSERT INTO workflow_runs (id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		runID, sw.workflow.Name, sw.workspace.Name, "cron", status, clawID, context, now, now,
+		`INSERT INTO workflow_runs (id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		runID, tenantID, sw.workflow.Name, sw.workspace.Name, "cron", status, clawID, context, now, now,
 	)
 	if err != nil {
 		log.Printf("[cron] failed to record run for %s: %v", sw.key, err)
@@ -359,13 +362,16 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 		limit = 50
 	}
 
+	var tenantID string
+	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+
 	rows, err := cs.srv.db.Query(
 		`SELECT id, workflow_name, workspace_name, trigger_type, status, result, claw_id, run_context, started_at, finished_at, created_at
 		 FROM workflow_runs
-		 WHERE workspace_name = ? AND workflow_name = ?
+		 WHERE tenant_id = ? AND workspace_name = ? AND workflow_name = ?
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
-		workspaceName, workflowName, limit,
+		tenantID, workspaceName, workflowName, limit,
 	)
 	if err != nil {
 		return nil, err

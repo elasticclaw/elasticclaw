@@ -325,6 +325,7 @@ func migrate(db *sql.DB) error {
 	-- v12: workflow_runs table for cron and manual workflow execution history
 	CREATE TABLE IF NOT EXISTS workflow_runs (
 		id             TEXT PRIMARY KEY,
+		tenant_id      TEXT NOT NULL DEFAULT '',
 		workflow_name  TEXT NOT NULL,
 		workspace_name TEXT NOT NULL,
 		trigger_type   TEXT NOT NULL DEFAULT 'cron',  -- 'cron', 'manual'
@@ -336,8 +337,9 @@ func migrate(db *sql.DB) error {
 		finished_at    DATETIME,
 		created_at     DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_name, workspace_name, created_at);
-	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs(tenant_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(tenant_id, workflow_name, workspace_name, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(tenant_id, status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_claw ON workflow_runs(claw_id);
 	`)
 	return err

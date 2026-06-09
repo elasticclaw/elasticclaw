@@ -92,7 +92,7 @@ type WorkflowRun struct {
 	WorkflowName  string                 `json:"workflow_name"`
 	WorkspaceName string                 `json:"workspace_name"`
 	TriggerType   string                 `json:"trigger_type"`   // "cron", "manual"
-	Status        string                 `json:"status"`         // "running", "completed", "failed", "skipped", "timed_out", "canceled"
+	Status        string                 `json:"status"`         // "pending", "running", "completed", "failed", "skipped", "timed_out", "canceled"
 	Result        string                 `json:"result,omitempty"` // "success", "failure", "skipped", "timed_out", "canceled"
 	ClawID        string                 `json:"claw_id,omitempty"`
 	RunContext    map[string]interface{} `json:"run_context,omitempty"`
