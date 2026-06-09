@@ -1,4 +1,16 @@
-import type { ApiClaw, ApiMessage, CreateClawRequest } from "./types"
+import type {
+  ApiClaw,
+  ApiMessage,
+  CreateClawRequest,
+  TaskRunAnalyticsFilters,
+  TaskRunAnalyticsSummary,
+  TaskRunAttempt,
+  TaskRunEvent,
+  TaskRunFilterOptions,
+  TaskRunPR,
+  TaskRunsResponse,
+  TaskRunSummary,
+} from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
 
@@ -331,4 +343,63 @@ export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string
       body: JSON.stringify({ inputs: inputs || {} }),
     }
   )
+}
+
+function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
+  const params = new URLSearchParams()
+  if (!filters) return ""
+  const entries: Array<[string, string | number | boolean | undefined]> = [
+    ["status", filters.status],
+    ["ownerType", filters.ownerType],
+    ["workspace", filters.workspace],
+    ["workflow", filters.workflow],
+    ["factory", filters.factory],
+    ["integration", filters.integration],
+    ["repo", filters.repo],
+    ["model", filters.model],
+    ["warningType", filters.warningType],
+    ["failureType", filters.failureType],
+    ["humanTouched", filters.humanTouched],
+    ["mergedPrs", filters.mergedPrs],
+    ["analyticsEnabled", filters.analyticsEnabled],
+    ["requiresPr", filters.requiresPr],
+    ["from", filters.from],
+    ["to", filters.to],
+    ["limit", filters.limit],
+    ["cursor", filters.cursor],
+  ]
+  for (const [key, value] of entries) {
+    if (value === undefined || value === null || value === "") continue
+    params.set(key, String(value))
+  }
+  const query = params.toString()
+  return query ? `?${query}` : ""
+}
+
+export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFilters): Promise<TaskRunAnalyticsSummary> {
+  return apiFetch<TaskRunAnalyticsSummary>(`/api/analytics/summary${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters): Promise<TaskRunsResponse> {
+  return apiFetch<TaskRunsResponse>(`/api/analytics/runs${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
+  return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}`)
+}
+
+export async function fetchTaskRunAttempts(runId: string): Promise<{ attempts: TaskRunAttempt[] }> {
+  return apiFetch<{ attempts: TaskRunAttempt[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/attempts`)
+}
+
+export async function fetchTaskRunEvents(runId: string): Promise<{ events: TaskRunEvent[] }> {
+  return apiFetch<{ events: TaskRunEvent[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/events`)
+}
+
+export async function fetchTaskRunPRs(runId: string): Promise<{ prs: TaskRunPR[] }> {
+  return apiFetch<{ prs: TaskRunPR[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/prs`)
+}
+
+export async function fetchTaskRunFilterOptions(): Promise<TaskRunFilterOptions> {
+  return apiFetch<TaskRunFilterOptions>("/api/analytics/filter-options")
 }

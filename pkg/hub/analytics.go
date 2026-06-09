@@ -296,11 +296,38 @@ func (s *Server) trackPROpened(factoryName, issueID, clawID, repo string, prNumb
 // trackPRMerged logs a PR merge for analytics.
 func (s *Server) trackPRMerged(factoryName, issueID, clawID, repo string, prNumber int) {
 	s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_merged", fmt.Sprintf("%s#%d", repo, prNumber), "success")
+	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+		EventKey:        fmt.Sprintf("pr_merged:%s#%d", repo, prNumber),
+		Source:          taskRunSourceGitHub,
+		EventType:       taskRunEventPRMerged,
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionTerminal,
+		TargetType:      "pull_request",
+		TargetID:        fmt.Sprintf("%s#%d", repo, prNumber),
+		Detail:          map[string]any{"repo": repo, "prNumber": prNumber},
+		OccurredAt:      now(),
+	}); err != nil {
+		log.Printf("[task-run-analytics] failed to record PR merge for claw %s: %v", clawID, err)
+	}
 }
 
 // trackPRClosed logs a PR close (without merge) for analytics.
 func (s *Server) trackPRClosed(factoryName, issueID, clawID, repo string, prNumber int) {
 	s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_closed", fmt.Sprintf("%s#%d", repo, prNumber), "failure")
+	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+		EventKey:        fmt.Sprintf("pr_closed_unmerged:%s#%d", repo, prNumber),
+		Source:          taskRunSourceGitHub,
+		EventType:       taskRunEventPRClosedUnmerged,
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionTerminal,
+		TargetType:      "pull_request",
+		TargetID:        fmt.Sprintf("%s#%d", repo, prNumber),
+		FailureType:     taskRunFailurePRClosedUnmerged,
+		Detail:          map[string]any{"repo": repo, "prNumber": prNumber},
+		OccurredAt:      now(),
+	}); err != nil {
+		log.Printf("[task-run-analytics] failed to record PR close for claw %s: %v", clawID, err)
+	}
 }
 
 // trackDoneSignal logs a [DONE] signal for analytics.

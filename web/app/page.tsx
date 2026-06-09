@@ -18,14 +18,12 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(null)
+  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
+    if (typeof window === "undefined") return null
+    return isConfigured()
+  })
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
-
-  // Check configured on mount (needs browser for localStorage)
-  useEffect(() => {
-    setConfiguredState(isConfigured())
-  }, [])
 
   // Fetch admin status
   useEffect(() => {
@@ -141,7 +139,7 @@ export default function Home() {
     )
   }, [pinnedClaws, activeTagFilters])
 
-    // Eagerly load messages for all claws once the claw list is first available.
+  // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
   // Board cards are passive — they never trigger loadMessages themselves.
   const boardLoadedRef = useRef(false)
@@ -151,7 +149,7 @@ export default function Home() {
     for (const c of claws) {
       hub.loadMessages(c.id)
     }
-  }, [claws]) // re-runs when claws first populate
+  }, [claws, hub]) // re-runs when claws first populate
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(

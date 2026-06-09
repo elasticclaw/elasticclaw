@@ -92,6 +92,37 @@ func TestFactoryConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "invalid run kind",
+			factory: &FactoryConfig{
+				Name:        "test-factory",
+				Integration: "linear",
+				Template:    "base",
+				RunKind:     "typo",
+			},
+			wantErr: true,
+			errMsg:  "invalid run_kind",
+		},
+		{
+			name: "valid run kind",
+			factory: &FactoryConfig{
+				Name:        "test-factory",
+				Integration: "linear",
+				Template:    "base",
+				RunKind:     "pr_task",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid run kind code_task",
+			factory: &FactoryConfig{
+				Name:        "test-factory",
+				Integration: "linear",
+				Template:    "base",
+				RunKind:     "code_task",
+			},
+			wantErr: false,
+		},
+		{
 			name: "invalid provider",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
