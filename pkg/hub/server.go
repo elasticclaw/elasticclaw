@@ -1916,7 +1916,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
 		desiredStatus := initialStatus(rp.GatewayReady)
-		if provider == "daytona" && bootstrapOK != 1 {
+		if !allowWakeBeforeBootstrap(provider, bootstrapOK) {
 			desiredStatus = "starting"
 		}
 		currentStatus = desiredStatus
@@ -1939,7 +1939,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var registrationTagsJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
-	allowWake := bootstrapOK == 1 || provider != "daytona"
+	allowWake := allowWakeBeforeBootstrap(provider, bootstrapOK)
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 
@@ -2119,13 +2119,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
-						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
-							cc.gatewayReady = true
+						if gatewayReadyBool(hb.GatewayReady) {
 							res, execErr := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
 							}
+							cc.gatewayReady = true
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
@@ -2136,7 +2136,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								wakeConn = cc
 								go s.requestBootstrapCheckpoint(clawID)
 							}
-						} else if !hb.GatewayHealthy {
+						}
+						if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
 							if cc.gatewayUnhealthyCount == 1 {
 								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
@@ -3304,6 +3305,13 @@ gh auth status`
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}
+			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
+				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
+					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
+				} else {
+					log.Printf("[daytona] repo instruction discovery done")
+				}
+			}
 		}
 	}
 
@@ -3335,7 +3343,7 @@ gh auth status`
 		log.Printf("[daytona] workspace readiness verified for claw %s", clawID)
 	}
 
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.markBootstrapReady(clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
 	s.setBootstrapStatus(clawID, "Connecting to hub")
 
@@ -3711,6 +3719,62 @@ func repoDirectoryName(repoFullName string) string {
 	return repoFullName
 }
 
+func allowWakeBeforeBootstrap(provider string, bootstrapOK int) bool {
+	switch provider {
+	case "daytona", "replicated", "exedev":
+		return bootstrapOK == 1
+	default:
+		return true
+	}
+}
+
+func (s *Server) markBootstrapReady(clawID string) {
+	if clawID == "" {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.promoteBootstrapReadyClaw(clawID)
+}
+
+func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return false
+	}
+
+	cc.mu.RLock()
+	gatewayReady := cc.gatewayReady
+	tenantID := cc.tenantID
+	cc.mu.RUnlock()
+	if !gatewayReady {
+		return false
+	}
+
+	res, err := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
+	if err != nil {
+		return false
+	}
+	rowsUpdated, _ := res.RowsAffected()
+	if rowsUpdated == 0 {
+		return false
+	}
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
+	})
+	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
+	go s.requestBootstrapCheckpoint(clawID)
+	if s.initializePipelineEntryIfNeeded(clawID) {
+		go s.sendInitialPlanInstruction(cc, clawID)
+	} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
+		go s.sendWakeMessage(cc, clawID)
+	}
+	return true
+}
+
 func daytonaRepoReadinessSnippet(repoFullName string) string {
 	repoName := repoDirectoryName(repoFullName)
 	return fmt.Sprintf("echo %s; [ -d %s/.git ] || { echo %s; exit 1; }; echo %s; ",
@@ -4017,6 +4081,13 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
+	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
+			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
+		}
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+	}
+	s.markBootstrapReady(clawID)
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
@@ -4949,6 +5020,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
+	s.markBootstrapReady(clawID)
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
@@ -5165,6 +5237,82 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	return b.String()
 }
 
+var repoInstructionFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
+
+const repoInstructionsIndexName = "REPO_INSTRUCTIONS.md"
+
+const repoInstructionsAgentsSection = `## Repository Instructions
+
+If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cloned repository. It lists repository-owned instruction files such as ` + "`AGENTS.md`" + `, ` + "`CLAUDE.md`" + `, and ` + "`GEMINI.md`" + `.`
+
+func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `set -euo pipefail
+WORKSPACE_DIR=%s
+mkdir -p "$WORKSPACE_DIR"
+cd "$WORKSPACE_DIR"
+TMP="$(mktemp "$WORKSPACE_DIR/.repo-instructions.XXXXXX")"
+FOUND=0
+{
+  printf '%%s\n\n' '# Repository Instructions'
+  printf '%%s\n\n' 'ElasticClaw detected repository-owned agent instruction files. Read the relevant files before making changes in that repository.'
+`, shellDoubleQuote(workspaceDir))
+	for _, repo := range repos {
+		repoName := repoDirectoryName(repo.Repo)
+		fmt.Fprintf(&b, `  REPO_DIR=%s
+  REPO_FOUND=0
+  if [ -d "$REPO_DIR" ]; then
+`, shellQuote(repoName))
+		for _, fileName := range repoInstructionFileNames {
+			repoPath := repoName + "/" + fileName
+			fmt.Fprintf(&b, "    if [ -f \"$REPO_DIR/%s\" ]; then\n", fileName)
+			fmt.Fprintf(&b, "      if [ \"$REPO_FOUND\" -eq 0 ]; then\n")
+			fmt.Fprintf(&b, "        printf '\\n## %%s\\n\\n' %s\n", shellQuote(repoName))
+			fmt.Fprintf(&b, "        REPO_FOUND=1\n")
+			fmt.Fprintf(&b, "        FOUND=1\n")
+			fmt.Fprintf(&b, "      fi\n")
+			fmt.Fprintf(&b, "      printf -- '- `%%s`\\n' %s\n", shellQuote(repoPath))
+			fmt.Fprintf(&b, "    fi\n")
+		}
+		b.WriteString("  fi\n")
+	}
+	fmt.Fprintf(&b, `} > "$TMP"
+if [ "$FOUND" -eq 1 ]; then
+  mv "$TMP" "$WORKSPACE_DIR/%s"
+else
+  rm -f "$TMP" "$WORKSPACE_DIR/%s"
+fi
+
+AGENTS_FILE="$WORKSPACE_DIR/AGENTS.md"
+SECTION='## Repository Instructions'
+if [ ! -f "$AGENTS_FILE" ]; then
+  cat > "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+%s
+ELASTICCLAW_REPO_AGENTS
+elif ! grep -Fqx "$SECTION" "$AGENTS_FILE"; then
+  cat >> "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+
+%s
+ELASTICCLAW_REPO_AGENTS
+fi
+`, repoInstructionsIndexName, repoInstructionsIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection)
+	return b.String()
+}
+
+func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	discoveryScript := buildRepoInstructionDiscoveryScript(workspaceDir, repos)
+	if discoveryScript == "" {
+		return ""
+	}
+	return fmt.Sprintf(`(
+%s
+) || echo "Warning: repo instruction discovery failed; continuing"
+`, discoveryScript)
+}
+
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
@@ -5246,7 +5394,8 @@ set +e
 FAILED=0
 %s
 exit $FAILED
-) || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
+) || echo "Warning: repo clone failed — agent can retry after bridge connects"
+%s`, tokenURL, buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
