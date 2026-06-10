@@ -172,6 +172,9 @@ func (cs *cronScheduler) reloadWorkflows() error {
 func (cs *cronScheduler) reload() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.cron == nil {
+		return nil
+	}
 	return cs.reloadWorkflows()
 }
 
