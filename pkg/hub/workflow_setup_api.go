@@ -517,11 +517,34 @@ func workflowSetupProviderReady(snapshot workflowsetup.SetupEnvironmentSnapshot)
 			strings.TrimSpace(provider.Type) != snapshot.DefaultProvider {
 			continue
 		}
-		if provider.Provisionable && provider.CredentialsSet {
+		if workflowSetupProviderRuntimeReady(provider) {
 			return true
 		}
 	}
 	return false
+}
+
+func workflowSetupProviderRuntimeReady(provider workflowsetup.ProviderRef) bool {
+	if !provider.Provisionable {
+		return false
+	}
+	if provider.CredentialsSet {
+		return true
+	}
+	providerType := strings.TrimSpace(provider.Type)
+	if providerType == "" {
+		providerType = strings.TrimSpace(provider.Name)
+	}
+	switch providerType {
+	case "replicated":
+		return provider.TokenSet
+	case "daytona":
+		return provider.APIKeySet
+	case "exedev":
+		return true
+	default:
+		return false
+	}
 }
 
 func workflowSetupModelReady(snapshot workflowsetup.SetupEnvironmentSnapshot) bool {

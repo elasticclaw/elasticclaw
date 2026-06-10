@@ -269,6 +269,48 @@ func TestWorkflowSetupAPIContextReturnsArraysForEmptyCollections(t *testing.T) {
 	}
 }
 
+func TestWorkflowSetupAPIContextTreatsExedevWithoutCredentialsAsReady(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "engineering",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: exedev\n",
+			},
+		},
+		nil,
+	)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Providers: map[string]types.ProviderConfig{
+			"exedev": {},
+		},
+	}, "", "", "")
+
+	rr := workflowSetupAPIRequest(s, http.MethodGet, "/api/workflow-setup/workspaces/engineering/context", nil, true)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Readiness struct {
+			ProviderReady bool                        `json:"providerReady"`
+			Providers     []workflowsetup.ProviderRef `json:"providers"`
+		} `json:"readiness"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	if !resp.Readiness.ProviderReady {
+		t.Fatalf("providerReady = false, want true for provisionable exedev with default SSH agent: %#v", resp.Readiness.Providers)
+	}
+	if len(resp.Readiness.Providers) != 1 || resp.Readiness.Providers[0].Type != "exedev" || !resp.Readiness.Providers[0].Provisionable || resp.Readiness.Providers[0].CredentialsSet {
+		t.Fatalf("provider refs = %#v, want exedev provisionable without explicit credentials", resp.Readiness.Providers)
+	}
+}
+
 func TestWorkflowSetupAPIRenderReturnsConfigHash(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
