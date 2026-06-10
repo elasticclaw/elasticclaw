@@ -87,7 +87,7 @@ ELASTICCLAW_E2E_GITHUB_REPO=elasticclaw/e2e-fixtures
 ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
 ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
 ELASTICCLAW_E2E_DAYTONA_API_URL=https://app.daytona.io/api
-ELASTICCLAW_E2E_DAYTONA_TARGET=eu
+ELASTICCLAW_E2E_DAYTONA_TARGET=org-allowed-target
 ELASTICCLAW_E2E_DAYTONA_SNAPSHOT=daytona-medium
 ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE=Todo
 ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
@@ -107,11 +107,11 @@ Webhooks: read/write
 The GitHub App must be installed on the fixture repo and have repository
 contents permissions sufficient for ElasticClaw to mint a checkout token.
 
-Daytona E2E defaults `ELASTICCLAW_E2E_DAYTONA_TARGET` to `eu` so CI does not
-depend on accounts that can provision the default `us` target. Set
-`ELASTICCLAW_E2E_DAYTONA_TARGET` and, when needed,
-`ELASTICCLAW_E2E_DAYTONA_SNAPSHOT` to a region/snapshot combination available
-to the organization.
+Set `ELASTICCLAW_E2E_DAYTONA_TARGET` and, when needed,
+`ELASTICCLAW_E2E_DAYTONA_SNAPSHOT` to a target/snapshot combination available
+to the Daytona organization. If Daytona rejects the configured target/class
+with a 403 "region is not available" response, the Daytona E2E marks the run as
+skipped because the account cannot provision the required sandbox class.
 
 The Linear API key must be able to create webhooks and issues for the team in
 `ELASTICCLAW_E2E_LINEAR_TEAM_KEY`. The trigger state defaults to `Todo`; set

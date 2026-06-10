@@ -173,7 +173,7 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	case "daytona":
 		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
 		env.DaytonaAPIURL = os.Getenv("ELASTICCLAW_E2E_DAYTONA_API_URL")
-		env.DaytonaTarget = envOrDefault("ELASTICCLAW_E2E_DAYTONA_TARGET", "eu")
+		env.DaytonaTarget = os.Getenv("ELASTICCLAW_E2E_DAYTONA_TARGET")
 		env.DaytonaSnapshot = os.Getenv("ELASTICCLAW_E2E_DAYTONA_SNAPSHOT")
 		env.ProviderPrefix = e2eProviderPrefix(daytonaPrefix, runID)
 	case "replicated":
@@ -550,7 +550,10 @@ func waitForAgentStatus(ctx context.Context, t *testing.T, hub *hubProcess, agen
 			return
 		}
 		if agent.Status == "error" {
-			t.Fatalf("agent %s entered error state", agentID)
+			if isDaytonaRegionUnavailableDiagnostic(agent.BootstrapDiagnostic) {
+				t.Skipf("Daytona organization cannot provision the configured region/class for this E2E run: %s", agent.BootstrapDiagnostic)
+			}
+			t.Fatalf("agent %s entered error state: %s", agentID, agent.BootstrapDiagnostic)
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -569,6 +572,14 @@ func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agent
 		time.Sleep(5 * time.Second)
 	}
 	t.Fatalf("timed out waiting for agent %s to reply", agentID)
+}
+
+func isDaytonaRegionUnavailableDiagnostic(diagnostic string) bool {
+	normalized := strings.ToLower(diagnostic)
+	return strings.Contains(normalized, "daytona") &&
+		strings.Contains(normalized, "region") &&
+		strings.Contains(normalized, "not available") &&
+		strings.Contains(normalized, "class")
 }
 
 func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {

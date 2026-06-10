@@ -25,6 +25,16 @@ func TestDaytonaProviderConfigIncludesTarget(t *testing.T) {
 	}
 }
 
+func TestDaytonaProviderConfigOmitsEmptyTarget(t *testing.T) {
+	config := daytonaProviderConfig(e2eEnv{
+		DaytonaAPIKey: "key",
+	})
+
+	if strings.Contains(config, "target:") {
+		t.Fatalf("daytona provider config should omit empty target:\n%s", config)
+	}
+}
+
 func TestDaytonaProviderConfigIncludesOptionalAPIURLAndSnapshot(t *testing.T) {
 	config := daytonaProviderConfig(e2eEnv{
 		DaytonaAPIKey:   "key",
@@ -35,6 +45,25 @@ func TestDaytonaProviderConfigIncludesOptionalAPIURLAndSnapshot(t *testing.T) {
 
 	if !containsAll(config, `api_url: "https://daytona.example"`, `target: "eu"`, `default_snapshot: "daytona-medium"`) {
 		t.Fatalf("daytona provider config missing optional fields:\n%s", config)
+	}
+}
+
+func TestDaytonaRegionUnavailableDiagnosticIsSkippable(t *testing.T) {
+	diagnostic := `Provisioning failed: daytona create: failed to create sandbox: status 403: Region eu is not available to the organization for class linux-vm`
+	if !isDaytonaRegionUnavailableDiagnostic(diagnostic) {
+		t.Fatalf("diagnostic was not classified as Daytona region unavailable")
+	}
+}
+
+func TestDaytonaRegionUnavailableDiagnosticDoesNotMaskOtherErrors(t *testing.T) {
+	for _, diagnostic := range []string{
+		"Daytona bootstrap failed: git clone failed",
+		"Provisioning failed: replicated create: region eu is not available for class linux-vm",
+		"Provisioning failed: daytona create: status 500 internal server error",
+	} {
+		if isDaytonaRegionUnavailableDiagnostic(diagnostic) {
+			t.Fatalf("diagnostic was incorrectly classified as skippable: %s", diagnostic)
+		}
 	}
 }
 
