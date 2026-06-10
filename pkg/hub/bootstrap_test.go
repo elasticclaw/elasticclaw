@@ -64,12 +64,21 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, cmd, "exec /usr/local/bin/claw-bridge", "runs installed bridge from async session command")
 	assertContains(t, cmd, "claw-bridge.pid", "writes pid file for idempotent retries")
 	assertContains(t, cmd, "kill -0", "validates existing and newly started process")
-	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID="claw-123"`, "passes claw id to bridge")
+	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID='claw-123'`, "passes claw id to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
 	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
 
 	assertContains(t, running, "claw-bridge.pid", "retry guard checks bridge pid file")
 	assertContains(t, running, "pgrep -x claw-bridge", "retry guard detects already running bridge")
+}
+
+func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
+	clawName := `$(touch /tmp/elasticclaw-pwned)' "quoted"`
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", clawName)
+
+	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
+	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
+	assertNotContains(t, cmd, "%q", "must not use Go printf quoting in shell command")
 }
 
 func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
