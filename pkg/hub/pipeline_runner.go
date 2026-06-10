@@ -378,7 +378,10 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		}
 		timeout = parsed
 	}
+	return s.executePipelineCommand(clawID, command, timeout)
+}
 
+func (s *Server) executePipelineCommand(clawID, command string, timeout time.Duration) (*pipelineRunResult, error) {
 	var providerName, providerID, sshHost, sshUser string
 	var sshPort int
 	if err := s.db.QueryRow(`
@@ -890,6 +893,28 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
+		}
+	}
+
+	if dependencyUpdatesConfigured(stage.OnEnter.DependencyUpdates) {
+		outputName := dependencyUpdatesOutputName(stage.OnEnter.DependencyUpdates)
+		log.Printf("[pipeline] running dependency updates for claw %s stage %q output %q", clawID[:8], stage.ID, outputName)
+		result, err := s.executeDependencyUpdatesAction(clawID, stage.ID, stage.OnEnter.DependencyUpdates)
+		if err != nil || (result != nil && result.ExitCode != 0) {
+			msg := "Dependency update step failed"
+			if result != nil {
+				details := strings.TrimSpace(result.Stdout + "\n" + result.Stderr)
+				if details != "" {
+					msg += ": " + truncateString(details, 2000)
+				}
+			} else if err != nil {
+				msg += ": " + err.Error()
+			}
+			log.Printf("[pipeline] %s", msg)
+			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			if !stage.OnEnter.DependencyUpdates.ContinueOnError {
+				return false
+			}
 		}
 	}
 
