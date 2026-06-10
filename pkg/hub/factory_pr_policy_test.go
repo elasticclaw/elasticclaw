@@ -82,7 +82,7 @@ func TestFactoryContextsIncludeDefaultPRPolicy(t *testing.T) {
 		"shortcut story":          buildShortcutContext(shortcut, "128"),
 		"external event":          buildExternalEventContext(externalPayload, externalFactory),
 		"manual factory trigger":  buildManualTriggerContext(manualFactory, map[string]string{"task": "fix issue 128"}),
-		"manual workflow trigger": buildWorkflowManualTriggerContext(manualWorkflow, map[string]string{"task": "fix issue 128"}),
+		"manual workflow trigger": buildWorkflowManualTriggerContext(manualWorkflow, map[string]string{"task": "fix issue 128"}, ""),
 	}
 
 	for name, content := range cases {
@@ -97,6 +97,38 @@ func TestFactoryContextsIncludeDefaultPRPolicy(t *testing.T) {
 				t.Fatalf("context missing DONE PR URL contract:\n%s", content)
 			}
 		})
+	}
+}
+
+func TestWorkflowManualTriggerContextIncludesTaskAndWorkspaceContext(t *testing.T) {
+	workflow := &types.WorkflowConfig{
+		Name: "dependency-update-go",
+		Stages: []types.WorkflowStage{{
+			ID:    "working",
+			Entry: true,
+			OnEnter: map[string]interface{}{
+				"inject": "Workflow task: run the Go dependency update maintenance workflow for vandoor.\n\nReview {{ .Outputs.dependency_updates.files_changed }}.",
+			},
+		}},
+	}
+
+	content := buildWorkflowManualTriggerContext(workflow, map[string]string{}, "Workspace context for vandoor")
+
+	for _, want := range []string{
+		"# Manual Workflow Trigger: dependency-update-go",
+		"No manual inputs were provided.",
+		"Workflow task: run the Go dependency update maintenance workflow for vandoor.",
+		"Review {{ .Outputs.dependency_updates.files_changed }}.",
+		"## Workspace Context",
+		"Workspace context for vandoor",
+		"## PR Completion Policy",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("context missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Read the trigger inputs fully") {
+		t.Fatalf("context should not ask for trigger inputs when workflow has none:\n%s", content)
 	}
 }
 
