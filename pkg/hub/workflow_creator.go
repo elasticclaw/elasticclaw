@@ -172,16 +172,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			linearWorkspace = tmplCfg.Linear.Workspace
 		}
 	}
-	if defaultModel == "" && llmKey != "" {
-		s.mu.RLock()
-		for _, k := range s.hubCfg.LLMKeys {
-			if k.Name == llmKey {
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
-				break
-			}
-		}
-		s.mu.RUnlock()
-	}
+	s.mu.RLock()
+	defaultModel, llmKey = resolveModelAndLLMKey(s.hubCfg, llmKey, defaultModel)
+	s.mu.RUnlock()
 
 	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
