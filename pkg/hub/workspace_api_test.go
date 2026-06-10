@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/robfig/cron/v3"
 )
 
 func TestWorkspacesEndpointReturnsPersistedWorkspacesOnly(t *testing.T) {
@@ -191,6 +192,102 @@ func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	}
 }
 
+func TestWorkflowPushReloadsCronScheduler(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"dependency-update-go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip","timeout":"2h"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	}
+}
+
+func TestWorkflowPushWithUnstartedCronSchedulerStillSucceeds(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"dependency-update-go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCronSchedulerStartLoadsExternalWorkflows(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "engineering",
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion: "v1",
+			Name:          "dependency-update-go",
+			Trigger: &types.WorkflowTrigger{
+				Cron: &types.CronWorkflowTrigger{
+					Schedule:      "*/1 * * * *",
+					Timezone:      "America/Chicago",
+					OverlapPolicy: "skip",
+				},
+			},
+			Stages: []types.WorkflowStage{{
+				ID:    "working",
+				Entry: true,
+			}},
+		}},
+	)
+
+	s.cronScheduler = newCronScheduler(s)
+	if err := s.cronScheduler.start(); err != nil {
+		t.Fatalf("start cron scheduler: %v", err)
+	}
+	t.Cleanup(s.cronScheduler.stop)
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered on startup: %#v", s.cronScheduler.entries)
+	}
+}
+
 func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
@@ -245,6 +342,50 @@ func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
 	}
 	if persisted.Trigger == nil || persisted.Trigger.GitHubIssues == nil || len(persisted.Stages) != 1 {
 		t.Fatalf("patch did not preserve trigger/stages: %#v", persisted)
+	}
+}
+
+func TestWorkspaceWorkflowPatchReloadsCronScheduler(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"dependency-update-go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/dependency-update-go", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; ok {
+		t.Fatalf("disabled cron workflow remained registered: %#v", s.cronScheduler.entries)
 	}
 }
 

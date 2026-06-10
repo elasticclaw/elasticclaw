@@ -169,6 +169,15 @@ func (cs *cronScheduler) reloadWorkflows() error {
 	return nil
 }
 
+func (cs *cronScheduler) reload() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.cron == nil {
+		return nil
+	}
+	return cs.reloadWorkflows()
+}
+
 // parseCronSchedule parses a cron schedule with timezone support.
 // If the schedule has seconds field (6 fields), we use WithSeconds.
 func parseCronSchedule(schedule string, loc *time.Location) (cron.Schedule, error) {
@@ -514,25 +523,5 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 
 // loadAllWorkspaces loads all workspace configurations.
 func (s *Server) loadAllWorkspaces() ([]*types.WorkspaceConfig, error) {
-	rows, err := s.db.Query(`SELECT name, config FROM workspaces`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var workspaces []*types.WorkspaceConfig
-	for rows.Next() {
-		var name string
-		var configJSON []byte
-		if err := rows.Scan(&name, &configJSON); err != nil {
-			return nil, err
-		}
-		var ws types.WorkspaceConfig
-		if err := json.Unmarshal(configJSON, &ws); err != nil {
-			log.Printf("[cron] failed to unmarshal workspace %s: %v", name, err)
-			continue
-		}
-		workspaces = append(workspaces, &ws)
-	}
-	return workspaces, rows.Err()
+	return loadExternalWorkspaces()
 }

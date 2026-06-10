@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -180,6 +181,11 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			log.Printf("[cron] failed to reload workflows after workflow push for workspace %s: %v", name, err)
+		}
+	}
 	workflows := make([]WorkflowView, 0, len(req.Workflows))
 	for _, workflow := range req.Workflows {
 		workflows = append(workflows, workflowToView(name, workflow))
@@ -259,6 +265,11 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
 		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			log.Printf("[cron] failed to reload workflows after workflow patch for workspace %s workflow %s: %v", workspace.Name, workflow.Name, err)
+		}
 	}
 	jsonOK(w, workflowToView(workspace.Name, workflow))
 }
