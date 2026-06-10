@@ -22,6 +22,12 @@ var validIntegrations = map[string]bool{
 	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true,
 }
 
+// Valid workflow integration types. Cron is workflow-only; factories still use
+// validIntegrations above.
+var validWorkflowIntegrations = map[string]bool{
+	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true, "cron": true,
+}
+
 // Valid provider types
 var validProviders = map[string]bool{
 	"replicated": true, "daytona": true, "exedev": true, "docker": true,
@@ -179,8 +185,8 @@ func (w *WorkflowConfig) Validate() error {
 	if strings.TrimSpace(w.Name) == "" {
 		return fmt.Errorf("workflow name is required")
 	}
-	if w.Integration != "" && !validIntegrations[w.Integration] {
-		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", w.Name, w.Integration)
+	if w.Integration != "" && !validWorkflowIntegrations[w.Integration] {
+		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external, cron)", w.Name, w.Integration)
 	}
 	if w.Color != "" && !validColors[w.Color] {
 		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
