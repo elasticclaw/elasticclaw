@@ -305,13 +305,54 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			keys := []*types.LLMKeyConfig{
-				{Name: tc.name + "-key", Provider: tc.provider, Default: true},
+				{Name: tc.name + "-key", Provider: tc.provider, APIKey: "test-key", Default: true},
 			}
 			flags := buildOnboardFlags(keys, "", "")
 			assertContains(t, flags, "--auth-choice "+tc.authChoice, "provider auth choice")
 			assertContains(t, flags, tc.flagName+` "${`+tc.envVar+`:-}"`, "provider api key flag")
 			assertNotContains(t, flags, "anthropic-api-key", "should not fallback to anthropic")
 		})
+	}
+}
+
+func TestBuildOnboardFlagsSkipsBlankExternalKeys(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "openai-empty", Provider: "openai", Default: true},
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test"},
+	}
+
+	flags := buildOnboardFlags(keys, "", "")
+
+	assertContains(t, flags, "--auth-choice anthropic-api-key", "uses usable external key")
+	assertNotContains(t, flags, "openai-api-key", "does not select blank OpenAI key")
+}
+
+func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "openai-empty", Provider: "openai", Default: true},
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test"},
+		{Name: "ollama-local", Provider: "ollama"},
+	}
+
+	env := buildLLMKeyEnv(keys, "")
+
+	assertContains(t, env, "ANTHROPIC_API_KEY", "exports usable external key")
+	assertContains(t, env, "OLLAMA_API_KEY", "exports blank Ollama key because Ollama auth does not require an API key")
+	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
+}
+
+func TestResolveModelAndLLMKeyReplacesUnusableSelectedKey(t *testing.T) {
+	hubCfg := &types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "openai-empty", Provider: "openai", Default: true},
+			{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test"},
+		},
+	}
+
+	model, llmKey := resolveModelAndLLMKey(hubCfg, "openai-empty", "")
+
+	if model != "anthropic/claude-sonnet-4-6" || llmKey != "anthropic-main" {
+		t.Fatalf("model/llm_key = %q/%q, want anthropic fallback", model, llmKey)
 	}
 }
 

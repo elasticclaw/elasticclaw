@@ -4918,6 +4918,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
+	defaultModel, llmKeyName = resolveModelAndLLMKey(s.hubCfg, llmKeyName, defaultModel)
 	log.Printf("[bootstrap] OpenClaw model resolution claw=%s llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
 		clawID[:8], llmKeyName, templateDefaultModel, s.hubCfg.DefaultModel, defaultModel)
 
@@ -5239,7 +5240,7 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	// First pass: export the selected key if specified
 	if selectedKeyName != "" {
 		for _, k := range keys {
-			if k.Name == selectedKeyName {
+			if k.Name == selectedKeyName && llmKeyHasRequiredAPIKey(k) {
 				envVar := k.EnvVarName()
 				seen[envVar] = true
 				fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
@@ -5250,7 +5251,7 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 
 	// Second pass: export default keys for providers not yet seen
 	for _, k := range keys {
-		if !k.Default {
+		if !k.Default || !llmKeyHasRequiredAPIKey(k) {
 			continue
 		}
 		envVar := k.EnvVarName()
@@ -5262,6 +5263,9 @@ func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	}
 	// Third pass: export non-default keys for providers not yet seen
 	for _, k := range keys {
+		if !llmKeyHasRequiredAPIKey(k) {
+			continue
+		}
 		envVar := k.EnvVarName()
 		if seen[envVar] {
 			continue
@@ -5313,6 +5317,27 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		// Fall back to hub default even if provider doesn't match
 		return hubCfg.DefaultModel
 	}
+}
+
+func resolveModelAndLLMKey(hubCfg *types.HubConfig, selectedKeyName, defaultModel string) (string, string) {
+	if hubCfg == nil {
+		return defaultModel, selectedKeyName
+	}
+	resolvedModel := defaultModel
+	resolvedKeyName := selectedKeyName
+	if resolvedModel == "" {
+		activeKey := resolveActiveKey(hubCfg.LLMKeys, selectedKeyName)
+		if activeKey != nil {
+			if resolvedKeyName == "" || resolvedKeyName != activeKey.Name {
+				resolvedKeyName = activeKey.Name
+			}
+			resolvedModel = resolveDefaultModelForKey(hubCfg, activeKey)
+		}
+	}
+	if resolvedModel == "" {
+		resolvedModel = hubCfg.DefaultModel
+	}
+	return resolvedModel, resolvedKeyName
 }
 
 // buildGitHubCloneScript returns shell lines that clone repos into the current directory.

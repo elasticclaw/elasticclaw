@@ -500,6 +500,40 @@ func TestWorkspaceWorkflowTriggerAllowsPausedManualWorkflow(t *testing.T) {
 	}
 }
 
+func TestWorkflowCreationUsesDefaultUsableLLMKey(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+		LLMKeys: types.LLMKeysList{
+			{Name: "openai-empty", Provider: "openai", Default: true},
+			{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test"},
+		},
+	}, "", "", "")
+	workspace := &types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n"},
+	}
+	workflow := &types.WorkflowConfig{Name: "dependency-update-go", Provider: "noop"}
+
+	clawID, _, err := s.createClawFromWorkflow(workspace, workflow, nil, "cron run")
+	if err != nil {
+		t.Fatalf("create workflow claw: %v", err)
+	}
+
+	var model, llmKey string
+	if err := db.QueryRow(`SELECT default_model, llm_key FROM claws WHERE id=?`, clawID).Scan(&model, &llmKey); err != nil {
+		t.Fatalf("read claw model: %v", err)
+	}
+	if model != "anthropic/claude-sonnet-4-6" || llmKey != "anthropic-main" {
+		t.Fatalf("model/llm_key = %q/%q, want anthropic default", model, llmKey)
+	}
+}
+
 func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")

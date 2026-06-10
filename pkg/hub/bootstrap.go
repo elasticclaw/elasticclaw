@@ -46,17 +46,21 @@ type BootstrapParams struct {
 // resolveActiveKey selects the active key by selected name, then default, then first.
 func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
 	for _, k := range keys {
-		if k.Name == selectedKeyName {
+		if k.Name == selectedKeyName && llmKeyHasRequiredAPIKey(k) {
 			return k
 		}
 	}
 	for _, k := range keys {
-		if k.Default {
+		if k.Default && llmKeyHasRequiredAPIKey(k) {
 			return k
 		}
 	}
 	if len(keys) > 0 {
-		return keys[0]
+		for _, k := range keys {
+			if llmKeyHasRequiredAPIKey(k) {
+				return k
+			}
+		}
 	}
 	return nil
 }
