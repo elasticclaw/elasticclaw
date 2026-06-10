@@ -25,6 +25,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -38,11 +39,12 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	db       *sql.DB
-	addr     string
-	hubCfg   *types.HubConfig
-	identity *HubIdentity
-	mux      *http.ServeMux
+	db        *sql.DB
+	addr      string
+	hubCfg    *types.HubConfig
+	identity  *HubIdentity
+	mux       *http.ServeMux
+	artifacts artifact.Store
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -175,8 +177,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if hubCfg == nil {
 		hubCfg = &types.HubConfig{}
 	}
+	artifacts, err := artifact.NewStoreFromHubConfig(context.Background(), identityDir, hubCfg.ArtifactStorage)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("artifact storage: %w", err)
+	}
 	id, err := LoadOrCreateIdentity(identityDir)
 	if err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("hub identity: %w", err)
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
@@ -185,6 +193,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		addr:              addr,
 		hubCfg:            hubCfg,
 		identity:          id,
+		artifacts:         artifacts,
 		claws:             make(map[string]*clawConn),
 		users:             make(map[string]*userConn),
 		fileAckWaiters:    make(map[string]chan types.FileAck),
@@ -292,9 +301,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))     // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))          // GET run history
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAuth(s.handleWorkspaceSecretsCRUD))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAuth(s.handleWorkspaceGitHubAppsCRUD))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAuth(s.handleWorkspaceIssueTrackersCRUD))
