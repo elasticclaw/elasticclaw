@@ -416,13 +416,64 @@ func (s *Server) withAdminForMethods(next http.HandlerFunc, methods ...string) h
 		adminMethods[method] = struct{}{}
 	}
 	authHandler := s.withAuth(next)
-	adminHandler := s.withWebAdminAuth(next)
+	adminHandler := s.withConfigMutationAuth(next)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := adminMethods[r.Method]; ok {
 			adminHandler(w, r)
 			return
 		}
 		authHandler(w, r)
+	}
+}
+
+func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		queryToken := false
+		if token == "" {
+			token = r.URL.Query().Get("token")
+			queryToken = token != ""
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+
+		if token == hubToken && hubToken != "" {
+			next(w, r)
+			return
+		}
+		if queryToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		sessionSecret := s.webSessionSecret()
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				if !isAccessAdmin(accessCfg, payload.Login) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 

@@ -1614,6 +1614,9 @@ func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected mutation method to allow admin user, got %d", rec.Code)
 	}
+	if calls != 2 {
+		t.Fatalf("expected handler to be called for admin mutation, got %d calls", calls)
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/config", nil)
 	req.Header.Set("Authorization", "Bearer hub-token")
@@ -1621,6 +1624,29 @@ func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
 	handler(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected mutation method to allow hub token, got %d", rec.Code)
+	}
+	if calls != 3 {
+		t.Fatalf("expected handler to be called for hub-token mutation, got %d calls", calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config?token=hub-token", nil)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected mutation method to allow hub query token, got %d", rec.Code)
+	}
+	if calls != 4 {
+		t.Fatalf("expected handler to be called for hub query-token mutation, got %d calls", calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config?token=test-token", nil)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected mutation method to reject tenant query token with %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+	if calls != 4 {
+		t.Fatalf("expected handler not to be called for tenant query-token mutation, got %d calls", calls)
 	}
 }
 
