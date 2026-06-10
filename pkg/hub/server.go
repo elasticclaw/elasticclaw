@@ -3581,8 +3581,13 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
   exit 0
 fi
 rm -f "$PIDFILE"
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`, hubURL, clawID, clawToken, clawName)
+ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s \
+sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`,
+		shellQuote(hubURL),
+		shellQuote(clawID),
+		shellQuote(clawToken),
+		shellQuote(clawName),
+	)
 }
 
 func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {
