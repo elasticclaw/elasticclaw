@@ -2,12 +2,39 @@
 
 package e2e
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestE2EProviderPrefixIsRunScoped(t *testing.T) {
 	got := e2eProviderPrefix(daytonaPrefix, "run-123")
 	if got != "ec-e2e-run-123-" {
 		t.Fatalf("provider prefix = %q", got)
+	}
+}
+
+func TestDaytonaProviderConfigIncludesTarget(t *testing.T) {
+	config := daytonaProviderConfig(e2eEnv{
+		DaytonaAPIKey: "key",
+		DaytonaTarget: "eu",
+	})
+
+	if !containsAll(config, `api_key: "key"`, `target: "eu"`) {
+		t.Fatalf("daytona provider config missing target:\n%s", config)
+	}
+}
+
+func TestDaytonaProviderConfigIncludesOptionalAPIURLAndSnapshot(t *testing.T) {
+	config := daytonaProviderConfig(e2eEnv{
+		DaytonaAPIKey:   "key",
+		DaytonaAPIURL:   "https://daytona.example",
+		DaytonaTarget:   "eu",
+		DaytonaSnapshot: "daytona-medium",
+	})
+
+	if !containsAll(config, `api_url: "https://daytona.example"`, `target: "eu"`, `default_snapshot: "daytona-medium"`) {
+		t.Fatalf("daytona provider config missing optional fields:\n%s", config)
 	}
 }
 
@@ -64,4 +91,13 @@ func TestGitHubE2EIssueMatchesOnlyRun(t *testing.T) {
 	if !isE2EIssue("Tell a dad joke. Do not make a PR.", "ElasticClaw E2E run: run-b", labels) {
 		t.Fatalf("broad sweep matcher should still recognize E2E issue")
 	}
+}
+
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }

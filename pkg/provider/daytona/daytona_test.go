@@ -5,6 +5,34 @@ import (
 	"testing"
 )
 
+func TestResolveDaytonaConfigUsesEnvFallbacks(t *testing.T) {
+	t.Setenv("DAYTONA_API_KEY", "env-key")
+	t.Setenv("DAYTONA_API_URL", "https://env.daytona.example")
+	t.Setenv("DAYTONA_TARGET", "us")
+
+	cfg := resolveDaytonaConfig(nil)
+
+	if cfg.APIKey != "env-key" || cfg.APIUrl != "https://env.daytona.example" || cfg.Target != "us" {
+		t.Fatalf("config = %#v, want env fallbacks", cfg)
+	}
+}
+
+func TestResolveDaytonaConfigHonorsExplicitValues(t *testing.T) {
+	t.Setenv("DAYTONA_API_KEY", "env-key")
+	t.Setenv("DAYTONA_API_URL", "https://env.daytona.example")
+	t.Setenv("DAYTONA_TARGET", "us")
+
+	cfg := resolveDaytonaConfig(map[string]interface{}{
+		"api_key": "config-key",
+		"api_url": "https://config.daytona.example",
+		"target":  "eu",
+	})
+
+	if cfg.APIKey != "config-key" || cfg.APIUrl != "https://config.daytona.example" || cfg.Target != "eu" {
+		t.Fatalf("config = %#v, want explicit values", cfg)
+	}
+}
+
 func TestBuildStartOpenClawCommandQuotesWorkdir(t *testing.T) {
 	workdir := `/tmp/a'; touch /tmp/pwned; #'`
 

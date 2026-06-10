@@ -131,6 +131,9 @@ type e2eEnv struct {
 	LinearTriggerState  string
 	LinearInitialState  string
 	DaytonaAPIKey       string
+	DaytonaAPIURL       string
+	DaytonaTarget       string
+	DaytonaSnapshot     string
 	ReplicatedToken     string
 	ReplicatedAPIURL    string
 	ReplicatedType      string
@@ -169,6 +172,9 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	switch sandboxProvider {
 	case "daytona":
 		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
+		env.DaytonaAPIURL = os.Getenv("ELASTICCLAW_E2E_DAYTONA_API_URL")
+		env.DaytonaTarget = envOrDefault("ELASTICCLAW_E2E_DAYTONA_TARGET", "eu")
+		env.DaytonaSnapshot = os.Getenv("ELASTICCLAW_E2E_DAYTONA_SNAPSHOT")
 		env.ProviderPrefix = e2eProviderPrefix(daytonaPrefix, runID)
 	case "replicated":
 		env.ReplicatedToken = requiredEnv(t, "REPLICATED_API_TOKEN")
@@ -204,10 +210,7 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 	providerConfig := ""
 	switch env.SandboxProvider {
 	case "daytona":
-		providerConfig = fmt.Sprintf(`  daytona:
-    type: daytona
-    api_key: %q
-`, env.DaytonaAPIKey)
+		providerConfig = daytonaProviderConfig(env)
 	case "replicated":
 		providerConfig = fmt.Sprintf(`  replicated:
     type: replicated
@@ -272,6 +275,23 @@ llm_keys:
 	})
 	waitForHub(ctx, t, hub)
 	return hub
+}
+
+func daytonaProviderConfig(env e2eEnv) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  daytona:\n")
+	fmt.Fprintf(&b, "    type: daytona\n")
+	fmt.Fprintf(&b, "    api_key: %q\n", env.DaytonaAPIKey)
+	if env.DaytonaAPIURL != "" {
+		fmt.Fprintf(&b, "    api_url: %q\n", env.DaytonaAPIURL)
+	}
+	if env.DaytonaTarget != "" {
+		fmt.Fprintf(&b, "    target: %q\n", env.DaytonaTarget)
+	}
+	if env.DaytonaSnapshot != "" {
+		fmt.Fprintf(&b, "    default_snapshot: %q\n", env.DaytonaSnapshot)
+	}
+	return b.String()
 }
 
 func waitForHub(ctx context.Context, t *testing.T, hub *hubProcess) {

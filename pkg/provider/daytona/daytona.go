@@ -24,30 +24,9 @@ var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // New creates a new Daytona provider
 func New(config map[string]interface{}) (*Provider, error) {
-	apiKey := os.Getenv("DAYTONA_API_KEY")
-	if config != nil {
-		if key, ok := config["api_key"].(string); ok && key != "" {
-			apiKey = key
-		}
-	}
-
-	if apiKey == "" {
+	cfg := resolveDaytonaConfig(config)
+	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("DAYTONA_API_KEY not set - get one at https://app.daytona.io/dashboard/keys")
-	}
-
-	// Create client with config
-	cfg := &daytonatypes.DaytonaConfig{
-		APIKey: apiKey,
-	}
-
-	// Check for custom API URL
-	if apiURL := os.Getenv("DAYTONA_API_URL"); apiURL != "" {
-		cfg.APIUrl = apiURL
-	}
-
-	// Check for target region
-	if target := os.Getenv("DAYTONA_TARGET"); target != "" {
-		cfg.Target = target
 	}
 
 	client, err := daytona.NewClientWithConfig(cfg)
@@ -57,8 +36,29 @@ func New(config map[string]interface{}) (*Provider, error) {
 
 	return &Provider{
 		client: client,
-		apiKey: apiKey,
+		apiKey: cfg.APIKey,
 	}, nil
+}
+
+func resolveDaytonaConfig(config map[string]interface{}) *daytonatypes.DaytonaConfig {
+	cfg := &daytonatypes.DaytonaConfig{
+		APIKey: os.Getenv("DAYTONA_API_KEY"),
+		APIUrl: os.Getenv("DAYTONA_API_URL"),
+		Target: os.Getenv("DAYTONA_TARGET"),
+	}
+	if config == nil {
+		return cfg
+	}
+	if key, ok := config["api_key"].(string); ok && key != "" {
+		cfg.APIKey = key
+	}
+	if apiURL, ok := config["api_url"].(string); ok && apiURL != "" {
+		cfg.APIUrl = apiURL
+	}
+	if target, ok := config["target"].(string); ok && target != "" {
+		cfg.Target = target
+	}
+	return cfg
 }
 
 // Info returns provider metadata
