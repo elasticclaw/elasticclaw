@@ -45,7 +45,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	if opts.inputs != nil {
-		templateFiles["CONTEXT.md"] = buildWorkflowManualTriggerContext(workflow, opts.inputs)
+		templateFiles["CONTEXT.md"] = buildWorkflowManualTriggerContext(workflow, opts.inputs, templateFiles["CONTEXT.md"])
 		inputsJSON, _ := json.Marshal(opts.inputs)
 		templateFiles["TRIGGER_INPUTS.json"] = string(inputsJSON)
 	}
@@ -323,27 +323,68 @@ func (s *Server) resolveWorkflowGroupLimit(workflow *types.WorkflowConfig) (stri
 	return groupName, 0
 }
 
-func buildWorkflowManualTriggerContext(workflow *types.WorkflowConfig, inputs map[string]string) string {
+func buildWorkflowManualTriggerContext(workflow *types.WorkflowConfig, inputs map[string]string, workspaceContext string) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("# Manual Trigger: %s\n\n", workflow.Name))
+	b.WriteString(fmt.Sprintf("# Manual Workflow Trigger: %s\n\n", workflow.Name))
 	b.WriteString("## Inputs\n\n")
-	for _, in := range workflow.Inputs {
-		val, ok := inputs[in.Name]
-		if !ok {
-			val = in.Default
-		}
-		b.WriteString(fmt.Sprintf("- **%s**: %s\n", in.Name, val))
-		if in.Description != "" {
-			b.WriteString(fmt.Sprintf("  - %s\n", in.Description))
+	if len(workflow.Inputs) == 0 {
+		b.WriteString("No manual inputs were provided.\n")
+	} else {
+		for _, in := range workflow.Inputs {
+			val, ok := inputs[in.Name]
+			if !ok {
+				val = in.Default
+			}
+			b.WriteString(fmt.Sprintf("- **%s**: %s\n", in.Name, val))
+			if in.Description != "" {
+				b.WriteString(fmt.Sprintf("  - %s\n", in.Description))
+			}
 		}
 	}
+	if inject := workflowEntryInject(workflow); inject != "" {
+		b.WriteString("\n## Workflow Task\n\n")
+		b.WriteString(inject)
+		if !strings.HasSuffix(inject, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	if workspaceContext = strings.TrimSpace(workspaceContext); workspaceContext != "" {
+		b.WriteString("\n## Workspace Context\n\n")
+		b.WriteString(workspaceContext)
+		b.WriteString("\n")
+	}
 	b.WriteString("\n## Instructions\n\n")
-	b.WriteString("1. Read the trigger inputs fully\n")
-	b.WriteString("2. Explore the codebase\n")
-	b.WriteString("3. Implement the requested work\n")
-	b.WriteString("4. Follow the PR Completion Policy below\n")
+	if len(workflow.Inputs) > 0 {
+		b.WriteString("1. Read the trigger inputs fully\n")
+		b.WriteString("2. Follow the workflow task and workspace context\n")
+		b.WriteString("3. Explore the codebase as needed\n")
+		b.WriteString("4. Follow the PR Completion Policy below\n")
+	} else {
+		b.WriteString("1. Follow the workflow task and workspace context\n")
+		b.WriteString("2. Explore the codebase as needed\n")
+		b.WriteString("3. Follow the PR Completion Policy below\n")
+	}
 	appendDefaultFactoryPRPolicy(&b)
 	return b.String()
+}
+
+func workflowEntryInject(workflow *types.WorkflowConfig) string {
+	for _, stage := range workflow.Stages {
+		if !stage.Entry {
+			continue
+		}
+		if inject, ok := stage.OnEnter["inject"].(string); ok {
+			return strings.TrimSpace(inject)
+		}
+		return ""
+	}
+	if len(workflow.Stages) == 0 {
+		return ""
+	}
+	if inject, ok := workflow.Stages[0].OnEnter["inject"].(string); ok {
+		return strings.TrimSpace(inject)
+	}
+	return ""
 }
 
 func buildSecretsFile(resolved map[string]string) string {
