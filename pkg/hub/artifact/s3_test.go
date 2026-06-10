@@ -73,6 +73,22 @@ func TestS3StoreBlobManifestAndRef(t *testing.T) {
 	}
 }
 
+func TestS3StoreRejectsInvalidDigestWithoutPanic(t *testing.T) {
+	store := &S3Store{bucket: "bucket", prefix: "prefix"}
+	if _, err := store.blobKey("not-a-digest"); err == nil {
+		t.Fatal("blobKey accepted invalid digest")
+	}
+	if _, err := store.manifestKey("not-a-digest"); err == nil {
+		t.Fatal("manifestKey accepted invalid digest")
+	}
+	if _, err := store.GetBlob(context.Background(), "not-a-digest"); err == nil {
+		t.Fatal("GetBlob accepted invalid digest")
+	}
+	if _, err := store.GetManifest(context.Background(), "not-a-digest"); err == nil {
+		t.Fatal("GetManifest accepted invalid digest")
+	}
+}
+
 type fakeS3HTTPClient struct {
 	mu      sync.Mutex
 	objects map[string][]byte

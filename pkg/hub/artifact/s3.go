@@ -3,8 +3,11 @@ package artifact
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strings"
 
@@ -66,28 +69,50 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 }
 
 func (s *S3Store) PutBlob(ctx context.Context, r io.Reader) (string, int64, error) {
-	data, err := io.ReadAll(r)
+	tmp, err := os.CreateTemp("", "elasticclaw-artifact-blob-*")
 	if err != nil {
 		return "", 0, err
 	}
-	digest := DigestBytes(data)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	h := sha256.New()
+	size, err := io.Copy(tmp, io.TeeReader(r, h))
+	if err != nil {
+		_ = tmp.Close()
+		return "", 0, err
+	}
+	digest := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	key, err := s.blobKey(digest)
+	if err != nil {
+		_ = tmp.Close()
+		return "", 0, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		_ = tmp.Close()
+		return "", 0, err
+	}
+	defer tmp.Close()
+
 	if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.blobKey(digest)),
-		Body:   bytes.NewReader(data),
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          tmp,
+		ContentLength: aws.Int64(size),
 	}); err != nil {
 		return "", 0, err
 	}
-	return digest, int64(len(data)), nil
+	return digest, size, nil
 }
 
 func (s *S3Store) GetBlob(ctx context.Context, digest string) (io.ReadCloser, error) {
-	if _, _, err := ParseDigest(digest); err != nil {
+	key, err := s.blobKey(digest)
+	if err != nil {
 		return nil, err
 	}
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.blobKey(digest)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		return nil, err
@@ -97,9 +122,13 @@ func (s *S3Store) GetBlob(ctx context.Context, digest string) (io.ReadCloser, er
 
 func (s *S3Store) PutManifest(ctx context.Context, manifest []byte) (string, error) {
 	digest := DigestBytes(manifest)
+	key, err := s.manifestKey(digest)
+	if err != nil {
+		return "", err
+	}
 	if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(s.manifestKey(digest)),
+		Key:         aws.String(key),
 		Body:        bytes.NewReader(manifest),
 		ContentType: aws.String("application/vnd.oci.image.manifest.v1+json"),
 	}); err != nil {
@@ -109,12 +138,13 @@ func (s *S3Store) PutManifest(ctx context.Context, manifest []byte) (string, err
 }
 
 func (s *S3Store) GetManifest(ctx context.Context, digest string) ([]byte, error) {
-	if _, _, err := ParseDigest(digest); err != nil {
+	key, err := s.manifestKey(digest)
+	if err != nil {
 		return nil, err
 	}
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.manifestKey(digest)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		return nil, err
@@ -170,14 +200,20 @@ func (s *S3Store) Tag(ctx context.Context, repo, tag, digest string) error {
 	return err
 }
 
-func (s *S3Store) blobKey(digest string) string {
-	_, encoded, _ := ParseDigest(digest)
-	return s.key("blobs", "sha256", encoded[:2], encoded[2:4], encoded)
+func (s *S3Store) blobKey(digest string) (string, error) {
+	_, encoded, err := ParseDigest(digest)
+	if err != nil {
+		return "", err
+	}
+	return s.key("blobs", "sha256", encoded[:2], encoded[2:4], encoded), nil
 }
 
-func (s *S3Store) manifestKey(digest string) string {
-	_, encoded, _ := ParseDigest(digest)
-	return s.key("manifests", "sha256", encoded[:2], encoded[2:4], encoded)
+func (s *S3Store) manifestKey(digest string) (string, error) {
+	_, encoded, err := ParseDigest(digest)
+	if err != nil {
+		return "", err
+	}
+	return s.key("manifests", "sha256", encoded[:2], encoded[2:4], encoded), nil
 }
 
 func (s *S3Store) refKey(repo, tag string) (string, error) {
