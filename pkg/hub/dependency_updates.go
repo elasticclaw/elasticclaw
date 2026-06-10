@@ -262,6 +262,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -298,6 +299,20 @@ def allowed(name):
     allow = CONFIG.get("allow") or ["*"]
     ignore = CONFIG.get("ignore") or []
     return any(fnmatch.fnmatch(name, p) for p in allow) and not any(fnmatch.fnmatch(name, p) for p in ignore)
+
+def update_record(ecosystem, name, from_version, to_version, kind, applied, group="default", skipped_reason=None):
+    record = {
+        "ecosystem": ecosystem,
+        "name": name,
+        "from": from_version,
+        "to": to_version,
+        "type": kind,
+        "applied": applied,
+        "group": group,
+    }
+    if skipped_reason:
+        record["skipped_reason"] = skipped_reason
+    result["updates"].append(record)
 
 def version_parts(version):
     version = str(version or "").strip().lstrip("v")
@@ -420,30 +435,29 @@ for manifest in manifests:
         listed = run_command(cwd, "go list -m -u -json all")
         if listed.returncode == 0:
             try:
+                apply_updates = []
                 for module in parse_go_modules(listed.stdout):
                     update = module.get("Update") or {}
                     name = module.get("Path", "")
-                    if not update or not allowed(name):
+                    if not update:
                         continue
                     from_version = module.get("Version", "")
                     to_version = update.get("Version", "")
                     kind = update_type(from_version, to_version)
-                    applied = not (kind == "major" and not CONFIG.get("include_major"))
-                    result["updates"].append({
-                        "ecosystem": "go",
-                        "name": name,
-                        "from": from_version,
-                        "to": to_version,
-                        "type": kind,
-                        "applied": applied,
-                        "group": "default",
-                        **({} if applied else {"skipped_reason": "major updates disabled"}),
-                    })
+                    if not allowed(name):
+                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
+                        continue
+                    if kind == "major" and not CONFIG.get("include_major"):
+                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
+                        continue
+                    update_record("go", name, from_version, to_version, kind, True)
+                    apply_updates.append(f"{name}@{to_version}")
+                if apply_updates:
+                    run_command(cwd, "go get " + " ".join(shlex.quote(value) for value in apply_updates))
+                    run_command(cwd, "go mod tidy")
             except Exception as exc:
                 result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
                 had_failure = True
-        run_command(cwd, "go get -u ./...")
-        run_command(cwd, "go mod tidy")
     elif manifest["ecosystem"] == "npm":
         if shutil.which("npm") is None:
             result["commands"].append({"command": "npm", "cwd": rel(cwd), "exit_code": 127, "stderr": "npm executable not found"})
@@ -452,38 +466,28 @@ for manifest in manifests:
         outdated = run_command(cwd, "npm outdated --json", allowed_exit_codes=(0, 1))
         if outdated.stdout.strip():
             try:
+                apply_updates = []
                 data = json.loads(outdated.stdout)
                 for name, info in sorted(data.items()):
-                    if not allowed(name):
-                        continue
                     current = str(info.get("current", ""))
                     wanted = str(info.get("wanted", ""))
                     latest = str(info.get("latest", ""))
                     kind = update_type(current, wanted)
-                    result["updates"].append({
-                        "ecosystem": "npm",
-                        "name": name,
-                        "from": current,
-                        "to": wanted,
-                        "type": kind,
-                        "applied": True,
-                        "group": "default",
-                    })
+                    if not allowed(name):
+                        update_record("npm", name, current, wanted, kind, False, skipped_reason="filtered by allow/ignore")
+                        continue
+                    if kind == "major" and not CONFIG.get("include_major"):
+                        update_record("npm", name, current, wanted, kind, False, skipped_reason="major updates disabled")
+                    else:
+                        update_record("npm", name, current, wanted, kind, True)
+                        apply_updates.append(name)
                     if latest and latest != wanted and update_type(current, latest) == "major" and not CONFIG.get("include_major"):
-                        result["updates"].append({
-                            "ecosystem": "npm",
-                            "name": name,
-                            "from": current,
-                            "to": latest,
-                            "type": "major",
-                            "applied": False,
-                            "group": "major",
-                            "skipped_reason": "major updates disabled",
-                        })
+                        update_record("npm", name, current, latest, "major", False, group="major", skipped_reason="major updates disabled")
+                if apply_updates:
+                    run_command(cwd, "npm update --package-lock-only " + " ".join(shlex.quote(value) for value in apply_updates))
             except Exception as exc:
                 result["commands"].append({"command": "parse npm outdated output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
                 had_failure = True
-        run_command(cwd, "npm update --package-lock-only")
 
 result["files_changed"] = changed_files(before)
 print(json.dumps(result, sort_keys=True))
