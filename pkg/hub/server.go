@@ -5328,7 +5328,7 @@ func resolveModelAndLLMKey(hubCfg *types.HubConfig, selectedKeyName, defaultMode
 	if resolvedModel == "" {
 		activeKey := resolveActiveKey(hubCfg.LLMKeys, selectedKeyName)
 		if activeKey != nil {
-			if resolvedKeyName == "" {
+			if resolvedKeyName == "" || resolvedKeyName != activeKey.Name {
 				resolvedKeyName = activeKey.Name
 			}
 			resolvedModel = resolveDefaultModelForKey(hubCfg, activeKey)

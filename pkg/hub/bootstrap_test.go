@@ -341,6 +341,21 @@ func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
 }
 
+func TestResolveModelAndLLMKeyReplacesUnusableSelectedKey(t *testing.T) {
+	hubCfg := &types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "openai-empty", Provider: "openai", Default: true},
+			{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test"},
+		},
+	}
+
+	model, llmKey := resolveModelAndLLMKey(hubCfg, "openai-empty", "")
+
+	if model != "anthropic/claude-sonnet-4-6" || llmKey != "anthropic-main" {
+		t.Fatalf("model/llm_key = %q/%q, want anthropic fallback", model, llmKey)
+	}
+}
+
 func TestBuildOnboardFlags_OllamaUsesNativeBaseURLAndModelID(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "ollama-main", Provider: "ollama", Default: true},
