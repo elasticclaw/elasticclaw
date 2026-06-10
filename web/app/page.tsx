@@ -18,7 +18,10 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(() => isConfigured())
+  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
+    if (typeof window === "undefined") return null
+    return isConfigured()
+  })
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
@@ -136,7 +139,7 @@ export default function Home() {
     )
   }, [pinnedClaws, activeTagFilters])
 
-    // Eagerly load messages for all claws once the claw list is first available.
+  // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
   // Board cards are passive — they never trigger loadMessages themselves.
   const boardLoadedRef = useRef(false)

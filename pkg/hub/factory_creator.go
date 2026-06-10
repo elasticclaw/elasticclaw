@@ -357,6 +357,32 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		return "", false, fmt.Errorf("db insert: %w", err)
 	}
 
+	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForFactory(factory)
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind:          taskRunKindForFactory(factory),
+		OwnerType:        taskRunOwnerFactory,
+		OwnerName:        factory.Name,
+		OwnerDisplayName: factory.Name,
+		WorkspaceName:    factory.Workspace,
+		FactoryName:      factory.Name,
+		Integration:      factory.Integration,
+		IssueID:          issueID,
+		Model:            defaultModel,
+		LLMKey:           llmKey,
+		Source:           taskRunSourceFactory,
+		AnalyticsEnabled: analyticsEnabled,
+		RequiresPR:       requiresPR,
+		ExcludedReason:   excludedReason,
+		StartedAt:        now,
+		EventKey:         "task_start:claw:" + clawID,
+	}); err != nil {
+		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
+			log.Printf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+		}
+		go s.promotePendingClaws()
+		return "", false, fmt.Errorf("task run analytics: %w", err)
+	}
+
 	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",

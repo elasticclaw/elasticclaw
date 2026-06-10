@@ -46,6 +46,17 @@ stages:
 	}
 }
 
+func TestWorkflowConfigRejectsInvalidRunKind(t *testing.T) {
+	workflow := &WorkflowConfig{Name: "invalid-kind", RunKind: "typo"}
+	err := workflow.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid run_kind") {
+		t.Fatalf("Validate() error = %v, want invalid run_kind", err)
+	}
+}
+
 func TestWorkflowV1LinearTriggerValidates(t *testing.T) {
 	data := []byte(`
 schema_version: v1
@@ -187,6 +198,40 @@ stages:
 	}
 	if workflow.TriggerStatus != "Todo" {
 		t.Fatalf("trigger status = %q, want Todo", workflow.TriggerStatus)
+	}
+}
+
+func TestWorkflowV1CronTriggerValidates(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: dependency-update
+trigger:
+  cron:
+    schedule: "0 9 * * 1"
+    timezone: America/Chicago
+    overlap_policy: skip
+    timeout: 2h
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: start
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if workflow.Integration != "cron" {
+		t.Fatalf("integration = %q, want cron", workflow.Integration)
+	}
+	if !strings.Contains(workflow.PipelineYAML, "stages:") {
+		t.Fatalf("pipeline yaml did not contain stages: %q", workflow.PipelineYAML)
 	}
 }
 

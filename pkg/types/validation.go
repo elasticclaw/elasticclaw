@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 // Valid colors for claw cards
@@ -17,6 +20,19 @@ var validColors = map[string]bool{
 // Valid integration types
 var validIntegrations = map[string]bool{
 	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true,
+}
+
+// Valid workflow integration types. Cron is workflow-only; factories still use
+// validIntegrations above.
+var validWorkflowIntegrations = buildWorkflowIntegrations()
+
+func buildWorkflowIntegrations() map[string]bool {
+	integrations := make(map[string]bool, len(validIntegrations)+1)
+	for integration := range validIntegrations {
+		integrations[integration] = true
+	}
+	integrations["cron"] = true
+	return integrations
 }
 
 // Valid provider types
@@ -34,6 +50,10 @@ var validFactoryInputTypes = map[string]bool{
 	"string": true, "number": true, "bool": true, "enum": true,
 }
 
+var validTaskRunKinds = map[string]bool{
+	"code_task": true, "pr_task": true,
+}
+
 // Valid GitHub trigger actions
 var validGitHubTriggerActions = map[string]bool{
 	"opened": true, "synchronize": true, "reopened": true, "closed": true,
@@ -49,6 +69,11 @@ var validExternalTriggerSources = map[string]bool{
 	"github-release": true, "generic-webhook": true,
 }
 
+// Valid cron overlap policies
+var validCronOverlapPolicies = map[string]bool{
+	"skip": true, "queue": true, "parallel": true,
+}
+
 // repoRegex validates owner/repo format
 var repoRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
@@ -56,6 +81,13 @@ var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
 // namePatternRegex validates that name_pattern only contains allowed placeholders.
 // Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
 var namePatternRegex = regexp.MustCompile(`^([a-zA-Z0-9_-]*\{[a-zA-Z0-9_]+\})*[a-zA-Z0-9_-]*$`)
+
+func validateRunKind(entityType, entityName, runKind string) error {
+	if runKind != "" && !validTaskRunKinds[runKind] {
+		return fmt.Errorf("%s %q: invalid run_kind %q (must be one of: code_task, pr_task)", entityType, entityName, runKind)
+	}
+	return nil
+}
 
 // Validate validates a FactoryConfig and returns an error if invalid.
 func (f *FactoryConfig) Validate() error {
@@ -84,6 +116,9 @@ func (f *FactoryConfig) Validate() error {
 	// Validate color if provided
 	if f.Color != "" && !validColors[f.Color] {
 		return fmt.Errorf("factory %q: invalid color %q", f.Name, f.Color)
+	}
+	if err := validateRunKind("factory", f.Name, f.RunKind); err != nil {
+		return err
 	}
 
 	// Validate name_pattern if provided
@@ -157,11 +192,14 @@ func (w *WorkflowConfig) Validate() error {
 	if strings.TrimSpace(w.Name) == "" {
 		return fmt.Errorf("workflow name is required")
 	}
-	if w.Integration != "" && !validIntegrations[w.Integration] {
-		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", w.Name, w.Integration)
+	if w.Integration != "" && !validWorkflowIntegrations[w.Integration] {
+		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external, cron)", w.Name, w.Integration)
 	}
 	if w.Color != "" && !validColors[w.Color] {
 		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
+	}
+	if err := validateRunKind("workflow", w.Name, w.RunKind); err != nil {
+		return err
 	}
 	if w.NamePattern != "" && !namePatternRegex.MatchString(w.NamePattern) {
 		return fmt.Errorf("workflow %q: invalid name_pattern %q (must contain only alphanumeric, hyphens, underscores, and {placeholders})", w.Name, w.NamePattern)
@@ -214,6 +252,9 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Shortcut != nil {
 		nestedCount++
 	}
+	if trigger.Cron != nil {
+		nestedCount++
+	}
 	if nestedCount != 1 {
 		return fmt.Errorf("workflow %q: trigger must define exactly one source", workflowName)
 	}
@@ -223,7 +264,35 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Linear != nil {
 		return validateLinearWorkflowTrigger(workflowName, trigger.Linear)
 	}
+	if trigger.Cron != nil {
+		return validateCronWorkflowTrigger(workflowName, trigger.Cron)
+	}
 	return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
+}
+
+func validateCronWorkflowTrigger(workflowName string, trigger *CronWorkflowTrigger) error {
+	if trigger.Schedule == "" {
+		return fmt.Errorf("workflow %q: cron trigger requires schedule", workflowName)
+	}
+	// Validate cron expression syntax using the same parser as the scheduler
+	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	if _, err := parser.Parse(trigger.Schedule); err != nil {
+		return fmt.Errorf("workflow %q: invalid cron schedule %q: %v", workflowName, trigger.Schedule, err)
+	}
+	if trigger.OverlapPolicy != "" && !validCronOverlapPolicies[trigger.OverlapPolicy] {
+		return fmt.Errorf("workflow %q: invalid cron overlap_policy %q (must be one of: skip, queue, parallel)", workflowName, trigger.OverlapPolicy)
+	}
+	if trigger.Timezone != "" {
+		if _, err := time.LoadLocation(trigger.Timezone); err != nil {
+			return fmt.Errorf("workflow %q: invalid cron timezone %q: %v", workflowName, trigger.Timezone, err)
+		}
+	}
+	if trigger.Timeout != "" {
+		if _, err := time.ParseDuration(trigger.Timeout); err != nil {
+			return fmt.Errorf("workflow %q: invalid cron timeout %q: %v", workflowName, trigger.Timeout, err)
+		}
+	}
+	return nil
 }
 
 func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIssuesWorkflowTrigger) error {

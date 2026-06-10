@@ -428,6 +428,29 @@ type AccessConfig struct {
 	InteractRequiresTags []string `yaml:"interact_requires_tags,omitempty"` // any matching tag grants interact
 }
 
+// ArtifactStorageConfig selects the hub-owned artifact store used for
+// content-addressed blobs, manifests, and refs.
+type ArtifactStorageConfig struct {
+	Backend string                      `yaml:"backend,omitempty" json:"backend,omitempty"` // local or s3
+	Local   *LocalArtifactStorageConfig `yaml:"local,omitempty" json:"local,omitempty"`
+	S3      *S3ArtifactStorageConfig    `yaml:"s3,omitempty" json:"s3,omitempty"`
+}
+
+type LocalArtifactStorageConfig struct {
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+type S3ArtifactStorageConfig struct {
+	Bucket          string `yaml:"bucket" json:"bucket"`
+	Region          string `yaml:"region,omitempty" json:"region,omitempty"`
+	Endpoint        string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty" json:"accessKeyId,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secretAccessKey,omitempty"`
+	SessionToken    string `yaml:"session_token,omitempty" json:"sessionToken,omitempty"`
+	PathStyle       bool   `yaml:"path_style,omitempty" json:"pathStyle,omitempty"`
+}
+
 type HubConfig struct {
 	// SchemaVersion is the schema version of this hub config file.
 	// Defaults to "v1" if not specified for backward compatibility.
@@ -488,6 +511,10 @@ type HubConfig struct {
 
 	// Auth holds GitHub OAuth and access control config for the hub web UI.
 	Auth *AuthConfig `yaml:"auth,omitempty"`
+
+	// ArtifactStorage configures the hub-owned artifact store used by
+	// checkpoints, volumes, and future large artifacts.
+	ArtifactStorage *ArtifactStorageConfig `yaml:"artifact_storage,omitempty" json:"artifactStorage,omitempty"`
 
 	// ConcurrencyGroups limits the number of simultaneously running claws per group.
 	// Each group has a name and a limit. 0 means unlimited.
@@ -576,6 +603,9 @@ type FactoryConfig struct {
 	WebhookSecret    string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"`         // HMAC-SHA256 secret for validating webhooks
 	Tags             []string `yaml:"tags,omitempty" json:"tags,omitempty"`                             // tags applied to created claws
 	Color            string   `yaml:"color,omitempty" json:"color,omitempty"`                           // color applied to created claws
+	RunKind          string   `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                     // analytics run kind: "code_task" or "pr_task"
+	AnalyticsEnabled *bool    `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`   // nil = infer from integration
+	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
 	// Labels: all must be present on the issue to trigger (AND)
 	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
-	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 )
 
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
@@ -413,6 +413,54 @@ func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
+	}
+}
+
+func TestTerminalPipelineFailureStageMarksWorkflowRunFailed(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+
+	const clawID = "claw-terminal-failure"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "validation",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at)
+		 VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
+		"run-terminal-failure", "test-tenant-id", "nightly", "engineering", "cron", "running", clawID, "{}",
+	)
+	if err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:       "failed",
+		Label:    "Failed",
+		Terminal: true,
+		Triggers: []pipeline.Trigger{{
+			GateResult: &pipeline.GateResultTrigger{
+				Stage:   "validation",
+				Verdict: "fail",
+			},
+		}},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+		t.Fatalf("terminal stage transition returned false")
+	}
+
+	var status, result string
+	if err := db.QueryRow(`SELECT status, result FROM workflow_runs WHERE id=?`, "run-terminal-failure").Scan(&status, &result); err != nil {
+		t.Fatalf("select workflow run: %v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("workflow run status = %q, want failed (result=%q)", status, result)
+	}
+	if result != "pipeline terminal stage failed" {
+		t.Fatalf("workflow run result = %q, want pipeline terminal stage failed", result)
 	}
 }
 

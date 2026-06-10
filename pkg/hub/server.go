@@ -25,11 +25,12 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
-	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
@@ -38,11 +39,12 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	db       *sql.DB
-	addr     string
-	hubCfg   *types.HubConfig
-	identity *HubIdentity
-	mux      *http.ServeMux
+	db        *sql.DB
+	addr      string
+	hubCfg    *types.HubConfig
+	identity  *HubIdentity
+	mux       *http.ServeMux
+	artifacts artifact.Store
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -71,6 +73,9 @@ type Server struct {
 	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
 	// multiple terminating claws each read active < max and promote, exceeding limit.
 	promoteMu sync.Mutex
+
+	// cronScheduler manages scheduled workflow runs
+	cronScheduler *cronScheduler
 }
 
 type clawConn struct {
@@ -172,8 +177,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if hubCfg == nil {
 		hubCfg = &types.HubConfig{}
 	}
+	artifacts, err := artifact.NewStoreFromHubConfig(context.Background(), identityDir, hubCfg.ArtifactStorage)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("artifact storage: %w", err)
+	}
 	id, err := LoadOrCreateIdentity(identityDir)
 	if err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("hub identity: %w", err)
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
@@ -182,6 +193,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		addr:              addr,
 		hubCfg:            hubCfg,
 		identity:          id,
+		artifacts:         artifacts,
 		claws:             make(map[string]*clawConn),
 		users:             make(map[string]*userConn),
 		fileAckWaiters:    make(map[string]chan types.FileAck),
@@ -197,6 +209,12 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	srv.startPRWatcher()
+
+	// Start cron scheduler for workflow triggers
+	srv.cronScheduler = newCronScheduler(srv)
+	if err := srv.cronScheduler.start(); err != nil {
+		log.Printf("[cron] failed to start scheduler: %v", err)
+	}
 	srv.startIntegrationPoller()
 
 	return srv, nil
@@ -276,18 +294,25 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github-issues", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/shortcut", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                    // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))     // POST manual trigger
-	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
-	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD))                   // workspace CRUD
-	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
+	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
+	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
+	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
+	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
+	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAuth(s.handleWorkspaceSecretsCRUD))
-	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAuth(s.handleWorkspaceGitHubAppsCRUD))
-	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAuth(s.handleWorkspaceIssueTrackersCRUD))
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
+	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
+	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
@@ -388,6 +413,73 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
+	}
+}
+
+func (s *Server) withAdminForMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
+	adminMethods := make(map[string]struct{}, len(methods))
+	for _, method := range methods {
+		adminMethods[method] = struct{}{}
+	}
+	authHandler := s.withAuth(next)
+	adminHandler := s.withConfigMutationAuth(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := adminMethods[r.Method]; ok {
+			adminHandler(w, r)
+			return
+		}
+		authHandler(w, r)
+	}
+}
+
+func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		queryToken := false
+		if token == "" {
+			token = r.URL.Query().Get("token")
+			queryToken = token != ""
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		s.mu.RLock()
+		hubToken := s.hubCfg.Token
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+
+		if token == hubToken && hubToken != "" {
+			next(w, r)
+			return
+		}
+		if queryToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		sessionSecret := s.webSessionSecret()
+		if sessionSecret != "" {
+			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
+				if !isAccessAdmin(accessCfg, payload.Login) {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+				r = r.WithContext(ctx)
+				next(w, r)
+				return
+			}
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 
@@ -1244,8 +1336,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Look up provider info before marking deleted so we can terminate the VM.
-		var provider, providerID string
-		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID)
+		var provider, providerID, clawStatus string
+		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(status,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID, &clawStatus)
 
 		// Post a comment on the linked issue/story when a factory-created claw is killed manually
 		factory, issueID := s.findFactoryForClaw(clawID)
@@ -1288,11 +1380,22 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		_, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ?`, clawID, tenantID)
+		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
 			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
 			return
+		}
+		rowsAffected, err := res.RowsAffected()
+		if err != nil || rowsAffected == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if clawStatus != "error" {
+			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
+		}
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
 		}
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{
@@ -1431,6 +1534,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
+		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
 		// Forward to claw if connected (or queue if busy)
 		s.mu.RLock()
 		cc := s.claws[clawID]
@@ -1909,7 +2013,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
 		desiredStatus := initialStatus(rp.GatewayReady)
-		if provider == "daytona" && bootstrapOK != 1 {
+		if !allowWakeBeforeBootstrap(provider, bootstrapOK) {
 			desiredStatus = "starting"
 		}
 		currentStatus = desiredStatus
@@ -1932,7 +2036,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var registrationTagsJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
-	allowWake := bootstrapOK == 1 || provider != "daytona"
+	allowWake := allowWakeBeforeBootstrap(provider, bootstrapOK)
 	var registrationTags []string
 	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 
@@ -2112,13 +2216,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.contextUsage = hb.ContextUsage
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
-						if gatewayReadyBool(hb.GatewayReady) && !cc.gatewayReady {
-							cc.gatewayReady = true
+						if gatewayReadyBool(hb.GatewayReady) {
 							res, execErr := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
 							var rowsUpdated int64
 							if execErr == nil {
 								rowsUpdated, _ = res.RowsAffected()
 							}
+							cc.gatewayReady = true
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
 									Type:    "claw_status",
@@ -2129,7 +2233,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 								wakeConn = cc
 								go s.requestBootstrapCheckpoint(clawID)
 							}
-						} else if !hb.GatewayHealthy {
+						}
+						if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
 							if cc.gatewayUnhealthyCount == 1 {
 								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
@@ -2613,6 +2718,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 			)
+			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()
 			cc := s.claws[hm.ClawID]
 			s.mu.RUnlock()
@@ -2790,7 +2896,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
 
-	exec := func(label string, timeout time.Duration, cmd string) error {
+	execResult := func(label string, timeout time.Duration, cmd string) (*types.ExecResult, error) {
 		s.setBootstrapStatus(clawID, daytonaBootstrapStatusForStep(label))
 		const maxAttempts = 3
 		var lastErr error
@@ -2816,9 +2922,14 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				continue
 			}
 			log.Printf("[daytona] %s done", label)
-			return nil
+			return result, nil
 		}
-		return lastErr
+		return nil, lastErr
+	}
+
+	exec := func(label string, timeout time.Duration, cmd string) error {
+		_, err := execResult(label, timeout, cmd)
+		return err
 	}
 
 	// Step 1: Install pinned OpenClaw version.
@@ -2836,16 +2947,34 @@ echo uninstalled`); err != nil {
 	}
 
 	const daytonaOpenClawVersion = "2026.6.1"
-	if err := exec("install openclaw", 3*time.Minute,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; \
-hash -r; \
-echo 'install done'`, daytonaOpenClawVersion)); err != nil {
+	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
+	}
+	deadline := time.Now().Add(4 * time.Minute)
+	var lastInstallStatus string
+	installComplete := false
+	for !installComplete {
+		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand(daytonaOpenClawVersion))
+		if err != nil {
+			lastInstallStatus = err.Error()
+		} else {
+			lastInstallStatus = strings.TrimSpace(result.Stdout)
+			switch {
+			case strings.Contains(result.Stdout, "openclaw-install-status=ok"):
+				installComplete = true
+			case strings.Contains(result.Stdout, "openclaw-install-status=failed"),
+				strings.Contains(result.Stdout, "openclaw-install-status=missing"),
+				strings.Contains(result.Stdout, "openclaw-install-status=unknown"):
+				return fmt.Errorf("install openclaw failed: %s", sanitizeBootstrapOutput(result.Stdout))
+			}
+		}
+		if installComplete {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("install openclaw timed out: %s", sanitizeBootstrapOutput(lastInstallStatus))
+		}
+		time.Sleep(10 * time.Second)
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
@@ -3273,6 +3402,13 @@ gh auth status`
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}
+			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
+				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
+					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
+				} else {
+					log.Printf("[daytona] repo instruction discovery done")
+				}
+			}
 		}
 	}
 
@@ -3304,7 +3440,7 @@ gh auth status`
 		log.Printf("[daytona] workspace readiness verified for claw %s", clawID)
 	}
 
-	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.markBootstrapReady(clawID)
 	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
 	s.setBootstrapStatus(clawID, "Connecting to hub")
 
@@ -3420,6 +3556,66 @@ echo "claw-bridge not running"
 exit 1`
 }
 
+func daytonaStartOpenClawInstallCommand(version string) string {
+	installScript := fmt.Sprintf(`set -o pipefail
+export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+NPM="$NVM_DIR/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+echo "npm=$NPM prefix=$PREFIX"
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; then
+  hash -r
+  echo ok > "$STATUS"
+  echo "install done"
+else
+  rc=$?
+  echo "failed:$rc" > "$STATUS"
+  exit "$rc"
+fi`, version)
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+rm -f "$LOG" "$STATUS"
+setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
+echo "openclaw-install-status=started"`, shellQuote(installScript))
+}
+
+func daytonaOpenClawInstallStatusCommand(version string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+if [ -s "$STATUS" ]; then
+  status="$(cat "$STATUS")"
+  case "$status" in
+    ok)
+      echo "openclaw-install-status=ok"
+      exit 0
+      ;;
+    failed:*)
+      echo "openclaw-install-status=failed"
+      echo "$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+    *)
+      echo "openclaw-install-status=unknown:$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+  esac
+fi
+if pgrep -af %s >/dev/null 2>&1; then
+  echo "openclaw-install-status=pending"
+  tail -n 20 "$LOG" 2>/dev/null || true
+  exit 0
+fi
+echo "openclaw-install-status=missing"
+tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+}
+
 func daytonaPrepareBridgeCommand() string {
 	return `set -e
 export HOME=/home/daytona
@@ -3458,8 +3654,13 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
   exit 0
 fi
 rm -f "$PIDFILE"
-ELASTICCLAW_HUB_URL=%q ELASTICCLAW_CLAW_ID=%q ELASTICCLAW_CLAW_TOKEN=%q ELASTICCLAW_CLAW_NAME=%q \
-sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`, hubURL, clawID, clawToken, clawName)
+ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s \
+sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`,
+		shellQuote(hubURL),
+		shellQuote(clawID),
+		shellQuote(clawToken),
+		shellQuote(clawName),
+	)
 }
 
 func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {
@@ -3618,6 +3819,62 @@ func repoDirectoryName(repoFullName string) string {
 		return repoParts[1]
 	}
 	return repoFullName
+}
+
+func allowWakeBeforeBootstrap(provider string, bootstrapOK int) bool {
+	switch provider {
+	case "daytona", "replicated", "exedev":
+		return bootstrapOK == 1
+	default:
+		return true
+	}
+}
+
+func (s *Server) markBootstrapReady(clawID string) {
+	if clawID == "" {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE claws SET bootstrap_ok=1, bootstrap_diagnostic='' WHERE id=?`, clawID)
+	s.promoteBootstrapReadyClaw(clawID)
+}
+
+func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return false
+	}
+
+	cc.mu.RLock()
+	gatewayReady := cc.gatewayReady
+	tenantID := cc.tenantID
+	cc.mu.RUnlock()
+	if !gatewayReady {
+		return false
+	}
+
+	res, err := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
+	if err != nil {
+		return false
+	}
+	rowsUpdated, _ := res.RowsAffected()
+	if rowsUpdated == 0 {
+		return false
+	}
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
+	})
+	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
+	go s.requestBootstrapCheckpoint(clawID)
+	if s.initializePipelineEntryIfNeeded(clawID) {
+		go s.sendInitialPlanInstruction(cc, clawID)
+	} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
+		go s.sendWakeMessage(cc, clawID)
+	}
+	return true
 }
 
 func daytonaRepoReadinessSnippet(repoFullName string) string {
@@ -3926,6 +4183,13 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
+	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
+			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
+		}
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+	}
+	s.markBootstrapReady(clawID)
 
 	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
@@ -4858,6 +5122,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
+	s.markBootstrapReady(clawID)
 
 	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
@@ -5074,6 +5339,82 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	return b.String()
 }
 
+var repoInstructionFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
+
+const repoInstructionsIndexName = "REPO_INSTRUCTIONS.md"
+
+const repoInstructionsAgentsSection = `## Repository Instructions
+
+If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cloned repository. It lists repository-owned instruction files such as ` + "`AGENTS.md`" + `, ` + "`CLAUDE.md`" + `, and ` + "`GEMINI.md`" + `.`
+
+func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `set -euo pipefail
+WORKSPACE_DIR=%s
+mkdir -p "$WORKSPACE_DIR"
+cd "$WORKSPACE_DIR"
+TMP="$(mktemp "$WORKSPACE_DIR/.repo-instructions.XXXXXX")"
+FOUND=0
+{
+  printf '%%s\n\n' '# Repository Instructions'
+  printf '%%s\n\n' 'ElasticClaw detected repository-owned agent instruction files. Read the relevant files before making changes in that repository.'
+`, shellDoubleQuote(workspaceDir))
+	for _, repo := range repos {
+		repoName := repoDirectoryName(repo.Repo)
+		fmt.Fprintf(&b, `  REPO_DIR=%s
+  REPO_FOUND=0
+  if [ -d "$REPO_DIR" ]; then
+`, shellQuote(repoName))
+		for _, fileName := range repoInstructionFileNames {
+			repoPath := repoName + "/" + fileName
+			fmt.Fprintf(&b, "    if [ -f \"$REPO_DIR/%s\" ]; then\n", fileName)
+			fmt.Fprintf(&b, "      if [ \"$REPO_FOUND\" -eq 0 ]; then\n")
+			fmt.Fprintf(&b, "        printf '\\n## %%s\\n\\n' %s\n", shellQuote(repoName))
+			fmt.Fprintf(&b, "        REPO_FOUND=1\n")
+			fmt.Fprintf(&b, "        FOUND=1\n")
+			fmt.Fprintf(&b, "      fi\n")
+			fmt.Fprintf(&b, "      printf -- '- `%%s`\\n' %s\n", shellQuote(repoPath))
+			fmt.Fprintf(&b, "    fi\n")
+		}
+		b.WriteString("  fi\n")
+	}
+	fmt.Fprintf(&b, `} > "$TMP"
+if [ "$FOUND" -eq 1 ]; then
+  mv "$TMP" "$WORKSPACE_DIR/%s"
+else
+  rm -f "$TMP" "$WORKSPACE_DIR/%s"
+fi
+
+AGENTS_FILE="$WORKSPACE_DIR/AGENTS.md"
+SECTION='## Repository Instructions'
+if [ ! -f "$AGENTS_FILE" ]; then
+  cat > "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+%s
+ELASTICCLAW_REPO_AGENTS
+elif ! grep -Fqx "$SECTION" "$AGENTS_FILE"; then
+  cat >> "$AGENTS_FILE" << 'ELASTICCLAW_REPO_AGENTS'
+
+%s
+ELASTICCLAW_REPO_AGENTS
+fi
+`, repoInstructionsIndexName, repoInstructionsIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection)
+	return b.String()
+}
+
+func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
+	discoveryScript := buildRepoInstructionDiscoveryScript(workspaceDir, repos)
+	if discoveryScript == "" {
+		return ""
+	}
+	return fmt.Sprintf(`(
+%s
+) || echo "Warning: repo instruction discovery failed; continuing"
+`, discoveryScript)
+}
+
 // buildGitHubCredentialHelper returns shell script lines that install a git
 // credential helper on the VM if GitHub App is configured on the hub.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
@@ -5155,7 +5496,8 @@ set +e
 FAILED=0
 %s
 exit $FAILED
-) || echo "Warning: repo clone failed — agent can retry after bridge connects"`, tokenURL, buildGitHubCloneScript(repos))
+) || echo "Warning: repo clone failed — agent can retry after bridge connects"
+%s`, tokenURL, buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
@@ -5483,9 +5825,32 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateDaytonaVM(vmID)
 	case "exedev":
 		s.terminateExedevVM(vmID)
+	case "docker":
+		s.terminateDockerVM(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
+}
+
+// terminateDockerVM destroys a Docker agent container by name/ID.
+func (s *Server) terminateDockerVM(vmID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["docker"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateDockerVM: no docker provider configured")
+		return
+	}
+	p, err := newDockerProvider(cfg)
+	if err != nil {
+		log.Printf("terminateDockerVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+		log.Printf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Docker container %s terminated", vmID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.

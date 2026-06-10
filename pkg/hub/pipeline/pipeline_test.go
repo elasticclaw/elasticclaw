@@ -3,7 +3,7 @@ package pipeline_test
 import (
 	"testing"
 
-	"github.com/elasticclaw/elasticclaw/pkg/workflow/pipeline"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 )
 
 const sampleYAML = `

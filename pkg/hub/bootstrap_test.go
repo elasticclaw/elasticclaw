@@ -64,12 +64,38 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, cmd, "exec /usr/local/bin/claw-bridge", "runs installed bridge from async session command")
 	assertContains(t, cmd, "claw-bridge.pid", "writes pid file for idempotent retries")
 	assertContains(t, cmd, "kill -0", "validates existing and newly started process")
-	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID="claw-123"`, "passes claw id to bridge")
+	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID='claw-123'`, "passes claw id to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
 	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
 
 	assertContains(t, running, "claw-bridge.pid", "retry guard checks bridge pid file")
 	assertContains(t, running, "pgrep -x claw-bridge", "retry guard detects already running bridge")
+}
+
+func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
+	clawName := `$(touch /tmp/elasticclaw-pwned)' "quoted"`
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", clawName)
+
+	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
+	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
+	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME='", "claw name assignment must use single-quote wrapping")
+}
+
+func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
+	start := daytonaStartOpenClawInstallCommand("2026.6.1")
+	status := daytonaOpenClawInstallStatusCommand("2026.6.1")
+
+	assertContains(t, start, "setsid nohup bash -c", "install starts in a detached process")
+	assertContains(t, start, "openclaw-install.log", "install writes a log for diagnostics")
+	assertContains(t, start, "openclaw-install.status", "install writes a status marker")
+	assertContains(t, start, "openclaw@2026.6.1", "install pins the expected openclaw version")
+	assertContains(t, start, "openclaw-install-status=started", "start command returns quickly after launching")
+
+	assertContains(t, status, "openclaw-install-status=ok", "status reports completion")
+	assertContains(t, status, "openclaw-install-status=pending", "status reports in-progress install")
+	assertContains(t, status, "openclaw-install-status=failed", "status reports failed install")
+	assertContains(t, status, "tail -n 120", "status includes install diagnostics")
+	assertContains(t, status, "openclaw@2026.6.1", "status checks the pinned install process")
 }
 
 func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
@@ -341,6 +367,7 @@ func TestBuildOpenClawProviderConfig_ConfiguresOllamaProviderBaseURL(t *testing.
 	assertContains(t, snippet, "agent_defaults.setdefault('experimental', {})['localModelLean'] = True", "uses lean mode for weak local dev models")
 	assertContains(t, snippet, "'baseUrl': 'http://ollama:11434'", "uses Compose Ollama service URL")
 	assertContains(t, snippet, "'apiKey': 'OLLAMA_API_KEY'", "keeps Ollama API key env reference")
+	assertNotContains(t, snippet, "timeoutSeconds", "does not override OpenClaw's default Ollama timeout")
 	assertContains(t, snippet, "'contextWindow': 32768", "keeps OpenClaw local model prompt budget within Docker Ollama limits")
 	assertContains(t, snippet, "'maxTokens': 1024", "keeps local dev generation bounded")
 	assertContains(t, snippet, "'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'}", "sets native Ollama runtime context explicitly")
