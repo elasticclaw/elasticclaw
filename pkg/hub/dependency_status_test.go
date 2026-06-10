@@ -23,6 +23,22 @@ func (c stubDependencyChecker) CheckDependencyStatus(context.Context, dependency
 	return c.status, c.err
 }
 
+func newDependencyStatusServiceWithTargets(targets ...dependencyStatusTarget) *dependencyStatusService {
+	service := newDependencyStatusService(&types.HubConfig{})
+	service.targetProvider = func() []dependencyStatusTarget {
+		return targets
+	}
+	return service
+}
+
+func anthropicDependencyTarget() dependencyStatusTarget {
+	return dependencyStatusTarget{
+		ID:   "model:anthropic",
+		Name: "Anthropic",
+		Kind: dependencyKindModel,
+	}
+}
+
 type blockingDependencyChecker struct {
 	calls   atomic.Int32
 	once    sync.Once
@@ -90,9 +106,7 @@ func TestDependencyStatusDiscoversConfiguredDependencies(t *testing.T) {
 }
 
 func TestDependencyStatusFailureIsUnknownAndNotDowntime(t *testing.T) {
-	service := newDependencyStatusService(&types.HubConfig{
-		LLMKeys: types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-test"}},
-	})
+	service := newDependencyStatusServiceWithTargets(anthropicDependencyTarget())
 	service.checkers["model:anthropic"] = stubDependencyChecker{err: errors.New("status page unavailable")}
 
 	resp := service.snapshot(context.Background())
@@ -112,9 +126,7 @@ func TestDependencyStatusFailureIsUnknownAndNotDowntime(t *testing.T) {
 }
 
 func TestDependencyStatusKeepsLastDowntimeSnapshotWhenRefreshFails(t *testing.T) {
-	service := newDependencyStatusService(&types.HubConfig{
-		LLMKeys: types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-test"}},
-	})
+	service := newDependencyStatusServiceWithTargets(anthropicDependencyTarget())
 	service.cacheTTL = time.Nanosecond
 	service.checkers["model:anthropic"] = stubDependencyChecker{status: DependencyStatus{
 		ID:     "model:anthropic",
@@ -140,9 +152,7 @@ func TestDependencyStatusKeepsLastDowntimeSnapshotWhenRefreshFails(t *testing.T)
 }
 
 func TestDependencyStatusCoalescesConcurrentRefreshes(t *testing.T) {
-	service := newDependencyStatusService(&types.HubConfig{
-		LLMKeys: types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-test"}},
-	})
+	service := newDependencyStatusServiceWithTargets(anthropicDependencyTarget())
 	checker := &blockingDependencyChecker{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
@@ -191,7 +201,7 @@ func TestDependencyStatusEndpointRequiresAuthAndReturnsSnapshot(t *testing.T) {
 		Token:   "test-token",
 		LLMKeys: types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-test"}},
 	}, "", "", "")
-	s.dependencyStatus = newDependencyStatusService(s.hubCfg)
+	s.dependencyStatus = newDependencyStatusServiceWithTargets(anthropicDependencyTarget())
 	s.dependencyStatus.checkers["model:anthropic"] = stubDependencyChecker{status: DependencyStatus{
 		ID:     "model:anthropic",
 		Name:   "Anthropic",

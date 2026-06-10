@@ -52,13 +52,16 @@ type dependencyStatusChecker interface {
 	CheckDependencyStatus(context.Context, dependencyStatusTarget) (DependencyStatus, error)
 }
 
+type dependencyStatusTargetProvider func() []dependencyStatusTarget
+
 type dependencyStatusService struct {
-	mu       sync.Mutex
-	hubCfg   *types.HubConfig
-	checkers map[string]dependencyStatusChecker
-	cache    *DependencyStatusResponse
-	cacheTTL time.Duration
-	refresh  singleflight.Group
+	mu             sync.Mutex
+	hubCfg         *types.HubConfig
+	checkers       map[string]dependencyStatusChecker
+	targetProvider dependencyStatusTargetProvider
+	cache          *DependencyStatusResponse
+	cacheTTL       time.Duration
+	refresh        singleflight.Group
 }
 
 func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
@@ -124,7 +127,7 @@ func (s *dependencyStatusService) cachedSnapshot() *DependencyStatusResponse {
 
 func (s *dependencyStatusService) refreshSnapshot(ctx context.Context) DependencyStatusResponse {
 	cached := s.cachedSnapshot()
-	targets := s.discoverTargets()
+	targets := s.targets()
 	if len(targets) == 0 {
 		resp := DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()}
 		s.storeSnapshot(resp)
@@ -138,6 +141,13 @@ func (s *dependencyStatusService) refreshSnapshot(ctx context.Context) Dependenc
 	}
 	s.storeSnapshot(resp)
 	return resp
+}
+
+func (s *dependencyStatusService) targets() []dependencyStatusTarget {
+	if s.targetProvider != nil {
+		return append([]dependencyStatusTarget(nil), s.targetProvider()...)
+	}
+	return s.discoverTargets()
 }
 
 func (s *dependencyStatusService) storeSnapshot(resp DependencyStatusResponse) {
