@@ -288,25 +288,25 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github-issues", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/shortcut", s.handleShortcutWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                    // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))     // POST manual trigger
-	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics)) // GET factory analytics
-	mux.HandleFunc("/api/factories", s.withAuth(s.handleFactoriesCRUD))                     // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))   // GET all factories analytics
+	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
+	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
+	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
+	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
+	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
 	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
 	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
 	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
 	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/workspaces", s.withAuth(s.handleWorkspacesCRUD)) // workspace CRUD
-	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAuth(s.handleWorkspaceWorkflowsList))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAuth(s.handleWorkspaceWorkflowDetail))
+	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
+	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
-	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAuth(s.handleWorkspaceSecretsCRUD))
-	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAuth(s.handleWorkspaceGitHubAppsCRUD))
-	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAuth(s.handleWorkspaceIssueTrackersCRUD))
+	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
+	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
+	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
@@ -407,6 +407,22 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
+	}
+}
+
+func (s *Server) withAdminForMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
+	adminMethods := make(map[string]struct{}, len(methods))
+	for _, method := range methods {
+		adminMethods[method] = struct{}{}
+	}
+	authHandler := s.withAuth(next)
+	adminHandler := s.withWebAdminAuth(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := adminMethods[r.Method]; ok {
+			adminHandler(w, r)
+			return
+		}
+		authHandler(w, r)
 	}
 }
 

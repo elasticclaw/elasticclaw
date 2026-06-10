@@ -1560,6 +1560,120 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	}
 }
 
+func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "hub-token",
+		Auth: &types.AuthConfig{
+			SessionSecret: "session-secret",
+			GitHubOAuth:   &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
+			Access:        &types.AccessConfig{Admins: []string{"admin-user"}},
+		},
+	}, "", "", "")
+
+	regularSession, err := signGitHubSession("session-secret", "regular-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSession, err := signGitHubSession("session-secret", "admin-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	handler := s.withAdminForMethods(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}, http.MethodPost)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.Header.Set("Authorization", "Bearer "+regularSession)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected read method to allow regular user, got %d", rec.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("expected handler to be called once, got %d", calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	req.Header.Set("Authorization", "Bearer "+regularSession)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mutation method to reject regular user with %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("expected handler not to be called for rejected mutation, got %d calls", calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	req.Header.Set("Authorization", "Bearer "+adminSession)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected mutation method to allow admin user, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	req.Header.Set("Authorization", "Bearer hub-token")
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected mutation method to allow hub token, got %d", rec.Code)
+	}
+}
+
+func TestConfigMutationRoutesRequireWebAdminForGitHubSessions(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "hub-token",
+		Auth: &types.AuthConfig{
+			SessionSecret: "session-secret",
+			GitHubOAuth:   &types.GitHubOAuthConfig{ClientSecret: "oauth-secret"},
+			Access:        &types.AccessConfig{Admins: []string{"admin-user"}},
+		},
+	}, "", "", "")
+	session, err := signGitHubSession("session-secret", "regular-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "factory push", method: http.MethodPost, path: "/api/factories", body: `{"factories":[]}`},
+		{name: "factory delete", method: http.MethodDelete, path: "/api/factories?name=demo"},
+		{name: "workspace push", method: http.MethodPost, path: "/api/workspaces", body: `{"workspaces":[]}`},
+		{name: "workspace delete", method: http.MethodDelete, path: "/api/workspaces?name=demo"},
+		{name: "workflow push", method: http.MethodPost, path: "/api/workspaces/demo/workflows", body: `{"workflows":[]}`},
+		{name: "workflow patch", method: http.MethodPatch, path: "/api/workspaces/demo/workflows/build", body: `{"enabled":true}`},
+		{name: "workspace secret upsert", method: http.MethodPut, path: "/api/workspaces/demo/secrets", body: `{"name":"TOKEN","value":"secret"}`},
+		{name: "workspace secret delete", method: http.MethodDelete, path: "/api/workspaces/demo/secrets?name=TOKEN"},
+		{name: "workspace github app upsert", method: http.MethodPost, path: "/api/workspaces/demo/github-apps", body: `{"name":"app","appId":1}`},
+		{name: "workspace github app delete", method: http.MethodDelete, path: "/api/workspaces/demo/github-apps?name=app"},
+		{name: "workspace issue tracker upsert", method: http.MethodPost, path: "/api/workspaces/demo/issue-trackers", body: `{"type":"linear","workspace":"eng","token":"token"}`},
+		{name: "workspace issue tracker delete", method: http.MethodDelete, path: "/api/workspaces/demo/issue-trackers?type=linear&workspace=eng"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+session)
+			rec := httptest.NewRecorder()
+
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestProvisionReplicatedDefersEnvInjectionToBootstrap(t *testing.T) {
 	var createRequests int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
