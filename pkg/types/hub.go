@@ -109,3 +109,37 @@ type CheckpointComplete struct {
 	RootSHA256   string `json:"root_sha256"`
 	Error        string `json:"error,omitempty"`
 }
+
+type VolumeAttachPayload struct {
+	RequestID string `json:"request_id"`
+	LeaseID   string `json:"lease_id"`
+	Name      string `json:"name"`
+	Mode      string `json:"mode"`
+	Mount     string `json:"mount"`
+	HubURL    string `json:"hub_url"`
+	ClawToken string `json:"claw_token"`
+}
+
+type VolumeAttachAck struct {
+	RequestID string `json:"request_id"`
+	LeaseID   string `json:"lease_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+type VolumeSyncPayload struct {
+	RequestID string `json:"request_id"`
+	LeaseID   string `json:"lease_id"`
+	Name      string `json:"name"`
+	Mode      string `json:"mode"`
+	Mount     string `json:"mount"`
+	HubURL    string `json:"hub_url"`
+	ClawToken string `json:"claw_token"`
+}
+
+type VolumeSyncAck struct {
+	RequestID string `json:"request_id"`
+	LeaseID   string `json:"lease_id"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}

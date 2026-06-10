@@ -81,6 +81,7 @@ var repoWildcardRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/\*$`)
 // namePatternRegex validates that name_pattern only contains allowed placeholders.
 // Allows multiple placeholders separated by literal characters, e.g. {issue_id}-{title}.
 var namePatternRegex = regexp.MustCompile(`^([a-zA-Z0-9_-]*\{[a-zA-Z0-9_]+\})*[a-zA-Z0-9_-]*$`)
+var volumeNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func validateRunKind(entityType, entityName, runKind string) error {
 	if runKind != "" && !validTaskRunKinds[runKind] {
@@ -233,10 +234,53 @@ func (w *WorkflowConfig) Validate() error {
 			return err
 		}
 	}
+	seenVolumes := map[string]struct{}{}
+	for i, volume := range w.Volumes {
+		if err := validateWorkflowVolume(w.Name, i, volume, seenVolumes); err != nil {
+			return err
+		}
+	}
 	for i, stage := range w.Stages {
 		if strings.TrimSpace(stage.ID) == "" {
 			return fmt.Errorf("workflow %q: stages[%d].id is required", w.Name, i)
 		}
+	}
+	return nil
+}
+
+func validateWorkflowVolume(workflowName string, index int, volume WorkflowVolume, seen map[string]struct{}) error {
+	name := strings.TrimSpace(volume.Name)
+	if name == "" {
+		return fmt.Errorf("workflow %q: volumes[%d].name is required", workflowName, index)
+	}
+	if !volumeNameRegex.MatchString(name) {
+		return fmt.Errorf("workflow %q: volumes[%d].name %q must contain only alphanumeric, hyphens, or underscores", workflowName, index, volume.Name)
+	}
+	lowerName := strings.ToLower(name)
+	if _, ok := seen[lowerName]; ok {
+		return fmt.Errorf("workflow %q: duplicate volume name %q", workflowName, volume.Name)
+	}
+	seen[lowerName] = struct{}{}
+	source := strings.TrimSpace(volume.Source)
+	if !strings.HasPrefix(source, "hub://volumes/") || strings.TrimPrefix(source, "hub://volumes/") == "" {
+		return fmt.Errorf("workflow %q: volumes[%d].source must use hub://volumes/<name>", workflowName, index)
+	}
+	mount := strings.TrimSpace(volume.Mount)
+	if mount == "" || !strings.HasPrefix(mount, "/") {
+		return fmt.Errorf("workflow %q: volumes[%d].mount must be an absolute path outside the repository", workflowName, index)
+	}
+	if strings.Contains(mount, "..") {
+		return fmt.Errorf("workflow %q: volumes[%d].mount must not contain path traversal", workflowName, index)
+	}
+	if mount == "/" || strings.HasPrefix(mount, "/home/daytona/.openclaw/workspace") || strings.HasPrefix(mount, "/workspace") {
+		return fmt.Errorf("workflow %q: volumes[%d].mount must be outside the repository workspace", workflowName, index)
+	}
+	mode := strings.TrimSpace(volume.Mode)
+	if mode == "" {
+		mode = "ro"
+	}
+	if mode != "ro" && mode != "rw" {
+		return fmt.Errorf("workflow %q: volumes[%d].mode must be ro or rw", workflowName, index)
 	}
 	return nil
 }

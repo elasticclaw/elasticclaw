@@ -33,22 +33,23 @@ type WorkspaceAccess struct {
 
 // WorkflowView is a workflow-shaped projection of a legacy factory.
 type WorkflowView struct {
-	Name                 string               `json:"name"`
-	WorkspaceName        string               `json:"workspaceName"`
-	Source               string               `json:"source"`
-	Integration          string               `json:"integration"`
-	IntegrationWorkspace string               `json:"integrationWorkspace,omitempty"`
-	TriggerStatus        string               `json:"triggerStatus,omitempty"`
-	DoneStatus           string               `json:"doneStatus,omitempty"`
-	Labels               []string             `json:"labels,omitempty"`
-	AssignedTo           string               `json:"assignedTo,omitempty"`
-	Enabled              bool                 `json:"enabled"`
-	HasWebhookSecret     bool                 `json:"hasWebhookSecret"`
-	WebhookSecretRef     string               `json:"webhookSecretRef,omitempty"`
-	PipelineYAML         string               `json:"pipelineYAML,omitempty"`
-	EnableManualTrigger  bool                 `json:"enableManualTrigger,omitempty"`
-	SecretRefs           map[string]string    `json:"secretRefs,omitempty"`
-	Inputs               []types.FactoryInput `json:"inputs,omitempty"`
+	Name                 string                 `json:"name"`
+	WorkspaceName        string                 `json:"workspaceName"`
+	Source               string                 `json:"source"`
+	Integration          string                 `json:"integration"`
+	IntegrationWorkspace string                 `json:"integrationWorkspace,omitempty"`
+	TriggerStatus        string                 `json:"triggerStatus,omitempty"`
+	DoneStatus           string                 `json:"doneStatus,omitempty"`
+	Labels               []string               `json:"labels,omitempty"`
+	AssignedTo           string                 `json:"assignedTo,omitempty"`
+	Enabled              bool                   `json:"enabled"`
+	HasWebhookSecret     bool                   `json:"hasWebhookSecret"`
+	WebhookSecretRef     string                 `json:"webhookSecretRef,omitempty"`
+	PipelineYAML         string                 `json:"pipelineYAML,omitempty"`
+	EnableManualTrigger  bool                   `json:"enableManualTrigger,omitempty"`
+	SecretRefs           map[string]string      `json:"secretRefs,omitempty"`
+	Volumes              []types.WorkflowVolume `json:"volumes,omitempty"`
+	Inputs               []types.FactoryInput   `json:"inputs,omitempty"`
 }
 
 func (s *Server) handleWorkspacesList(w http.ResponseWriter, _ *http.Request) {
@@ -496,6 +497,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		Enabled:              workflow.Enabled == nil || *workflow.Enabled,
 		EnableManualTrigger:  workflow.EnableManualTrigger,
 		SecretRefs:           cloneStringMap(workflow.SecretRefs),
+		Volumes:              append([]types.WorkflowVolume(nil), workflow.Volumes...),
 		Inputs:               append([]types.FactoryInput(nil), workflow.Inputs...),
 	}
 }

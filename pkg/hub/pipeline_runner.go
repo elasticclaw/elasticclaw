@@ -1444,6 +1444,7 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
 
 		s.checkpointBeforeTermination(clawID, "pipeline-terminal")
+		s.syncWorkflowVolumes(clawID)
 
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
@@ -1649,6 +1650,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // poll saw "terminated") to avoid redundant delete attempts that spam the logs with 404 errors.
 func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool) {
 	s.checkpointBeforeTermination(clawID, "stop-agent")
+	s.syncWorkflowVolumes(clawID)
 
 	// Resolve factory + issueID
 	factory, issueID := s.findFactoryForClaw(clawID)

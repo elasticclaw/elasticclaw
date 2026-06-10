@@ -53,9 +53,11 @@ type Server struct {
 
 	dependencyStatus *dependencyStatusService
 
-	fileAckMu       sync.Mutex
-	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
-	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
+	fileAckMu           sync.Mutex
+	fileAckWaiters      map[string]chan types.FileAck      // request_id -> waiter
+	fileReadWaiters     map[string]chan types.FileReadResp // request_id -> waiter
+	volumeAttachWaiters map[string]chan types.VolumeAttachAck
+	volumeSyncWaiters   map[string]chan types.VolumeSyncAck
 
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
@@ -317,6 +319,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
+	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
@@ -2103,6 +2106,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
+	if allowWake && cc.gatewayReady && currentStatus == "connected" {
+		if err := s.attachWorkflowVolumes(ctx, cc, clawID); err != nil {
+			go s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false)
+			return
+		}
+	}
+
 	// Drain any queued messages that were copied from the old connection.
 	// This must happen after the connection is live but before the read loop starts.
 	// We call it synchronously (not in a goroutine) to avoid racing with new user messages.
@@ -2262,6 +2272,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Unlock()
 					}
 					s.mu.Unlock()
+					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldWarnContext {
 						s.mu.RLock()
 						warnCC := s.claws[clawID]
@@ -2496,6 +2507,36 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if ch != nil {
 						select {
 						case ch <- resp:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "volume_attach_ack" {
+				raw, _ := json.Marshal(msg.Payload)
+				var ack types.VolumeAttachAck
+				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.volumeAttachWaiters[ack.RequestID]
+					delete(s.volumeAttachWaiters, ack.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- ack:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "volume_sync_ack" {
+				raw, _ := json.Marshal(msg.Payload)
+				var ack types.VolumeSyncAck
+				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.volumeSyncWaiters[ack.RequestID]
+					delete(s.volumeSyncWaiters, ack.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- ack:
 						default:
 						}
 					}
