@@ -428,6 +428,29 @@ type AccessConfig struct {
 	InteractRequiresTags []string `yaml:"interact_requires_tags,omitempty"` // any matching tag grants interact
 }
 
+// ArtifactStorageConfig selects the hub-owned artifact store used for
+// content-addressed blobs, manifests, and refs.
+type ArtifactStorageConfig struct {
+	Backend string                      `yaml:"backend,omitempty" json:"backend,omitempty"` // local or s3
+	Local   *LocalArtifactStorageConfig `yaml:"local,omitempty" json:"local,omitempty"`
+	S3      *S3ArtifactStorageConfig    `yaml:"s3,omitempty" json:"s3,omitempty"`
+}
+
+type LocalArtifactStorageConfig struct {
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+type S3ArtifactStorageConfig struct {
+	Bucket          string `yaml:"bucket" json:"bucket"`
+	Region          string `yaml:"region,omitempty" json:"region,omitempty"`
+	Endpoint        string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty" json:"accessKeyId,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secretAccessKey,omitempty"`
+	SessionToken    string `yaml:"session_token,omitempty" json:"sessionToken,omitempty"`
+	PathStyle       bool   `yaml:"path_style,omitempty" json:"pathStyle,omitempty"`
+}
+
 type HubConfig struct {
 	// SchemaVersion is the schema version of this hub config file.
 	// Defaults to "v1" if not specified for backward compatibility.
@@ -488,6 +511,10 @@ type HubConfig struct {
 
 	// Auth holds GitHub OAuth and access control config for the hub web UI.
 	Auth *AuthConfig `yaml:"auth,omitempty"`
+
+	// ArtifactStorage configures the hub-owned artifact store used by
+	// checkpoints, volumes, and future large artifacts.
+	ArtifactStorage *ArtifactStorageConfig `yaml:"artifact_storage,omitempty" json:"artifactStorage,omitempty"`
 
 	// ConcurrencyGroups limits the number of simultaneously running claws per group.
 	// Each group has a name and a limit. 0 means unlimited.
