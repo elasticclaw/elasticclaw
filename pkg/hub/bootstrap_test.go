@@ -78,7 +78,7 @@ func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 
 	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
 	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
-	assertNotContains(t, cmd, "%q", "must not use Go printf quoting in shell command")
+	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME='", "claw name assignment must use single-quote wrapping")
 }
 
 func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
