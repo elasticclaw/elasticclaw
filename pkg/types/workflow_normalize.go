@@ -48,6 +48,8 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			if len(workflow.Trigger.Shortcut.States) > 0 {
 				workflow.TriggerStatus = workflow.Trigger.Shortcut.States[0]
 			}
+		case workflow.Trigger.Cron != nil:
+			workflow.Integration = "cron"
 		}
 	}
 	if len(workflow.Stages) > 0 {

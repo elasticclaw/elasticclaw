@@ -512,6 +512,26 @@ func migrate(db *sql.DB) error {
 		PRIMARY KEY (claw_id, stage_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_stage_history_claw ON pipeline_stage_history(claw_id, created_at);
+
+	-- v12: workflow_runs table for cron and manual workflow execution history
+	CREATE TABLE IF NOT EXISTS workflow_runs (
+		id             TEXT PRIMARY KEY,
+		tenant_id      TEXT NOT NULL DEFAULT '',
+		workflow_name  TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		trigger_type   TEXT NOT NULL DEFAULT 'cron',  -- 'cron', 'manual'
+		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'running', 'completed', 'failed', 'skipped', 'timed_out', 'canceled'
+		result         TEXT NOT NULL DEFAULT '',           -- 'success', 'failure', 'skipped', 'timed_out', 'canceled'
+		claw_id        TEXT NOT NULL DEFAULT '',
+		run_context    TEXT NOT NULL DEFAULT '{}',         -- JSON: trigger, workflow, repository info
+		started_at     DATETIME,
+		finished_at    DATETIME,
+		created_at     DATETIME NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs(tenant_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(tenant_id, workflow_name, workspace_name, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(tenant_id, status, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_runs_claw ON workflow_runs(claw_id);
 	`)
 	return err
 }

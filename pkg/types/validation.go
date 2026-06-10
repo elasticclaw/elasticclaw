@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 // Valid colors for claw cards
@@ -51,6 +54,11 @@ var validGitHubTriggerTypes = map[string]bool{
 // Valid external trigger sources
 var validExternalTriggerSources = map[string]bool{
 	"github-release": true, "generic-webhook": true,
+}
+
+// Valid cron overlap policies
+var validCronOverlapPolicies = map[string]bool{
+	"skip": true, "queue": true, "parallel": true,
 }
 
 // repoRegex validates owner/repo format
@@ -231,6 +239,9 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Shortcut != nil {
 		nestedCount++
 	}
+	if trigger.Cron != nil {
+		nestedCount++
+	}
 	if nestedCount != 1 {
 		return fmt.Errorf("workflow %q: trigger must define exactly one source", workflowName)
 	}
@@ -240,7 +251,35 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Linear != nil {
 		return validateLinearWorkflowTrigger(workflowName, trigger.Linear)
 	}
+	if trigger.Cron != nil {
+		return validateCronWorkflowTrigger(workflowName, trigger.Cron)
+	}
 	return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
+}
+
+func validateCronWorkflowTrigger(workflowName string, trigger *CronWorkflowTrigger) error {
+	if trigger.Schedule == "" {
+		return fmt.Errorf("workflow %q: cron trigger requires schedule", workflowName)
+	}
+	// Validate cron expression syntax using the same parser as the scheduler
+	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	if _, err := parser.Parse(trigger.Schedule); err != nil {
+		return fmt.Errorf("workflow %q: invalid cron schedule %q: %v", workflowName, trigger.Schedule, err)
+	}
+	if trigger.OverlapPolicy != "" && !validCronOverlapPolicies[trigger.OverlapPolicy] {
+		return fmt.Errorf("workflow %q: invalid cron overlap_policy %q (must be one of: skip, queue, parallel)", workflowName, trigger.OverlapPolicy)
+	}
+	if trigger.Timezone != "" {
+		if _, err := time.LoadLocation(trigger.Timezone); err != nil {
+			return fmt.Errorf("workflow %q: invalid cron timezone %q: %v", workflowName, trigger.Timezone, err)
+		}
+	}
+	if trigger.Timeout != "" {
+		if _, err := time.ParseDuration(trigger.Timeout); err != nil {
+			return fmt.Errorf("workflow %q: invalid cron timeout %q: %v", workflowName, trigger.Timeout, err)
+		}
+	}
+	return nil
 }
 
 func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIssuesWorkflowTrigger) error {
