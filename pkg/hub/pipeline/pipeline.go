@@ -197,6 +197,24 @@ type RunAction struct {
 	Output string `yaml:"output,omitempty"`
 }
 
+// DependencyUpdatesAction updates repository dependencies using ecosystem-native
+// tooling and emits structured JSON output for later workflow stages.
+type DependencyUpdatesAction struct {
+	Enabled          bool     `yaml:"-" json:"-"`
+	Ecosystems       []string `yaml:"ecosystems,omitempty"`
+	Paths            []string `yaml:"paths,omitempty"`
+	Grouping         string   `yaml:"grouping,omitempty"`
+	IncludeMajor     bool     `yaml:"include_major,omitempty"`
+	SeparateMajor    *bool    `yaml:"separate_major,omitempty"`
+	SeparateSecurity *bool    `yaml:"separate_security,omitempty"`
+	SeparateRuntime  *bool    `yaml:"separate_runtime,omitempty"`
+	Allow            []string `yaml:"allow,omitempty"`
+	Ignore           []string `yaml:"ignore,omitempty"`
+	Output           string   `yaml:"output,omitempty"`
+	Timeout          string   `yaml:"timeout,omitempty"`
+	ContinueOnError  bool     `yaml:"continue_on_error,omitempty"`
+}
+
 // JudgeInput defines a constrained input source for a judge stage.
 type JudgeInput string
 
@@ -241,6 +259,8 @@ type JudgeAction struct {
 type OnEnter struct {
 	// Run executes a command in the agent workspace.
 	Run RunAction `yaml:"run,omitempty"`
+	// DependencyUpdates updates supported dependency manifests with native package managers.
+	DependencyUpdates DependencyUpdatesAction `yaml:"dependency_updates,omitempty"`
 	// Judge runs a model-backed review pass with constrained inputs.
 	Judge JudgeAction `yaml:"judge,omitempty"`
 	// Inject sends this message to the claw as a user message.
@@ -262,14 +282,15 @@ type OnEnter struct {
 func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	// Use a shadow type to avoid infinite recursion.
 	type rawOnEnter struct {
-		Run          RunAction `yaml:"run,omitempty"`
-		Judge        JudgeAction `yaml:"judge,omitempty"`
-		Inject       string    `yaml:"inject"`
-		MoveIssueRaw yaml.Node `yaml:"move_issue"`
-		MergePR      bool      `yaml:"merge_pr,omitempty"`
-		CloseIssue   bool      `yaml:"close_issue,omitempty"`
-		AddLabels    []string  `yaml:"add_labels,omitempty"`
-		RemoveLabels []string  `yaml:"remove_labels,omitempty"`
+		Run                  RunAction   `yaml:"run,omitempty"`
+		DependencyUpdatesRaw yaml.Node   `yaml:"dependency_updates"`
+		Judge                JudgeAction `yaml:"judge,omitempty"`
+		Inject               string      `yaml:"inject"`
+		MoveIssueRaw         yaml.Node   `yaml:"move_issue"`
+		MergePR              bool        `yaml:"merge_pr,omitempty"`
+		CloseIssue           bool        `yaml:"close_issue,omitempty"`
+		AddLabels            []string    `yaml:"add_labels,omitempty"`
+		RemoveLabels         []string    `yaml:"remove_labels,omitempty"`
 	}
 	var raw rawOnEnter
 	if err := value.Decode(&raw); err != nil {
@@ -283,6 +304,15 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	oe.CloseIssue = raw.CloseIssue
 	oe.AddLabels = raw.AddLabels
 	oe.RemoveLabels = raw.RemoveLabels
+
+	if raw.DependencyUpdatesRaw.Kind != 0 {
+		var dua DependencyUpdatesAction
+		if err := raw.DependencyUpdatesRaw.Decode(&dua); err != nil {
+			return err
+		}
+		dua.Enabled = true
+		oe.DependencyUpdates = dua
+	}
 
 	if raw.MoveIssueRaw.Kind == 0 {
 		// move_issue not present

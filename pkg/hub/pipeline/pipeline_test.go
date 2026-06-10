@@ -102,6 +102,53 @@ stages:
 	}
 }
 
+func TestParseDependencyUpdatesAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: deps
+    on_enter:
+      dependency_updates:
+        ecosystems: [go, npm]
+        paths: ["."]
+        grouping: all
+        include_major: false
+        output: deps
+        timeout: 20m
+        continue_on_error: true
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	action := p.Stages[0].OnEnter.DependencyUpdates
+	if !action.Enabled {
+		t.Fatal("dependency_updates should be marked enabled when present")
+	}
+	if action.Output != "deps" {
+		t.Fatalf("output = %q, want deps", action.Output)
+	}
+	if action.Timeout != "20m" {
+		t.Fatalf("timeout = %q, want 20m", action.Timeout)
+	}
+	if !action.ContinueOnError {
+		t.Fatal("expected continue_on_error")
+	}
+}
+
+func TestParseEmptyDependencyUpdatesAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: deps
+    on_enter:
+      dependency_updates: {}
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if !p.Stages[0].OnEnter.DependencyUpdates.Enabled {
+		t.Fatal("empty dependency_updates block should still enable the action")
+	}
+}
+
 func TestEntryStage(t *testing.T) {
 	p, _ := pipeline.Parse([]byte(sampleYAML))
 	entry := p.EntryStage()
