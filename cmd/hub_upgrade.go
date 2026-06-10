@@ -37,7 +37,7 @@ func init() {
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeServer, "server", "", "SSH target, e.g. ssh://root@host (required)")
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeSSHKey, "ssh-key", "", "SSH private key path (optional; defaults to profile ssh_key when available)")
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeVersion, "version", "", "Override the target version (default: client version)")
-	hubUpgradeCmd.Flags().BoolVar(&hubUpgradeTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint before adding it")
+	hubUpgradeCmd.Flags().BoolVar(&hubUpgradeTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint after adding it")
 }
 
 func runHubUpgrade(cmd *cobra.Command, args []string) error {

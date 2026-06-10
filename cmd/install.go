@@ -69,7 +69,7 @@ func init() {
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
 	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
-	installCmd.Flags().BoolVar(&installTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint before adding it")
+	installCmd.Flags().BoolVar(&installTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint after adding it")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
 	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")

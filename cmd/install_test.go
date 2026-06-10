@@ -193,11 +193,26 @@ func TestKnownHostsCallbackTrustNewHostKeyDoesNotAcceptChangedKey(t *testing.T) 
 }
 
 func TestInstallAndHubUpgradeExposeTrustNewHostKeyFlag(t *testing.T) {
-	if installCmd.Flags().Lookup("trust-new-host-key") == nil {
+	installFlag := installCmd.Flags().Lookup("trust-new-host-key")
+	if installFlag == nil {
 		t.Fatal("install command is missing --trust-new-host-key")
 	}
-	if hubUpgradeCmd.Flags().Lookup("trust-new-host-key") == nil {
+	if strings.Contains(installFlag.Usage, "before adding it") {
+		t.Fatalf("install --trust-new-host-key usage = %q, should not imply a prompt-before-write flow", installFlag.Usage)
+	}
+	if !strings.Contains(installFlag.Usage, "after adding it") {
+		t.Fatalf("install --trust-new-host-key usage = %q, want after adding it", installFlag.Usage)
+	}
+
+	hubUpgradeFlag := hubUpgradeCmd.Flags().Lookup("trust-new-host-key")
+	if hubUpgradeFlag == nil {
 		t.Fatal("hub upgrade command is missing --trust-new-host-key")
+	}
+	if strings.Contains(hubUpgradeFlag.Usage, "before adding it") {
+		t.Fatalf("hub upgrade --trust-new-host-key usage = %q, should not imply a prompt-before-write flow", hubUpgradeFlag.Usage)
+	}
+	if !strings.Contains(hubUpgradeFlag.Usage, "after adding it") {
+		t.Fatalf("hub upgrade --trust-new-host-key usage = %q, want after adding it", hubUpgradeFlag.Usage)
 	}
 }
 
