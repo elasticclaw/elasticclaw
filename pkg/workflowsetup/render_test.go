@@ -124,6 +124,9 @@ func TestRenderGithubIssuePattern(t *testing.T) {
 	assertStageStringList(t, workflow, "working", "remove_labels", []string{"agent-ready"})
 	assertStageStringList(t, workflow, "working", "add_labels", []string{"agent-working"})
 	assertStageHasInject(t, workflow, "working")
+	assertStageInjectContains(t, workflow, "working", "[READY_TO_COMMIT]")
+	assertStageInjectNotContains(t, workflow, "working", "[DONE]")
+	assertStageInjectContains(t, workflow, "pre_commit", "[DONE]")
 	assertStageStringList(t, workflow, "pr_opened", "add_labels", []string{"agent-review"})
 	assertStageStringList(t, workflow, "pr_opened", "remove_labels", []string{"agent-working"})
 	assertStageStringList(t, workflow, "merged", "add_labels", []string{"agent-done"})
@@ -315,6 +318,9 @@ func TestRenderManualTaskPattern(t *testing.T) {
 	}
 
 	assertStageIDs(t, workflow, []string{"working", "pre_commit", "complete"})
+	assertStageInjectContains(t, workflow, "working", "[READY_TO_COMMIT]")
+	assertStageInjectNotContains(t, workflow, "working", "[DONE]")
+	assertStageInjectContains(t, workflow, "pre_commit", "[DONE]")
 	parsedPipeline := parseRenderedPipeline(t, workflow)
 	if parsedPipeline.StageForMessageContains("implementation finished [DONE]") == nil {
 		t.Fatalf("complete stage does not include [DONE] message trigger")
@@ -415,6 +421,32 @@ func assertStageStringList(t *testing.T, workflow types.WorkflowConfig, stageID 
 func assertStageHasInject(t *testing.T, workflow types.WorkflowConfig, stageID string) {
 	t.Helper()
 
+	if inject := stageInject(t, workflow, stageID); strings.TrimSpace(inject) == "" {
+		t.Fatalf("stage %q inject = %q, want non-empty string", stageID, inject)
+	}
+}
+
+func assertStageInjectContains(t *testing.T, workflow types.WorkflowConfig, stageID string, want string) {
+	t.Helper()
+
+	inject := stageInject(t, workflow, stageID)
+	if !strings.Contains(inject, want) {
+		t.Fatalf("stage %q inject = %q, want to contain %q", stageID, inject, want)
+	}
+}
+
+func assertStageInjectNotContains(t *testing.T, workflow types.WorkflowConfig, stageID string, unwanted string) {
+	t.Helper()
+
+	inject := stageInject(t, workflow, stageID)
+	if strings.Contains(inject, unwanted) {
+		t.Fatalf("stage %q inject = %q, want not to contain %q", stageID, inject, unwanted)
+	}
+}
+
+func stageInject(t *testing.T, workflow types.WorkflowConfig, stageID string) string {
+	t.Helper()
+
 	for _, stage := range workflow.Stages {
 		if stage.ID != stageID {
 			continue
@@ -423,12 +455,13 @@ func assertStageHasInject(t *testing.T, workflow types.WorkflowConfig, stageID s
 			t.Fatalf("stage %q on_enter missing", stageID)
 		}
 		inject, ok := stage.OnEnter["inject"].(string)
-		if !ok || strings.TrimSpace(inject) == "" {
-			t.Fatalf("stage %q inject = %#v, want non-empty string", stageID, stage.OnEnter["inject"])
+		if !ok {
+			t.Fatalf("stage %q inject = %#v, want string", stageID, stage.OnEnter["inject"])
 		}
-		return
+		return inject
 	}
 	t.Fatalf("stage %q missing", stageID)
+	return ""
 }
 
 func findInput(inputs []types.FactoryInput, name string) *types.FactoryInput {

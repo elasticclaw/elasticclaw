@@ -22,7 +22,26 @@ type workflowCreateOptions struct {
 	CreateWorkspace      bool
 	ConcurrencyGroup     string
 	Labels               []string
+	Event                string
+	States               []string
+	Labelers             []string
+	AssignedTo           string
+	TriggerLabel         string
+	WorkingLabel         string
+	ReviewLabel          string
+	DoneLabel            string
+	ClosedLabel          string
 	IntegrationWorkspace string
+	Team                 string
+	TriggerStatus        string
+	WorkingStatus        string
+	PROpenedStatus       string
+	MergedStatus         string
+	ClosedNoMergeStatus  string
+	IncludePreCommit     bool
+	PreCommitCommand     string
+	PreCommitReadySignal string
+	DoneSignal           string
 }
 
 type workflowValidateOptions struct {
@@ -96,7 +115,26 @@ func addWorkflowSetupFlags(cmd *cobra.Command, opts *workflowCreateOptions) {
 	cmd.Flags().BoolVar(&opts.CreateWorkspace, "create-workspace", false, "create a minimal local workspace directory if missing")
 	cmd.Flags().StringVar(&opts.ConcurrencyGroup, "concurrency-group", "", "workflow concurrency group")
 	cmd.Flags().StringArrayVar(&opts.Labels, "label", nil, "GitHub issue label that can trigger the workflow (can be repeated)")
+	cmd.Flags().StringVar(&opts.Event, "event", "", "trigger event override")
+	cmd.Flags().StringArrayVar(&opts.States, "state", nil, "issue or tracker state allowed to trigger the workflow (can be repeated)")
+	cmd.Flags().StringArrayVar(&opts.Labelers, "labeler", nil, "GitHub user allowed to trigger by labeling (can be repeated)")
+	cmd.Flags().StringVar(&opts.AssignedTo, "assigned-to", "", "GitHub assignee filter for issue triggers")
+	cmd.Flags().StringVar(&opts.TriggerLabel, "trigger-label", "", "GitHub trigger label removed when work starts")
+	cmd.Flags().StringVar(&opts.WorkingLabel, "working-label", "", "GitHub label added when work starts")
+	cmd.Flags().StringVar(&opts.ReviewLabel, "review-label", "", "GitHub label added when a pull request opens")
+	cmd.Flags().StringVar(&opts.DoneLabel, "done-label", "", "GitHub label added when a pull request merges")
+	cmd.Flags().StringVar(&opts.ClosedLabel, "closed-label", "", "GitHub label added when a pull request closes without merge")
 	cmd.Flags().StringVar(&opts.IntegrationWorkspace, "integration-workspace", "", "issue tracker workspace for linear-status or shortcut-status")
+	cmd.Flags().StringVar(&opts.Team, "team", "", "Linear team key filter")
+	cmd.Flags().StringVar(&opts.TriggerStatus, "trigger-status", "", "Linear or Shortcut status/state that starts the workflow")
+	cmd.Flags().StringVar(&opts.WorkingStatus, "working-status", "", "status/state to move the issue to when work starts")
+	cmd.Flags().StringVar(&opts.PROpenedStatus, "pr-opened-status", "", "status/state to move the issue to when a pull request opens")
+	cmd.Flags().StringVar(&opts.MergedStatus, "merged-status", "", "status/state to move the issue to when a pull request merges")
+	cmd.Flags().StringVar(&opts.ClosedNoMergeStatus, "closed-no-merge-status", "", "status/state to move the issue to when a pull request closes without merge")
+	cmd.Flags().BoolVar(&opts.IncludePreCommit, "include-pre-commit", false, "add a pre-commit command stage before completion or PR handoff")
+	cmd.Flags().StringVar(&opts.PreCommitCommand, "pre-commit-command", "", "command to run in the pre-commit stage")
+	cmd.Flags().StringVar(&opts.PreCommitReadySignal, "pre-commit-ready-signal", "", "message token that enters the pre-commit stage")
+	cmd.Flags().StringVar(&opts.DoneSignal, "done-signal", "", "message token that marks manual workflows complete")
 }
 
 func runWorkflowCreate(out io.Writer, opts workflowCreateOptions) error {
@@ -205,21 +243,82 @@ func workflowRenderConfig(opts workflowCreateOptions) map[string]interface{} {
 		config["concurrencyGroup"] = group
 	}
 	if len(opts.Labels) > 0 {
-		labels := make([]string, 0, len(opts.Labels))
-		for _, label := range opts.Labels {
-			label = strings.TrimSpace(label)
-			if label != "" {
-				labels = append(labels, label)
-			}
-		}
-		if len(labels) > 0 {
+		if labels := trimmedStrings(opts.Labels); len(labels) > 0 {
 			config["labels"] = labels
 		}
+	}
+	if event := strings.TrimSpace(opts.Event); event != "" {
+		config["event"] = event
+	}
+	if states := trimmedStrings(opts.States); len(states) > 0 {
+		config["states"] = states
+	}
+	if labelers := trimmedStrings(opts.Labelers); len(labelers) > 0 {
+		config["labelers"] = labelers
+	}
+	if assignedTo := strings.TrimSpace(opts.AssignedTo); assignedTo != "" {
+		config["assignedTo"] = assignedTo
+	}
+	if triggerLabel := strings.TrimSpace(opts.TriggerLabel); triggerLabel != "" {
+		config["triggerLabel"] = triggerLabel
+	}
+	if workingLabel := strings.TrimSpace(opts.WorkingLabel); workingLabel != "" {
+		config["workingLabel"] = workingLabel
+	}
+	if reviewLabel := strings.TrimSpace(opts.ReviewLabel); reviewLabel != "" {
+		config["reviewLabel"] = reviewLabel
+	}
+	if doneLabel := strings.TrimSpace(opts.DoneLabel); doneLabel != "" {
+		config["doneLabel"] = doneLabel
+	}
+	if closedLabel := strings.TrimSpace(opts.ClosedLabel); closedLabel != "" {
+		config["closedLabel"] = closedLabel
 	}
 	if integrationWorkspace := strings.TrimSpace(opts.IntegrationWorkspace); integrationWorkspace != "" {
 		config["workspace"] = integrationWorkspace
 	}
+	if team := strings.TrimSpace(opts.Team); team != "" {
+		config["team"] = team
+	}
+	if triggerStatus := strings.TrimSpace(opts.TriggerStatus); triggerStatus != "" {
+		config["triggerStatus"] = triggerStatus
+	}
+	if workingStatus := strings.TrimSpace(opts.WorkingStatus); workingStatus != "" {
+		config["workingStatus"] = workingStatus
+	}
+	if prOpenedStatus := strings.TrimSpace(opts.PROpenedStatus); prOpenedStatus != "" {
+		config["prOpenedStatus"] = prOpenedStatus
+	}
+	if mergedStatus := strings.TrimSpace(opts.MergedStatus); mergedStatus != "" {
+		config["mergedStatus"] = mergedStatus
+	}
+	if closedNoMergeStatus := strings.TrimSpace(opts.ClosedNoMergeStatus); closedNoMergeStatus != "" {
+		config["closedNoMergeStatus"] = closedNoMergeStatus
+	}
+	if opts.IncludePreCommit {
+		config["includePreCommit"] = true
+	}
+	if preCommitCommand := strings.TrimSpace(opts.PreCommitCommand); preCommitCommand != "" {
+		config["preCommitCommand"] = preCommitCommand
+	}
+	if readySignal := strings.TrimSpace(opts.PreCommitReadySignal); readySignal != "" {
+		config["preCommitReadySignal"] = readySignal
+	}
+	if doneSignal := strings.TrimSpace(opts.DoneSignal); doneSignal != "" {
+		config["doneSignal"] = doneSignal
+	}
 	return config
+}
+
+func trimmedStrings(values []string) []string {
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+	return trimmed
 }
 
 func validateWorkflowFile(workspace, path string) (workflowsetup.ValidateResponse, error) {

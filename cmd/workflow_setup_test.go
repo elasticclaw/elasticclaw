@@ -56,6 +56,93 @@ func TestWorkflowSetupCLICreateGitHubIssueWritesDefaultWorkflowPath(t *testing.T
 	}
 }
 
+func TestWorkflowSetupCLICreateGitHubIssueAcceptsAdvancedLifecycleFlags(t *testing.T) {
+	withTempWorkingDir(t)
+	if err := os.MkdirAll(filepath.Join(".elasticclaw", "workspaces", "engineering"), 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, err := executeWorkflowCommand(t,
+		"create", "github-issue",
+		"--workspace", "engineering",
+		"--name", "issue-precommit",
+		"--repo", "owner/repo",
+		"--include-pre-commit",
+		"--pre-commit-command", "go test ./pkg/workflowsetup",
+		"--pre-commit-ready-signal", "[READY_TO_TEST]",
+		"--trigger-label", "agent-ready",
+		"--working-label", "agent-working",
+		"--review-label", "agent-review",
+		"--done-label", "agent-done",
+		"--closed-label", "agent-needs-attention",
+		"--state", "open",
+		"--labeler", "octocat",
+	)
+	if err != nil {
+		t.Fatalf("workflow create: %v", err)
+	}
+
+	path := filepath.Join(".elasticclaw", "workspaces", "engineering", "workflows", "issue-precommit.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rendered workflow: %v", err)
+	}
+	rendered := string(data)
+	for _, want := range []string{
+		"id: pre_commit",
+		"command: go test ./pkg/workflowsetup",
+		"[READY_TO_TEST]",
+		"octocat",
+		"agent-review",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered workflow missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestWorkflowSetupCLICreateLinearAcceptsStatusFlags(t *testing.T) {
+	withTempWorkingDir(t)
+	if err := os.MkdirAll(filepath.Join(".elasticclaw", "workspaces", "engineering"), 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, err := executeWorkflowCommand(t,
+		"create", "linear-status",
+		"--workspace", "engineering",
+		"--name", "linear-lifecycle",
+		"--integration-workspace", "product",
+		"--team", "ENG",
+		"--trigger-status", "Ready for Agent",
+		"--working-status", "In Progress",
+		"--pr-opened-status", "In Review",
+		"--merged-status", "Done",
+		"--closed-no-merge-status", "Needs Attention",
+	)
+	if err != nil {
+		t.Fatalf("workflow create: %v", err)
+	}
+
+	path := filepath.Join(".elasticclaw", "workspaces", "engineering", "workflows", "linear-lifecycle.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rendered workflow: %v", err)
+	}
+	rendered := string(data)
+	for _, want := range []string{
+		"team: ENG",
+		"Ready for Agent",
+		"status: In Progress",
+		"status: In Review",
+		"status: Done",
+		"status: Needs Attention",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered workflow missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
 func TestWorkflowSetupCLICreateRequiresExistingWorkspaceOrCreateWorkspace(t *testing.T) {
 	withTempWorkingDir(t)
 

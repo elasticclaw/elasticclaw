@@ -133,6 +133,30 @@ trigger_status: Ready for Agent
 	}
 }
 
+func TestFactoryConvertCLIReportsInputFactoryNameWhenWorkflowNameDiffers(t *testing.T) {
+	withTempWorkingDir(t)
+	writeFactoryConvertCLIWorkspaceConfig(t, "engineering", "workspace_secret")
+	writeFactoryConvertCLIFactory(t, "legacy-issue-triage", `
+name: issue-triage
+integration: github-issues
+template: engineering
+trigger_status: agent-ready
+trigger_repos:
+  - owner/repo
+secret_refs:
+  WORKFLOW_SECRET: workspace_secret
+`, validFactoryConvertCLIPipeline("inject: start"))
+
+	out, err := executeFactoryCommand(t, "convert", "legacy-issue-triage", "--workspace", "engineering")
+	if err != nil {
+		t.Fatalf("factory convert: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(out, `Converted factory "legacy-issue-triage" to workflow "issue-triage"`) {
+		t.Fatalf("output %q did not report distinct factory and workflow names", out)
+	}
+}
+
 func TestFactoryConvertCLIBlocksWhenWorkspaceDoesNotHaveLegacyTemplateFile(t *testing.T) {
 	withTempWorkingDir(t)
 	writeFactoryConvertCLIWorkspaceConfig(t, "engineering", "workspace_secret")

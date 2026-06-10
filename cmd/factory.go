@@ -443,6 +443,7 @@ type factoryConvertOptions struct {
 }
 
 type factoryConvertResult struct {
+	FactoryName  string                     `json:"factoryName"`
 	WorkflowName string                     `json:"workflowName"`
 	Workspace    string                     `json:"workspace"`
 	Path         string                     `json:"path,omitempty"`
@@ -519,6 +520,7 @@ func runFactoryConvert(out io.Writer, opts factoryConvertOptions) error {
 	}
 
 	result := factoryConvertResult{
+		FactoryName:  strings.TrimSpace(opts.Name),
 		WorkflowName: resp.WorkflowName,
 		Workspace:    workspace,
 		Path:         outputPath,
@@ -636,10 +638,14 @@ func readFactoryConvertDirectoryFiles(root string) (map[string]string, error) {
 }
 
 func printFactoryConvertResult(out io.Writer, result factoryConvertResult) {
+	factoryName := result.FactoryName
+	if factoryName == "" {
+		factoryName = result.WorkflowName
+	}
 	if result.Status == workflowsetup.FactoryConvertStatusReady {
-		fmt.Fprintf(out, "Converted factory %q to workflow %q at %s\n", result.WorkflowName, result.WorkflowName, result.Path)
+		fmt.Fprintf(out, "Converted factory %q to workflow %q at %s\n", factoryName, result.WorkflowName, result.Path)
 	} else {
-		fmt.Fprintf(out, "Factory conversion blocked for %q\n", result.WorkflowName)
+		fmt.Fprintf(out, "Factory conversion blocked for %q\n", factoryName)
 	}
 	fmt.Fprintf(out, "Summary: %d critical, %d warning, %d info\n", result.Summary.Critical, result.Summary.Warning, result.Summary.Info)
 	for _, diagnostic := range result.Diagnostics {

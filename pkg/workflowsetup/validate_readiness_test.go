@@ -70,6 +70,26 @@ func TestValidateReadinessProviderRuntimeMatrix(t *testing.T) {
 	}
 }
 
+func TestValidateReadinessExedevAllowsDefaultSSHAgent(t *testing.T) {
+	req := defaultReadinessRequest()
+	req.Config = readinessGitHubIssueWorkflowYAML("issue-triage", "exedev", []string{"owner/repo"}, []string{"agent-ready"}, true, map[string]string{
+		"WORKFLOW_SECRET": "hub_workflow_secret",
+	})
+	env := defaultReadinessEnv()
+	env.snapshot.Providers = []ProviderRef{{
+		Name:          "exedev",
+		Type:          "exedev",
+		Provisionable: true,
+	}}
+
+	resp := ValidateReadiness(req, env)
+
+	assertNoDiagnostic(t, resp, "readiness-provider-unconfigured")
+	if resp.Summary.Critical != 0 {
+		t.Fatalf("critical diagnostics = %d, want 0: %#v", resp.Summary.Critical, resp.Checks)
+	}
+}
+
 func TestValidateReadinessBlocksDockerProviderRuntime(t *testing.T) {
 	req := defaultReadinessRequest()
 	req.Config = readinessGitHubIssueWorkflowYAML("issue-triage", "docker", []string{"owner/repo"}, []string{"agent-ready"}, true, map[string]string{

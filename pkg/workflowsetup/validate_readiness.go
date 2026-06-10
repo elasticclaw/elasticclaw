@@ -215,7 +215,7 @@ func providerRuntimeConfigured(provider ProviderRef, providerType string) bool {
 	case "daytona":
 		return provider.APIKeySet
 	case "exedev":
-		return provider.SSHKeySet || provider.AccessTokenSet
+		return true
 	default:
 		return false
 	}

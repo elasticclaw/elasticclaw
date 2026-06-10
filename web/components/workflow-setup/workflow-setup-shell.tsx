@@ -98,6 +98,9 @@ interface WorkflowSetupShellProps {
 
 type StepId = "pattern" | "access" | "trigger" | "lifecycle" | "review"
 type RequirementStatus = "available" | "missing" | "not_used"
+type IssueTrackerResolutionStatus = "missing" | "resolved" | "ambiguous"
+
+const WORKFLOW_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/
 
 interface StepDefinition {
   id: StepId
@@ -113,6 +116,11 @@ interface AccessRequirement {
   status: RequirementStatus
   settingsHref?: string
   settingsLabel?: string
+}
+
+interface IssueTrackerResolution {
+  tracker?: SetupIssueTrackerRef
+  status: IssueTrackerResolutionStatus
 }
 
 interface RenderInput {
@@ -376,8 +384,8 @@ function WorkflowSetupShellInner({
     [draft, selectedPattern]
   )
   const renderReadiness = useMemo(
-    () => getRenderReadiness(selectedPattern, draft, renderInput),
-    [draft, renderInput, selectedPattern]
+    () => getRenderReadiness(selectedPattern, draft, renderInput, selectedWorkspace),
+    [draft, renderInput, selectedPattern, selectedWorkspace]
   )
   const accessRequirements = useMemo(
     () => buildAccessRequirements(selectedPattern, draft, setupContext, contextReady),
@@ -396,9 +404,13 @@ function WorkflowSetupShellInner({
     Boolean(currentConfigHash) &&
     Boolean(validatedConfigHash) &&
     currentConfigHash === validatedConfigHash
+  const draftValidationErrors = useMemo(
+    () => getDraftFieldErrors(selectedPattern, draft, renderInput, selectedWorkspace),
+    [draft, renderInput, selectedPattern, selectedWorkspace]
+  )
   const draftFieldErrors = useMemo(
-    () => (attemptedSave ? getDraftFieldErrors(selectedPattern, draft, renderInput) : {}),
-    [attemptedSave, draft, renderInput, selectedPattern]
+    () => visibleDraftFieldErrors(draftValidationErrors, attemptedSave, draft),
+    [attemptedSave, draft, draftValidationErrors]
   )
   const saveBlockReason = getSaveBlockReason({
     renderPending,
@@ -607,7 +619,7 @@ function WorkflowSetupShellInner({
 
     if (savePending) return
 
-    const currentDraftErrors = getDraftFieldErrors(selectedPattern, draft, renderInput)
+    const currentDraftErrors = getDraftFieldErrors(selectedPattern, draft, renderInput, selectedWorkspace)
     if (Object.keys(currentDraftErrors).length > 0) {
       setSaveError("Complete the required fields before saving.")
       focusFirstInvalidDraftField(currentDraftErrors)
@@ -674,6 +686,7 @@ function WorkflowSetupShellInner({
     saveBlockReason,
     savePending,
     selectedPattern,
+    selectedWorkspace,
     validatedConfigHash,
     warningSaveConfirmed,
     workflowName,
@@ -2127,11 +2140,18 @@ function buildRenderInput(pattern: PatternMetadata, draft: WorkflowSetupDraft): 
 function getRenderReadiness(
   pattern: PatternMetadata | undefined,
   draft: WorkflowSetupDraft,
-  renderInput: RenderInput | null
+  renderInput: RenderInput | null,
+  workspace: Workspace | undefined
 ): { ready: boolean; reason: string } {
   if (!pattern || !renderInput) return { ready: false, reason: "Select a pattern to render workflow YAML." }
   if (!draft.workspaceName.trim()) return { ready: false, reason: "Select a workspace before rendering." }
   if (!draft.workflowName.trim()) return { ready: false, reason: "Enter a workflow name before rendering." }
+  if (!isValidWorkflowSlug(draft.workflowName.trim())) {
+    return { ready: false, reason: workflowSlugError(draft.workflowName.trim()) }
+  }
+  if (workspaceHasWorkflow(workspace, draft.workflowName.trim())) {
+    return { ready: false, reason: "A workflow with this name already exists in the selected workspace." }
+  }
   if (pattern.id === "github-issue" && !stringFromConfig(renderInput.config, "repository")) {
     return { ready: false, reason: "Choose a GitHub repository before rendering." }
   }
@@ -2188,7 +2208,7 @@ function buildAccessRequirements(
     const repositories = arrayValue(context.workspace.repositories).map((repository) => repository.repo)
     const repoAvailable =
       repositories.length > 0 && (selectedRepo === "" || repositories.includes(selectedRepo))
-    const tracker = findBestIssueTracker(context, "github-issues", "")
+    const tracker = resolveIssueTracker(context, "github-issues", "")
     requirements.push(
       {
         id: "github-repository",
@@ -2204,7 +2224,7 @@ function buildAccessRequirements(
         label: "GitHub Issues source",
         description: "Automatic issue triggers need GitHub Issues credentials and a webhook secret.",
         detail: issueTrackerDetail(tracker, "GitHub Issues"),
-        status: tracker?.tokenSet && tracker.webhookSecretSet ? "available" : "missing",
+        status: issueTrackerAvailable(tracker) ? "available" : "missing",
         settingsHref: SETTINGS_SECTIONS.issueTrackers,
         settingsLabel: "Open issue trackers",
       }
@@ -2212,13 +2232,13 @@ function buildAccessRequirements(
   } else if (pattern.id === "linear-status" || pattern.id === "shortcut-status") {
     const trackerType = pattern.id === "linear-status" ? "linear" : "shortcut"
     const trackerLabel = pattern.id === "linear-status" ? "Linear" : "Shortcut"
-    const tracker = findBestIssueTracker(context, trackerType, draft.trackerWorkspace)
+    const tracker = resolveIssueTracker(context, trackerType, draft.trackerWorkspace)
     requirements.push({
       id: `${trackerType}-source`,
       label: `${trackerLabel} issue source`,
       description: `${trackerLabel} status workflows need issue tracker credentials and a webhook secret.`,
       detail: issueTrackerDetail(tracker, trackerLabel),
-      status: tracker?.tokenSet && tracker.webhookSecretSet ? "available" : "missing",
+      status: issueTrackerAvailable(tracker) ? "available" : "missing",
       settingsHref: SETTINGS_SECTIONS.issueTrackers,
       settingsLabel: "Open issue trackers",
     })
@@ -2385,11 +2405,17 @@ function getValidationStatus({
 function getDraftFieldErrors(
   pattern: PatternMetadata | undefined,
   draft: WorkflowSetupDraft,
-  renderInput: RenderInput | null
+  renderInput: RenderInput | null,
+  workspace: Workspace | undefined
 ): DraftFieldErrors {
   const errors: DraftFieldErrors = {}
-  if (!draft.workflowName.trim()) {
+  const workflowName = draft.workflowName.trim()
+  if (!workflowName) {
     errors.workflowName = "Workflow name is required."
+  } else if (!isValidWorkflowSlug(workflowName)) {
+    errors.workflowName = workflowSlugError(workflowName)
+  } else if (workspaceHasWorkflow(workspace, workflowName)) {
+    errors.workflowName = "A workflow with this name already exists in this workspace."
   }
   if (!pattern || !renderInput) return errors
 
@@ -2406,6 +2432,30 @@ function getDraftFieldErrors(
     }
   }
   return errors
+}
+
+function visibleDraftFieldErrors(
+  errors: DraftFieldErrors,
+  attemptedSave: boolean,
+  draft: WorkflowSetupDraft
+): DraftFieldErrors {
+  if (attemptedSave) return errors
+  const visible: DraftFieldErrors = {}
+  if (draft.workflowName.trim() && errors.workflowName) visible.workflowName = errors.workflowName
+  return visible
+}
+
+function isValidWorkflowSlug(name: string): boolean {
+  return WORKFLOW_SLUG_PATTERN.test(name)
+}
+
+function workflowSlugError(name: string): string {
+  if (name.length > 63) return "Workflow name must be 63 characters or fewer."
+  return "Use a slug that starts with a lowercase letter or number and contains only lowercase letters, numbers, hyphens, or underscores."
+}
+
+function workspaceHasWorkflow(workspace: Workspace | undefined, workflowName: string): boolean {
+  return Boolean(workspace?.workflows?.some((workflow) => workflow.name === workflowName))
 }
 
 function firstDraftErrorStep(errors: DraftFieldErrors): StepId | null {
@@ -2595,33 +2645,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function issueTrackerWorkspaces(context: SetupContext | null, type: string): string[] {
   if (!context) return []
   const workspaces = new Set<string>()
-  for (const tracker of issueTrackersForContext(context)) {
+  for (const tracker of workspaceIssueTrackersForContext(context)) {
     if (tracker.type === type && tracker.workspace.trim()) workspaces.add(tracker.workspace)
   }
   return [...workspaces]
 }
 
-function findBestIssueTracker(context: SetupContext, type: string, workspace: string) {
-  const trackers = issueTrackersForContext(context).filter((tracker) => tracker.type === type)
+function resolveIssueTracker(context: SetupContext, type: string, workspace: string): IssueTrackerResolution {
+  const trackers = workspaceIssueTrackersForContext(context).filter((tracker) => tracker.type === type)
   const requested = workspace.trim()
   if (requested) {
-    return trackers.find((tracker) => tracker.workspace === requested)
+    const tracker = trackers.find((candidate) => candidate.workspace.trim().toLowerCase() === requested.toLowerCase())
+    return tracker ? { tracker, status: "resolved" } : { status: "missing" }
   }
-  return trackers[0]
+  if (trackers.length === 1) return { tracker: trackers[0], status: "resolved" }
+  if (trackers.length > 1) return { status: "ambiguous" }
+  return { status: "missing" }
 }
 
-function issueTrackersForContext(context: SetupContext): SetupIssueTrackerRef[] {
-  return [
-    ...arrayValue(context.workspace?.issueTrackers),
-    ...arrayValue(context.hub?.issueTrackers),
-  ]
+function workspaceIssueTrackersForContext(context: SetupContext): SetupIssueTrackerRef[] {
+  return arrayValue(context.workspace?.issueTrackers)
 }
 
-function issueTrackerDetail(
-  tracker: ReturnType<typeof findBestIssueTracker> | undefined,
-  label: string
-): string {
-  if (!tracker) return `${label} tracker is not configured.`
+function issueTrackerAvailable(resolution: IssueTrackerResolution): boolean {
+  return Boolean(resolution.tracker?.tokenSet && resolution.tracker.webhookSecretSet)
+}
+
+function issueTrackerDetail(resolution: IssueTrackerResolution, label: string): string {
+  if (resolution.status === "ambiguous") {
+    return `Multiple ${label} trackers are configured for this workspace; choose one in settings or keep exactly one workspace-managed tracker.`
+  }
+  const tracker = resolution.tracker
+  if (!tracker) return `${label} tracker is not configured for this workspace.`
   const token = tracker.tokenSet ? "token set" : "token missing"
   const webhook = tracker.webhookSecretSet ? "webhook secret set" : "webhook secret missing"
   return `${tracker.workspace || "default"}: ${token}, ${webhook}.`

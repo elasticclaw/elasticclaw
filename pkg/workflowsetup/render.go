@@ -260,7 +260,13 @@ func prLifecycleStages(opts lifecycleStageOptions) []types.WorkflowStage {
 
 	stages := []types.WorkflowStage{working}
 	if opts.IncludePreCommit {
-		stages = append(stages, preCommitStage(opts.ReadySignal, opts.PreCommitCommand))
+		working.OnEnter["inject"] = readyForPreCommitInject(opts.WorkingInject, opts.ReadySignal)
+		stages[0] = working
+		stages = append(stages, preCommitStage(
+			opts.ReadySignal,
+			opts.PreCommitCommand,
+			"Pre-commit checks passed. Open a pull request and reply with [DONE] and the PR URL.",
+		))
 	}
 
 	prOpened := types.WorkflowStage{
@@ -330,17 +336,25 @@ type manualStageOptions struct {
 }
 
 func manualTaskStages(opts manualStageOptions) []types.WorkflowStage {
+	workingInject := "Complete the manual task. Reply with " + opts.DoneSignal + " when finished."
+	if opts.IncludePreCommit {
+		workingInject = "Complete the manual task. Reply with " + opts.ReadySignal + " when ready for pre-commit checks."
+	}
 	working := types.WorkflowStage{
 		ID:    "working",
 		Label: "Working",
 		Entry: true,
 		OnEnter: map[string]interface{}{
-			"inject": "Complete the manual task. Reply with " + opts.DoneSignal + " when finished.",
+			"inject": workingInject,
 		},
 	}
 	stages := []types.WorkflowStage{working}
 	if opts.IncludePreCommit {
-		stages = append(stages, preCommitStage(opts.ReadySignal, opts.PreCommitCommand))
+		stages = append(stages, preCommitStage(
+			opts.ReadySignal,
+			opts.PreCommitCommand,
+			"Pre-commit checks passed. Reply with "+opts.DoneSignal+" when finished.",
+		))
 	}
 	stages = append(stages, types.WorkflowStage{
 		ID:       "complete",
@@ -356,7 +370,12 @@ func manualTaskStages(opts manualStageOptions) []types.WorkflowStage {
 	return stages
 }
 
-func preCommitStage(readySignal string, command string) types.WorkflowStage {
+func readyForPreCommitInject(inject string, readySignal string) string {
+	replacement := "When the implementation is ready for pre-commit checks, reply with " + readySignal + "."
+	return strings.Replace(inject, "When you open a pull request, reply with [DONE] and the PR URL.", replacement, 1)
+}
+
+func preCommitStage(readySignal string, command string, inject string) types.WorkflowStage {
 	return types.WorkflowStage{
 		ID:    "pre_commit",
 		Label: "Pre-commit",
@@ -367,7 +386,7 @@ func preCommitStage(readySignal string, command string) types.WorkflowStage {
 			"run": map[string]interface{}{
 				"command": command,
 			},
-			"inject": "Pre-commit checks passed. Open a pull request and reply with [DONE] and the PR URL.",
+			"inject": inject,
 		},
 	}
 }
