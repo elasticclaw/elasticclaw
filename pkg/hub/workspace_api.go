@@ -180,6 +180,12 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			http.Error(w, "reload cron workflows: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	workflows := make([]WorkflowView, 0, len(req.Workflows))
 	for _, workflow := range req.Workflows {
 		workflows = append(workflows, workflowToView(name, workflow))
@@ -259,6 +265,12 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
 		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			http.Error(w, "reload cron workflows: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	jsonOK(w, workflowToView(workspace.Name, workflow))
 }
