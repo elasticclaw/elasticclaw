@@ -196,6 +196,46 @@ func TestDependencyStatusCoalescesConcurrentRefreshes(t *testing.T) {
 	}
 }
 
+func TestDependencyStatusRefreshIgnoresRequestCancellation(t *testing.T) {
+	service := newDependencyStatusServiceWithTargets(anthropicDependencyTarget())
+	checker := &blockingDependencyChecker{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	service.checkers["model:anthropic"] = checker
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan DependencyStatusResponse, 1)
+	go func() {
+		done <- service.snapshot(ctx)
+	}()
+
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("checker was not called")
+	}
+	select {
+	case resp := <-done:
+		t.Fatalf("snapshot returned before refresh completed: %#v", resp.Dependencies)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(checker.release)
+	select {
+	case resp := <-done:
+		if resp.DowntimeCount != 1 {
+			t.Fatalf("DowntimeCount = %d, want 1", resp.DowntimeCount)
+		}
+		if len(resp.Dependencies) != 1 || resp.Dependencies[0].Status != dependencyStatusDowntime {
+			t.Fatalf("dependencies = %#v, want one downtime dependency", resp.Dependencies)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot did not complete")
+	}
+}
+
 func TestDependencyStatusEndpointRequiresAuthAndReturnsSnapshot(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token:   "test-token",

@@ -96,7 +96,7 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 			return resp, nil
 		}
 
-		return s.refreshSnapshot(ctx), nil
+		return s.refreshSnapshot(context.Background()), nil
 	})
 	if resp, ok := value.(DependencyStatusResponse); ok {
 		return cloneDependencyStatusResponse(resp)
