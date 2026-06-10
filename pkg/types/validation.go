@@ -24,8 +24,15 @@ var validIntegrations = map[string]bool{
 
 // Valid workflow integration types. Cron is workflow-only; factories still use
 // validIntegrations above.
-var validWorkflowIntegrations = map[string]bool{
-	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true, "cron": true,
+var validWorkflowIntegrations = buildWorkflowIntegrations()
+
+func buildWorkflowIntegrations() map[string]bool {
+	integrations := make(map[string]bool, len(validIntegrations)+1)
+	for integration := range validIntegrations {
+		integrations[integration] = true
+	}
+	integrations["cron"] = true
+	return integrations
 }
 
 // Valid provider types
