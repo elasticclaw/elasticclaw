@@ -11,6 +11,7 @@ import (
 var hubUpgradeServer string
 var hubUpgradeSSHKey string
 var hubUpgradeVersion string
+var hubUpgradeTrustNewHostKey bool
 
 var hubUpgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -36,6 +37,7 @@ func init() {
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeServer, "server", "", "SSH target, e.g. ssh://root@host (required)")
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeSSHKey, "ssh-key", "", "SSH private key path (optional; defaults to profile ssh_key when available)")
 	hubUpgradeCmd.Flags().StringVar(&hubUpgradeVersion, "version", "", "Override the target version (default: client version)")
+	hubUpgradeCmd.Flags().BoolVar(&hubUpgradeTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint before adding it")
 }
 
 func runHubUpgrade(cmd *cobra.Command, args []string) error {
@@ -60,7 +62,10 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Connecting to %s@%s...\n", user, host)
 
-	client, err := dialSSH(user, host, hubUpgradeSSHKey)
+	client, err := dialSSH(user, host, sshDialOptions{
+		KeyPath:         hubUpgradeSSHKey,
+		TrustNewHostKey: hubUpgradeTrustNewHostKey,
+	})
 	if err != nil {
 		return fmt.Errorf("SSH connection failed: %w", err)
 	}
@@ -193,5 +198,3 @@ func parseVersionFromOutput(s string) string {
 	}
 	return "unknown"
 }
-
-

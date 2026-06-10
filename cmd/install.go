@@ -24,6 +24,15 @@ import (
 
 var knownHostsWriteMu sync.Mutex
 
+type sshDialOptions struct {
+	KeyPath         string
+	TrustNewHostKey bool
+}
+
+type sshHostKeyPolicy struct {
+	TrustNewHostKey bool
+}
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install ElasticClaw on a remote server",
@@ -43,12 +52,13 @@ Prerequisites:
 }
 
 var (
-	installServer     string
-	installDomain     string
-	installSSHKey     string
-	installVersion    string
-	installToken      string
-	installUIPassword string
+	installServer          string
+	installDomain          string
+	installSSHKey          string
+	installVersion         string
+	installToken           string
+	installUIPassword      string
+	installTrustNewHostKey bool
 )
 
 func init() {
@@ -59,6 +69,7 @@ func init() {
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
 	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
+	installCmd.Flags().BoolVar(&installTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint before adding it")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
 	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")
@@ -113,7 +124,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Connecting to %s@%s... ", sshUser, sshHost)
-	client, err := dialSSH(sshUser, sshHost, installSSHKey)
+	client, err := dialSSH(sshUser, sshHost, sshDialOptions{
+		KeyPath:         installSSHKey,
+		TrustNewHostKey: installTrustNewHostKey,
+	})
 	if err != nil {
 		return fmt.Errorf("SSH connection failed: %w", err)
 	}
@@ -340,7 +354,7 @@ func parseSSHHost(host string) (user, addr string, err error) {
 	return user, addr, nil
 }
 
-func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
+func dialSSH(user, addr string, opts sshDialOptions) (*gossh.Client, error) {
 	var authMethods []gossh.AuthMethod
 
 	// Try SSH agent first — call Signers() eagerly so failures are visible
@@ -355,8 +369,8 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 
 	// Load all available keys (explicit path or all standard ~/.ssh/ keys)
 	keyPaths := []string{}
-	if keyPath != "" {
-		keyPaths = []string{keyPath}
+	if opts.KeyPath != "" {
+		keyPaths = []string{opts.KeyPath}
 	} else {
 		home, _ := os.UserHomeDir()
 		for _, k := range []string{"id_ed25519", "id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519_sk"} {
@@ -367,7 +381,7 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	for _, p := range keyPaths {
 		key, err := os.ReadFile(p)
 		if err != nil {
-			if keyPath != "" && os.IsNotExist(err) {
+			if opts.KeyPath != "" && os.IsNotExist(err) {
 				return nil, fmt.Errorf("ssh key file not found: %s", p)
 			}
 			continue // key doesn't exist, skip
@@ -386,7 +400,7 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 		return nil, fmt.Errorf("no SSH auth methods available — ensure SSH agent is running (eval $(ssh-agent)) or use --ssh-key with an unencrypted key")
 	}
 
-	hostKeyCallback, err := knownHostsCallback()
+	hostKeyCallback, err := knownHostsCallback(sshHostKeyPolicy{TrustNewHostKey: opts.TrustNewHostKey})
 	if err != nil {
 		return nil, err
 	}
@@ -400,16 +414,23 @@ func dialSSH(user, addr, keyPath string) (*gossh.Client, error) {
 	return gossh.Dial("tcp", addr, cfg)
 }
 
-func knownHostsCallback() (gossh.HostKeyCallback, error) {
+func knownHostsCallback(policy sshHostKeyPolicy) (gossh.HostKeyCallback, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("could not locate home directory for SSH known_hosts: %w", err)
 	}
 	path := filepath.Join(home, ".ssh", "known_hosts")
+	return knownHostsCallbackForPath(path, policy)
+}
+
+func knownHostsCallbackForPath(path string, policy sshHostKeyPolicy) (gossh.HostKeyCallback, error) {
 	callback, err := knownhosts.New(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
+				if !policy.TrustNewHostKey {
+					return unknownHostKeyError(path, hostname, key)
+				}
 				return trustUnknownHostKey(path, hostname, remote, key)
 			}, nil
 		}
@@ -419,12 +440,19 @@ func knownHostsCallback() (gossh.HostKeyCallback, error) {
 		if err := callback(hostname, remote, key); err != nil {
 			var keyErr *knownhosts.KeyError
 			if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
+				if !policy.TrustNewHostKey {
+					return unknownHostKeyError(path, hostname, key)
+				}
 				return trustUnknownHostKey(path, hostname, remote, key)
 			}
 			return fmt.Errorf("SSH host key verification failed for %s: %w; add or update the trusted host key with: %s", hostname, err, sshKeyscanHint(hostname, path))
 		}
 		return nil
 	}, nil
+}
+
+func unknownHostKeyError(knownHostsPath, hostname string, key gossh.PublicKey) error {
+	return fmt.Errorf("unknown SSH host key for %s (%s %s); refusing to trust it automatically. Add it with: %s or rerun with --trust-new-host-key if you have verified the fingerprint", hostname, key.Type(), gossh.FingerprintSHA256(key), sshKeyscanHint(hostname, knownHostsPath))
 }
 
 func trustUnknownHostKey(knownHostsPath, hostname string, remote net.Addr, key gossh.PublicKey) error {
