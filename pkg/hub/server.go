@@ -51,6 +51,8 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// one-time oauth_code -> signed GitHub session token
 
+	dependencyStatus *dependencyStatusService
+
 	fileAckMu       sync.Mutex
 	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
 	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
@@ -196,6 +198,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		artifacts:         artifacts,
 		claws:             make(map[string]*clawConn),
 		users:             make(map[string]*userConn),
+		dependencyStatus:  newDependencyStatusService(hubCfg),
 		fileAckWaiters:    make(map[string]chan types.FileAck),
 		fileReadWaiters:   make(map[string]chan types.FileReadResp),
 		checkpointWaiters: make(map[string]chan error),
@@ -297,6 +300,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
 	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
 	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))

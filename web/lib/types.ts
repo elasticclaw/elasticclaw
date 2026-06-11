@@ -251,3 +251,27 @@ export interface TaskRunFilterOptions {
   warningTypes: string[]
   failureTypes: string[]
 }
+
+export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "unknown"
+
+export enum DependencyKind {
+  Model = "model",
+  Sandbox = "sandbox",
+  IssueTracker = "issue_tracker",
+}
+
+export interface DependencyStatus {
+  id: string
+  name: string
+  kind: DependencyKind
+  status: DependencyStatusValue
+  message?: string
+  source?: string
+  checkedAt: string
+}
+
+export interface DependencyStatusResponse {
+  dependencies: DependencyStatus[]
+  downtimeCount: number
+  checkedAt: string
+}

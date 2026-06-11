@@ -50,7 +50,7 @@ export default function Home() {
 
   const hub = useHub(selectedClawId)
 
-  const { claws: rawClaws, messages, streamingBuffers, loading, hubError, reorderClaws } = hub
+  const { claws: rawClaws, downtimeDependencies, messages, streamingBuffers, loading, hubError, reorderClaws } = hub
 
   // Derive isStreaming from the live typewriter buffers so it stays true
   // while the typewriter is still draining (even after final WS message arrives)
@@ -262,6 +262,7 @@ export default function Home() {
         <ConversationView
           claw={selectedClaw}
           allClaws={claws}
+          downtimeDependencies={downtimeDependencies}
           messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
           allMessages={mergedMessages}
           onSendMessage={handleSendMessage}
