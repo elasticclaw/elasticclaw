@@ -24,6 +24,24 @@ func TestWorkflowVolumeValidation(t *testing.T) {
 		t.Fatalf("valid workflow volume config rejected: %v", err)
 	}
 
+	duplicateMount := &WorkflowConfig{
+		Name: "volume-workflow",
+		Volumes: []WorkflowVolume{{
+			Name:   "fixtures",
+			Source: "hub://volumes/test-fixtures",
+			Mount:  "/mnt/elasticclaw/shared",
+			Mode:   "ro",
+		}, {
+			Name:   "scratch",
+			Source: "hub://volumes/scratch",
+			Mount:  "/mnt/elasticclaw/shared",
+			Mode:   "rw",
+		}},
+	}
+	if err := duplicateMount.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate volume mount") {
+		t.Fatalf("duplicate mount Validate() error = %v, want duplicate volume mount", err)
+	}
+
 	tests := []struct {
 		name string
 		vol  WorkflowVolume

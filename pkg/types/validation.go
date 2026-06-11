@@ -275,6 +275,11 @@ func validateWorkflowVolume(workflowName string, index int, volume WorkflowVolum
 	if mount == "/" || strings.HasPrefix(mount, "/home/daytona/.openclaw/workspace") || strings.HasPrefix(mount, "/workspace") {
 		return fmt.Errorf("workflow %q: volumes[%d].mount must be outside the repository workspace", workflowName, index)
 	}
+	mountKey := "mount:" + mount
+	if _, ok := seen[mountKey]; ok {
+		return fmt.Errorf("workflow %q: duplicate volume mount %q", workflowName, mount)
+	}
+	seen[mountKey] = struct{}{}
 	mode := strings.TrimSpace(volume.Mode)
 	if mode == "" {
 		mode = "ro"
