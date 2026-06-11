@@ -23,7 +23,7 @@ func TestRepoInstructionFileNamesIncludesAgents(t *testing.T) {
 
 func TestBuildRepoInstructionDiscoveryScriptReferencesKnownFiles(t *testing.T) {
 	script := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", []types.GitHubRepoAccess{{Repo: "elasticclaw/elasticclaw"}})
-	for _, want := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md", "REPO_INSTRUCTIONS.md"} {
+	for _, want := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md", "REPO_INSTRUCTIONS.md", "REPO_ENVIRONMENT.md", "nix develop --accept-flake-config"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
@@ -84,6 +84,38 @@ func TestBuildRepoInstructionDiscoveryScriptRemovesStaleIndexWhenNoInstructionFi
 
 	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
 		t.Fatalf("stale REPO_INSTRUCTIONS.md should be removed, stat err=%v", err)
+	}
+}
+
+func TestBuildRepoInstructionDiscoveryScriptWritesRepoEnvironmentForFlakes(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "elasticclaw")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "flake.nix"), []byte("{ description = \"test\"; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := buildRepoInstructionDiscoveryScript(dir, []types.GitHubRepoAccess{{Repo: "elasticclaw/elasticclaw"}})
+	runBashScript(t, script)
+	runBashScript(t, script)
+
+	envIndex, err := os.ReadFile(filepath.Join(dir, "REPO_ENVIRONMENT.md"))
+	if err != nil {
+		t.Fatalf("read generated environment index: %v", err)
+	}
+	envText := string(envIndex)
+	if !strings.Contains(envText, "cd elasticclaw && nix develop --accept-flake-config -c <command>") {
+		t.Fatalf("generated environment index missing native nix guidance:\n%s", envText)
+	}
+
+	agents, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read workspace AGENTS.md: %v", err)
+	}
+	if count := strings.Count(string(agents), "## Repository Environments"); count != 1 {
+		t.Fatalf("workspace AGENTS.md should contain one repo environment section, got %d:\n%s", count, agents)
 	}
 }
 
