@@ -5452,17 +5452,13 @@ ELASTICCLAW_REPO_AGENTS
 fi
 
 ENV_SECTION='## Repository Environments'
-if [ ! -f "$AGENTS_FILE" ]; then
-  cat > "$AGENTS_FILE" << 'ELASTICCLAW_REPO_ENV'
-%s
-ELASTICCLAW_REPO_ENV
-elif ! grep -Fqx "$ENV_SECTION" "$AGENTS_FILE"; then
+if ! grep -Fqx "$ENV_SECTION" "$AGENTS_FILE"; then
   cat >> "$AGENTS_FILE" << 'ELASTICCLAW_REPO_ENV'
 
 %s
 ELASTICCLAW_REPO_ENV
 fi
-`, repoEnvironmentIndexName, repoEnvironmentIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection, repoEnvironmentAgentsSection, repoEnvironmentAgentsSection)
+`, repoEnvironmentIndexName, repoEnvironmentIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection, repoEnvironmentAgentsSection)
 	return b.String()
 }
 

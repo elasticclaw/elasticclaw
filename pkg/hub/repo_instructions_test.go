@@ -87,6 +87,25 @@ func TestBuildRepoInstructionDiscoveryScriptRemovesStaleIndexWhenNoInstructionFi
 	}
 }
 
+func TestBuildRepoInstructionDiscoveryScriptRemovesStaleEnvironmentWhenNoFlakes(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "elasticclaw")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(dir, "REPO_ENVIRONMENT.md")
+	if err := os.WriteFile(stalePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := buildRepoInstructionDiscoveryScript(dir, []types.GitHubRepoAccess{{Repo: "elasticclaw/elasticclaw"}})
+	runBashScript(t, script)
+
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale REPO_ENVIRONMENT.md should be removed, stat err=%v", err)
+	}
+}
+
 func TestBuildRepoInstructionDiscoveryScriptWritesRepoEnvironmentForFlakes(t *testing.T) {
 	dir := t.TempDir()
 	repoDir := filepath.Join(dir, "elasticclaw")
