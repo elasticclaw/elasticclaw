@@ -552,23 +552,18 @@ func (s *Server) checkGreptileReviewComments(pr clawPR, reviewCommentsData []int
 		body, _ := comment["body"].(string)
 		htmlURL, _ := comment["html_url"].(string)
 		path, _ := comment["path"].(string)
-		lineF, _ := comment["line"].(float64)
+		line := githubReviewCommentLine(comment)
 		userType, _ := user["type"].(string)
-		if !isGreptileComment(login, body) && !strings.EqualFold(userType, "bot") && !strings.HasSuffix(login, "[bot]") {
-			s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunEventHumanReviewComment, fmt.Sprintf("human_review_comment:%d", id), login, htmlURL, map[string]any{
-				"repo":       pr.repo,
-				"pr_number":  pr.prNumber,
-				"comment_id": id,
-				"path":       path,
-			})
+		if !isGreptileComment(login, body) && s.isHumanGitHubActor(login, userType) {
+			s.forwardHumanReviewComment(pr, id, login, body, htmlURL, path, line)
 			continue
 		}
 		if isGreptileComment(login, body) {
 			loc := ""
 			if path != "" {
 				loc = fmt.Sprintf("`%s", path)
-				if lineF > 0 {
-					loc += fmt.Sprintf(":%d", int(lineF))
+				if line > 0 {
+					loc += fmt.Sprintf(":%d", line)
 				}
 				loc += "`"
 			}
@@ -617,12 +612,113 @@ func (s *Server) checkPRReviews(pr clawPR, reviewsData []interface{}) {
 		if htmlURL == "" {
 			htmlURL = pr.prURL
 		}
-		s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunEventHumanRequestedChanges, fmt.Sprintf("human_requested_changes:%d", reviewID), login, htmlURL, map[string]any{
-			"repo":      pr.repo,
-			"pr_number": pr.prNumber,
-			"review_id": reviewID,
-		})
+		body, _ := review["body"].(string)
+		s.forwardHumanRequestedChangesReview(pr, reviewID, login, body, htmlURL)
 	}
+}
+
+func (s *Server) forwardHumanReviewComment(pr clawPR, id int64, login, body, htmlURL, path string, line int) {
+	if !s.claimPRReviewComment(pr.clawID, id) {
+		return
+	}
+	s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunEventHumanReviewComment, fmt.Sprintf("human_review_comment:%d", id), login, htmlURL, map[string]any{
+		"repo":       pr.repo,
+		"pr_number":  pr.prNumber,
+		"comment_id": id,
+		"path":       path,
+	})
+	s.injectHubMessageByID(pr.clawID, formatHumanReviewCommentMessage(login, pr.prNumber, body, htmlURL, path, line))
+}
+
+func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, body, htmlURL string) {
+	if !s.claimPRReview(pr.clawID, id) {
+		return
+	}
+	s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunEventHumanRequestedChanges, fmt.Sprintf("human_requested_changes:%d", id), login, htmlURL, map[string]any{
+		"repo":      pr.repo,
+		"pr_number": pr.prNumber,
+		"review_id": id,
+	})
+	s.injectHubMessageByID(pr.clawID, formatHumanRequestedChangesMessage(login, pr.prNumber, body, htmlURL))
+}
+
+func (s *Server) isHumanGitHubActor(login, userType string) bool {
+	if login == "" {
+		return false
+	}
+	if strings.EqualFold(userType, "bot") || strings.HasSuffix(login, "[bot]") {
+		return false
+	}
+	if s.isOwnAppBot(login) {
+		return false
+	}
+	return true
+}
+
+func formatHumanReviewCommentMessage(login string, prNumber int, body, htmlURL, path string, line int) string {
+	location := ""
+	if path != "" {
+		location = fmt.Sprintf(" at `%s", path)
+		if line > 0 {
+			location += fmt.Sprintf(":%d", line)
+		}
+		location += "`"
+	}
+	msg := fmt.Sprintf("**@%s** left an inline review comment on PR #%d%s:\n> %s", login, prNumber, location, strings.TrimSpace(body))
+	if htmlURL != "" {
+		msg += fmt.Sprintf("\n[View](%s)", htmlURL)
+	}
+	return msg
+}
+
+func formatHumanRequestedChangesMessage(login string, prNumber int, body, htmlURL string) string {
+	body = strings.TrimSpace(body)
+	msg := fmt.Sprintf("**@%s** requested changes on PR #%d:", login, prNumber)
+	if body != "" {
+		msg += fmt.Sprintf("\n> %s", body)
+	}
+	if htmlURL != "" {
+		msg += fmt.Sprintf("\n[View review](%s)", htmlURL)
+	}
+	return msg
+}
+
+func githubReviewCommentLine(comment map[string]interface{}) int {
+	if lineF, ok := comment["line"].(float64); ok && lineF > 0 {
+		return int(lineF)
+	}
+	if lineF, ok := comment["original_line"].(float64); ok && lineF > 0 {
+		return int(lineF)
+	}
+	return 0
+}
+
+func (s *Server) claimPRReviewComment(clawID string, id int64) bool {
+	return s.claimPRFeedbackDelivery(clawID, "review_comment", id)
+}
+
+func (s *Server) claimPRReview(clawID string, id int64) bool {
+	return s.claimPRFeedbackDelivery(clawID, "review", id)
+}
+
+func (s *Server) claimPRFeedbackDelivery(clawID, feedbackType string, id int64) bool {
+	if id <= 0 {
+		return false
+	}
+	result, err := s.db.Exec(
+		`INSERT OR IGNORE INTO claw_pr_feedback_deliveries(claw_id, feedback_type, github_id, created_at) VALUES(?,?,?,?)`,
+		clawID, feedbackType, id, now(),
+	)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to claim %s %d for claw %s: %v", feedbackType, id, clawID, err)
+		return true
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("[pr-watcher] failed to inspect %s claim %d for claw %s: %v", feedbackType, id, clawID, err)
+		return true
+	}
+	return affected > 0
 }
 
 func (s *Server) updatePRReviewWatermark(pr clawPR, reviewsData []interface{}) {
