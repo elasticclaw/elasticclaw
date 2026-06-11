@@ -296,20 +296,37 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 	if err != nil || len(volumes) == 0 {
 		return
 	}
+	hasWritableLease := false
+	for _, volume := range volumes {
+		if volume.Mode == volumeModeRW && volume.LeaseID != "" {
+			hasWritableLease = true
+			break
+		}
+	}
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
+		if hasWritableLease {
+			log.Printf("[volume] sync %s skipped: claw disconnected with writable volume lease; keeping lease until expiry", clawID)
+			return
+		}
 		s.releaseWorkflowVolumeLeases(clawID)
 		return
 	}
+	syncFailed := false
 	for _, volume := range volumes {
 		if volume.Mode != volumeModeRW || volume.LeaseID == "" {
 			continue
 		}
 		if err := s.dispatchVolumeSync(context.Background(), cc, volume); err != nil {
 			log.Printf("[volume] sync %s/%s failed: %v", clawID, volume.Name, err)
+			syncFailed = true
 		}
+	}
+	if syncFailed {
+		log.Printf("[volume] sync %s incomplete; keeping writable volume leases until expiry", clawID)
+		return
 	}
 	s.releaseWorkflowVolumeLeases(clawID)
 }

@@ -87,6 +87,36 @@ func TestVolumeArchivePutAndGetUsesArtifactStore(t *testing.T) {
 	}
 }
 
+func TestSyncWorkflowVolumesKeepsWritableLeaseWhenDisconnected(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	volumes := []workflowVolumeRuntime{{
+		WorkflowVolume: types.WorkflowVolume{Name: "scratch", Source: "hub://volumes/scratch", Mount: "/mnt/elasticclaw/scratch", Mode: "rw"},
+		Repo:           "volumes/scratch",
+		Tag:            "latest",
+	}}
+	acquired, err := s.acquireWorkflowVolumeLeases(context.Background(), "claw-rw", volumes)
+	if err != nil {
+		t.Fatalf("acquire rw lease: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"claw-rw", "test-tenant-id", "claw rw", "test", "connected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storeWorkflowVolumes("claw-rw", acquired); err != nil {
+		t.Fatalf("store workflow volumes: %v", err)
+	}
+
+	s.syncWorkflowVolumes("claw-rw")
+
+	var active int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM volume_leases WHERE claw_id=? AND released_at IS NULL`, "claw-rw").Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("active writable leases after disconnected sync = %d, want 1", active)
+	}
+}
+
 func testVolumeArchive(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
