@@ -42,7 +42,7 @@ func TestKnownHostsCallbackVerifiesServerKey(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 
-	callback, err := knownHostsCallback()
+	callback, err := knownHostsCallbackForPath(knownHosts, sshHostKeyPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,23 +55,23 @@ func TestKnownHostsCallbackVerifiesServerKey(t *testing.T) {
 		t.Fatal("mismatched host key accepted")
 	}
 	if err := callback("unknown.example.com:22", addr, trustedPub); err != nil {
-		t.Fatalf("unknown host key rejected: %v", err)
-	}
-
-	callback, err = knownHostsCallback()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := callback("unknown.example.com:22", addr, trustedPub); err != nil {
-		t.Fatalf("trusted unknown host key rejected after persisting: %v", err)
+		if !strings.Contains(err.Error(), "unknown SSH host key") {
+			t.Fatalf("unknown host key error = %q, want unknown host key message", err)
+		}
+		if !strings.Contains(err.Error(), gossh.FingerprintSHA256(trustedPub)) {
+			t.Fatalf("unknown host key error = %q, want fingerprint", err)
+		}
+		if !strings.Contains(err.Error(), "ssh-keyscan -H unknown.example.com") {
+			t.Fatalf("unknown host key error = %q, want ssh-keyscan hint", err)
+		}
+	} else {
+		t.Fatal("unknown host key accepted without opt-in")
 	}
 }
 
-func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	callback, err := knownHostsCallback()
+func TestKnownHostsCallbackMissingFileRejectsUnknownHostKeyByDefault(t *testing.T) {
+	knownHosts := filepath.Join(t.TempDir(), ".ssh", "known_hosts")
+	callback, err := knownHostsCallbackForPath(knownHosts, sshHostKeyPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,14 +87,47 @@ func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
 
 	addr := &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 2222}
 	err = callback("example.com:2222", addr, pub)
+	if err == nil {
+		t.Fatal("missing known_hosts accepted unknown host key without opt-in")
+	}
+	if !strings.Contains(err.Error(), "unknown SSH host key") {
+		t.Fatalf("error = %q, want unknown host key message", err)
+	}
+	if !strings.Contains(err.Error(), gossh.FingerprintSHA256(pub)) {
+		t.Fatalf("error = %q, want fingerprint", err)
+	}
+	if !strings.Contains(err.Error(), "ssh-keyscan -p 2222 -H example.com") {
+		t.Fatalf("error = %q, want ssh-keyscan hint", err)
+	}
+	if _, statErr := os.Stat(knownHosts); !os.IsNotExist(statErr) {
+		t.Fatalf("known_hosts was created in strict mode: %v", statErr)
+	}
+}
+
+func TestKnownHostsCallbackTrustNewHostKeyOptInPersistsUnknownHostKey(t *testing.T) {
+	knownHosts := filepath.Join(t.TempDir(), ".ssh", "known_hosts")
+	callback, err := knownHostsCallbackForPath(knownHosts, sshHostKeyPolicy{TrustNewHostKey: true})
 	if err != nil {
-		t.Fatalf("missing known_hosts file rejected host key: %v", err)
+		t.Fatal(err)
+	}
+
+	key, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := gossh.NewPublicKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addr := &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 2222}
+	if err := callback("example.com:2222", addr, pub); err != nil {
+		t.Fatalf("opt-in unknown host key rejected: %v", err)
 	}
 	if err := callback("example.com:2222", addr, pub); err != nil {
 		t.Fatalf("repeated unknown host key rejected: %v", err)
 	}
 
-	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
 	contents, err := os.ReadFile(knownHosts)
 	if err != nil {
 		t.Fatal(err)
@@ -105,13 +138,81 @@ func TestKnownHostsCallbackMissingFileTrustsUnknownHostKey(t *testing.T) {
 	if got := strings.Count(string(contents), "[example.com]:2222 "+pub.Type()); got != 1 {
 		t.Fatalf("known_hosts has %d entries for the same trusted host key, want 1: %s", got, contents)
 	}
+	info, err := os.Stat(knownHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("known_hosts mode = %v, want 0600", got)
+	}
 
-	callback, err = knownHostsCallback()
+	callback, err = knownHostsCallbackForPath(knownHosts, sshHostKeyPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := callback("example.com:2222", addr, pub); err != nil {
 		t.Fatalf("persisted host key rejected: %v", err)
+	}
+}
+
+func TestKnownHostsCallbackTrustNewHostKeyDoesNotAcceptChangedKey(t *testing.T) {
+	trustedKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedPub, err := gossh.NewPublicKey(trustedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPub, err := gossh.NewPublicKey(otherKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	knownHosts := filepath.Join(t.TempDir(), ".ssh", "known_hosts")
+	if err := os.MkdirAll(filepath.Dir(knownHosts), 0700); err != nil {
+		t.Fatal(err)
+	}
+	line := "example.com " + strings.TrimSpace(string(gossh.MarshalAuthorizedKey(trustedPub))) + "\n"
+	if err := os.WriteFile(knownHosts, []byte(line), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	callback, err := knownHostsCallbackForPath(knownHosts, sshHostKeyPolicy{TrustNewHostKey: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 22}
+	if err := callback("example.com:22", addr, otherPub); err == nil {
+		t.Fatal("changed host key accepted with trust-new-host-key")
+	}
+}
+
+func TestInstallAndHubUpgradeExposeTrustNewHostKeyFlag(t *testing.T) {
+	installFlag := installCmd.Flags().Lookup("trust-new-host-key")
+	if installFlag == nil {
+		t.Fatal("install command is missing --trust-new-host-key")
+	}
+	if strings.Contains(installFlag.Usage, "before adding it") {
+		t.Fatalf("install --trust-new-host-key usage = %q, should not imply a prompt-before-write flow", installFlag.Usage)
+	}
+	if !strings.Contains(installFlag.Usage, "after adding it") {
+		t.Fatalf("install --trust-new-host-key usage = %q, want after adding it", installFlag.Usage)
+	}
+
+	hubUpgradeFlag := hubUpgradeCmd.Flags().Lookup("trust-new-host-key")
+	if hubUpgradeFlag == nil {
+		t.Fatal("hub upgrade command is missing --trust-new-host-key")
+	}
+	if strings.Contains(hubUpgradeFlag.Usage, "before adding it") {
+		t.Fatalf("hub upgrade --trust-new-host-key usage = %q, should not imply a prompt-before-write flow", hubUpgradeFlag.Usage)
+	}
+	if !strings.Contains(hubUpgradeFlag.Usage, "after adding it") {
+		t.Fatalf("hub upgrade --trust-new-host-key usage = %q, want after adding it", hubUpgradeFlag.Usage)
 	}
 }
 
