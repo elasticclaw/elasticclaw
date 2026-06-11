@@ -5362,9 +5362,15 @@ var repoInstructionFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
 
 const repoInstructionsIndexName = "REPO_INSTRUCTIONS.md"
 
+const repoEnvironmentIndexName = "REPO_ENVIRONMENT.md"
+
 const repoInstructionsAgentsSection = `## Repository Instructions
 
 If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cloned repository. It lists repository-owned instruction files such as ` + "`AGENTS.md`" + `, ` + "`CLAUDE.md`" + `, and ` + "`GEMINI.md`" + `.`
+
+const repoEnvironmentAgentsSection = `## Repository Environments
+
+If ` + "`REPO_ENVIRONMENT.md`" + ` exists, read it before running commands inside cloned repositories. Repositories with ` + "`flake.nix`" + ` should run repo-local commands with that repository's own Nix development shell, for example ` + "`cd <repo> && nix develop --accept-flake-config -c <command>`" + `.`
 
 func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
 	if len(repos) == 0 {
@@ -5375,6 +5381,7 @@ func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitH
 WORKSPACE_DIR=%s
 mkdir -p "$WORKSPACE_DIR"
 cd "$WORKSPACE_DIR"
+
 TMP="$(mktemp "$WORKSPACE_DIR/.repo-instructions.XXXXXX")"
 FOUND=0
 {
@@ -5407,6 +5414,30 @@ else
   rm -f "$TMP" "$WORKSPACE_DIR/%s"
 fi
 
+ENV_TMP="$(mktemp "$WORKSPACE_DIR/.repo-environment.XXXXXX")"
+ENV_FOUND=0
+{
+  printf '%%s\n\n' '# Repository Environments'
+  printf '%%s\n\n' 'ElasticClaw detected repository-local Nix flakes. Run commands for each repository with that repository flake instead of assuming one global project environment.'
+  printf '%%s\n\n' 'For one command, use: cd <repo> && nix develop --accept-flake-config -c <command>'
+  printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop --accept-flake-config'
+`, repoInstructionsIndexName, repoInstructionsIndexName)
+	for _, repo := range repos {
+		repoName := repoDirectoryName(repo.Repo)
+		fmt.Fprintf(&b, `  REPO_DIR=%s
+  if [ -f "$REPO_DIR/flake.nix" ]; then
+    ENV_FOUND=1
+    printf -- '- %s: cd %s && nix develop --accept-flake-config -c <command>\n'
+  fi
+`, shellQuote(repoName), repoName, repoName)
+	}
+	fmt.Fprintf(&b, `} > "$ENV_TMP"
+if [ "$ENV_FOUND" -eq 1 ]; then
+  mv "$ENV_TMP" "$WORKSPACE_DIR/%s"
+else
+  rm -f "$ENV_TMP" "$WORKSPACE_DIR/%s"
+fi
+
 AGENTS_FILE="$WORKSPACE_DIR/AGENTS.md"
 SECTION='## Repository Instructions'
 if [ ! -f "$AGENTS_FILE" ]; then
@@ -5419,7 +5450,15 @@ elif ! grep -Fqx "$SECTION" "$AGENTS_FILE"; then
 %s
 ELASTICCLAW_REPO_AGENTS
 fi
-`, repoInstructionsIndexName, repoInstructionsIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection)
+
+ENV_SECTION='## Repository Environments'
+if ! grep -Fqx "$ENV_SECTION" "$AGENTS_FILE"; then
+  cat >> "$AGENTS_FILE" << 'ELASTICCLAW_REPO_ENV'
+
+%s
+ELASTICCLAW_REPO_ENV
+fi
+`, repoEnvironmentIndexName, repoEnvironmentIndexName, repoInstructionsAgentsSection, repoInstructionsAgentsSection, repoEnvironmentAgentsSection)
 	return b.String()
 }
 
