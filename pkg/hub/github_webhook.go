@@ -85,6 +85,26 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			payload.Action, payload.Repository.FullName, payload.Number,
 			payload.PullRequest.User.Login, payload.PullRequest.Base.Ref)
 		go s.processGitHubPREvent(payload)
+	case "pull_request_review_comment":
+		var payload githubPRReviewCommentPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse pull_request_review_comment payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] pull_request_review_comment action=%q repo=%q pr=#%d author=%q",
+			payload.Action, payload.Repository.FullName, payload.PullRequest.Number, payload.Comment.User.Login)
+		go s.processGitHubPRReviewCommentEvent(payload)
+	case "pull_request_review":
+		var payload githubPRReviewPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse pull_request_review payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] pull_request_review action=%q state=%q repo=%q pr=#%d author=%q",
+			payload.Action, payload.Review.State, payload.Repository.FullName, payload.PullRequest.Number, payload.Review.User.Login)
+		go s.processGitHubPRReviewEvent(payload)
 	case "issue_comment":
 		var payload githubIssueCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -236,6 +256,95 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
 		}
 	}
+}
+
+// githubPRReviewCommentPayload holds fields from a pull_request_review_comment webhook event.
+type githubPRReviewCommentPayload struct {
+	Action  string `json:"action"` // "created", "edited", "deleted"
+	Comment struct {
+		ID      int64  `json:"id"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		Path    string `json:"path"`
+		Line    int    `json:"line"`
+		User    struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"user"`
+	} `json:"comment"`
+	PullRequest struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// githubPRReviewPayload holds fields from a pull_request_review webhook event.
+type githubPRReviewPayload struct {
+	Action string `json:"action"` // "submitted", "edited", "dismissed"
+	Review struct {
+		ID      int64  `json:"id"`
+		State   string `json:"state"` // "changes_requested", "approved", "commented"
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"user"`
+	} `json:"review"`
+	PullRequest struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewCommentPayload) {
+	if payload.Action != "created" {
+		return
+	}
+	if !s.isHumanGitHubActor(payload.Comment.User.Login, payload.Comment.User.Type) {
+		return
+	}
+	prURL := payload.PullRequest.HTMLURL
+	clawID := s.findClawForGitHubPR(prURL)
+	if clawID == "" {
+		log.Printf("[github-webhook] review_comment on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
+		return
+	}
+	pr := clawPR{
+		clawID:   clawID,
+		repo:     payload.Repository.FullName,
+		prNumber: payload.PullRequest.Number,
+		prURL:    prURL,
+	}
+	s.forwardHumanReviewComment(pr, payload.Comment.ID, payload.Comment.User.Login, payload.Comment.Body, payload.Comment.HTMLURL, payload.Comment.Path, payload.Comment.Line)
+}
+
+func (s *Server) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
+	if payload.Action != "submitted" || !strings.EqualFold(payload.Review.State, "changes_requested") {
+		return
+	}
+	if !s.isHumanGitHubActor(payload.Review.User.Login, payload.Review.User.Type) {
+		return
+	}
+	prURL := payload.PullRequest.HTMLURL
+	clawID := s.findClawForGitHubPR(prURL)
+	if clawID == "" {
+		log.Printf("[github-webhook] review on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
+		return
+	}
+	pr := clawPR{
+		clawID:   clawID,
+		repo:     payload.Repository.FullName,
+		prNumber: payload.PullRequest.Number,
+		prURL:    prURL,
+	}
+	s.forwardHumanRequestedChangesReview(pr, payload.Review.ID, payload.Review.User.Login, payload.Review.Body, payload.Review.HTMLURL)
 }
 
 // githubIssueCommentPayload holds fields from an issue_comment webhook event.

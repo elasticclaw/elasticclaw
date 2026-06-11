@@ -428,6 +428,14 @@ func migrate(db *sql.DB) error {
 		UNIQUE(claw_id, pr_url)
 	);
 
+	CREATE TABLE IF NOT EXISTS claw_pr_feedback_deliveries (
+		claw_id       TEXT NOT NULL,
+		feedback_type TEXT NOT NULL,
+		github_id     INTEGER NOT NULL,
+		created_at    DATETIME NOT NULL,
+		PRIMARY KEY(claw_id, feedback_type, github_id)
+	);
+
 	CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
 		tenant_id             TEXT NOT NULL,
