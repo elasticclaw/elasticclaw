@@ -153,7 +153,8 @@ func (s *Server) resolveVolumeManifest(ctx context.Context, repo, tag string) (s
 	if err == nil {
 		return digest, nil
 	}
-	if !strings.Contains(err.Error(), "no such file") && !strings.Contains(err.Error(), "not found") {
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "no such file") && !strings.Contains(msg, "not found") {
 		return "", err
 	}
 	return s.createEmptyVolumeManifest(ctx, repo, tag)
@@ -441,7 +442,9 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "tag volume: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_, _ = s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=?`, manifestDigest, time.Now().UTC(), leaseID)
+	if _, err := s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=?`, manifestDigest, time.Now().UTC(), leaseID); err != nil {
+		log.Printf("[volume] lease %s: failed to update manifest_digest after successful tag: %v", leaseID, err)
+	}
 	jsonOK(w, map[string]string{"manifest_digest": manifestDigest})
 }
 

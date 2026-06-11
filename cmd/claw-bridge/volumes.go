@@ -107,7 +107,9 @@ func validateVolumeMount(mount string) error {
 		return fmt.Errorf("volume mount must be absolute")
 	}
 	clean := filepath.Clean(mount)
-	if clean == "/" || strings.HasPrefix(clean, filepath.Join(os.Getenv("HOME"), ".openclaw", "workspace")) {
+	if clean == "/" ||
+		strings.HasPrefix(clean, "/home/daytona/.openclaw/workspace") ||
+		strings.HasPrefix(clean, "/workspace") {
 		return fmt.Errorf("volume mount must be outside the repository workspace")
 	}
 	return nil
