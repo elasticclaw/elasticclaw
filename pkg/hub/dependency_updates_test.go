@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 func TestNormalizeDependencyUpdatesConfigDefaults(t *testing.T) {
@@ -70,6 +71,42 @@ func TestDiscoverDependencyUpdateManifestsRejectsEscapingPath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected escaping path error")
+	}
+}
+
+func TestWrapDependencyUpdatesCommandUsesNixDevShellWhenEnabled(t *testing.T) {
+	command := "python3 - <<'PY'\nprint('dependency update')\nPY"
+
+	wrapped := wrapDependencyUpdatesCommand(command, true)
+
+	want := "nix develop --accept-flake-config -c bash -lc " + shellQuote(command)
+	if wrapped != want {
+		t.Fatalf("wrapped command = %q, want %q", wrapped, want)
+	}
+	if got := wrapDependencyUpdatesCommand(command, false); got != command {
+		t.Fatalf("non-nix command = %q, want original command", got)
+	}
+}
+
+func TestDependencyUpdatesCommandForClawWrapsNixEnabledAgents(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, nix, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		"nix-claw", "test-tenant-id", "nix claw", "workspace", "connected", 1,
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	command, err := s.dependencyUpdatesCommandForClaw("nix-claw", pipeline.DependencyUpdatesAction{Enabled: true})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	if !strings.HasPrefix(command, "nix develop --accept-flake-config -c bash -lc ") {
+		t.Fatalf("command was not wrapped with nix develop:\n%s", command)
+	}
+	if !strings.Contains(command, "python3 - <<") {
+		t.Fatalf("wrapped command missing dependency update script:\n%s", command)
 	}
 }
 

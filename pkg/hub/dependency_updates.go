@@ -241,7 +241,7 @@ func buildDependencyUpdatesCommand(action pipeline.DependencyUpdatesAction) (str
 }
 
 func (s *Server) executeDependencyUpdatesAction(clawID, stageID string, action pipeline.DependencyUpdatesAction) (*pipelineRunResult, error) {
-	command, err := buildDependencyUpdatesCommand(action)
+	command, err := s.dependencyUpdatesCommandForClaw(clawID, action)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +254,33 @@ func (s *Server) executeDependencyUpdatesAction(clawID, stageID string, action p
 		s.persistPipelineOutput(clawID, stageID, dependencyUpdatesOutputName(action), result)
 	}
 	return result, err
+}
+
+func (s *Server) dependencyUpdatesCommandForClaw(clawID string, action pipeline.DependencyUpdatesAction) (string, error) {
+	command, err := buildDependencyUpdatesCommand(action)
+	if err != nil {
+		return "", err
+	}
+	useNix, err := s.clawUsesNix(clawID)
+	if err != nil {
+		return "", err
+	}
+	return wrapDependencyUpdatesCommand(command, useNix), nil
+}
+
+func (s *Server) clawUsesNix(clawID string) (bool, error) {
+	var nixEnabled int
+	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
+		return false, fmt.Errorf("load agent nix setting: %w", err)
+	}
+	return nixEnabled != 0, nil
+}
+
+func wrapDependencyUpdatesCommand(command string, useNix bool) string {
+	if !useNix {
+		return command
+	}
+	return "nix develop --accept-flake-config -c bash -lc " + shellQuote(command)
 }
 
 const dependencyUpdatesPythonScript = `import base64
