@@ -79,24 +79,33 @@ func syncVolume(ctx context.Context, req types.VolumeSyncPayload) error {
 		return err
 	}
 	pr, pw := io.Pipe()
+	writeDone := make(chan error, 1)
 	go func() {
-		pw.CloseWithError(writeTarGzip(pw, req.Mount))
+		err := writeTarGzip(pw, req.Mount)
+		_ = pw.CloseWithError(err)
+		writeDone <- err
 	}()
 	url := fmt.Sprintf("%s/api/volumes/leases/%s/archive", strings.TrimRight(req.HubURL, "/"), req.LeaseID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, pr)
 	if err != nil {
-		_ = pr.Close()
+		_ = pr.CloseWithError(err)
+		<-writeDone
 		return err
 	}
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
+		_ = pr.CloseWithError(err)
+		<-writeDone
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload volume archive: HTTP %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("upload volume archive: HTTP %d: %s", resp.StatusCode, string(body))
+		_ = pr.CloseWithError(err)
+		<-writeDone
+		return err
 	}
 	return nil
 }
