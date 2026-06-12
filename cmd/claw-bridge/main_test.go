@@ -622,8 +622,11 @@ func TestIsMissingGatewaySessionError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "session not found", err: errString("sessions.subscribe: sessions.subscribe failed: session not found"), want: true},
-		{name: "not found", err: errString("sessions.subscribe: not found"), want: true},
+		{name: "session key not found", err: errString("sessions.subscribe failed: session key not found"), want: true},
 		{name: "unknown session", err: errString("sessions.subscribe failed: unknown session key"), want: true},
+		{name: "plain not found", err: errString("sessions.subscribe: not found"), want: false},
+		{name: "user not found", err: errString("sessions.subscribe failed: user not found"), want: false},
+		{name: "route not found", err: errString("sessions.subscribe failed: route not found"), want: false},
 		{name: "permission denied", err: errString("sessions.subscribe failed: permission denied"), want: false},
 		{name: "transport timeout", err: errString("sessions.subscribe write: i/o timeout"), want: false},
 	}
@@ -633,6 +636,23 @@ func TestIsMissingGatewaySessionError(t *testing.T) {
 				t.Fatalf("isMissingGatewaySessionError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReconnectGatewayReportsStaleConnectionNoop(t *testing.T) {
+	current := &websocket.Conn{}
+	stale := &websocket.Conn{}
+	gs := &gatewaySession{conn: current}
+
+	reconnected, err := gs.reconnectGateway(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("reconnectGateway returned error: %v", err)
+	}
+	if reconnected {
+		t.Fatal("reconnectGateway reported reconnect for stale expected connection")
+	}
+	if got := gs.currentConn(); got != current {
+		t.Fatalf("current connection changed on stale reconnect: got %p, want %p", got, current)
 	}
 }
 

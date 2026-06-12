@@ -1045,17 +1045,17 @@ func (gs *gatewaySession) createFreshSessionOnConn(ctx context.Context, conn *we
 	return nil
 }
 
-func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) error {
+func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) (bool, error) {
 	gs.reconnectMu.Lock()
 	defer gs.reconnectMu.Unlock()
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return nil
+		return false, nil
 	}
 
 	conn, err := gs.client.connectToGateway(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	installed := false
 	defer func() {
@@ -1071,22 +1071,22 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 		} else {
 			log.Printf("[gateway] re-subscribe failed after reconnect: %v", err)
 			if !isMissingGatewaySessionError(err) {
-				return err
+				return false, err
 			}
 			if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-				return err
+				return false, err
 			}
 			createdFresh = true
 		}
 	} else {
 		if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-			return err
+			return false, err
 		}
 		createdFresh = true
 	}
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return nil
+		return false, nil
 	}
 	gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 	gs.connMu.Lock()
@@ -1100,7 +1100,7 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 	if createdFresh {
 		gs.setReady()
 	}
-	return nil
+	return true, nil
 }
 
 // readLoop reads frames from the gateway forever, dispatching responses to
@@ -1145,7 +1145,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				if !gs.isCurrentConn(conn) {
 					break
 				}
-				if err := gs.reconnectGateway(ctx, conn); err != nil {
+				if _, err := gs.reconnectGateway(ctx, conn); err != nil {
 					if !gs.isCurrentConn(conn) {
 						break
 					}
@@ -1611,13 +1611,17 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				return "", ctxErr
 			}
 			reconnectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
+			reconnected, reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
 			cancel()
 			if reconnectErr != nil {
 				return "", fmt.Errorf("%w; gateway reconnect failed: %v", err, reconnectErr)
 			}
-			gatewayRetried = true
-			log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
+			if reconnected {
+				gatewayRetried = true
+				log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
+			} else {
+				log.Printf("[gateway] retrying message after another goroutine reconnected gateway")
+			}
 			continue
 		}
 		if !isRecoverableSessionSendError(err) {
@@ -1748,7 +1752,7 @@ func isMissingGatewaySessionError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "session not found") ||
-		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "session key not found") ||
 		strings.Contains(msg, "unknown session")
 }
 
