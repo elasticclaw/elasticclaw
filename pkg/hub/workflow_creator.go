@@ -185,7 +185,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	repositoriesJSON, _ := json.Marshal(repositories)
 
 	groupName, groupLimit := s.resolveWorkflowGroupLimit(workflow)
-	workflowVolumes, err := normalizeWorkflowVolumes(workflow)
+	workflowVolumes, err := normalizeWorkflowVolumes(tenantID, workflow)
 	if err != nil {
 		return "", false, err
 	}

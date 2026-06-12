@@ -66,7 +66,7 @@ func TestVolumeArchivePutAndGetUsesArtifactStore(t *testing.T) {
 
 	putReq := httptest.NewRequest(http.MethodPut, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", bytes.NewReader(archive))
 	putReq.SetPathValue("lease", acquired[0].LeaseID)
-	putReq.Header.Set("X-Claw-Token", "claw-token")
+	setVolumeArchiveAuth(putReq, "claw-token", "claw-rw", acquired[0].AccessToken)
 	putRec := httptest.NewRecorder()
 	s.handleVolumeArchive(putRec, putReq)
 	if putRec.Code != http.StatusOK {
@@ -75,7 +75,7 @@ func TestVolumeArchivePutAndGetUsesArtifactStore(t *testing.T) {
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", nil)
 	getReq.SetPathValue("lease", acquired[0].LeaseID)
-	getReq.Header.Set("X-Claw-Token", "claw-token")
+	setVolumeArchiveAuth(getReq, "claw-token", "claw-rw", acquired[0].AccessToken)
 	getRec := httptest.NewRecorder()
 	s.handleVolumeArchive(getRec, getReq)
 	if getRec.Code != http.StatusOK {
@@ -84,6 +84,62 @@ func TestVolumeArchivePutAndGetUsesArtifactStore(t *testing.T) {
 	files := readTestVolumeArchive(t, getRec.Body.Bytes())
 	if files["state.txt"] != "hello volume" {
 		t.Fatalf("archive files = %#v, want state.txt", files)
+	}
+}
+
+func TestNormalizeWorkflowVolumesNamespacesTenant(t *testing.T) {
+	workflow := &types.WorkflowConfig{Volumes: []types.WorkflowVolume{{
+		Name:   "cache",
+		Source: "hub://volumes/cache",
+		Mount:  "/mnt/elasticclaw/cache",
+		Mode:   "rw",
+	}}}
+	tenantA, err := normalizeWorkflowVolumes("tenant-a", workflow)
+	if err != nil {
+		t.Fatalf("normalize tenant a: %v", err)
+	}
+	tenantB, err := normalizeWorkflowVolumes("tenant-b", workflow)
+	if err != nil {
+		t.Fatalf("normalize tenant b: %v", err)
+	}
+	if tenantA[0].Repo != "volumes/tenant-a/cache" {
+		t.Fatalf("tenant a repo = %q", tenantA[0].Repo)
+	}
+	if tenantB[0].Repo != "volumes/tenant-b/cache" {
+		t.Fatalf("tenant b repo = %q", tenantB[0].Repo)
+	}
+	if tenantA[0].Repo == tenantB[0].Repo {
+		t.Fatalf("tenant repos should be distinct: %q", tenantA[0].Repo)
+	}
+}
+
+func TestVolumeArchiveRejectsWrongLeaseCredentials(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	volumes := []workflowVolumeRuntime{{
+		WorkflowVolume: types.WorkflowVolume{Name: "scratch", Source: "hub://volumes/scratch", Mount: "/mnt/elasticclaw/scratch", Mode: "rw"},
+		Repo:           "volumes/test-tenant/scratch",
+		Tag:            "latest",
+	}}
+	acquired, err := s.acquireWorkflowVolumeLeases(context.Background(), "claw-rw", volumes)
+	if err != nil {
+		t.Fatalf("acquire rw lease: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", nil)
+	req.SetPathValue("lease", acquired[0].LeaseID)
+	setVolumeArchiveAuth(req, "claw-token", "other-claw", acquired[0].AccessToken)
+	rec := httptest.NewRecorder()
+	s.handleVolumeArchive(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get with wrong claw status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", nil)
+	req.SetPathValue("lease", acquired[0].LeaseID)
+	setVolumeArchiveAuth(req, "claw-token", "claw-rw", "wrong-token")
+	rec = httptest.NewRecorder()
+	s.handleVolumeArchive(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get with wrong lease token status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 
@@ -149,6 +205,12 @@ func TestSyncWorkflowVolumesSkipsReleasedWritableLease(t *testing.T) {
 	if active != 0 {
 		t.Fatalf("active writable leases after released sync = %d, want 0", active)
 	}
+}
+
+func setVolumeArchiveAuth(req *http.Request, clawToken, clawID, leaseToken string) {
+	req.Header.Set("X-Claw-Token", clawToken)
+	req.Header.Set("X-Claw-ID", clawID)
+	req.Header.Set("X-Volume-Token", leaseToken)
 }
 
 func testVolumeArchive(t *testing.T, files map[string]string) []byte {

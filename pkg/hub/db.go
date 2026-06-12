@@ -148,6 +148,7 @@ func migrate(db *sql.DB) error {
 		repo            TEXT NOT NULL,
 		tag             TEXT NOT NULL,
 		claw_id         TEXT NOT NULL,
+		access_token    TEXT NOT NULL DEFAULT '',
 		mode            TEXT NOT NULL CHECK(mode IN ('ro','rw')),
 		mount           TEXT NOT NULL DEFAULT '',
 		manifest_digest TEXT NOT NULL DEFAULT '',
@@ -156,6 +157,7 @@ func migrate(db *sql.DB) error {
 		heartbeat_at    DATETIME NOT NULL,
 		released_at     DATETIME
 	)`)
+	_, _ = db.Exec(`ALTER TABLE volume_leases ADD COLUMN access_token TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
 

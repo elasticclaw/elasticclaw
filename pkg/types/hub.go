@@ -111,13 +111,15 @@ type CheckpointComplete struct {
 }
 
 type VolumeAttachPayload struct {
-	RequestID string `json:"request_id"`
-	LeaseID   string `json:"lease_id"`
-	Name      string `json:"name"`
-	Mode      string `json:"mode"`
-	Mount     string `json:"mount"`
-	HubURL    string `json:"hub_url"`
-	ClawToken string `json:"claw_token"`
+	RequestID  string `json:"request_id"`
+	LeaseID    string `json:"lease_id"`
+	ClawID     string `json:"claw_id"`
+	LeaseToken string `json:"lease_token"`
+	Name       string `json:"name"`
+	Mode       string `json:"mode"`
+	Mount      string `json:"mount"`
+	HubURL     string `json:"hub_url"`
+	ClawToken  string `json:"claw_token"`
 }
 
 type VolumeAttachAck struct {
@@ -128,13 +130,15 @@ type VolumeAttachAck struct {
 }
 
 type VolumeSyncPayload struct {
-	RequestID string `json:"request_id"`
-	LeaseID   string `json:"lease_id"`
-	Name      string `json:"name"`
-	Mode      string `json:"mode"`
-	Mount     string `json:"mount"`
-	HubURL    string `json:"hub_url"`
-	ClawToken string `json:"claw_token"`
+	RequestID  string `json:"request_id"`
+	LeaseID    string `json:"lease_id"`
+	ClawID     string `json:"claw_id"`
+	LeaseToken string `json:"lease_token"`
+	Name       string `json:"name"`
+	Mode       string `json:"mode"`
+	Mount      string `json:"mount"`
+	HubURL     string `json:"hub_url"`
+	ClawToken  string `json:"claw_token"`
 }
 
 type VolumeSyncAck struct {

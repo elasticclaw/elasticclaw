@@ -33,6 +33,7 @@ const (
 type workflowVolumeRuntime struct {
 	types.WorkflowVolume
 	LeaseID        string `json:"lease_id,omitempty"`
+	AccessToken    string `json:"access_token,omitempty"`
 	Repo           string `json:"repo,omitempty"`
 	Tag            string `json:"tag,omitempty"`
 	ManifestDigest string `json:"manifest_digest,omitempty"`
@@ -52,7 +53,11 @@ type volumeManifestLayer struct {
 	Size      int64  `json:"size"`
 }
 
-func parseVolumeSource(source string) (repo, tag string, err error) {
+func parseVolumeSource(tenantID, source string) (repo, tag string, err error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return "", "", fmt.Errorf("tenant id is required")
+	}
 	source = strings.TrimSpace(source)
 	const prefix = "hub://volumes/"
 	if !strings.HasPrefix(source, prefix) {
@@ -69,14 +74,14 @@ func parseVolumeSource(source string) (repo, tag string, err error) {
 			tag = strings.TrimSpace(after)
 		}
 	}
-	repo = "volumes/" + strings.Trim(ref, "/")
+	repo = "volumes/" + tenantID + "/" + strings.Trim(ref, "/")
 	if err := artifact.ValidateRef(repo, tag); err != nil {
 		return "", "", err
 	}
 	return repo, tag, nil
 }
 
-func normalizeWorkflowVolumes(workflow *types.WorkflowConfig) ([]workflowVolumeRuntime, error) {
+func normalizeWorkflowVolumes(tenantID string, workflow *types.WorkflowConfig) ([]workflowVolumeRuntime, error) {
 	if workflow == nil || len(workflow.Volumes) == 0 {
 		return nil, nil
 	}
@@ -86,7 +91,7 @@ func normalizeWorkflowVolumes(workflow *types.WorkflowConfig) ([]workflowVolumeR
 		if mode == "" {
 			mode = volumeModeRO
 		}
-		repo, tag, err := parseVolumeSource(v.Source)
+		repo, tag, err := parseVolumeSource(tenantID, v.Source)
 		if err != nil {
 			return nil, fmt.Errorf("volume %q: %w", v.Name, err)
 		}
@@ -135,9 +140,10 @@ func (s *Server) acquireWorkflowVolumeLeases(ctx context.Context, clawID string,
 			return nil, fmt.Errorf("volume %q is locked by an active lease", volume.Name)
 		}
 		volume.LeaseID = uuid.New().String()
+		volume.AccessToken = uuid.New().String()
 		volume.ManifestDigest = manifestDigest
-		if _, err := tx.ExecContext(ctx, `INSERT INTO volume_leases(id, volume_id, repo, tag, claw_id, mode, mount, manifest_digest, acquired_at, expires_at, heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-			volume.LeaseID, volume.Repo, volume.Repo, volume.Tag, clawID, volume.Mode, volume.Mount, manifestDigest, now, expires, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO volume_leases(id, volume_id, repo, tag, claw_id, access_token, mode, mount, manifest_digest, acquired_at, expires_at, heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			volume.LeaseID, volume.Repo, volume.Repo, volume.Tag, clawID, volume.AccessToken, volume.Mode, volume.Mount, manifestDigest, now, expires, now); err != nil {
 			return nil, err
 		}
 		acquired = append(acquired, volume)
@@ -273,13 +279,15 @@ func (s *Server) dispatchVolumeAttach(ctx context.Context, cc *clawConn, volume 
 		s.fileAckMu.Unlock()
 	}()
 	payload := types.VolumeAttachPayload{
-		RequestID: reqID,
-		LeaseID:   volume.LeaseID,
-		Name:      volume.Name,
-		Mode:      volume.Mode,
-		Mount:     volume.Mount,
-		HubURL:    s.clawHubURL(),
-		ClawToken: s.hubCfg.ClawToken,
+		RequestID:  reqID,
+		LeaseID:    volume.LeaseID,
+		ClawID:     cc.id,
+		LeaseToken: volume.AccessToken,
+		Name:       volume.Name,
+		Mode:       volume.Mode,
+		Mount:      volume.Mount,
+		HubURL:     s.clawHubURL(),
+		ClawToken:  s.hubCfg.ClawToken,
 	}
 	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "volume_attach", Payload: payload}); err != nil {
 		return err
@@ -355,13 +363,15 @@ func (s *Server) dispatchVolumeSync(ctx context.Context, cc *clawConn, volume wo
 		s.fileAckMu.Unlock()
 	}()
 	payload := types.VolumeSyncPayload{
-		RequestID: reqID,
-		LeaseID:   volume.LeaseID,
-		Name:      volume.Name,
-		Mode:      volume.Mode,
-		Mount:     volume.Mount,
-		HubURL:    s.clawHubURL(),
-		ClawToken: s.hubCfg.ClawToken,
+		RequestID:  reqID,
+		LeaseID:    volume.LeaseID,
+		ClawID:     cc.id,
+		LeaseToken: volume.AccessToken,
+		Name:       volume.Name,
+		Mode:       volume.Mode,
+		Mount:      volume.Mount,
+		HubURL:     s.clawHubURL(),
+		ClawToken:  s.hubCfg.ClawToken,
 	}
 	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "volume_sync", Payload: payload}); err != nil {
 		return err
@@ -388,18 +398,24 @@ func (s *Server) handleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticateClawToken(w, r) {
 		return
 	}
+	clawID := strings.TrimSpace(r.Header.Get("X-Claw-ID"))
+	accessToken := strings.TrimSpace(r.Header.Get("X-Volume-Token"))
+	if clawID == "" || accessToken == "" {
+		http.Error(w, "volume lease credentials required", http.StatusUnauthorized)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		s.handleVolumeArchiveGet(w, r, leaseID)
+		s.handleVolumeArchiveGet(w, r, leaseID, clawID, accessToken)
 	case http.MethodPut:
-		s.handleVolumeArchivePut(w, r, leaseID)
+		s.handleVolumeArchivePut(w, r, leaseID, clawID, accessToken)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID string) {
-	manifestDigest, err := s.volumeLeaseManifest(r.Context(), leaseID)
+func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
+	manifestDigest, err := s.volumeLeaseManifest(r.Context(), leaseID, clawID, accessToken)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -424,9 +440,9 @@ func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, 
 	_, _ = io.Copy(w, body)
 }
 
-func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID string) {
+func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	var repo, tag, mode, attachedDigest string
-	if err := s.db.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND released_at IS NULL AND expires_at > ?`, leaseID, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
+	if err := s.db.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
 		http.Error(w, "active lease not found", http.StatusNotFound)
 		return
 	}
@@ -468,15 +484,15 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "tag volume: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=?`, manifestDigest, time.Now().UTC(), leaseID); err != nil {
+	if _, err := s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=? AND claw_id=? AND access_token=?`, manifestDigest, time.Now().UTC(), leaseID, clawID, accessToken); err != nil {
 		log.Printf("[volume] lease %s: failed to update manifest_digest after successful tag: %v", leaseID, err)
 	}
 	jsonOK(w, map[string]string{"manifest_digest": manifestDigest})
 }
 
-func (s *Server) volumeLeaseManifest(ctx context.Context, leaseID string) (string, error) {
+func (s *Server) volumeLeaseManifest(ctx context.Context, leaseID, clawID, accessToken string) (string, error) {
 	var digest string
-	err := s.db.QueryRowContext(ctx, `SELECT manifest_digest FROM volume_leases WHERE id=? AND released_at IS NULL AND expires_at > ?`, leaseID, time.Now().UTC()).Scan(&digest)
+	err := s.db.QueryRowContext(ctx, `SELECT manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&digest)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("active lease not found")
 	}

@@ -59,6 +59,8 @@ func attachVolume(ctx context.Context, req types.VolumeAttachPayload) error {
 		return err
 	}
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
+	httpReq.Header.Set("X-Claw-ID", req.ClawID)
+	httpReq.Header.Set("X-Volume-Token", req.LeaseToken)
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return err
@@ -93,6 +95,8 @@ func syncVolume(ctx context.Context, req types.VolumeSyncPayload) error {
 		return err
 	}
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
+	httpReq.Header.Set("X-Claw-ID", req.ClawID)
+	httpReq.Header.Set("X-Volume-Token", req.LeaseToken)
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		_ = pr.CloseWithError(err)
