@@ -208,6 +208,12 @@ func (s *Server) heartbeatWorkflowVolumeLeases(clawID string) {
 	_, _ = s.db.Exec(`UPDATE volume_leases SET heartbeat_at=?, expires_at=? WHERE claw_id=? AND released_at IS NULL`, now, now.Add(volumeLeaseTTL), clawID)
 }
 
+func (s *Server) workflowVolumeLeaseActive(leaseID string) bool {
+	var active int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM volume_leases WHERE id=? AND released_at IS NULL AND expires_at > ?`, leaseID, time.Now().UTC()).Scan(&active)
+	return err == nil && active > 0
+}
+
 func (s *Server) workflowVolumesForClaw(clawID string) ([]workflowVolumeRuntime, error) {
 	var raw string
 	if err := s.db.QueryRow(`SELECT COALESCE(workflow_volumes,'[]') FROM claws WHERE id=?`, clawID).Scan(&raw); err != nil {
@@ -296,10 +302,10 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 	if err != nil || len(volumes) == 0 {
 		return
 	}
-	hasWritableLease := false
+	hasActiveWritableLease := false
 	for _, volume := range volumes {
-		if volume.Mode == volumeModeRW && volume.LeaseID != "" {
-			hasWritableLease = true
+		if volume.Mode == volumeModeRW && volume.LeaseID != "" && s.workflowVolumeLeaseActive(volume.LeaseID) {
+			hasActiveWritableLease = true
 			break
 		}
 	}
@@ -307,7 +313,7 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
-		if hasWritableLease {
+		if hasActiveWritableLease {
 			log.Printf("[volume] sync %s skipped: claw disconnected with writable volume lease; keeping lease until expiry", clawID)
 			return
 		}
@@ -317,6 +323,9 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 	syncFailed := false
 	for _, volume := range volumes {
 		if volume.Mode != volumeModeRW || volume.LeaseID == "" {
+			continue
+		}
+		if !s.workflowVolumeLeaseActive(volume.LeaseID) {
 			continue
 		}
 		if err := s.dispatchVolumeSync(context.Background(), cc, volume); err != nil {

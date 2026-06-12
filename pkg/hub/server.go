@@ -3910,6 +3910,7 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 			cc.workflowStartPending = false
 			cc.mu.Unlock()
 			log.Printf("[volume] attach workflow volumes for %s failed: %v", clawID[:8], err)
+			s.releaseWorkflowVolumeLeases(clawID)
 			go s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false)
 			return
 		}
