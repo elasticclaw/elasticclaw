@@ -778,11 +778,15 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 // gatewaySession is a long-lived connection to the OpenClaw gateway that
 // maintains a single persistent agent session across all messages.
 type gatewaySession struct {
-	client     *gatewayClient
+	client *gatewayClient
+
+	sessionMu  sync.RWMutex
 	sessionKey string
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
+
+	reconnectMu sync.Mutex
 
 	// pending req/res tracking (reqID → response channel)
 	pendMu  sync.Mutex
@@ -840,6 +844,30 @@ func (gs *gatewaySession) connect(ctx context.Context) error {
 	return nil
 }
 
+func (gs *gatewaySession) getSessionKey() string {
+	gs.sessionMu.RLock()
+	defer gs.sessionMu.RUnlock()
+	return gs.sessionKey
+}
+
+func (gs *gatewaySession) setSessionKey(key string) {
+	gs.sessionMu.Lock()
+	gs.sessionKey = key
+	gs.sessionMu.Unlock()
+}
+
+func (gs *gatewaySession) currentConn() *websocket.Conn {
+	gs.connMu.Lock()
+	defer gs.connMu.Unlock()
+	return gs.conn
+}
+
+func (gs *gatewaySession) isCurrentConn(conn *websocket.Conn) bool {
+	gs.connMu.Lock()
+	defer gs.connMu.Unlock()
+	return gs.conn == conn
+}
+
 // sendReq sends a gateway request and waits for the corresponding response.
 func (gs *gatewaySession) sendReq(ctx context.Context, method string, params interface{}) (gwFrame, error) {
 	paramsJSON, _ := json.Marshal(params)
@@ -884,6 +912,36 @@ func (gs *gatewaySession) sendReq(ctx context.Context, method string, params int
 	}
 }
 
+func sendReqOnConn(ctx context.Context, conn *websocket.Conn, method string, params interface{}) (gwFrame, error) {
+	paramsJSON, _ := json.Marshal(params)
+	reqID := randomID()
+	if err := wsjson.Write(ctx, conn, gwFrame{
+		Type:   "req",
+		ID:     reqID,
+		Method: method,
+		Params: paramsJSON,
+	}); err != nil {
+		return gwFrame{}, fmt.Errorf("%s write: %w", method, err)
+	}
+	for {
+		var resp gwFrame
+		if err := wsjson.Read(ctx, conn, &resp); err != nil {
+			return gwFrame{}, fmt.Errorf("%s read response: %w", method, err)
+		}
+		if resp.Type != "res" || resp.ID != reqID {
+			continue
+		}
+		if !resp.OK {
+			msg := "unknown"
+			if resp.Error != nil {
+				msg = resp.Error.Message
+			}
+			return resp, fmt.Errorf("%s failed: %s", method, msg)
+		}
+		return resp, nil
+	}
+}
+
 func (gs *gatewaySession) failPendingRequests(err error) {
 	gs.pendMu.Lock()
 	pending := gs.pending
@@ -910,7 +968,7 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 		_, err := gs.sendReq(ctx, "sessions.get", map[string]string{"key": key})
 		if err == nil {
 			log.Printf("[session] restored existing session: %s", key)
-			gs.sessionKey = key
+			gs.setSessionKey(key)
 			if err := gs.subscribe(ctx); err != nil {
 				return err
 			}
@@ -932,9 +990,9 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 	if payload.Key == "" {
 		return fmt.Errorf("sessions.create returned empty key")
 	}
-	gs.sessionKey = payload.Key
+	gs.setSessionKey(payload.Key)
 	saveBridgeSession(payload.Key)
-	log.Printf("[session] created new session: %s", gs.sessionKey)
+	log.Printf("[session] created new session: %s", gs.getSessionKey())
 
 	if err := gs.subscribe(ctx); err != nil {
 		return err
@@ -945,11 +1003,103 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 
 // subscribe registers for events on the current session key.
 func (gs *gatewaySession) subscribe(ctx context.Context) error {
-	_, err := gs.sendReq(ctx, "sessions.subscribe", map[string]string{"sessionKey": gs.sessionKey})
+	_, err := gs.sendReq(ctx, "sessions.subscribe", map[string]string{"sessionKey": gs.getSessionKey()})
 	if err != nil {
 		return fmt.Errorf("sessions.subscribe: %w", err)
 	}
 	log.Printf("[session] subscribed to session events")
+	return nil
+}
+
+func (gs *gatewaySession) subscribeOnConn(ctx context.Context, conn *websocket.Conn) error {
+	_, err := sendReqOnConn(ctx, conn, "sessions.subscribe", map[string]string{"sessionKey": gs.getSessionKey()})
+	if err != nil {
+		return fmt.Errorf("sessions.subscribe: %w", err)
+	}
+	log.Printf("[session] subscribed to session events")
+	return nil
+}
+
+func (gs *gatewaySession) createFreshSessionOnConn(ctx context.Context, conn *websocket.Conn, reason string) error {
+	log.Printf("[session] creating fresh session after %s", reason)
+	resp, err := sendReqOnConn(ctx, conn, "sessions.create", map[string]string{"agentId": "main"})
+	if err != nil {
+		return fmt.Errorf("sessions.create: %w", err)
+	}
+	var payload struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(resp.Payload, &payload)
+	if payload.Key == "" {
+		return fmt.Errorf("sessions.create returned empty key")
+	}
+	gs.setSessionKey(payload.Key)
+	saveBridgeSession(payload.Key)
+	if err := gs.subscribeOnConn(ctx, conn); err != nil {
+		return err
+	}
+	gs.ctxMu.Lock()
+	gs.contextUsage = 0
+	gs.ctxMu.Unlock()
+	log.Printf("[session] recovered with fresh session: %s", gs.getSessionKey())
+	return nil
+}
+
+func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) error {
+	gs.reconnectMu.Lock()
+	defer gs.reconnectMu.Unlock()
+
+	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
+		return nil
+	}
+
+	conn, err := gs.client.connectToGateway(ctx)
+	if err != nil {
+		return err
+	}
+	installed := false
+	defer func() {
+		if !installed {
+			conn.CloseNow()
+		}
+	}()
+
+	createdFresh := false
+	if gs.getSessionKey() != "" {
+		if err := gs.subscribeOnConn(ctx, conn); err == nil {
+			createdFresh = false
+		} else {
+			log.Printf("[gateway] re-subscribe failed after reconnect: %v", err)
+			if !isMissingGatewaySessionError(err) {
+				return err
+			}
+			if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
+				return err
+			}
+			createdFresh = true
+		}
+	} else {
+		if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
+			return err
+		}
+		createdFresh = true
+	}
+
+	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
+		return nil
+	}
+	gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
+	gs.connMu.Lock()
+	old := gs.conn
+	gs.conn = conn
+	gs.connMu.Unlock()
+	installed = true
+	if old != nil && old != conn {
+		old.CloseNow()
+	}
+	if createdFresh {
+		gs.setReady()
+	}
 	return nil
 }
 
@@ -967,7 +1117,10 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return // shutting down
 			}
-			log.Printf("[gateway] read error: %v — reconnecting in 3s", err)
+			if !gs.isCurrentConn(conn) {
+				continue
+			}
+			log.Printf("[gateway] read error: %v — reconnecting", err)
 
 			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 
@@ -981,19 +1134,22 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				default:
 				}
 			}
+			if gs.client == nil {
+				return
+			}
 
-			time.Sleep(3 * time.Second)
 			for {
 				if ctx.Err() != nil {
 					return
 				}
-				if err := gs.connect(ctx); err != nil {
-					log.Printf("[gateway] reconnect failed: %v — retrying in 5s", err)
-					time.Sleep(5 * time.Second)
-					continue
+				if !gs.isCurrentConn(conn) {
+					break
 				}
-				if err := gs.subscribe(ctx); err != nil {
-					log.Printf("[gateway] re-subscribe failed: %v — retrying in 5s", err)
+				if err := gs.reconnectGateway(ctx, conn); err != nil {
+					if !gs.isCurrentConn(conn) {
+						break
+					}
+					log.Printf("[gateway] reconnect failed: %v — retrying in 5s", err)
 					time.Sleep(5 * time.Second)
 					continue
 				}
@@ -1044,7 +1200,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				Data map[string]interface{} `json:"data"`
 			}
 			_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
-			if agentPayload.SessionKey != gs.sessionKey {
+			if agentPayload.SessionKey != gs.getSessionKey() {
 				continue
 			}
 
@@ -1337,7 +1493,7 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := gs.sendReq(pollCtx, "sessions.describe", map[string]string{"key": gs.sessionKey})
+	resp, err := gs.sendReq(pollCtx, "sessions.describe", map[string]string{"key": gs.getSessionKey()})
 	if err != nil {
 		log.Printf("[session] sessions.describe for context usage: %v", err)
 		return
@@ -1399,7 +1555,7 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	if payload.Key == "" {
 		return fmt.Errorf("sessions.create returned empty key")
 	}
-	gs.sessionKey = payload.Key
+	gs.setSessionKey(payload.Key)
 	saveBridgeSession(payload.Key)
 	if err := gs.subscribe(ctx); err != nil {
 		return err
@@ -1408,15 +1564,16 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	gs.contextUsage = 0
 	gs.ctxMu.Unlock()
 	gs.setReady()
-	log.Printf("[session] recovered with fresh session: %s", gs.sessionKey)
+	log.Printf("[session] recovered with fresh session: %s", gs.getSessionKey())
 	return nil
 }
 
 func isRecoverableSessionSendError(err error) bool {
-	if err == nil {
+	var sendErr *sessionSendRequestError
+	if !errors.As(err, &sendErr) {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
+	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
 		strings.Contains(msg, "prompt too large")
 }
@@ -1429,7 +1586,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	defer gs.sendMu.Unlock()
 
 	delays := []time.Duration{2 * time.Second, 5 * time.Second}
+	gatewayRetried := false
 	for attempt := 0; ; attempt++ {
+		conn := gs.currentConn()
 		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
 		// Retry only failures from the initial sessions.send request. Once the
 		// request is accepted, chunks may already be visible to the UI, so stream
@@ -1445,6 +1604,20 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
+			continue
+		}
+		if !gatewayRetried && isRetryableGatewaySendRequestError(err) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			reconnectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
+			cancel()
+			if reconnectErr != nil {
+				return "", fmt.Errorf("%w; gateway reconnect failed: %v", err, reconnectErr)
+			}
+			gatewayRetried = true
+			log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
 			continue
 		}
 		if !isRecoverableSessionSendError(err) {
@@ -1483,7 +1656,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 
 	// Send the message
 	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
-		"key":     gs.sessionKey,
+		"key":     gs.getSessionKey(),
 		"message": message,
 	})
 	if err != nil {
@@ -1538,6 +1711,45 @@ func isRetryableLLMSendRequestError(err error) bool {
 		return false
 	}
 	return isRetryableLLMSendError(sendErr.err)
+}
+
+func isRetryableGatewaySendRequestError(err error) bool {
+	var sendErr *sessionSendRequestError
+	if !errors.As(err, &sendErr) {
+		return false
+	}
+	return isRetryableGatewaySendWriteError(sendErr.err)
+}
+
+func isRetryableGatewaySendWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.HasPrefix(msg, "sessions.send write:") {
+		return false
+	}
+	if strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "context deadline") ||
+		strings.Contains(msg, "deadline exceeded") {
+		return false
+	}
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "closed network connection") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "unexpected eof") ||
+		(strings.Contains(msg, "websocket") && strings.Contains(msg, "closed"))
+}
+
+func isMissingGatewaySessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "session not found") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "unknown session")
 }
 
 func isRetryableLLMSendError(err error) bool {
@@ -2504,7 +2716,7 @@ func main() {
 		}
 		break
 	}
-	log.Printf("[bridge] gateway session ready: %s", gwSession.sessionKey)
+	log.Printf("[bridge] gateway session ready: %s", gwSession.getSessionKey())
 
 	// Start status channel goroutine (lightweight second WS to hub)
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)

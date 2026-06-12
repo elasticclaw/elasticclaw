@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -522,8 +524,10 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "caller deadline", err: context.DeadlineExceeded, want: false},
-		{name: "context overflow", err: errString("context overflow detected"), want: true},
-		{name: "prompt too large", err: errString("Context overflow: prompt too large for the model"), want: true},
+		{name: "lifecycle context overflow not retryable", err: errString("context overflow detected"), want: false},
+		{name: "lifecycle prompt too large not retryable", err: errString("Context overflow: prompt too large for the model"), want: false},
+		{name: "send request context overflow", err: &sessionSendRequestError{err: errString("context overflow detected")}, want: true},
+		{name: "send request prompt too large", err: &sessionSendRequestError{err: errString("Context overflow: prompt too large for the model")}, want: true},
 		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
 	}
 	for _, tt := range tests {
@@ -581,6 +585,220 @@ func TestIsRetryableLLMSendRequestError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsRetryableGatewaySendRequestError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "context deadline", err: context.DeadlineExceeded, want: false},
+		{name: "plain non-wrapped closed connection", err: errString("sessions.send write: use of closed network connection"), want: false},
+		{name: "wrapped closed network connection", err: &sessionSendRequestError{err: errString("sessions.send write: use of closed network connection")}, want: true},
+		{name: "wrapped marshaler closed connection string", err: &sessionSendRequestError{err: errString("sessions.send write: failed to marshal JSON: use of closed network connection")}, want: true},
+		{name: "wrapped connection reset", err: &sessionSendRequestError{err: errString("sessions.send write: write tcp 127.0.0.1:123->127.0.0.1:456: connection reset by peer")}, want: true},
+		{name: "wrapped broken pipe", err: &sessionSendRequestError{err: errString("sessions.send write: write tcp 127.0.0.1:123->127.0.0.1:456: broken pipe")}, want: true},
+		{name: "wrapped websocket close unexpected eof", err: &sessionSendRequestError{err: errString("sessions.send write: failed to write msg: WebSocket closed: unexpected EOF")}, want: true},
+		{name: "wrapped gateway disconnected after accept", err: &sessionSendRequestError{err: errString("sessions.send failed: gateway disconnected")}, want: false},
+		{name: "wrapped io timeout", err: &sessionSendRequestError{err: errString("sessions.send write: i/o timeout")}, want: false},
+		{name: "lifecycle closed connection not wrapped", err: errString("lifecycle: use of closed network connection"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableGatewaySendRequestError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableGatewaySendRequestError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsMissingGatewaySessionError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "session not found", err: errString("sessions.subscribe: sessions.subscribe failed: session not found"), want: true},
+		{name: "not found", err: errString("sessions.subscribe: not found"), want: true},
+		{name: "unknown session", err: errString("sessions.subscribe failed: unknown session key"), want: true},
+		{name: "permission denied", err: errString("sessions.subscribe failed: permission denied"), want: false},
+		{name: "transport timeout", err: errString("sessions.subscribe write: i/o timeout"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMissingGatewaySessionError(tt.err); got != tt.want {
+				t.Fatalf("isMissingGatewaySessionError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
+	var connections atomic.Int32
+	var acceptedSends atomic.Int32
+	firstHandshakeDone := make(chan struct{})
+	firstGatewayClosed := make(chan struct{})
+	testDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		connID := connections.Add(1)
+		ctx := r.Context()
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if connectReq.Method != "connect" {
+			t.Errorf("first request method = %q, want connect", connectReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		if connID == 1 {
+			close(firstHandshakeDone)
+			conn.CloseNow()
+			close(firstGatewayClosed)
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("reconnect request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: true}); err != nil {
+			t.Errorf("write subscribe response: %v", err)
+			return
+		}
+
+		var sendReq gwFrame
+		if err := wsjson.Read(ctx, conn, &sendReq); err != nil {
+			t.Errorf("read sessions.send request: %v", err)
+			return
+		}
+		if sendReq.Method != "sessions.send" {
+			t.Errorf("retry request method = %q, want sessions.send", sendReq.Method)
+			return
+		}
+		acceptedSends.Add(1)
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("write sessions.send response: %v", err)
+			return
+		}
+
+		assistantPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "assistant",
+			"sessionKey": "session-1",
+			"data":       map[string]string{"delta": "hello"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}); err != nil {
+			t.Errorf("write assistant event: %v", err)
+			return
+		}
+		endPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "lifecycle",
+			"sessionKey": "session-1",
+			"data":       map[string]string{"phase": "end"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}); err != nil {
+			t.Errorf("write lifecycle event: %v", err)
+			return
+		}
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	conn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway handshake did not complete")
+	}
+	select {
+	case <-firstGatewayClosed:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway did not close")
+	}
+	conn.CloseNow()
+
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	go gs.readLoop(ctx)
+
+	var chunks []string
+	start := time.Now()
+	reply, err := gs.SendMessage(ctx, "hi", func(chunk string) {
+		chunks = append(chunks, chunk)
+	}, nil)
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("SendMessage took %s, want retry to complete without waiting for readLoop reconnect backoff", elapsed)
+	}
+	if reply != "hello" {
+		t.Fatalf("reply = %q, want hello", reply)
+	}
+	if strings.Join(chunks, "") != "hello" {
+		t.Fatalf("chunks = %q, want hello", strings.Join(chunks, ""))
+	}
+	if got := acceptedSends.Load(); got != 1 {
+		t.Fatalf("accepted sends = %d, want 1", got)
+	}
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
+}
+
+func testPEM(typ string) string {
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  typ,
+		Bytes: []byte("01234567890123456789012345678901"),
+	}))
 }
 
 type errString string
