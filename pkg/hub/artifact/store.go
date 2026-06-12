@@ -14,6 +14,7 @@ const (
 	MediaTypeCheckpointV1      = "application/vnd.elasticclaw.checkpoint.v1+json"
 	MediaTypeVolumeV1          = "application/vnd.elasticclaw.volume.v1+json"
 	MediaTypeVolumeLayerTarZst = "application/vnd.elasticclaw.volume.layer.v1.tar+zstd"
+	MediaTypeVolumeLayerTarGz  = "application/vnd.elasticclaw.volume.layer.v1.tar+gzip"
 )
 
 type Store interface {

@@ -1298,6 +1298,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	if err != nil || rowsAffected == 0 {
 		return
 	}
+	s.syncWorkflowVolumes(clawID)
 	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        "task_completed:" + clawID,
 		Source:          taskRunSourceHub,

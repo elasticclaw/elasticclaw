@@ -185,6 +185,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	repositoriesJSON, _ := json.Marshal(repositories)
 
 	groupName, groupLimit := s.resolveWorkflowGroupLimit(workflow)
+	workflowVolumes, err := normalizeWorkflowVolumes(tenantID, workflow)
+	if err != nil {
+		return "", false, err
+	}
+	workflowVolumesJSON, _ := json.Marshal(workflowVolumes)
 	s.promoteMu.Lock()
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := groupLimit > 0 && activeCount >= groupLimit
@@ -196,11 +201,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
 		string(repositoriesJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
-		initialStatus, now, "", groupName,
+		initialStatus, now, "", groupName, string(workflowVolumesJSON),
 	)
 	s.promoteMu.Unlock()
 	if err != nil {

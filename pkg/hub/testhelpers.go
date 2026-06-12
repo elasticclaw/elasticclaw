@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -44,10 +45,15 @@ func NewTestServerWithConfig(t interface {
 			)
 		}
 	}
+	artifacts, err := artifact.NewLocalStore(tTempDir(t))
+	if err != nil {
+		panic("NewTestServerWithConfig: artifact store: " + err.Error())
+	}
 
 	s := &Server{
 		db:               db,
 		hubCfg:           cfg,
+		artifacts:        artifacts,
 		claws:            make(map[string]*clawConn),
 		users:            make(map[string]*userConn),
 		dependencyStatus: newDependencyStatusService(cfg),
@@ -61,6 +67,19 @@ func NewTestServerWithConfig(t interface {
 	s.registerRoutes(mux)
 	s.mux = mux
 	return s, db
+}
+
+func tTempDir(t interface {
+	Helper()
+	Cleanup(func())
+}) string {
+	type tempDir interface {
+		TempDir() string
+	}
+	if td, ok := t.(tempDir); ok {
+		return td.TempDir()
+	}
+	return ""
 }
 
 // SaveWorkspaceForTest writes a workspace and its workflows through the same

@@ -2816,6 +2816,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		case "checkpoint_create":
 			go handleCheckpointCreate(ctx, msg.Payload)
 
+		case "volume_attach":
+			go handleVolumeAttach(ctx, conn, msg.Payload)
+
+		case "volume_sync":
+			go handleVolumeSync(ctx, conn, msg.Payload)
+
 		default:
 			// ignore unknown message types
 		}

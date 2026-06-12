@@ -53,9 +53,11 @@ type Server struct {
 
 	dependencyStatus *dependencyStatusService
 
-	fileAckMu       sync.Mutex
-	fileAckWaiters  map[string]chan types.FileAck      // request_id -> waiter
-	fileReadWaiters map[string]chan types.FileReadResp // request_id -> waiter
+	fileAckMu           sync.Mutex
+	fileAckWaiters      map[string]chan types.FileAck      // request_id -> waiter
+	fileReadWaiters     map[string]chan types.FileReadResp // request_id -> waiter
+	volumeAttachWaiters map[string]chan types.VolumeAttachAck
+	volumeSyncWaiters   map[string]chan types.VolumeSyncAck
 
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
@@ -90,6 +92,8 @@ type clawConn struct {
 	contextUsage          int             // 0-100, updated from heartbeats
 	gatewayReady          bool            // true once bridge reports gateway session established
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
+	workflowStartPending  bool            // true while initial volume attach / wake is in flight
+	workflowStartDone     bool            // true once initial volume attach / wake has completed
 	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID        string          // pre-assigned message ID for the current stream
 	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
@@ -317,6 +321,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
+	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
 	mux.HandleFunc("/api/terminal/", s.handleTerminal)
 	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
@@ -2112,19 +2117,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
-	usedPipelineEntryInject := false
 	if allowWake && cc.gatewayReady && currentStatus == "connected" {
-		usedPipelineEntryInject = s.initializePipelineEntryIfNeeded(clawID)
-		if usedPipelineEntryInject {
-			go s.sendInitialPlanInstruction(cc, clawID)
-		}
-	}
-	// If no pipeline entry inject was sent, fire the default wake message.
-	// But don't re-wake claws that already have a pipeline stage (hub restart reconnect).
-	if allowWake && cc.gatewayReady && currentStatus == "connected" && !usedPipelineEntryInject {
-		if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
-			go s.sendWakeMessage(cc, clawID)
-		}
+		s.startWorkflowAfterVolumes(ctx, cc, clawID)
 	}
 	if allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
 		go s.requestBootstrapCheckpoint(clawID)
@@ -2262,6 +2256,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Unlock()
 					}
 					s.mu.Unlock()
+					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldWarnContext {
 						s.mu.RLock()
 						warnCC := s.claws[clawID]
@@ -2271,11 +2266,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					if shouldWake {
-						if s.initializePipelineEntryIfNeeded(clawID) {
-							go s.sendInitialPlanInstruction(wakeConn, clawID)
-						} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
-							go s.sendWakeMessage(wakeConn, clawID)
-						}
+						s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
 					}
 					// Check for streaming turn timeout (12 minutes)
 					s.mu.RLock()
@@ -2496,6 +2487,36 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if ch != nil {
 						select {
 						case ch <- resp:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "volume_attach_ack" {
+				raw, _ := json.Marshal(msg.Payload)
+				var ack types.VolumeAttachAck
+				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.volumeAttachWaiters[ack.RequestID]
+					delete(s.volumeAttachWaiters, ack.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- ack:
+						default:
+						}
+					}
+				}
+			} else if msg.Type == "volume_sync_ack" {
+				raw, _ := json.Marshal(msg.Payload)
+				var ack types.VolumeSyncAck
+				if err := json.Unmarshal(raw, &ack); err == nil && ack.RequestID != "" {
+					s.fileAckMu.Lock()
+					ch := s.volumeSyncWaiters[ack.RequestID]
+					delete(s.volumeSyncWaiters, ack.RequestID)
+					s.fileAckMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- ack:
 						default:
 						}
 					}
@@ -3867,12 +3888,44 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 	})
 	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
 	go s.requestBootstrapCheckpoint(clawID)
-	if s.initializePipelineEntryIfNeeded(clawID) {
-		go s.sendInitialPlanInstruction(cc, clawID)
-	} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
-		go s.sendWakeMessage(cc, clawID)
-	}
+	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
 	return true
+}
+
+func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, clawID string) {
+	if cc == nil {
+		return
+	}
+	cc.mu.Lock()
+	if cc.workflowStartPending || cc.workflowStartDone {
+		cc.mu.Unlock()
+		return
+	}
+	cc.workflowStartPending = true
+	cc.mu.Unlock()
+
+	go func() {
+		if err := s.attachWorkflowVolumes(ctx, cc, clawID); err != nil {
+			cc.mu.Lock()
+			cc.workflowStartPending = false
+			cc.mu.Unlock()
+			log.Printf("[volume] attach workflow volumes for %s failed: %v", clawID[:8], err)
+			s.releaseWorkflowVolumeLeases(clawID)
+			go s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false)
+			return
+		}
+
+		cc.mu.Lock()
+		cc.workflowStartPending = false
+		cc.workflowStartDone = true
+		cc.mu.Unlock()
+
+		if s.initializePipelineEntryIfNeeded(clawID) {
+			s.sendInitialPlanInstruction(cc, clawID)
+		} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
+			s.sendWakeMessage(cc, clawID)
+		}
+	}()
 }
 
 func daytonaRepoReadinessSnippet(repoFullName string) string {

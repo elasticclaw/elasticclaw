@@ -44,6 +44,7 @@ type WorkflowConfig struct {
 	AssignedTo          string            `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AllowedLabelers     []string          `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`
 	SecretRefs          map[string]string `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
+	Volumes             []WorkflowVolume  `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	Inputs              []FactoryInput    `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 	ConcurrencyGroup    string            `yaml:"concurrency_group,omitempty" json:"concurrency_group,omitempty"`
 	EnableManualTrigger bool              `yaml:"enable_manual_trigger,omitempty" json:"enable_manual_trigger,omitempty"`
@@ -52,6 +53,15 @@ type WorkflowConfig struct {
 	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Stages              []WorkflowStage   `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+}
+
+// WorkflowVolume declares a hub-managed artifact-backed directory attached to
+// claws created by a workflow.
+type WorkflowVolume struct {
+	Name   string `yaml:"name" json:"name"`
+	Source string `yaml:"source" json:"source"`
+	Mount  string `yaml:"mount" json:"mount"`
+	Mode   string `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 // UnmarshalYAML rejects removed workflow keys so old workflow files fail loudly
@@ -83,10 +93,10 @@ type WorkflowTrigger struct {
 
 // CronWorkflowTrigger defines a cron-based schedule for a workflow.
 type CronWorkflowTrigger struct {
-	Schedule       string `yaml:"schedule" json:"schedule"`                             // cron expression, e.g. "0 9 * * 1"
-	Timezone       string `yaml:"timezone,omitempty" json:"timezone,omitempty"`           // IANA timezone, e.g. "America/Chicago"
-	OverlapPolicy  string `yaml:"overlap_policy,omitempty" json:"overlap_policy,omitempty"` // skip, queue, parallel (default: skip)
-	Timeout        string `yaml:"timeout,omitempty" json:"timeout,omitempty"`             // e.g. "2h", "30m"
+	Schedule      string `yaml:"schedule" json:"schedule"`                                 // cron expression, e.g. "0 9 * * 1"
+	Timezone      string `yaml:"timezone,omitempty" json:"timezone,omitempty"`             // IANA timezone, e.g. "America/Chicago"
+	OverlapPolicy string `yaml:"overlap_policy,omitempty" json:"overlap_policy,omitempty"` // skip, queue, parallel (default: skip)
+	Timeout       string `yaml:"timeout,omitempty" json:"timeout,omitempty"`               // e.g. "2h", "30m"
 }
 
 // WorkflowRun represents a single execution of a workflow.
@@ -95,8 +105,8 @@ type WorkflowRun struct {
 	TenantID      string                 `json:"tenant_id,omitempty"`
 	WorkflowName  string                 `json:"workflow_name"`
 	WorkspaceName string                 `json:"workspace_name"`
-	TriggerType   string                 `json:"trigger_type"`   // "cron", "manual"
-	Status        string                 `json:"status"`         // "pending", "running", "completed", "failed", "skipped", "timed_out", "canceled"
+	TriggerType   string                 `json:"trigger_type"`     // "cron", "manual"
+	Status        string                 `json:"status"`           // "pending", "running", "completed", "failed", "skipped", "timed_out", "canceled"
 	Result        string                 `json:"result,omitempty"` // "success", "failure", "skipped", "timed_out", "canceled"
 	ClawID        string                 `json:"claw_id,omitempty"`
 	RunContext    map[string]interface{} `json:"run_context,omitempty"`

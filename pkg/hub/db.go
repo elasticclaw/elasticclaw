@@ -53,6 +53,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restore_checkpoint_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
@@ -141,6 +142,25 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_analytics_action ON factory_analytics(action, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_analytics_claw ON factory_analytics(claw_id)`)
 
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS volume_leases (
+		id              TEXT PRIMARY KEY,
+		volume_id       TEXT NOT NULL,
+		repo            TEXT NOT NULL,
+		tag             TEXT NOT NULL,
+		claw_id         TEXT NOT NULL,
+		access_token    TEXT NOT NULL DEFAULT '',
+		mode            TEXT NOT NULL CHECK(mode IN ('ro','rw')),
+		mount           TEXT NOT NULL DEFAULT '',
+		manifest_digest TEXT NOT NULL DEFAULT '',
+		acquired_at     DATETIME NOT NULL,
+		expires_at      DATETIME NOT NULL,
+		heartbeat_at    DATETIME NOT NULL,
+		released_at     DATETIME
+	)`)
+	_, _ = db.Exec(`ALTER TABLE volume_leases ADD COLUMN access_token TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
+
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
@@ -185,7 +205,8 @@ func migrate(db *sql.DB) error {
 		external_trigger_id TEXT NOT NULL DEFAULT '',
 		restore_checkpoint_id TEXT NOT NULL DEFAULT '',
 		restored_from_checkpoint_id TEXT NOT NULL DEFAULT '',
-		task_run_id TEXT NOT NULL DEFAULT ''
+		task_run_id TEXT NOT NULL DEFAULT '',
+		workflow_volumes TEXT NOT NULL DEFAULT '[]'
 	);
 
 
