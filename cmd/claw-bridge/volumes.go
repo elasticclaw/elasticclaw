@@ -107,7 +107,7 @@ func syncVolume(ctx context.Context, req types.VolumeSyncPayload) error {
 		<-writeDone
 		return err
 	}
-	return nil
+	return <-writeDone
 }
 
 func validateVolumeMount(mount string) error {

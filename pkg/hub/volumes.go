@@ -108,7 +108,7 @@ func (s *Server) acquireWorkflowVolumeLeases(ctx context.Context, clawID string,
 	if len(volumes) == 0 {
 		return nil, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
 	}
