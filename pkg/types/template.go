@@ -586,26 +586,27 @@ type ConcurrencyGroup struct {
 type FactoryConfig struct {
 	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
-	SchemaVersion    string   `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
-	Name             string   `yaml:"name" json:"name"`
-	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                       // nil = true (default on); set false to pause
-	Integration      string   `yaml:"integration" json:"integration"`                                   // "linear", "shortcut", "github-issues", or "github"
-	Workspace        string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`                   // matches integrations.<type>[].workspace
-	Team             string   `yaml:"team,omitempty" json:"team,omitempty"`                             // Linear team key (e.g. "ELA")
-	TriggerStatus    string   `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`         // entering this status → create claw
-	WorkingStatus    string   `yaml:"working_status,omitempty" json:"working_status,omitempty"`         // claw moves issue here when it starts working
-	FinishedStatus   string   `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`       // claw moves issue here when it finishes working
-	DoneStatus       string   `yaml:"done_status,omitempty" json:"done_status,omitempty"`               // claw moves issue here when done (PR merged)
-	TerminateOnLeave bool     `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
-	Template         string   `yaml:"template" json:"template"`                                         // template name (must be pushed to hub)
-	Provider         string   `yaml:"provider,omitempty" json:"provider,omitempty"`                     // override the default provider for this factory
-	NamePattern      string   `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`             // claw name pattern, e.g. "{issue_id}"
-	WebhookSecret    string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"`         // HMAC-SHA256 secret for validating webhooks
-	Tags             []string `yaml:"tags,omitempty" json:"tags,omitempty"`                             // tags applied to created claws
-	Color            string   `yaml:"color,omitempty" json:"color,omitempty"`                           // color applied to created claws
-	RunKind          string   `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                     // analytics run kind: "code_task" or "pr_task"
-	AnalyticsEnabled *bool    `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`   // nil = infer from integration
-	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
+	SchemaVersion    string            `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
+	Name             string            `yaml:"name" json:"name"`
+	Enabled          *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`                       // nil = true (default on); set false to pause
+	Integration      string            `yaml:"integration" json:"integration"`                                   // "linear", "shortcut", "github-issues", or "github"
+	Workspace        string            `yaml:"workspace,omitempty" json:"workspace,omitempty"`                   // matches integrations.<type>[].workspace
+	Team             string            `yaml:"team,omitempty" json:"team,omitempty"`                             // Linear team key (e.g. "ELA")
+	TriggerStatus    string            `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`         // entering this status → create claw
+	WorkingStatus    string            `yaml:"working_status,omitempty" json:"working_status,omitempty"`         // claw moves issue here when it starts working
+	FinishedStatus   string            `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`       // claw moves issue here when it finishes working
+	DoneStatus       string            `yaml:"done_status,omitempty" json:"done_status,omitempty"`               // claw moves issue here when done (PR merged)
+	AgentError       *AgentErrorConfig `yaml:"agent_error,omitempty" json:"agent_error,omitempty"`               // tracker update policy when the agent errors
+	TerminateOnLeave bool              `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
+	Template         string            `yaml:"template" json:"template"`                                         // template name (must be pushed to hub)
+	Provider         string            `yaml:"provider,omitempty" json:"provider,omitempty"`                     // override the default provider for this factory
+	NamePattern      string            `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`             // claw name pattern, e.g. "{issue_id}"
+	WebhookSecret    string            `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"`         // HMAC-SHA256 secret for validating webhooks
+	Tags             []string          `yaml:"tags,omitempty" json:"tags,omitempty"`                             // tags applied to created claws
+	Color            string            `yaml:"color,omitempty" json:"color,omitempty"`                           // color applied to created claws
+	RunKind          string            `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                     // analytics run kind: "code_task" or "pr_task"
+	AnalyticsEnabled *bool             `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`   // nil = infer from integration
+	RequiresPR       *bool             `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
 	// Labels: all must be present on the issue to trigger (AND)
 	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"

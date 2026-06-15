@@ -38,6 +38,9 @@ type githubIssuesWebhookPayload struct {
 		Assignee *struct {
 			Login string `json:"login"`
 		} `json:"assignee"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
 		User struct {
 			Login string `json:"login"`
 		} `json:"user"`
@@ -471,6 +474,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		return "", false, fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false
+	s.saveTrackerContext(clawID, "github-issues", issueID, s.githubOriginalOwnersFromIssue(payload), nil)
 	return clawID, true, nil
 }
 
@@ -750,6 +754,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
+	s.saveTrackerContext(clawID, "github-issues", issueID, s.githubOriginalOwnersFromIssue(payload), nil)
 
 	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears

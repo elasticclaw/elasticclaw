@@ -21,6 +21,7 @@ type IssueState struct {
 	State     string
 	Labels    []string
 	Assignee  string
+	Assignees []string
 	UpdatedAt string // RFC3339
 }
 
@@ -254,6 +255,13 @@ func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevStat
 		action = "reopened"
 	}
 
+	assignees := make([]map[string]string, 0, len(issue.Assignees))
+	for _, login := range issue.Assignees {
+		assignees = append(assignees, map[string]string{"login": login})
+	}
+	if issue.Assignee != "" && len(assignees) == 0 {
+		assignees = append(assignees, map[string]string{"login": issue.Assignee})
+	}
 	payload := map[string]interface{}{
 		"action": action,
 		"issue": map[string]interface{}{
@@ -266,6 +274,7 @@ func (m *MockGitHubIssues) BuildWebhookPayload(repo string, number int, prevStat
 			"state_reason": "",
 			"labels":       labelsToNameMaps(issue.Labels),
 			"assignee":     nil,
+			"assignees":    assignees,
 			"user":         map[string]interface{}{"login": "testuser", "type": "User"},
 		},
 		"repository": map[string]interface{}{
@@ -296,6 +305,13 @@ func issueToMap(number int, issue IssueState, owner, repo string) map[string]int
 	if issue.Assignee != "" {
 		assignee = map[string]interface{}{"login": issue.Assignee}
 	}
+	assignees := make([]map[string]string, 0, len(issue.Assignees))
+	for _, login := range issue.Assignees {
+		assignees = append(assignees, map[string]string{"login": login})
+	}
+	if issue.Assignee != "" && len(assignees) == 0 {
+		assignees = append(assignees, map[string]string{"login": issue.Assignee})
+	}
 	return map[string]interface{}{
 		"number":     number,
 		"title":      issue.Title,
@@ -305,6 +321,7 @@ func issueToMap(number int, issue IssueState, owner, repo string) map[string]int
 		"updated_at": issue.UpdatedAt,
 		"labels":     labels,
 		"assignee":   assignee,
+		"assignees":  assignees,
 		"user":       map[string]interface{}{"login": "testuser"},
 	}
 }

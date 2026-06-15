@@ -1703,13 +1703,18 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	}
 	s.mu.Unlock()
 
-	// 4. Write issue-tracker comment without delaying agent shutdown.
+	// 4. Apply generic issue-tracker agent-error policy without delaying shutdown.
+	go s.handleAgentError(clawID, safeReason)
+
+	// 5. Write legacy issue-tracker comment without delaying agent shutdown.
 	if factory != nil && issueID != "" {
 		factoryCopy := *factory
-		go s.commentAgentStopToTracker(clawID, &factoryCopy, issueID, reason)
+		if factoryCopy.Integration != "github-issues" {
+			go s.commentAgentStopToTracker(clawID, &factoryCopy, issueID, reason)
+		}
 	}
 
-	// 5. Terminate VM if still running
+	// 6. Terminate VM if still running
 	if providerID != "" && !skipVMTerminate {
 		go s.terminateVM(provider, providerID)
 	}

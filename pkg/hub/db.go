@@ -60,6 +60,14 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_tracker_contexts (
+		claw_id         TEXT PRIMARY KEY,
+		integration     TEXT NOT NULL DEFAULT '',
+		issue_id        TEXT NOT NULL DEFAULT '',
+		original_owners TEXT NOT NULL DEFAULT '[]',
+		agent_owners    TEXT NOT NULL DEFAULT '[]',
+		created_at      DATETIME NOT NULL
+	)`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -241,6 +249,15 @@ func migrate(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
+
+	CREATE TABLE IF NOT EXISTS claw_tracker_contexts (
+		claw_id         TEXT PRIMARY KEY,
+		integration     TEXT NOT NULL DEFAULT '',
+		issue_id        TEXT NOT NULL DEFAULT '',
+		original_owners TEXT NOT NULL DEFAULT '[]',
+		agent_owners    TEXT NOT NULL DEFAULT '[]',
+		created_at      DATETIME NOT NULL
+	);
 
 	CREATE TABLE IF NOT EXISTS task_runs (
 		id                    TEXT PRIMARY KEY,

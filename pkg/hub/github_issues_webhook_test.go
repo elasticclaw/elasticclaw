@@ -232,6 +232,50 @@ func TestGitHubIssuesWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	}
 }
 
+func TestGitHubIssuesWorkflowStoresOriginalAssigneeSnapshot(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueWorkflowFixture(t, "workspace-a", "")
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{
+		Title:     "Test Issue",
+		Body:      "Test body",
+		State:     "open",
+		Assignees: []string{"ana", "matias"},
+	})
+	s.PollIntegrationsForTest()
+
+	var ownersJSON string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err := db.QueryRow(`
+			SELECT original_owners
+			  FROM claw_tracker_contexts
+			 WHERE integration='github-issues' AND issue_id='testorg/testrepo/42'`,
+		).Scan(&ownersJSON)
+		if err == nil && ownersJSON != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ownersJSON == "" {
+		t.Fatal("expected GitHub issue claw to store tracker context")
+	}
+	if !strings.Contains(ownersJSON, `"login":"ana"`) || !strings.Contains(ownersJSON, `"login":"matias"`) {
+		t.Fatalf("original owners snapshot = %s, want ana and matias", ownersJSON)
+	}
+}
+
 func TestGitHubIssuesWorkflowPollUsesActualLabeler(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")

@@ -32,6 +32,7 @@ type WorkflowConfig struct {
 	TriggerStatus       string            `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`
 	WorkingStatus       string            `yaml:"working_status,omitempty" json:"working_status,omitempty"`
 	FinishedStatus      string            `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`
+	AgentError          *AgentErrorConfig `yaml:"agent_error,omitempty" json:"agent_error,omitempty"`
 	TerminateOnLeave    bool              `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"`
 	Provider            string            `yaml:"provider,omitempty" json:"provider,omitempty"`
 	NamePattern         string            `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`
@@ -53,6 +54,15 @@ type WorkflowConfig struct {
 	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Stages              []WorkflowStage   `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+}
+
+// AgentErrorConfig customizes issue-tracker updates when an agent stops with
+// an unrecoverable error.
+type AgentErrorConfig struct {
+	Enabled    *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Marker     string `yaml:"marker,omitempty" json:"marker,omitempty"`
+	Comment    string `yaml:"comment,omitempty" json:"comment,omitempty"`
+	ReassignTo string `yaml:"reassign_to,omitempty" json:"reassign_to,omitempty"`
 }
 
 // WorkflowVolume declares a hub-managed artifact-backed directory attached to
