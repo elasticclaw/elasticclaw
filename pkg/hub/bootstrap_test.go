@@ -105,6 +105,9 @@ func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.
 	assertContains(t, script, "Downloading ElasticClaw connector", "user-facing connector label")
 	assertContains(t, script, "Retrying connector download in", "retry status")
 	assertContains(t, script, "could not download ElasticClaw connector", "user-facing failure")
+	assertContains(t, script, "[ ! -s /tmp/claw-bridge ]", "missing or empty connector is retried before install")
+	assertContains(t, script, "connector download produced no usable file", "missing connector has actionable error")
+	assertContains(t, script, "sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge", "installs verified connector atomically")
 	assertNotContains(t, script, "Downloading claw-bridge from", "implementation name hidden from remote output")
 }
 
@@ -740,7 +743,21 @@ set +e
 for cmd in curl apt-get npm sudo systemctl git gh oras python3 gpg tee chmod mv nohup; do
   eval "${cmd}() { return 0; }"
 done
-curl() { echo stub_curl_output; return 0; }
+curl() {
+  local out=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+      shift
+      out="$1"
+    fi
+    shift || true
+  done
+  if [ -n "$out" ]; then
+    printf 'stub bridge binary' > "$out"
+  fi
+  echo stub_curl_output
+  return 0
+}
 openclaw() {
   if [ "$1" = "--version" ]; then echo "OpenClaw 2026.1.0"; fi
   return 0

@@ -244,6 +244,11 @@ download_connector_once() {
     cp "$BINARY" /tmp/claw-bridge
     cd -
   fi
+  if [ ! -s /tmp/claw-bridge ]; then
+    echo "ERROR: ElasticClaw connector download produced no usable file at /tmp/claw-bridge"
+    ls -la /tmp/claw-bridge /tmp/claw-bridge-dl 2>/dev/null || true
+    return 1
+  fi
 }
 
 CONNECTOR_DELAYS=(5 10 20 40 60)
@@ -261,8 +266,13 @@ for attempt in $(seq 1 "$CONNECTOR_ATTEMPTS"); do
   echo "Retrying connector download in ${delay}s..."
   sleep "$delay"
 done
-chmod +x /tmp/claw-bridge
-sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
+if [ ! -s /tmp/claw-bridge ]; then
+  echo "ERROR: ElasticClaw connector is missing after download retries"
+  exit 1
+fi
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge
+rm -f /tmp/claw-bridge
 echo "ElasticClaw connector installed"
 
 # ── Bootstrap + run ───────────────────────────────────────────────────────────
