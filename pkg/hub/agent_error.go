@@ -274,17 +274,11 @@ func fetchGitHubIssueOwners(baseURL, token, repo string, issueNumber int) ([]tra
 		Assignee *struct {
 			Login string `json:"login"`
 		} `json:"assignee"`
-		Assignees []struct {
-			Login string `json:"login"`
-		} `json:"assignees"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
-	owners := make([]trackerOwner, 0, len(result.Assignees)+1)
-	for _, assignee := range result.Assignees {
-		owners = appendGitHubOwner(owners, assignee.Login)
-	}
+	var owners []trackerOwner
 	if result.Assignee != nil {
 		owners = appendGitHubOwner(owners, result.Assignee.Login)
 	}
@@ -404,9 +398,6 @@ func setGitHubHeaders(req *http.Request, token string) {
 
 func githubOwnersFromWebhook(payload githubIssuesWebhookPayload) []trackerOwner {
 	var owners []trackerOwner
-	for _, assignee := range payload.Issue.Assignees {
-		owners = appendGitHubOwner(owners, assignee.Login)
-	}
 	if payload.Issue.Assignee != nil {
 		owners = appendGitHubOwner(owners, payload.Issue.Assignee.Login)
 	}

@@ -248,10 +248,10 @@ func TestGitHubIssuesWorkflowStoresOriginalAssigneeSnapshot(t *testing.T) {
 	saveGitHubIssueWorkflowFixture(t, "workspace-a", "")
 
 	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{
-		Title:     "Test Issue",
-		Body:      "Test body",
-		State:     "open",
-		Assignees: []string{"ana", "matias"},
+		Title:    "Test Issue",
+		Body:     "Test body",
+		State:    "open",
+		Assignee: "ana",
 	})
 	s.PollIntegrationsForTest()
 
@@ -271,8 +271,8 @@ func TestGitHubIssuesWorkflowStoresOriginalAssigneeSnapshot(t *testing.T) {
 	if ownersJSON == "" {
 		t.Fatal("expected GitHub issue claw to store tracker context")
 	}
-	if !strings.Contains(ownersJSON, `"login":"ana"`) || !strings.Contains(ownersJSON, `"login":"matias"`) {
-		t.Fatalf("original owners snapshot = %s, want ana and matias", ownersJSON)
+	if !strings.Contains(ownersJSON, `"login":"ana"`) {
+		t.Fatalf("original owners snapshot = %s, want ana", ownersJSON)
 	}
 }
 

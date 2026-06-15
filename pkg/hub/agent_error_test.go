@@ -44,6 +44,10 @@ func (m *agentErrorGitHubMock) handle(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/testorg/testrepo/issues/42":
+		var assignee interface{}
+		if len(m.assignees) > 0 {
+			assignee = map[string]string{"login": m.assignees[len(m.assignees)-1]}
+		}
 		assignees := make([]map[string]string, 0, len(m.assignees))
 		for _, login := range m.assignees {
 			assignees = append(assignees, map[string]string{"login": login})
@@ -52,6 +56,7 @@ func (m *agentErrorGitHubMock) handle(w http.ResponseWriter, r *http.Request) {
 			"number":    42,
 			"title":     "Test issue",
 			"state":     "open",
+			"assignee":  assignee,
 			"assignees": assignees,
 		})
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/testorg/testrepo/issues/42/labels":

@@ -838,9 +838,6 @@ type githubIssuesPollItem struct {
 	Assignee *struct {
 		Login string `json:"login"`
 	} `json:"assignee"`
-	Assignees []struct {
-		Login string `json:"login"`
-	} `json:"assignees"`
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
@@ -1220,11 +1217,6 @@ func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, act
 		payload.Issue.Assignee = &struct {
 			Login string `json:"login"`
 		}{Login: issue.Assignee.Login}
-	}
-	for _, assignee := range issue.Assignees {
-		payload.Issue.Assignees = append(payload.Issue.Assignees, struct {
-			Login string `json:"login"`
-		}{Login: assignee.Login})
 	}
 	payload.Repository.FullName = repo
 	payload.Sender.Login = issue.User.Login

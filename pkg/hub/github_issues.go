@@ -38,9 +38,6 @@ type githubIssuesWebhookPayload struct {
 		Assignee *struct {
 			Login string `json:"login"`
 		} `json:"assignee"`
-		Assignees []struct {
-			Login string `json:"login"`
-		} `json:"assignees"`
 		User struct {
 			Login string `json:"login"`
 		} `json:"user"`
