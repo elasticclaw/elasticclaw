@@ -271,6 +271,7 @@ llm_keys:
 		}
 	})
 	waitForHub(ctx, t, hub)
+	waitForPublicHub(ctx, t, env.PublicURL)
 	return hub
 }
 
@@ -290,6 +291,30 @@ func waitForHub(ctx context.Context, t *testing.T, hub *hubProcess) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("hub did not become ready at %s", hub.baseURL)
+}
+
+func waitForPublicHub(ctx context.Context, t *testing.T, publicURL string) {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	healthURL := strings.TrimRight(publicURL, "/") + "/healthz"
+	var lastErr string
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		req.Header.Set("ngrok-skip-browser-warning", "true")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+			lastErr = fmt.Sprintf("status %d", resp.StatusCode)
+		} else {
+			lastErr = err.Error()
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("public hub URL %s did not become reachable: %s", healthURL, lastErr)
 }
 
 func writeWorkspaceFixture(t *testing.T, env e2eEnv, workspaceName, workflowName, labelName string) string {
