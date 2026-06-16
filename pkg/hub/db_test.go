@@ -16,13 +16,10 @@ func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 		}
 		defer db.Close()
 
-		now := time.Now()
-		if _, err := db.Exec(`INSERT INTO tenants(id, name, token, claw_token, created_at) VALUES(?,?,?,?,?)`, "tenant", "Tenant", "token", "claw-token", now); err != nil {
+		if _, err := db.Exec(`INSERT INTO tenants(id, name, token, claw_token, created_at) VALUES(?,?,?,?,?)`, "tenant", "Tenant", "token", "claw-token", time.Now()); err != nil {
 			t.Fatalf("insert tenant: %v", err)
 		}
-		if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, status, created_at) VALUES(?,?,?,?,?,?,?)`, "claw-default", "tenant", "Claw", "", "docker", "provisioning", now); err != nil {
-			t.Fatalf("insert claw: %v", err)
-		}
+		insertClawUsingTriggerActorDefault(t, db, "claw-default")
 
 		assertClawTriggerActorJSONIsValid(t, db, "claw-default")
 	})
@@ -34,18 +31,33 @@ func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 		}
 		defer db.Close()
 
-		if _, err := db.Exec(`CREATE TABLE claws (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '')`); err != nil {
+		if _, err := db.Exec(`
+			CREATE TABLE claws (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				template TEXT NOT NULL DEFAULT '',
+				provider TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'offline',
+				created_at DATETIME NOT NULL
+			)`); err != nil {
 			t.Fatalf("create old claws table: %v", err)
 		}
 		if err := migrate(db); err != nil {
 			t.Fatalf("migrate old claws table: %v", err)
 		}
-		if _, err := db.Exec(`INSERT INTO claws(id) VALUES(?)`, "claw-default"); err != nil {
-			t.Fatalf("insert migrated claw: %v", err)
-		}
+		insertClawUsingTriggerActorDefault(t, db, "claw-default")
 
 		assertClawTriggerActorJSONIsValid(t, db, "claw-default")
 	})
+}
+
+func insertClawUsingTriggerActorDefault(t *testing.T, db *sql.DB, clawID string) {
+	t.Helper()
+
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, status, created_at) VALUES(?,?,?,?,?,?,?)`, clawID, "tenant", "Claw", "", "docker", "provisioning", time.Now()); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
 }
 
 func assertClawTriggerActorJSONIsValid(t *testing.T, db *sql.DB, clawID string) {
