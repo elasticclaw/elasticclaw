@@ -8,7 +8,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
+
+var issueTrackerHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 type triggerActor struct {
 	ID    string `json:"id,omitempty"`
@@ -55,7 +58,7 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to mark GitHub issue %s#%d with label %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, err)
 			}
 		}
-		if feedback.TriggerActor.Login != "" {
+		if canAssignFailureFeedback(feedback) {
 			if err := assignGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login); err != nil {
 				log.Printf("[agent-failure-feedback] failed to assign GitHub issue %s#%d to %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login, err)
 			}
@@ -69,7 +72,7 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to mark Linear issue %s with status %q: %v", feedback.LinearIdentifier, feedback.AgentStatusError, err)
 			}
 		}
-		if feedback.TriggerActor.ID != "" && strings.EqualFold(feedback.TriggerActor.Type, "user") {
+		if canAssignFailureFeedback(feedback) {
 			if err := s.assignLinearIssue(token, feedback.LinearIdentifier, feedback.TriggerActor.ID); err != nil {
 				log.Printf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
 			}
@@ -139,7 +142,7 @@ func agentFailureFeedbackActionText(feedback agentFailureFeedback) string {
 func canAssignFailureFeedback(feedback agentFailureFeedback) bool {
 	switch feedback.Integration {
 	case "github-issues":
-		return feedback.TriggerActor.Login != ""
+		return feedback.TriggerActor.Login != "" && strings.EqualFold(feedback.TriggerActor.Type, "user")
 	case "linear":
 		return feedback.TriggerActor.ID != "" && strings.EqualFold(feedback.TriggerActor.Type, "user")
 	default:
@@ -162,7 +165,7 @@ func commentGitHubIssueWithBase(base, token, repo string, issueNumber int, body 
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -199,7 +202,7 @@ func assignLinearIssueWithBase(baseURL, token, issueIdentifier, assigneeID strin
 	}
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -240,7 +243,7 @@ func assignLinearIssueWithBase(baseURL, token, issueIdentifier, assigneeID strin
 	}
 	req2.Header.Set("Authorization", token)
 	req2.Header.Set("Content-Type", "application/json")
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := issueTrackerHTTPClient.Do(req2)
 	if err != nil {
 		return err
 	}

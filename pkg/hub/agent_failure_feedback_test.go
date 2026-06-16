@@ -90,6 +90,21 @@ func TestBuildAgentFailureFeedbackCommentWithoutTriggerActor(t *testing.T) {
 	}
 }
 
+func TestBuildAgentFailureFeedbackCommentDoesNotClaimBotAssignment(t *testing.T) {
+	comment := buildAgentFailureFeedbackComment(agentFailureFeedback{
+		Integration:      "github-issues",
+		TriggerActor:     triggerActor{Login: "elasticclaw-app[bot]", Type: "Bot"},
+		AgentStatusError: "agent-error",
+		Failure:          classifyAgentFailure("Bootstrap failed: HTTP 502"),
+	})
+	if strings.Contains(comment, "assigned it back to you") || strings.Contains(comment, "assigned this issue back to you") {
+		t.Fatalf("comment claimed bot reassignment:\n%s", comment)
+	}
+	if !strings.Contains(comment, "I marked this issue for review") {
+		t.Fatalf("comment missing status-only action text:\n%s", comment)
+	}
+}
+
 func TestCommentWorkflowAgentStopToTrackerHandlesMissingTriggerConfig(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	ghi := newStopFeedbackGitHubMock(t)

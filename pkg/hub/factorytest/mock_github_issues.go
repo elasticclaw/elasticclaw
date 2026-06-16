@@ -83,6 +83,11 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 				_ = json.NewDecoder(r.Body).Decode(&req)
 				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
 				m.mu.Lock()
+				if _, ok := m.Issues[key]; !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
 				id := int64(len(m.IssueComments[key]) + 1)
 				m.IssueComments[key] = append(m.IssueComments[key], IssueCommentState{
 					ID:        id,
@@ -105,7 +110,12 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 				_ = json.NewDecoder(r.Body).Decode(&req)
 				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
 				m.mu.Lock()
-				issue := m.Issues[key]
+				issue, ok := m.Issues[key]
+				if !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
 				for _, label := range req.Labels {
 					if !stringSliceContains(issue.Labels, label) {
 						issue.Labels = append(issue.Labels, label)
@@ -128,7 +138,12 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 				_ = json.NewDecoder(r.Body).Decode(&req)
 				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
 				m.mu.Lock()
-				issue := m.Issues[key]
+				issue, ok := m.Issues[key]
+				if !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
 				if len(req.Assignees) > 0 {
 					issue.Assignee = req.Assignees[0]
 				}

@@ -223,8 +223,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
 	}
 	if opts.triggerActor != nil {
-		if actorJSON, err := json.Marshal(opts.triggerActor); err == nil {
-			_, _ = s.db.Exec(`UPDATE claws SET trigger_actor_json=? WHERE id=?`, string(actorJSON), clawID)
+		actorJSON, err := json.Marshal(opts.triggerActor)
+		if err != nil {
+			log.Printf("[workflow] failed to marshal trigger actor for claw %s: %v", shortID(clawID), err)
+		} else if _, err := s.db.Exec(`UPDATE claws SET trigger_actor_json=? WHERE id=?`, string(actorJSON), clawID); err != nil {
+			log.Printf("[workflow] failed to persist trigger actor for claw %s: %v", shortID(clawID), err)
 		}
 	}
 

@@ -1040,7 +1040,7 @@ func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1112,7 +1112,7 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
