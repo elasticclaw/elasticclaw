@@ -192,8 +192,17 @@ jobs:
           printf 'version: "3"\nagent:\n  web_addr: "%s"\n' "$NGROK_API_ADDR" > ngrok.yml
           ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
           echo "$!" > ngrok.pid
-          for i in $(seq 1 30); do
-            url="$(curl -fsS "http://$NGROK_API_ADDR/api/tunnels" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"
+          for i in $(seq 1 120); do
+            if ! kill -0 "$(cat ngrok.pid)" >/dev/null 2>&1; then
+              echo "ngrok exited before the local API became ready"
+              cat ngrok.log
+              exit 1
+            fi
+            if ! curl -fsS --connect-timeout 2 --max-time 5 "http://$NGROK_API_ADDR/api/tunnels" > ngrok-tunnels.json 2>/dev/null; then
+              sleep 1
+              continue
+            fi
+            url="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' < ngrok-tunnels.json 2>/dev/null || true)"
             if [ -n "$url" ]; then
               case "$url" in
                 *://elasticclaw.ngrok.app*)
@@ -206,6 +215,7 @@ jobs:
             fi
             sleep 1
           done
+          echo "ngrok tunnel did not become ready"
           cat ngrok.log
           exit 1
 
@@ -235,6 +245,7 @@ jobs:
             ngrok.log
             ngrok.pid
             ngrok.yml
+            ngrok-tunnels.json
             ngrok-domain.json
             ngrok-domain-id
             e2e-daytona-sandbox-ids
