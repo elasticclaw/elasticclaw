@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,188 @@ var (
 	longOpaqueRE      = regexp.MustCompile(`\b[A-Za-z0-9+/=_-]{80,}\b`)
 	pemBlockRE        = regexp.MustCompile(`(?s)-----BEGIN [^-]+-----.*?-----END [^-]+-----`)
 	secretLikeValueRE = regexp.MustCompile(`(?i)(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})`)
+	httpStatusRE      = regexp.MustCompile(`(?i)\b(?:HTTP|status|github API error|Linear API error|github API [A-Z]+ [^:]+:)\s+([1-5][0-9]{2})\b`)
 )
+
+type agentFailureKind string
+
+const (
+	agentFailureUnknown            agentFailureKind = "unknown"
+	agentFailureTrackerRead        agentFailureKind = "tracker_read"
+	agentFailureTemplate           agentFailureKind = "template"
+	agentFailureProviderConfig     agentFailureKind = "provider_config"
+	agentFailureHubPersistence     agentFailureKind = "hub_persistence"
+	agentFailureWorkspaceSecrets   agentFailureKind = "workspace_secrets"
+	agentFailureTriggerClaim       agentFailureKind = "trigger_claim"
+	agentFailureTaskRunAnalytics   agentFailureKind = "task_run_analytics"
+	agentFailureProvisioning       agentFailureKind = "provisioning"
+	agentFailureBootstrap          agentFailureKind = "bootstrap"
+	agentFailureWorkspaceReadiness agentFailureKind = "workspace_readiness"
+	agentFailureWorkspaceFiles     agentFailureKind = "workspace_files"
+	agentFailureGitHubCredentials  agentFailureKind = "github_credentials"
+	agentFailureWorkflowVolume     agentFailureKind = "workflow_volume"
+	agentFailureRestore            agentFailureKind = "restore"
+	agentFailureWorkflowCommand    agentFailureKind = "workflow_command"
+	agentFailureDependencyUpdate   agentFailureKind = "dependency_update"
+	agentFailureJudge              agentFailureKind = "judge"
+	agentFailureGate               agentFailureKind = "gate"
+	agentFailurePullRequestAction  agentFailureKind = "pull_request_action"
+	agentFailureIssueAction        agentFailureKind = "issue_action"
+	agentFailureSandboxTerminated  agentFailureKind = "sandbox_terminated"
+	agentFailureTrackerAPI         agentFailureKind = "tracker_api"
+)
+
+type agentFailureMessage struct {
+	Kind        agentFailureKind
+	StatusCode  int
+	Title       string
+	UserMessage string
+	NextStep    string
+	SafeDetail  string
+}
+
+type agentFailureRule struct {
+	kind    agentFailureKind
+	signals []string
+}
+
+var agentFailureRules = []agentFailureRule{
+	{agentFailureTrackerRead, []string{"cannot read issue", "fetchgithubissuedetails", "fetchlinearissuedetails"}},
+	{agentFailureTemplate, []string{"template \"", "template '", "resolvetemplatefiles"}},
+	{agentFailureProviderConfig, []string{"no provider configured", "provider \"", " is not configured", "unsupported provider", "unknown provider"}},
+	{agentFailureHubPersistence, []string{"no tenant", "db insert", "artifact storage", "hub identity"}},
+	{agentFailureWorkspaceSecrets, []string{"load workspace secrets", "secret_ref"}},
+	{agentFailureTriggerClaim, []string{"claim workflow trigger", "claim factory trigger", "complete workflow trigger", "complete factory trigger"}},
+	{agentFailureTaskRunAnalytics, []string{"task run analytics"}},
+	{agentFailureProvisioning, []string{"provisioning failed", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
+	{agentFailureBootstrap, []string{"bootstrap failed", "daytona bootstrap failed", "exedev bootstrap failed", "install openclaw failed", "start claw-bridge", "connector download"}},
+	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete"}},
+	{agentFailureWorkspaceFiles, []string{"could not write workspace files", "workspace files incomplete", "template file staging failed", "docker file copy failed", "invalid template file path", "path must stay inside workspace"}},
+	{agentFailureGitHubCredentials, []string{"could not configure github credentials", "auth gh cli failed", "verify gh auth failed", "fetch github bootstrap token"}},
+	{agentFailureWorkflowVolume, []string{"workflow volume attach failed"}},
+	{agentFailureRestore, []string{"restore failed", "restore checkpoint failed", "checkpoint not found", "checkpoint is not ready", "checkpoint has no manifest", "checkpoint blob", "checkpoint tree"}},
+	{agentFailureWorkflowCommand, []string{"workflow command failed", "invalid run timeout", "does not support workflow run actions", "script command", "command failed"}},
+	{agentFailureDependencyUpdate, []string{"dependency update step failed"}},
+	{agentFailureJudge, []string{"judge stage failed", "judge llm call failed", "judge response parse failed", "no judge inputs", "no llm keys configured for judge", "invalid verdict", "missing verdict"}},
+	{agentFailureGate, []string{"gate error", "gate failed", "required gate"}},
+	{agentFailurePullRequestAction, []string{"merge_pr: failed", "pr validation failed", "pr closed without merge"}},
+	{agentFailureIssueAction, []string{"close_issue: failed", "failed to move github issue", "failed to move issue", "failed to add label", "failed to remove label"}},
+	{agentFailureSandboxTerminated, []string{"sandbox terminated", "ttl expired", "external shutdown"}},
+	{agentFailureTrackerAPI, []string{"github api error", "linear api error", "graphql error", "commentcreate returned success=false", "issue or state not found"}},
+}
+
+func classifyAgentFailure(reason string) agentFailureMessage {
+	sanitized := sanitizeFailureDetails(reason)
+	lower := strings.ToLower(sanitized)
+	kind := agentFailureUnknown
+	for _, rule := range agentFailureRules {
+		if containsAny(lower, rule.signals) {
+			kind = rule.kind
+			break
+		}
+	}
+	msg := agentFailureMessage{
+		Kind:        kind,
+		StatusCode:  extractFailureStatusCode(sanitized),
+		UserMessage: agentFailureUserMessage(kind),
+		NextStep:    agentFailureNextStep(kind),
+		SafeDetail:  agentFailureSafeDetail(sanitized),
+	}
+	msg.Title = msg.UserMessage
+	return msg
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractFailureStatusCode(s string) int {
+	for _, match := range httpStatusRE.FindAllStringSubmatch(s, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		code, err := strconv.Atoi(match[1])
+		if err == nil && code >= 100 && code <= 599 {
+			return code
+		}
+	}
+	return http.StatusInternalServerError
+}
+
+func agentFailureUserMessage(kind agentFailureKind) string {
+	switch kind {
+	case agentFailureTrackerRead:
+		return "ElasticClaw could not read the source issue/ticket."
+	case agentFailureTemplate:
+		return "ElasticClaw could not load the workspace template."
+	case agentFailureProviderConfig:
+		return "ElasticClaw could not find a valid execution provider."
+	case agentFailureHubPersistence:
+		return "ElasticClaw could not save or load required hub data."
+	case agentFailureWorkspaceSecrets:
+		return "ElasticClaw could not load a required workspace secret."
+	case agentFailureTriggerClaim:
+		return "ElasticClaw could not reserve or finalize this automation run."
+	case agentFailureTaskRunAnalytics:
+		return "ElasticClaw could not create the run tracking record."
+	case agentFailureProvisioning:
+		return "ElasticClaw could not start the agent workspace."
+	case agentFailureBootstrap:
+		return "ElasticClaw started the workspace but could not finish preparing it."
+	case agentFailureWorkspaceReadiness:
+		return "ElasticClaw could not verify that the workspace was ready."
+	case agentFailureWorkspaceFiles:
+		return "ElasticClaw could not place the required files in the workspace."
+	case agentFailureGitHubCredentials:
+		return "ElasticClaw could not configure GitHub access inside the workspace."
+	case agentFailureWorkflowVolume:
+		return "ElasticClaw could not attach a required workflow volume."
+	case agentFailureRestore:
+		return "ElasticClaw could not restore the previous agent checkpoint."
+	case agentFailureWorkflowCommand:
+		return "A workflow command failed while the agent was running."
+	case agentFailureDependencyUpdate:
+		return "The dependency update step did not complete successfully."
+	case agentFailureJudge:
+		return "ElasticClaw could not complete an automated review step."
+	case agentFailureGate:
+		return "A workflow gate blocked the run."
+	case agentFailurePullRequestAction:
+		return "ElasticClaw could not complete the pull request action."
+	case agentFailureIssueAction:
+		return "ElasticClaw could not update the source issue/ticket."
+	case agentFailureSandboxTerminated:
+		return "The agent workspace stopped before ElasticClaw could finish."
+	case agentFailureTrackerAPI:
+		return "ElasticClaw received an error from the issue tracker API."
+	default:
+		return "ElasticClaw hit an unexpected error while running the agent."
+	}
+}
+
+func agentFailureNextStep(kind agentFailureKind) string {
+	switch kind {
+	case agentFailureTrackerRead, agentFailureTrackerAPI:
+		return "Check the issue tracker token permissions, then re-trigger the workflow."
+	case agentFailureTemplate, agentFailureProviderConfig, agentFailureWorkspaceSecrets, agentFailureGitHubCredentials, agentFailureWorkflowVolume:
+		return "Check the ElasticClaw workspace/workflow configuration, then re-trigger the workflow."
+	case agentFailureProvisioning, agentFailureBootstrap, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles, agentFailureRestore, agentFailureSandboxTerminated:
+		return "Check the ElasticClaw run logs and provider status, then retry the workflow."
+	case agentFailureWorkflowCommand, agentFailureDependencyUpdate, agentFailureJudge, agentFailureGate, agentFailurePullRequestAction, agentFailureIssueAction:
+		return "Review the workflow result, fix the command/review/PR issue, then retry from the appropriate stage."
+	default:
+		return "Review the failure details and retry after the configuration or hub issue is fixed."
+	}
+}
+
+func agentFailureSafeDetail(sanitized string) string {
+	return firstUsefulFailureLines(sanitized, 2)
+}
 
 func (s *Server) buildAgentStopComment(clawID, reason string) string {
 	sanitized := sanitizeFailureDetails(reason)
