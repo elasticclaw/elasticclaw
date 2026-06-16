@@ -72,6 +72,36 @@ func TestLinearWorkflowCreateFailureCommentsMovesAndAssignsTriggerActor(t *testi
 	}
 }
 
+func TestLinearWorkflowCreateFailureDoesNotReprocessErrorStatusWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	linear := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{ClawToken: "test-claw-token"}
+	s, _ := hub.NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+	saveLinearIssueWorkflowFixtureWithProviderAndErrorStatus(t, "workspace-a", "missing-provider", "Agent Error")
+	hub.SaveWorkspaceIssueTrackerForTest(t, "workspace-a", "linear", "default", "test-linear-token", "")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithActor(t, linear, "ELA-123", "Backlog", "Todo", map[string]interface{}{
+		"id":   "user-123",
+		"type": "user",
+		"name": "Marc Developer",
+		"url":  "https://linear.app/test/profiles/user-123",
+	}))
+	waitForLinearIssueState(t, linear, "ELA-123", "Agent Error")
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithActor(t, linear, "ELA-123", "Todo", "Agent Error", map[string]interface{}{
+		"id":   "user-123",
+		"type": "user",
+		"name": "Marc Developer",
+		"url":  "https://linear.app/test/profiles/user-123",
+	}))
+
+	assertLinearIssueCommentCountStable(t, linear, "ELA-123", 1)
+}
+
 func saveLinearIssueWorkflowFixtureWithProviderAndErrorStatus(t *testing.T, workspace, provider, agentStatusError string) {
 	t.Helper()
 	hub.SaveWorkspaceForTest(t,
@@ -121,6 +151,24 @@ func linearWebhookPayloadWithActor(t *testing.T, linear *factorytest.MockLinear,
 	return out
 }
 
+func postLinearWebhook(t *testing.T, serverURL, workspace string, payload []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/api/workspaces/"+workspace+"/webhooks/linear", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func waitForLinearIssuePostedComment(t *testing.T, linear *factorytest.MockLinear, issueID string) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -131,6 +179,18 @@ func waitForLinearIssuePostedComment(t *testing.T, linear *factorytest.MockLinea
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for Linear issue comment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertLinearIssueCommentCountStable(t *testing.T, linear *factorytest.MockLinear, issueID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		comments := linear.Comments(issueID)
+		if len(comments) != want {
+			t.Fatalf("posted %d failure comments, want %d: %#v", len(comments), want, comments)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

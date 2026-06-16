@@ -364,6 +364,9 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 		if payload.Action != "labeled" {
 			return false
 		}
+		if len(labels) > 0 && !githubIssuesPayloadLabelMatches(payload, labels) {
+			return false
+		}
 	case "issue_opened":
 		if payload.Action != "opened" {
 			return false
@@ -413,6 +416,22 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 		return false
 	}
 	return true
+}
+
+func githubIssuesPayloadLabelMatches(payload githubIssuesWebhookPayload, labels []string) bool {
+	if payload.Label == nil {
+		return false
+	}
+	added := strings.ToLower(strings.TrimSpace(payload.Label.Name))
+	if added == "" {
+		return false
+	}
+	for _, label := range labels {
+		if strings.EqualFold(added, strings.TrimSpace(label)) {
+			return true
+		}
+	}
+	return false
 }
 
 func assignedToMatches(filter, assignee string) bool {
