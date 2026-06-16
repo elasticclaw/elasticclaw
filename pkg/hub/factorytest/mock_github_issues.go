@@ -33,7 +33,8 @@ type IssueCommentState struct {
 }
 
 // MockGitHubIssues is a REST-style mock for the GitHub Issues API and webhook
-// delivery.
+// delivery. It handles issue reads/listing, comments, labels, issue patching,
+// issue events, and issue comments for the workflow/factory test paths.
 type MockGitHubIssues struct {
 	*httptest.Server
 	mu            sync.Mutex
@@ -54,7 +55,7 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 	}
 	mux := http.NewServeMux()
 
-	// /repos/:owner/:repo/issues endpoints.
+	// /repos/:owner/:repo/issues endpoints used by the workflow/factory tests.
 	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/repos/")
 		parts := strings.Split(path, "/")
