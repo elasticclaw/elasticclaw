@@ -1748,7 +1748,9 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		}
 		feedback.GitHubRepo = repo
 		feedback.GitHubIssueNum = issueNum
-		feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.GitHubIssues.AgentStatusError)
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.GitHubIssues != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.GitHubIssues.AgentStatusError)
+		}
 		s.handleAgentFailureFeedback(feedback, token)
 	case "linear":
 		token := s.resolveLinearTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
@@ -1756,7 +1758,9 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 			return
 		}
 		feedback.LinearIdentifier = ctx.IssueID
-		feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Linear != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
+		}
 		s.handleAgentFailureFeedback(feedback, token)
 	}
 }

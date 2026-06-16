@@ -31,6 +31,10 @@ type agentFailureFeedback struct {
 	ClawID           string
 }
 
+type linearGraphQLError struct {
+	Message string `json:"message"`
+}
+
 func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token string) {
 	if feedback.Failure.UserMessage == "" {
 		feedback.Failure = classifyAgentFailure(feedback.Failure.SafeDetail)
@@ -90,21 +94,22 @@ func (s *Server) triggerActorForClaw(clawID string) triggerActor {
 }
 
 func buildAgentFailureFeedbackComment(feedback agentFailureFeedback) string {
-	actor := feedback.TriggerActor.Login
-	if actor != "" {
-		actor = "@" + actor
+	var actorPrefix string
+	if feedback.TriggerActor.Login != "" {
+		actorPrefix = "@" + feedback.TriggerActor.Login + " "
 	} else if feedback.TriggerActor.Name != "" {
-		actor = feedback.TriggerActor.Name
+		actor := feedback.TriggerActor.Name
 		if feedback.TriggerActor.URL != "" {
 			actor = fmt.Sprintf("[%s](%s)", actor, feedback.TriggerActor.URL)
 		}
-	} else {
-		actor = "ElasticClaw"
+		actorPrefix = actor + " "
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s ElasticClaw could not finish this implementation.\n\n", actor))
-	b.WriteString("The agent hit an error while preparing or running the workspace, so no reliable code change was completed. I marked this issue for review and assigned it back to you so you can decide whether to retry or update the setup.\n\n")
+	b.WriteString(fmt.Sprintf("%sElasticClaw could not finish this implementation.\n\n", actorPrefix))
+	b.WriteString("The agent hit an error while preparing or running the workspace, so no reliable code change was completed. ")
+	b.WriteString(agentFailureFeedbackActionText(feedback))
+	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("Status code: %d\n", feedback.Failure.StatusCode))
 	if feedback.ClawID != "" {
 		b.WriteString(fmt.Sprintf("Agent run: %s\n", feedback.ClawID))
@@ -114,6 +119,32 @@ func buildAgentFailureFeedbackComment(feedback agentFailureFeedback) string {
 	b.WriteString("\n\nNext step:\n")
 	b.WriteString(feedback.Failure.NextStep)
 	return clampFailureComment(b.String())
+}
+
+func agentFailureFeedbackActionText(feedback agentFailureFeedback) string {
+	canMark := strings.TrimSpace(feedback.AgentStatusError) != ""
+	canAssign := canAssignFailureFeedback(feedback)
+	switch {
+	case canMark && canAssign:
+		return "I marked this issue for review and assigned it back to you so you can decide whether to retry or update the setup."
+	case canMark:
+		return "I marked this issue for review so the workflow setup can be checked before retrying."
+	case canAssign:
+		return "I assigned this issue back to you so you can decide whether to retry or update the setup."
+	default:
+		return "Please review the workflow setup before retrying."
+	}
+}
+
+func canAssignFailureFeedback(feedback agentFailureFeedback) bool {
+	switch feedback.Integration {
+	case "github-issues":
+		return feedback.TriggerActor.Login != ""
+	case "linear":
+		return feedback.TriggerActor.ID != "" && strings.EqualFold(feedback.TriggerActor.Type, "user")
+	default:
+		return false
+	}
 }
 
 func commentGitHubIssueWithBase(base, token, repo string, issueNumber int, body string) error {
@@ -183,8 +214,12 @@ func assignLinearIssueWithBase(baseURL, token, issueIdentifier, assigneeID strin
 				ID string `json:"id"`
 			} `json:"issue"`
 		} `json:"data"`
+		Errors []linearGraphQLError `json:"errors"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if err := linearGraphQLErrorsError(result.Errors); err != nil {
 		return err
 	}
 	if result.Data.Issue.ID == "" {
@@ -210,9 +245,37 @@ func assignLinearIssueWithBase(baseURL, token, issueIdentifier, assigneeID strin
 		return err
 	}
 	defer resp2.Body.Close()
+	body, _ := io.ReadAll(resp2.Body)
 	if resp2.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp2.Body)
 		return fmt.Errorf("Linear API error %d: %s", resp2.StatusCode, string(body))
 	}
+	var mutationResult struct {
+		Data struct {
+			IssueUpdate struct {
+				Success bool `json:"success"`
+			} `json:"issueUpdate"`
+		} `json:"data"`
+		Errors []linearGraphQLError `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &mutationResult); err != nil {
+		return err
+	}
+	if err := linearGraphQLErrorsError(mutationResult.Errors); err != nil {
+		return err
+	}
+	if !mutationResult.Data.IssueUpdate.Success {
+		return fmt.Errorf("issueUpdate returned success=false")
+	}
 	return nil
+}
+
+func linearGraphQLErrorsError(errs []linearGraphQLError) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	messages := make([]string, 0, len(errs))
+	for _, err := range errs {
+		messages = append(messages, err.Message)
+	}
+	return fmt.Errorf("GraphQL error: %s", strings.Join(messages, "; "))
 }

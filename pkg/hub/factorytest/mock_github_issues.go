@@ -112,9 +112,10 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 					}
 				}
 				m.Issues[key] = issue
+				allLabels := append([]string(nil), issue.Labels...)
 				m.mu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(labelsToNameMaps(req.Labels))
+				json.NewEncoder(w).Encode(labelsToNameMaps(allLabels))
 				return
 			}
 			if r.Method == http.MethodPatch && len(parts2) == 2 && parts2[0] == "issues" {

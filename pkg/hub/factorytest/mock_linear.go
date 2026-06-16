@@ -60,8 +60,13 @@ func NewMockLinear(t *testing.T) *MockLinear {
 			}
 			_ = json.Unmarshal(body, &req)
 			comment, _ := req.Variables["body"].(string)
+			issueID, _ := req.Variables["issueId"].(string)
 			m.mu.Lock()
-			m.IssueComments["ELA-123"] = append(m.IssueComments["ELA-123"], comment)
+			identifier := m.issueIdentifierLocked(issueID)
+			if identifier == "" {
+				identifier = issueID
+			}
+			m.IssueComments[identifier] = append(m.IssueComments[identifier], comment)
 			m.mu.Unlock()
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
@@ -75,36 +80,44 @@ func NewMockLinear(t *testing.T) *MockLinear {
 		}
 		// issueUpdate mutation (moveIssue)
 		if strings.Contains(bodyStr, "issueUpdate") {
-			// Extract issueId and stateId from variables - best effort
 			var req struct {
 				Variables map[string]interface{} `json:"variables"`
 			}
 			json.Unmarshal(body, &req)
 			if id, ok := req.Variables["id"].(string); ok {
+				m.mu.Lock()
+				identifier := m.issueIdentifierLocked(id)
+				if identifier == "" {
+					identifier = id
+				}
+				m.mu.Unlock()
 				if stateID, ok := req.Variables["stateId"].(string); ok {
 					m.mu.Lock()
 					m.IssueStates[id] = stateID
-					m.IssueStateNames["ELA-123"] = linearStateNameForID(stateID)
-					if issue, ok := m.PollingIssues["ELA-123"]; ok {
+					m.IssueStateNames[identifier] = linearStateNameForID(stateID)
+					if issue, ok := m.PollingIssues[identifier]; ok {
 						issue["state"] = map[string]interface{}{"name": linearStateNameForID(stateID)}
 					}
 					m.mu.Unlock()
 				}
 				if assigneeID, ok := req.Variables["assigneeId"].(string); ok {
 					m.mu.Lock()
-					m.IssueAssignees["ELA-123"] = assigneeID
+					m.IssueAssignees[identifier] = assigneeID
 					m.mu.Unlock()
 				}
 				if input, ok := req.Variables["input"].(map[string]interface{}); ok {
 					if stateID, ok := input["stateId"].(string); ok {
 						m.mu.Lock()
 						m.IssueStates[id] = stateID
-						m.IssueStateNames["ELA-123"] = linearStateNameForID(stateID)
+						m.IssueStateNames[identifier] = linearStateNameForID(stateID)
+						if issue, ok := m.PollingIssues[identifier]; ok {
+							issue["state"] = map[string]interface{}{"name": linearStateNameForID(stateID)}
+						}
 						m.mu.Unlock()
 					}
 					if assigneeID, ok := input["assigneeId"].(string); ok {
 						m.mu.Lock()
-						m.IssueAssignees["ELA-123"] = assigneeID
+						m.IssueAssignees[identifier] = assigneeID
 						m.mu.Unlock()
 					}
 				}
@@ -150,27 +163,39 @@ func NewMockLinear(t *testing.T) *MockLinear {
 		}
 		// issue(id:) query — returns a single issue directly
 		if strings.Contains(bodyStr, "issue(") || strings.Contains(bodyStr, `"issue"`) {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"data": map[string]interface{}{
-					"issue": map[string]interface{}{
-						"id":          "issue-uuid-123",
-						"identifier":  "ELA-123",
-						"title":       "Add hello world to README",
-						"description": "Please add a 'Hello World' section to the README.md file.",
-						"url":         "https://linear.app/test/issue/ELA-123",
-						"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
-						"team": map[string]interface{}{
-							"name": "Engineering",
-							"key":  "ELA",
-							"states": map[string]interface{}{
-								"nodes": []map[string]interface{}{
-									{"id": "done-state-id", "name": "Done", "type": "completed"},
-									{"id": "in-progress-id", "name": "In Progress", "type": "started"},
-									{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
-								},
+			var req struct {
+				Variables map[string]interface{} `json:"variables"`
+			}
+			_ = json.Unmarshal(body, &req)
+			id, _ := req.Variables["id"].(string)
+			m.mu.Lock()
+			issue := cloneMap(m.issueByIDLocked(id))
+			m.mu.Unlock()
+			if issue == nil {
+				issue = map[string]interface{}{
+					"id":          "issue-uuid-123",
+					"identifier":  "ELA-123",
+					"title":       "Add hello world to README",
+					"description": "Please add a 'Hello World' section to the README.md file.",
+					"url":         "https://linear.app/test/issue/ELA-123",
+					"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
+					"team": map[string]interface{}{
+						"name": "Engineering",
+						"key":  "ELA",
+						"states": map[string]interface{}{
+							"nodes": []map[string]interface{}{
+								{"id": "done-state-id", "name": "Done", "type": "completed"},
+								{"id": "in-progress-id", "name": "In Progress", "type": "started"},
+								{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
 							},
 						},
 					},
+				}
+			}
+			ensureMockLinearIssueStates(issue)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"issue": issue,
 				},
 			})
 			return
@@ -183,6 +208,9 @@ func NewMockLinear(t *testing.T) *MockLinear {
 }
 
 func cloneMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
 	out := make(map[string]interface{}, len(in))
 	for k, v := range in {
 		switch typed := v.(type) {
@@ -195,6 +223,48 @@ func cloneMap(in map[string]interface{}) map[string]interface{} {
 		}
 	}
 	return out
+}
+
+func (m *MockLinear) issueByIDLocked(id string) map[string]interface{} {
+	if issue, ok := m.PollingIssues[id]; ok {
+		return issue
+	}
+	for _, issue := range m.PollingIssues {
+		if issueID, _ := issue["id"].(string); issueID == id {
+			return issue
+		}
+	}
+	return nil
+}
+
+func (m *MockLinear) issueIdentifierLocked(id string) string {
+	if _, ok := m.PollingIssues[id]; ok {
+		return id
+	}
+	for identifier, issue := range m.PollingIssues {
+		if issueID, _ := issue["id"].(string); issueID == id {
+			return identifier
+		}
+	}
+	return ""
+}
+
+func ensureMockLinearIssueStates(issue map[string]interface{}) {
+	team, _ := issue["team"].(map[string]interface{})
+	if team == nil {
+		team = map[string]interface{}{"name": "Engineering", "key": "ELA"}
+		issue["team"] = team
+	}
+	if _, ok := team["states"]; ok {
+		return
+	}
+	team["states"] = map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "done-state-id", "name": "Done", "type": "completed"},
+			{"id": "in-progress-id", "name": "In Progress", "type": "started"},
+			{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
+		},
+	}
 }
 
 // SetIssueStateName updates the state name of a polling issue.
