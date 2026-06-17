@@ -361,6 +361,9 @@ func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIss
 			return fmt.Errorf("workflow %q: trigger.github_issues.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
 		}
 	}
+	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
+		return fmt.Errorf("workflow %q: trigger.github_issues.agent_status_error cannot be blank", workflowName)
+	}
 	return nil
 }
 
@@ -380,6 +383,9 @@ func validateLinearWorkflowTrigger(workflowName string, trigger *LinearWorkflowT
 		if strings.TrimSpace(state) == "" {
 			return fmt.Errorf("workflow %q: trigger.linear.states[%d] cannot be empty", workflowName, i)
 		}
+	}
+	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
+		return fmt.Errorf("workflow %q: trigger.linear.agent_status_error cannot be blank", workflowName)
 	}
 	return nil
 }

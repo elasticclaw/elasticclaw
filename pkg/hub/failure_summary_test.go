@@ -66,6 +66,107 @@ func TestClampFailureCommentPreservesUTF8(t *testing.T) {
 	}
 }
 
+func TestClassifyAgentFailureMapsKnownErrorsToGenericMessages(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     string
+		wantKind   agentFailureKind
+		wantStatus int
+		wantMsg    string
+		wantNext   string
+	}{
+		{
+			name:       "tracker read",
+			reason:     "cannot read issue ELA-123 from Linear (check token/workspace access): Linear API error 403",
+			wantKind:   agentFailureTrackerRead,
+			wantStatus: 403,
+			wantMsg:    "ElasticClaw could not read the source issue/ticket.",
+			wantNext:   "Check the issue tracker token permissions, then re-trigger the workflow.",
+		},
+		{
+			name:       "template",
+			reason:     `template "missing" not found: not found`,
+			wantKind:   agentFailureTemplate,
+			wantStatus: 500,
+			wantMsg:    "ElasticClaw could not load the workspace template.",
+			wantNext:   "Check the ElasticClaw workspace/workflow configuration, then re-trigger the workflow.",
+		},
+		{
+			name:       "provider config",
+			reason:     `provider "daytona" is not configured on this hub`,
+			wantKind:   agentFailureProviderConfig,
+			wantStatus: 500,
+			wantMsg:    "ElasticClaw could not find a valid execution provider.",
+			wantNext:   "Check the ElasticClaw workspace/workflow configuration, then re-trigger the workflow.",
+		},
+		{
+			name:       "bootstrap",
+			reason:     "Bootstrap failed: install openclaw failed: status 22",
+			wantKind:   agentFailureBootstrap,
+			wantStatus: 500,
+			wantMsg:    "ElasticClaw started the workspace but could not finish preparing it.",
+			wantNext:   "Check the ElasticClaw run logs and provider status, then retry the workflow.",
+		},
+		{
+			name:       "judge",
+			reason:     "Judge stage failed: no LLM keys configured for judge",
+			wantKind:   agentFailureJudge,
+			wantStatus: 500,
+			wantMsg:    "ElasticClaw could not complete an automated review step.",
+			wantNext:   "Review the workflow result, fix the command/review/PR issue, then retry from the appropriate stage.",
+		},
+		{
+			name:       "tracker api",
+			reason:     "github API error 404: label not found",
+			wantKind:   agentFailureTrackerAPI,
+			wantStatus: 404,
+			wantMsg:    "ElasticClaw received an error from the issue tracker API.",
+			wantNext:   "Check the issue tracker token permissions, then re-trigger the workflow.",
+		},
+		{
+			name:       "unknown",
+			reason:     "unexpected internal failure",
+			wantKind:   agentFailureUnknown,
+			wantStatus: 500,
+			wantMsg:    "ElasticClaw hit an unexpected error while running the agent.",
+			wantNext:   "Review the failure details and retry after the configuration or hub issue is fixed.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyAgentFailure(tt.reason)
+			if got.Kind != tt.wantKind {
+				t.Fatalf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+			if got.StatusCode != tt.wantStatus {
+				t.Fatalf("StatusCode = %d, want %d", got.StatusCode, tt.wantStatus)
+			}
+			if got.UserMessage != tt.wantMsg {
+				t.Fatalf("UserMessage = %q, want %q", got.UserMessage, tt.wantMsg)
+			}
+			if got.NextStep != tt.wantNext {
+				t.Fatalf("NextStep = %q, want %q", got.NextStep, tt.wantNext)
+			}
+		})
+	}
+}
+
+func TestClassifyAgentFailureDoesNotExposeRawSecrets(t *testing.T) {
+	got := classifyAgentFailure("Bootstrap failed: OPENAI_API_KEY=sk-secret-token\nreal error: HTTP 401")
+	if got.StatusCode != 401 {
+		t.Fatalf("StatusCode = %d, want 401", got.StatusCode)
+	}
+	for _, forbidden := range []string{"sk-secret-token", "OPENAI_API_KEY=sk-secret-token"} {
+		if strings.Contains(got.SafeDetail, forbidden) {
+			t.Fatalf("SafeDetail leaked %q in:\n%s", forbidden, got.SafeDetail)
+		}
+	}
+	if got.UserMessage == "" || got.NextStep == "" {
+		t.Fatalf("expected generic user message and next step: %#v", got)
+	}
+}
+
 func TestCloneLLMKeysCopiesStructValues(t *testing.T) {
 	original := types.LLMKeysList{
 		{Name: "openai-main", Provider: "openai", APIKey: "old-key", DefaultModel: "gpt-4o-mini"},

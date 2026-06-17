@@ -46,6 +46,37 @@ stages:
 	}
 }
 
+func TestWorkflowV1GitHubIssuesTriggerPreservesAgentStatusError(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - elasticclaw/elasticclaw
+    labels:
+      - agent-ready
+    agent_status_error: agent-error
+stages:
+  - id: working
+    entry: true
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := workflow.Trigger.GitHubIssues.AgentStatusError; got != "agent-error" {
+		t.Fatalf("agent_status_error = %q, want agent-error", got)
+	}
+}
+
 func TestWorkflowConfigRejectsInvalidRunKind(t *testing.T) {
 	workflow := &WorkflowConfig{Name: "invalid-kind", RunKind: "typo"}
 	err := workflow.Validate()
@@ -104,6 +135,79 @@ stages:
 	}
 	if !strings.Contains(workflow.PipelineYAML, "move_issue:") {
 		t.Fatalf("pipeline yaml did not contain move_issue: %q", workflow.PipelineYAML)
+	}
+}
+
+func TestWorkflowV1LinearTriggerPreservesAgentStatusError(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: linear-story
+trigger:
+  linear:
+    event: status_changed
+    states:
+      - Todo
+    agent_status_error: Agent Error
+stages:
+  - id: working
+    entry: true
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := workflow.Trigger.Linear.AgentStatusError; got != "Agent Error" {
+		t.Fatalf("agent_status_error = %q, want Agent Error", got)
+	}
+}
+
+func TestWorkflowV1TriggersRejectBlankAgentStatusError(t *testing.T) {
+	tests := []struct {
+		name string
+		wf   *WorkflowConfig
+		want string
+	}{
+		{
+			name: "github issues",
+			wf: &WorkflowConfig{
+				Name: "github-issue",
+				Trigger: &WorkflowTrigger{GitHubIssues: &GitHubIssuesWorkflowTrigger{
+					Event:            "issue_labeled",
+					Repositories:     []string{"elasticclaw/elasticclaw"},
+					AgentStatusError: "   ",
+				}},
+			},
+			want: "trigger.github_issues.agent_status_error cannot be blank",
+		},
+		{
+			name: "linear",
+			wf: &WorkflowConfig{
+				Name: "linear-story",
+				Trigger: &WorkflowTrigger{Linear: &LinearWorkflowTrigger{
+					Event:            "status_changed",
+					States:           []string{"Todo"},
+					AgentStatusError: "   ",
+				}},
+			},
+			want: "trigger.linear.agent_status_error cannot be blank",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.wf.Validate()
+			if err == nil {
+				t.Fatal("Validate() expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

@@ -44,7 +44,7 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func githubAPIAddLabel(baseURL, repo string, issueNumber int, label, token strin
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token st
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -1652,10 +1652,11 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	s.checkpointBeforeTermination(clawID, "stop-agent")
 	s.syncWorkflowVolumes(clawID)
 
-	// Resolve factory + issueID
+	// Resolve workflow/factory + issueID
+	pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
 	factory, issueID := s.findFactoryForClaw(clawID)
-	if factory == nil {
-		log.Printf("[stopAgent] claw %s: no factory found, skipping issue tracker comment", clawID[:8])
+	if factory == nil && (!hasPipelineCtx || pipelineCtx.Workflow == nil) {
+		log.Printf("[stopAgent] claw %s: no issue tracker context found, skipping issue tracker comment", clawID[:8])
 	}
 
 	// Fetch tenantID + provider info for broadcast + VM cleanup
@@ -1704,7 +1705,9 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	s.mu.Unlock()
 
 	// 4. Write issue-tracker comment without delaying agent shutdown.
-	if factory != nil && issueID != "" {
+	if hasPipelineCtx && pipelineCtx.Workflow != nil && pipelineCtx.IssueID != "" && isFailureFeedbackWorkflowIntegration(pipelineCtx.Workflow.Integration) {
+		go s.commentWorkflowAgentStopToTracker(clawID, pipelineCtx, reason)
+	} else if factory != nil && issueID != "" {
 		factoryCopy := *factory
 		go s.commentAgentStopToTracker(clawID, &factoryCopy, issueID, reason)
 	}
@@ -1715,6 +1718,64 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	}
 
 	log.Printf("[stopAgent] claw %s stopped: %s", clawID[:8], reason)
+}
+
+func isFailureFeedbackWorkflowIntegration(integration string) bool {
+	return integration == "github-issues" || integration == "linear"
+}
+
+func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineContext, reason string) {
+	if ctx.Workflow == nil || ctx.Workspace == nil || ctx.IssueID == "" {
+		return
+	}
+	feedback := agentFailureFeedback{
+		Integration:  ctx.Workflow.Integration,
+		IssueID:      ctx.IssueID,
+		TriggerActor: s.triggerActorForClaw(clawID),
+		Failure:      classifyAgentFailure(reason),
+		ClawID:       clawID,
+	}
+	switch ctx.Workflow.Integration {
+	case "github-issues":
+		repo, issueNum, ok := parseGitHubIssueWorkflowID(ctx.IssueID)
+		if !ok {
+			log.Printf("[stopAgent] invalid GitHub workflow issue id %q for claw %s", ctx.IssueID, shortID(clawID))
+			return
+		}
+		token := s.resolveGitHubIssuesTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
+		if token == "" {
+			return
+		}
+		feedback.GitHubRepo = repo
+		feedback.GitHubIssueNum = issueNum
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.GitHubIssues != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.GitHubIssues.AgentStatusError)
+		}
+		s.handleAgentFailureFeedback(feedback, token)
+	case "linear":
+		token := s.resolveLinearTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
+		if token == "" {
+			return
+		}
+		feedback.LinearIdentifier = ctx.IssueID
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Linear != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
+		}
+		s.handleAgentFailureFeedback(feedback, token)
+	}
+}
+
+func parseGitHubIssueWorkflowID(issueID string) (string, int, bool) {
+	lastSlash := strings.LastIndex(issueID, "/")
+	if lastSlash <= 0 || lastSlash == len(issueID)-1 {
+		return "", 0, false
+	}
+	repo := issueID[:lastSlash]
+	var issueNum int
+	if _, err := fmt.Sscanf(issueID[lastSlash+1:], "%d", &issueNum); err != nil || issueNum <= 0 {
+		return "", 0, false
+	}
+	return repo, issueNum, true
 }
 
 func (s *Server) commentAgentStopToTracker(clawID string, factory *types.FactoryConfig, issueID, reason string) {

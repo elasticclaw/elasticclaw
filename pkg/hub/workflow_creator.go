@@ -22,6 +22,7 @@ type workflowCreateOptions struct {
 	linearIssueID   string
 	shortcutStoryID string
 	reason          string
+	triggerActor    *triggerActor
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
@@ -220,6 +221,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 	if opts.shortcutStoryID != "" {
 		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
+	}
+	if opts.triggerActor != nil {
+		actorJSON, err := json.Marshal(opts.triggerActor)
+		if err != nil {
+			log.Printf("[workflow] failed to marshal trigger actor for claw %s: %v", shortID(clawID), err)
+		} else if _, err := s.db.Exec(`UPDATE claws SET trigger_actor_json=? WHERE id=?`, string(actorJSON), clawID); err != nil {
+			log.Printf("[workflow] failed to persist trigger actor for claw %s: %v", shortID(clawID), err)
+		}
 	}
 
 	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForWorkflow(workflow)

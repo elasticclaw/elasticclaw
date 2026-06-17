@@ -110,9 +110,10 @@ e2e-run: build-dev build-bridge-linux
 	echo "Starting ngrok tunnel https://$$NGROK_HOST for localhost:$$HUB_PORT"; \
 	ngrok http "$$HUB_PORT" --url "https://$$NGROK_HOST" --authtoken "$$NGROK_AUTHTOKEN" --config "$$NGROK_CONFIG" --log stdout > "$$NGROK_LOG" 2>&1 & \
 	NGROK_PID="$$!"; \
-	echo "Waiting for ngrok tunnel on localhost:$$HUB_PORT..."; \
-	for i in $$(seq 1 30); do \
-		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS "http://$$NGROK_API_ADDR/api/tunnels" 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' 2>/dev/null || true)"; \
+	echo "Waiting for ngrok tunnel https://$$NGROK_HOST on localhost:$$HUB_PORT..."; \
+	for i in $$(seq 1 90); do \
+		if ! kill -0 "$$NGROK_PID" >/dev/null 2>&1; then cat "$$NGROK_LOG"; echo "ngrok exited before tunnel was ready"; exit 1; fi; \
+		ELASTICCLAW_E2E_PUBLIC_URL="$$(curl -fsS "http://$$NGROK_API_ADDR/api/tunnels" 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); want="https://" + sys.argv[1]; print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https" and t.get("public_url") == want), ""))' "$$NGROK_HOST" 2>/dev/null || true)"; \
 		if [ -n "$$ELASTICCLAW_E2E_PUBLIC_URL" ]; then \
 			case "$$ELASTICCLAW_E2E_PUBLIC_URL" in *://elasticclaw.ngrok.app*) echo "Refusing shared ngrok domain: $$ELASTICCLAW_E2E_PUBLIC_URL"; exit 1;; esac; \
 			echo "ngrok: $$ELASTICCLAW_E2E_PUBLIC_URL"; \

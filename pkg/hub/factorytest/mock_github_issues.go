@@ -33,12 +33,8 @@ type IssueCommentState struct {
 }
 
 // MockGitHubIssues is a REST-style mock for the GitHub Issues API and webhook
-// delivery. It currently handles:
-//   - GET /repos/{owner}/{repo}/issues?since=...&state=all&sort=updated&direction=desc
-//   - GET /repos/{owner}/{repo}/issues/{number}
-//
-// POST endpoints for comments/labels are not yet implemented (needed for
-// move_issue parity tests in a future phase).
+// delivery. It handles issue reads/listing, comments, labels, issue patching,
+// issue events, and issue comments for the workflow/factory test paths.
 type MockGitHubIssues struct {
 	*httptest.Server
 	mu            sync.Mutex
@@ -59,12 +55,8 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 	}
 	mux := http.NewServeMux()
 
-	// GET /repos/:owner/:repo/issues — polling endpoint
+	// /repos/:owner/:repo/issues endpoints used by the workflow/factory tests.
 	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 		path := strings.TrimPrefix(r.URL.Path, "/repos/")
 		parts := strings.Split(path, "/")
 		if len(parts) < 2 {
@@ -82,6 +74,92 @@ func NewMockGitHubIssues(t *testing.T) *MockGitHubIssues {
 		// issues endpoint
 		if strings.HasPrefix(rest, "issues") {
 			parts2 := strings.Split(rest, "/")
+			if r.Method == http.MethodPost && len(parts2) == 3 && parts2[0] == "issues" && parts2[2] == "comments" {
+				var num int
+				fmt.Sscanf(parts2[1], "%d", &num)
+				var req struct {
+					Body string `json:"body"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
+				m.mu.Lock()
+				if _, ok := m.Issues[key]; !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
+				id := int64(len(m.IssueComments[key]) + 1)
+				m.IssueComments[key] = append(m.IssueComments[key], IssueCommentState{
+					ID:        id,
+					Body:      req.Body,
+					User:      "elasticclaw-bot",
+					CreatedAt: time.Now().UTC().Format(time.RFC3339),
+				})
+				m.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(map[string]interface{}{"id": id, "body": req.Body})
+				return
+			}
+			if r.Method == http.MethodPost && len(parts2) == 3 && parts2[0] == "issues" && parts2[2] == "labels" {
+				var num int
+				fmt.Sscanf(parts2[1], "%d", &num)
+				var req struct {
+					Labels []string `json:"labels"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
+				m.mu.Lock()
+				issue, ok := m.Issues[key]
+				if !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
+				for _, label := range req.Labels {
+					if !stringSliceContains(issue.Labels, label) {
+						issue.Labels = append(issue.Labels, label)
+					}
+				}
+				m.Issues[key] = issue
+				allLabels := append([]string(nil), issue.Labels...)
+				m.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(labelsToNameMaps(allLabels))
+				return
+			}
+			if r.Method == http.MethodPatch && len(parts2) == 2 && parts2[0] == "issues" {
+				var num int
+				fmt.Sscanf(parts2[1], "%d", &num)
+				var req struct {
+					Assignees []string `json:"assignees"`
+					State     string   `json:"state"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				key := fmt.Sprintf("%s/%s#%d", owner, repo, num)
+				m.mu.Lock()
+				issue, ok := m.Issues[key]
+				if !ok {
+					m.mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
+				if len(req.Assignees) > 0 {
+					issue.Assignee = req.Assignees[0]
+				}
+				if req.State != "" {
+					issue.State = req.State
+				}
+				m.Issues[key] = issue
+				m.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(issueToMap(num, issue, owner, repo))
+				return
+			}
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 			if len(parts2) == 3 && parts2[0] == "issues" && parts2[2] == "events" {
 				var num int
 				fmt.Sscanf(parts2[1], "%d", &num)
@@ -217,6 +295,23 @@ func (m *MockGitHubIssues) SawAPICall() bool {
 	return len(m.Calls) > 0
 }
 
+func (m *MockGitHubIssues) Issue(repo string, number int) IssueState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Issues[fmt.Sprintf("%s#%d", repo, number)]
+}
+
+func (m *MockGitHubIssues) PostedComments(repo string, number int) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	states := m.IssueComments[fmt.Sprintf("%s#%d", repo, number)]
+	out := make([]string, 0, len(states))
+	for _, state := range states {
+		out = append(out, state.Body)
+	}
+	return out
+}
+
 func (m *MockGitHubIssues) AuthHeaderCount(header string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,4 +440,13 @@ func labelsToNameMaps(labels []string) []map[string]interface{} {
 		result = append(result, map[string]interface{}{"name": l})
 	}
 	return result
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

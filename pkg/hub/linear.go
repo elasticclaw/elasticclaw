@@ -50,6 +50,13 @@ type linearWebhookPayload struct {
 			Name string `json:"name"`
 		} `json:"state,omitempty"`
 	} `json:"updatedFrom,omitempty"`
+	Actor struct {
+		ID    string `json:"id"`
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		URL   string `json:"url"`
+	} `json:"actor,omitempty"`
 	WebhookID string `json:"webhookId,omitempty"`
 }
 
@@ -405,6 +412,7 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 				log.Printf("[workflow:%s/%s] Linear issue %s entered %q — creating claw", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus)
 				if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "linear webhook"); err != nil {
 					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+					s.notifyLinearWorkflowCreateFailure(workspace, workflow, payload, err)
 				}
 			}
 			if workflow.TerminateOnLeave && !strings.EqualFold(currentStatus, workflow.TriggerStatus) {
@@ -419,6 +427,31 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 		}
 	}
 	return matched
+}
+
+func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, createErr error) {
+	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.Linear == nil {
+		return
+	}
+	token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+	if token == "" {
+		log.Printf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
+		return
+	}
+	s.handleAgentFailureFeedback(agentFailureFeedback{
+		Integration:      "linear",
+		IssueID:          payload.Data.Identifier,
+		LinearIdentifier: payload.Data.Identifier,
+		TriggerActor: triggerActor{
+			ID:    payload.Actor.ID,
+			Type:  payload.Actor.Type,
+			Name:  payload.Actor.Name,
+			Email: payload.Actor.Email,
+			URL:   payload.Actor.URL,
+		},
+		AgentStatusError: strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError),
+		Failure:          classifyAgentFailure(createErr.Error()),
+	}, token)
 }
 
 func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
@@ -467,6 +500,13 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		clawName:       clawName,
 		linearIssueID:  issueID,
 		reason:         reason,
+		triggerActor: &triggerActor{
+			ID:    payload.Actor.ID,
+			Type:  payload.Actor.Type,
+			Name:  payload.Actor.Name,
+			Email: payload.Actor.Email,
+			URL:   payload.Actor.URL,
+		},
 	})
 	if err != nil {
 		return err

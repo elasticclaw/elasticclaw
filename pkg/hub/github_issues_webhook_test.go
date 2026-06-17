@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -415,6 +416,90 @@ func TestGitHubIssuesWorkflowPollContextIncludesAllIssueComments(t *testing.T) {
 	}
 }
 
+func TestGitHubIssuesWorkflowCreateFailureCommentsLabelsAndAssignsTriggerActor(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "secret"
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{ClawToken: "test-claw-token"}
+	s, db := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueWorkflowFixtureWithProviderAndErrorLabel(t, "workspace-a", "secret", "missing-provider", "agent-error")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{Title: "Test Issue", Body: "Main issue body", State: "open"})
+	payload, _ := ghi.BuildWebhookPayload("testorg/testrepo", 42, "closed", "open")
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/github-issues", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", hmacSHA256(payload, "secret"))
+	req.Header.Set("X-GitHub-Delivery", "delivery-create-failure")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	comment := waitForGitHubIssuePostedComment(t, ghi, "testorg/testrepo", 42)
+	for _, want := range []string{
+		"@testuser ElasticClaw could not finish this implementation.",
+		"Status code: 500",
+		"ElasticClaw could not find a valid execution provider.",
+		"Check the ElasticClaw workspace/workflow configuration, then re-trigger the workflow.",
+	} {
+		if !strings.Contains(comment, want) {
+			t.Fatalf("comment missing %q:\n%s", want, comment)
+		}
+	}
+	if strings.Contains(comment, "provider \"missing-provider\" is not configured") {
+		t.Fatalf("comment exposed raw provider error:\n%s", comment)
+	}
+	waitForGitHubIssueAssignee(t, ghi, "testorg/testrepo", 42, "testuser")
+	waitForGitHubIssueLabel(t, ghi, "testorg/testrepo", 42, "agent-error")
+	var claws int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&claws); err != nil {
+		t.Fatalf("count claws: %v", err)
+	}
+	if claws != 0 {
+		t.Fatalf("created %d claws, want 0 for creation failure", claws)
+	}
+}
+
+func TestGitHubIssuesWorkflowCreateFailureIgnoresErrorLabelWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	ghi.WebhookSecret = "secret"
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{ClawToken: "test-claw-token"}
+	s, _ := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueLabeledWorkflowFixtureWithProviderAndErrorLabel(t, "workspace-a", "secret", "missing-provider", "agent-error")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 42, factorytest.IssueState{
+		Title:  "Test Issue",
+		Body:   "Main issue body",
+		State:  "open",
+		Labels: []string{"agent-ready"},
+	})
+	postGitHubIssuesWebhook(t, httpSrv.URL, "workspace-a", "delivery-ready", labeledGitHubIssuePayload(t, ghi, "testorg/testrepo", 42, "agent-ready"))
+
+	waitForGitHubIssueLabel(t, ghi, "testorg/testrepo", 42, "agent-error")
+	postGitHubIssuesWebhook(t, httpSrv.URL, "workspace-a", "delivery-error-label", labeledGitHubIssuePayload(t, ghi, "testorg/testrepo", 42, "agent-error"))
+
+	assertGitHubIssueCommentCountStable(t, ghi, "testorg/testrepo", 42, 1)
+}
+
 func waitForGitHubIssueContext(t *testing.T, db *sql.DB, issueID string) string {
 	t.Helper()
 	var filesJSON string
@@ -436,14 +521,80 @@ func waitForGitHubIssueContext(t *testing.T, db *sql.DB, issueID string) string 
 	return files["CONTEXT.md"]
 }
 
+func waitForGitHubIssuePostedComment(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int) string {
+	t.Helper()
+	comments := waitForGitHubIssuePostedComments(t, ghi, repo, number, 1)
+	return comments[len(comments)-1]
+}
+
+func waitForGitHubIssuePostedComments(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number, wantAtLeast int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		comments := ghi.PostedComments(repo, number)
+		if len(comments) >= wantAtLeast {
+			return comments
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for GitHub issue comment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertGitHubIssueCommentCountStable(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number, want int) {
+	t.Helper()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		comments := ghi.PostedComments(repo, number)
+		if len(comments) != want {
+			t.Fatalf("posted %d failure comments, want %d: %#v", len(comments), want, comments)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForGitHubIssueAssignee(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := ghi.Issue(repo, number).Assignee; got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("assignee = %q, want %q", ghi.Issue(repo, number).Assignee, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForGitHubIssueLabel(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if containsString(ghi.Issue(repo, number).Labels, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("labels = %v, want %q", ghi.Issue(repo, number).Labels, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
+	t.Helper()
+	saveGitHubIssueWorkflowFixtureWithProviderAndErrorLabel(t, workspace, secret, "noop", "")
+}
+
+func saveGitHubIssueWorkflowFixtureWithProviderAndErrorLabel(t *testing.T, workspace, secret, provider, agentStatusError string) {
 	t.Helper()
 	hub.SaveWorkspaceForTest(t,
 		&types.WorkspaceConfig{
 			SchemaVersion: "v1",
 			Name:          workspace,
 			Files: map[string]string{
-				"elasticclaw-config.yaml": "schema_version: v1\nname: " + workspace + "\nprovider: noop\n",
+				"elasticclaw-config.yaml": "schema_version: v1\nname: " + workspace + "\nprovider: " + provider + "\n",
 				"CONTEXT.md":              "Test context\n",
 			},
 		},
@@ -452,9 +603,10 @@ func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 			Name:          "test-workflow",
 			Trigger: &types.WorkflowTrigger{
 				GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
-					Event:        "issue_reopened",
-					Repositories: []string{"testorg/testrepo"},
-					States:       []string{"open"},
+					Event:            "issue_reopened",
+					Repositories:     []string{"testorg/testrepo"},
+					States:           []string{"open"},
+					AgentStatusError: agentStatusError,
 				},
 			},
 			Stages: []types.WorkflowStage{{
@@ -468,6 +620,112 @@ func saveGitHubIssueWorkflowFixture(t *testing.T, workspace, secret string) {
 		}},
 	)
 	hub.SaveWorkspaceIssueTrackerForTest(t, workspace, "github-issues", "default", "test-github-issues-token", secret)
+}
+
+func saveGitHubIssueLabeledWorkflowFixtureWithProviderAndErrorLabel(t *testing.T, workspace, secret, provider, agentStatusError string) {
+	t.Helper()
+	hub.SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          workspace,
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: " + workspace + "\nprovider: " + provider + "\n",
+				"CONTEXT.md":              "Test context\n",
+			},
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion: "v1",
+			Name:          "test-workflow",
+			Trigger: &types.WorkflowTrigger{
+				GitHubIssues: &types.GitHubIssuesWorkflowTrigger{
+					Event:            "issue_labeled",
+					Repositories:     []string{"testorg/testrepo"},
+					States:           []string{"open"},
+					Labels:           []string{"agent-ready"},
+					Labelers:         []string{"*"},
+					AgentStatusError: agentStatusError,
+				},
+			},
+			Stages: []types.WorkflowStage{{
+				ID:    "working",
+				Label: "Working",
+				Entry: true,
+				OnEnter: map[string]interface{}{
+					"inject": "Read your CONTEXT.md and start working on the issue.\n",
+				},
+			}},
+		}},
+	)
+	hub.SaveWorkspaceIssueTrackerForTest(t, workspace, "github-issues", "default", "test-github-issues-token", secret)
+}
+
+func postGitHubIssuesWebhook(t *testing.T, serverURL, workspace, deliveryID string, payload []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/api/workspaces/"+workspace+"/webhooks/github-issues", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", hmacSHA256(payload, "secret"))
+	req.Header.Set("X-GitHub-Delivery", deliveryID)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func labeledGitHubIssuePayload(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int, label string) []byte {
+	t.Helper()
+	issue := ghi.Issue(repo, number)
+	if !containsString(issue.Labels, label) {
+		issue.Labels = append(issue.Labels, label)
+		ghi.SetIssue(repo, number, issue)
+	}
+	payload := map[string]interface{}{
+		"action": "labeled",
+		"issue": map[string]interface{}{
+			"id":           number,
+			"number":       number,
+			"title":        issue.Title,
+			"body":         issue.Body,
+			"html_url":     fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
+			"state":        issue.State,
+			"state_reason": "",
+			"labels":       labelsToNameMapsForTest(issue.Labels),
+			"assignee":     nil,
+			"user":         map[string]interface{}{"login": "testuser", "type": "User"},
+		},
+		"repository": map[string]interface{}{"full_name": repo},
+		"sender":     map[string]interface{}{"login": "testuser", "type": "User"},
+		"label":      map[string]interface{}{"name": label},
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return out
+}
+
+func labelsToNameMapsForTest(labels []string) []map[string]string {
+	out := make([]map[string]string, 0, len(labels))
+	for _, label := range labels {
+		out = append(out, map[string]string{"name": label})
+	}
+	return out
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func saveGitHubIssueLabeledWorkflowFixture(t *testing.T, workspace string) {

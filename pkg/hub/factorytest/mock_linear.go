@@ -12,9 +12,12 @@ import (
 
 type MockLinear struct {
 	*httptest.Server
-	mu           sync.Mutex
-	IssueStates  map[string]string // issueID → state ID (from mutations)
-	GraphQLCalls []string
+	mu              sync.Mutex
+	IssueStates     map[string]string // issueID → state ID (from mutations)
+	IssueStateNames map[string]string // identifier → state name
+	IssueAssignees  map[string]string // identifier → assignee ID
+	IssueComments   map[string][]string
+	GraphQLCalls    []string
 	// PollingIssues holds issue data returned by the issues(filter:) polling query.
 	// Key is identifier (e.g. "ELA-123"). Call SetIssueStateName to mutate state.
 	PollingIssues map[string]map[string]interface{}
@@ -23,8 +26,11 @@ type MockLinear struct {
 func NewMockLinear(t *testing.T) *MockLinear {
 	t.Helper()
 	m := &MockLinear{
-		IssueStates:   make(map[string]string),
-		PollingIssues: make(map[string]map[string]interface{}),
+		IssueStates:     make(map[string]string),
+		IssueStateNames: make(map[string]string),
+		IssueAssignees:  make(map[string]string),
+		IssueComments:   make(map[string][]string),
+		PollingIssues:   make(map[string]map[string]interface{}),
 	}
 	// Default polling issue
 	m.PollingIssues["ELA-123"] = map[string]interface{}{
@@ -47,18 +53,71 @@ func NewMockLinear(t *testing.T) *MockLinear {
 		m.GraphQLCalls = append(m.GraphQLCalls, bodyStr)
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		// commentCreate mutation
+		if strings.Contains(bodyStr, "commentCreate") {
+			var req struct {
+				Variables map[string]interface{} `json:"variables"`
+			}
+			_ = json.Unmarshal(body, &req)
+			comment, _ := req.Variables["body"].(string)
+			issueID, _ := req.Variables["issueId"].(string)
+			m.mu.Lock()
+			identifier := m.issueIdentifierLocked(issueID)
+			if identifier == "" {
+				identifier = issueID
+			}
+			m.IssueComments[identifier] = append(m.IssueComments[identifier], comment)
+			m.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"commentCreate": map[string]interface{}{
+						"success": true,
+						"comment": map[string]interface{}{"id": "comment-1"},
+					},
+				},
+			})
+			return
+		}
 		// issueUpdate mutation (moveIssue)
 		if strings.Contains(bodyStr, "issueUpdate") {
-			// Extract issueId and stateId from variables - best effort
 			var req struct {
 				Variables map[string]interface{} `json:"variables"`
 			}
 			json.Unmarshal(body, &req)
 			if id, ok := req.Variables["id"].(string); ok {
+				m.mu.Lock()
+				identifier := m.issueIdentifierLocked(id)
+				if identifier == "" {
+					identifier = id
+				}
+				m.mu.Unlock()
+				if stateID, ok := req.Variables["stateId"].(string); ok {
+					m.mu.Lock()
+					m.IssueStates[id] = stateID
+					m.IssueStateNames[identifier] = linearStateNameForID(stateID)
+					if issue, ok := m.PollingIssues[identifier]; ok {
+						issue["state"] = map[string]interface{}{"name": linearStateNameForID(stateID)}
+					}
+					m.mu.Unlock()
+				}
+				if assigneeID, ok := req.Variables["assigneeId"].(string); ok {
+					m.mu.Lock()
+					m.IssueAssignees[identifier] = assigneeID
+					m.mu.Unlock()
+				}
 				if input, ok := req.Variables["input"].(map[string]interface{}); ok {
 					if stateID, ok := input["stateId"].(string); ok {
 						m.mu.Lock()
 						m.IssueStates[id] = stateID
+						m.IssueStateNames[identifier] = linearStateNameForID(stateID)
+						if issue, ok := m.PollingIssues[identifier]; ok {
+							issue["state"] = map[string]interface{}{"name": linearStateNameForID(stateID)}
+						}
+						m.mu.Unlock()
+					}
+					if assigneeID, ok := input["assigneeId"].(string); ok {
+						m.mu.Lock()
+						m.IssueAssignees[identifier] = assigneeID
 						m.mu.Unlock()
 					}
 				}
@@ -78,6 +137,7 @@ func NewMockLinear(t *testing.T) *MockLinear {
 						"nodes": []map[string]interface{}{
 							{"id": "done-state-id", "name": "Done", "type": "completed"},
 							{"id": "in-progress-id", "name": "In Progress", "type": "started"},
+							{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
 						},
 					},
 				},
@@ -103,17 +163,39 @@ func NewMockLinear(t *testing.T) *MockLinear {
 		}
 		// issue(id:) query — returns a single issue directly
 		if strings.Contains(bodyStr, "issue(") || strings.Contains(bodyStr, `"issue"`) {
+			var req struct {
+				Variables map[string]interface{} `json:"variables"`
+			}
+			_ = json.Unmarshal(body, &req)
+			id, _ := req.Variables["id"].(string)
+			m.mu.Lock()
+			issue := cloneMap(m.issueByIDLocked(id))
+			m.mu.Unlock()
+			if issue == nil {
+				issue = map[string]interface{}{
+					"id":          "issue-uuid-123",
+					"identifier":  "ELA-123",
+					"title":       "Add hello world to README",
+					"description": "Please add a 'Hello World' section to the README.md file.",
+					"url":         "https://linear.app/test/issue/ELA-123",
+					"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
+					"team": map[string]interface{}{
+						"name": "Engineering",
+						"key":  "ELA",
+						"states": map[string]interface{}{
+							"nodes": []map[string]interface{}{
+								{"id": "done-state-id", "name": "Done", "type": "completed"},
+								{"id": "in-progress-id", "name": "In Progress", "type": "started"},
+								{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
+							},
+						},
+					},
+				}
+			}
+			ensureMockLinearIssueStates(issue)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
-					"issue": map[string]interface{}{
-						"id":          "issue-uuid-123",
-						"identifier":  "ELA-123",
-						"title":       "Add hello world to README",
-						"description": "Please add a 'Hello World' section to the README.md file.",
-						"url":         "https://linear.app/test/issue/ELA-123",
-						"state":       map[string]interface{}{"name": "In Progress", "id": "in-progress-id"},
-						"team":        map[string]interface{}{"name": "Engineering", "key": "ELA"},
-					},
+					"issue": issue,
 				},
 			})
 			return
@@ -126,6 +208,9 @@ func NewMockLinear(t *testing.T) *MockLinear {
 }
 
 func cloneMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
 	out := make(map[string]interface{}, len(in))
 	for k, v := range in {
 		switch typed := v.(type) {
@@ -140,6 +225,48 @@ func cloneMap(in map[string]interface{}) map[string]interface{} {
 	return out
 }
 
+func (m *MockLinear) issueByIDLocked(id string) map[string]interface{} {
+	if issue, ok := m.PollingIssues[id]; ok {
+		return issue
+	}
+	for _, issue := range m.PollingIssues {
+		if issueID, _ := issue["id"].(string); issueID == id {
+			return issue
+		}
+	}
+	return nil
+}
+
+func (m *MockLinear) issueIdentifierLocked(id string) string {
+	if _, ok := m.PollingIssues[id]; ok {
+		return id
+	}
+	for identifier, issue := range m.PollingIssues {
+		if issueID, _ := issue["id"].(string); issueID == id {
+			return identifier
+		}
+	}
+	return ""
+}
+
+func ensureMockLinearIssueStates(issue map[string]interface{}) {
+	team, _ := issue["team"].(map[string]interface{})
+	if team == nil {
+		team = map[string]interface{}{"name": "Engineering", "key": "ELA"}
+		issue["team"] = team
+	}
+	if _, ok := team["states"]; ok {
+		return
+	}
+	team["states"] = map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "done-state-id", "name": "Done", "type": "completed"},
+			{"id": "in-progress-id", "name": "In Progress", "type": "started"},
+			{"id": "agent-error-id", "name": "Agent Error", "type": "canceled"},
+		},
+	}
+}
+
 // SetIssueStateName updates the state name of a polling issue.
 func (m *MockLinear) SetIssueStateName(identifier, stateName string) {
 	m.mu.Lock()
@@ -148,6 +275,7 @@ func (m *MockLinear) SetIssueStateName(identifier, stateName string) {
 		issue["state"] = map[string]interface{}{"name": stateName}
 		issue["updatedAt"] = "2026-05-10T00:01:00Z"
 	}
+	m.IssueStateNames[identifier] = stateName
 }
 
 // SawPollCall returns true if the mock has received an issues(filter:) GraphQL query
@@ -179,6 +307,34 @@ func (m *MockLinear) SawAPICall() bool {
 	return len(m.GraphQLCalls) > 0
 }
 
+func (m *MockLinear) Comments(issueID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.IssueComments[issueID]...)
+}
+
+func (m *MockLinear) IssueStateName(issueID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if state := m.IssueStateNames[issueID]; state != "" {
+		return state
+	}
+	if issue, ok := m.PollingIssues[issueID]; ok {
+		if state, ok := issue["state"].(map[string]interface{}); ok {
+			if name, ok := state["name"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func (m *MockLinear) IssueAssigneeID(issueID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.IssueAssignees[issueID]
+}
+
 // BuildWebhookPayload returns a JSON webhook payload and the HMAC-SHA256
 // signature for the given issue state transition.
 func (m *MockLinear) BuildWebhookPayload(issueID, prevStatus, newStatus string) ([]byte, string) {
@@ -207,4 +363,17 @@ func (m *MockLinear) BuildWebhookPayload(issueID, prevStatus, newStatus string) 
 	}
 	b, _ := json.Marshal(payload)
 	return b, ""
+}
+
+func linearStateNameForID(id string) string {
+	switch id {
+	case "done-state-id":
+		return "Done"
+	case "in-progress-id":
+		return "In Progress"
+	case "agent-error-id":
+		return "Agent Error"
+	default:
+		return id
+	}
 }

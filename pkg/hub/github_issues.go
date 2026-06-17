@@ -321,10 +321,31 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 					continue
 				}
 				log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+				s.notifyGitHubIssueWorkflowCreateFailure(workspace, workflow, payload, err)
 			}
 		}
 	}
 	return matched
+}
+
+func (s *Server) notifyGitHubIssueWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, createErr error) {
+	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.GitHubIssues == nil {
+		return
+	}
+	token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+	if token == "" {
+		log.Printf("[agent-failure-feedback] workflow %s/%s has no GitHub Issues token; skipping failure feedback", workspace.Name, workflow.Name)
+		return
+	}
+	s.handleAgentFailureFeedback(agentFailureFeedback{
+		Integration:      "github-issues",
+		IssueID:          fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number),
+		GitHubRepo:       payload.Repository.FullName,
+		GitHubIssueNum:   payload.Issue.Number,
+		TriggerActor:     triggerActor{Login: payload.Sender.Login, Type: payload.Sender.Type},
+		AgentStatusError: strings.TrimSpace(workflow.Trigger.GitHubIssues.AgentStatusError),
+		Failure:          classifyAgentFailure(createErr.Error()),
+	}, token)
 }
 
 func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
@@ -341,6 +362,9 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 	switch event {
 	case "issue_labeled":
 		if payload.Action != "labeled" {
+			return false
+		}
+		if len(labels) > 0 && !githubIssuesPayloadLabelMatches(payload, labels) {
 			return false
 		}
 	case "issue_opened":
@@ -392,6 +416,22 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 		return false
 	}
 	return true
+}
+
+func githubIssuesPayloadLabelMatches(payload githubIssuesWebhookPayload, labels []string) bool {
+	if payload.Label == nil {
+		return false
+	}
+	added := strings.ToLower(strings.TrimSpace(payload.Label.Name))
+	if added == "" {
+		return false
+	}
+	for _, label := range labels {
+		if strings.EqualFold(added, strings.TrimSpace(label)) {
+			return true
+		}
+	}
+	return false
 }
 
 func assignedToMatches(filter, assignee string) bool {
@@ -459,6 +499,10 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		clawName:       clawName,
 		githubIssueID:  issueID,
 		reason:         reason,
+		triggerActor: &triggerActor{
+			Login: payload.Sender.Login,
+			Type:  payload.Sender.Type,
+		},
 	})
 	if err != nil {
 		return "", false, err
@@ -1015,7 +1059,7 @@ func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1064,27 +1108,7 @@ func nextGitHubPagePath(linkHeader, baseURL string) string {
 
 // commentGitHubIssue adds a comment to a GitHub issue.
 func commentGitHubIssue(token, repo string, issueNumber int, body string) error {
-	base := "https://api.github.com"
-	commentBody := map[string]interface{}{"body": body}
-	b, _ := json.Marshal(commentBody)
-	req, _ := http.NewRequest("POST",
-		fmt.Sprintf("%s/repos/%s/issues/%d/comments", base, repo, issueNumber),
-		bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("github API error %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
+	return commentGitHubIssueWithBase("https://api.github.com", token, repo, issueNumber, body)
 }
 
 // githubAPIPostWithBase makes a POST/PATCH/PUT request to the GitHub API.
@@ -1107,7 +1131,7 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := issueTrackerHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
