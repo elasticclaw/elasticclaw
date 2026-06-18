@@ -145,11 +145,15 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processShortcutEvent(payload)
+	go s.processShortcutEvent(strings.TrimSpace(r.PathValue("workspace")), payload)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
+func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebhookPayload) {
+	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("shortcut")
+	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
+	_ = s.processShortcutWorkflowEvent(workflowWorkspaces, payload)
+
 	factories := s.resolveFactories()
 
 	// Build a per-token state-name cache so we only fetch the workflow list once
@@ -285,6 +289,112 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				}
 			}
 		}
+	}
+}
+
+func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfig, payload shortcutWebhookPayload) bool {
+	if len(workspaces) == 0 {
+		return false
+	}
+
+	stateNameCache := map[string]map[int64]string{}
+	matched := false
+
+	for _, action := range payload.Actions {
+		if action.EntityType != "story" || action.Action != "update" {
+			continue
+		}
+		stateChange, ok := action.Changes["workflow_state_id"]
+		if !ok {
+			continue
+		}
+
+		newStateID := toInt64(stateChange.New)
+		oldStateID := toInt64(stateChange.Old)
+		storyID := fmt.Sprintf("sc-%d", action.ID)
+		storyFiltersByToken := map[string]*shortcutStoryFilterData{}
+
+		for _, workspace := range workspaces {
+			for _, workflow := range workspace.Workflows {
+				if workflow == nil || workflow.Integration != "shortcut" {
+					continue
+				}
+				if workflow.Enabled != nil && !*workflow.Enabled {
+					continue
+				}
+				if workflow.TriggerStatus == "" {
+					continue
+				}
+
+				token := s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
+				if token == "" {
+					log.Printf("[workflow:%s/%s] no Shortcut token configured — skipping webhook story %s", workspace.Name, workflow.Name, storyID)
+					continue
+				}
+
+				stateMap, ok := stateNameCache[token]
+				if !ok {
+					stateMap = buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+					if len(stateMap) > 0 {
+						stateNameCache[token] = stateMap
+					} else {
+						log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", workflow.Workspace)
+						continue
+					}
+				}
+				newStateName := stateMap[newStateID]
+				oldStateName := stateMap[oldStateID]
+				if !strings.EqualFold(newStateName, workflow.TriggerStatus) || strings.EqualFold(oldStateName, workflow.TriggerStatus) {
+					continue
+				}
+
+				if len(workflow.Labels) > 0 || len(workflow.ExcludeLabels) > 0 || workflow.AssignedTo != "" {
+					filterData, ok := storyFiltersByToken[token]
+					if !ok {
+						filterData = s.loadShortcutStoryFilterData(token, action.ID)
+						storyFiltersByToken[token] = filterData
+					}
+					if filterData.loadErr != nil {
+						log.Printf("[workflow:%s/%s] skipping story %s: failed to load Shortcut story filters: %v", workspace.Name, workflow.Name, storyID, filterData.loadErr)
+						continue
+					}
+					if !labelSetAllowed(filterData.labels, workflow.Labels, workflow.ExcludeLabels) {
+						continue
+					}
+					if workflow.AssignedTo != "" && !shortcutAssigneeFilterMatches(workflow.AssignedTo, filterData) {
+						continue
+					}
+				}
+
+				matched = true
+				log.Printf("[workflow:%s/%s] Shortcut story %s entered %q — creating claw", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus)
+				if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "shortcut webhook"); err != nil {
+					if isFactoryTriggerAlreadyClaimed(err) {
+						continue
+					}
+					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
+				}
+			}
+		}
+	}
+	return matched
+}
+
+func shortcutAssigneeFilterMatches(filter string, data *shortcutStoryFilterData) bool {
+	wanted := strings.ToLower(strings.TrimSpace(filter))
+	switch {
+	case wanted == "":
+		return true
+	case wanted == "any":
+		return data.hasOwner
+	case wanted == "none":
+		return !data.hasOwner
+	case strings.HasPrefix(wanted, "!"):
+		excluded := strings.TrimPrefix(strings.TrimPrefix(wanted, "!"), "@")
+		return excluded != "" && !data.assignees[excluded]
+	default:
+		target := strings.TrimPrefix(wanted, "@")
+		return target != "" && data.assignees[target]
 	}
 }
 
