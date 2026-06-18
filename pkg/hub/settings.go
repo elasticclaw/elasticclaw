@@ -1115,6 +1115,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				disk.ExternalTrigger = fp.ExternalTrigger
 			}
 
+			if err := disk.Validate(); err != nil {
+				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			if err := saveExternalFactory(disk); err != nil {
 				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
 				return

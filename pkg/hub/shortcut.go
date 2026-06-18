@@ -344,9 +344,6 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 				}
 				newStateName := stateMap[newStateID]
 				oldStateName := stateMap[oldStateID]
-				if !strings.EqualFold(newStateName, workflow.TriggerStatus) || strings.EqualFold(oldStateName, workflow.TriggerStatus) {
-					continue
-				}
 
 				if len(workflow.Labels) > 0 || len(workflow.ExcludeLabels) > 0 || workflow.AssignedTo != "" {
 					filterData, ok := storyFiltersByToken[token]
@@ -364,6 +361,20 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 					if workflow.AssignedTo != "" && !shortcutAssigneeFilterMatches(workflow.AssignedTo, filterData) {
 						continue
 					}
+				}
+
+				if workflow.TerminateOnLeave && !strings.EqualFold(newStateName, workflow.TriggerStatus) {
+					var activeClaw string
+					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&activeClaw)
+					if activeClaw != "" {
+						matched = true
+						log.Printf("[workflow:%s/%s] Shortcut story %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus, activeClaw[:8])
+						s.terminateClawForIssue(storyID)
+					}
+				}
+
+				if !strings.EqualFold(newStateName, workflow.TriggerStatus) || strings.EqualFold(oldStateName, workflow.TriggerStatus) {
+					continue
 				}
 
 				matched = true
