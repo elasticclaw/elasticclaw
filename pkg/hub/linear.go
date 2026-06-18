@@ -257,22 +257,12 @@ func (s *Server) processLinearEvent(workspaceName string, payload linearWebhookP
 			continue
 		}
 
-		// Labels filter: all configured labels must be present on the issue (AND)
-		if len(factory.Labels) > 0 {
-			issueLabels := map[string]bool{}
-			for _, l := range payload.Data.Labels {
-				issueLabels[strings.ToLower(l.Name)] = true
-			}
-			allMatch := true
-			for _, required := range factory.Labels {
-				if !issueLabels[strings.ToLower(required)] {
-					allMatch = false
-					break
-				}
-			}
-			if !allMatch {
-				continue
-			}
+		currentLabels := make([]string, 0, len(payload.Data.Labels))
+		for _, label := range payload.Data.Labels {
+			currentLabels = append(currentLabels, label.Name)
+		}
+		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
+			continue
 		}
 
 		// AssignedTo filter
@@ -389,17 +379,8 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 			if workflow.Team != "" && !strings.EqualFold(workflow.Team, teamKey) {
 				continue
 			}
-			if len(workflow.Labels) > 0 {
-				allMatch := true
-				for _, required := range workflow.Labels {
-					if !issueLabels[strings.ToLower(required)] {
-						allMatch = false
-						break
-					}
-				}
-				if !allMatch {
-					continue
-				}
+			if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
+				continue
 			}
 			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
 				continue

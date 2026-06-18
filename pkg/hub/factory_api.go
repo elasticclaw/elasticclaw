@@ -34,19 +34,20 @@ func (s *Server) handleFactoriesCRUD(w http.ResponseWriter, r *http.Request) {
 
 // FactoryPushView is the JSON-safe view of a factory returned by push/list API (secrets masked).
 type FactoryPushView struct {
-	Name                string              `json:"name"`
-	Integration         string              `json:"integration"`
-	Workspace           string              `json:"workspace"`
-	TriggerStatus       string              `json:"trigger_status"`
-	DoneStatus          string              `json:"done_status,omitempty"`
-	Template            string              `json:"template"`
-	Labels              []string            `json:"labels,omitempty"`
-	AssignedTo          string              `json:"assigned_to,omitempty"`
-	Enabled             *bool               `json:"enabled,omitempty"`
-	HasWebhookSecret    bool                `json:"has_webhook_secret"`
-	WebhookSecretRef    string              `json:"webhook_secret_ref,omitempty"`
-	PipelineYAML        string              `json:"pipeline_yaml,omitempty"`
-	EnableManualTrigger bool                `json:"enable_manual_trigger,omitempty"`
+	Name                string               `json:"name"`
+	Integration         string               `json:"integration"`
+	Workspace           string               `json:"workspace"`
+	TriggerStatus       string               `json:"trigger_status"`
+	DoneStatus          string               `json:"done_status,omitempty"`
+	Template            string               `json:"template"`
+	Labels              []string             `json:"labels,omitempty"`
+	ExcludeLabels       []string             `json:"exclude_labels,omitempty"`
+	AssignedTo          string               `json:"assigned_to,omitempty"`
+	Enabled             *bool                `json:"enabled,omitempty"`
+	HasWebhookSecret    bool                 `json:"has_webhook_secret"`
+	WebhookSecretRef    string               `json:"webhook_secret_ref,omitempty"`
+	PipelineYAML        string               `json:"pipeline_yaml,omitempty"`
+	EnableManualTrigger bool                 `json:"enable_manual_trigger,omitempty"`
 	SecretRefs          map[string]string    `json:"secret_refs,omitempty"`
 	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
 }
@@ -60,6 +61,7 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 		DoneStatus:          f.DoneStatus,
 		Template:            f.Template,
 		Labels:              f.Labels,
+		ExcludeLabels:       f.ExcludeLabels,
 		AssignedTo:          f.AssignedTo,
 		Enabled:             f.Enabled,
 		HasWebhookSecret:    f.WebhookSecret != "" || f.WebhookSecretRef != "",

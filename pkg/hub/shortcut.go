@@ -188,7 +188,7 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 				continue
 			}
 
-			if len(factory.Labels) > 0 || factory.AssignedTo != "" {
+			if len(factory.Labels) > 0 || len(factory.ExcludeLabels) > 0 || factory.AssignedTo != "" {
 				filterData, ok := storyFiltersByToken[token]
 				if !ok {
 					filterData = s.loadShortcutStoryFilterData(token, action.ID)
@@ -199,22 +199,8 @@ func (s *Server) processShortcutEvent(payload shortcutWebhookPayload) {
 					continue
 				}
 
-				// Labels filter: all configured labels must be present on the story (AND)
-				if len(factory.Labels) > 0 {
-					allMatch := true
-					for _, required := range factory.Labels {
-						required = strings.ToLower(strings.TrimSpace(required))
-						if required == "" {
-							continue
-						}
-						if !filterData.labels[required] {
-							allMatch = false
-							break
-						}
-					}
-					if !allMatch {
-						continue
-					}
+				if !labelSetAllowed(filterData.labels, factory.Labels, factory.ExcludeLabels) {
+					continue
 				}
 
 				// AssignedTo filter

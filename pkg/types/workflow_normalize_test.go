@@ -138,6 +138,77 @@ stages:
 	}
 }
 
+func TestWorkflowNormalizePreservesExcludeLabels(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "linear",
+			data: []byte(`
+schema_version: v1
+name: linear-story
+trigger:
+  linear:
+    event: status_changed
+    states: [Todo]
+    exclude_labels: [Bug]
+stages:
+  - id: working
+    entry: true
+`),
+		},
+		{
+			name: "shortcut",
+			data: []byte(`
+schema_version: v1
+name: shortcut-story
+trigger:
+  shortcut:
+    event: status_changed
+    states: [Todo]
+    exclude_labels: [Bug]
+stages:
+  - id: working
+    entry: true
+`),
+		},
+		{
+			name: "github issues",
+			data: []byte(`
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories: [elasticclaw/elasticclaw]
+    labels: [agent-ready]
+    exclude_labels: [Bug]
+stages:
+  - id: working
+    entry: true
+`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var workflow WorkflowConfig
+			if err := yaml.Unmarshal(tt.data, &workflow); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if err := NormalizeWorkflowConfig(&workflow); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			if got := strings.Join(workflow.ExcludeLabels, ","); got != "Bug" {
+				t.Fatalf("ExcludeLabels = %q, want Bug", got)
+			}
+			if err := workflow.Validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkflowV1LinearTriggerPreservesAgentStatusError(t *testing.T) {
 	data := []byte(`
 schema_version: v1

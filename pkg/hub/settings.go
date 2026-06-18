@@ -33,15 +33,15 @@ type LLMKeyView struct {
 
 // MCPView is the redacted view of an MCP server config for the settings page.
 type MCPView struct {
-	Name      string            `json:"name"`
-	Source    string            `json:"source"`
-	Package   string            `json:"package,omitempty"`
-	Image     string            `json:"image,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	Enabled   bool              `json:"enabled"`
-	Config    map[string]string `json:"config,omitempty"`
-	Secrets   []string          `json:"secrets,omitempty"` // env var names only, not values
-	Command   []string          `json:"command,omitempty"`
+	Name    string            `json:"name"`
+	Source  string            `json:"source"`
+	Package string            `json:"package,omitempty"`
+	Image   string            `json:"image,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Enabled bool              `json:"enabled"`
+	Config  map[string]string `json:"config,omitempty"`
+	Secrets []string          `json:"secrets,omitempty"` // env var names only, not values
+	Command []string          `json:"command,omitempty"`
 }
 
 // ConcurrencyGroupView is the JSON-safe view of a concurrency group.
@@ -118,26 +118,27 @@ func isFactoryEnabled(f *types.FactoryConfig) bool {
 }
 
 type FactoryView struct {
-	Name                string   `json:"name"`
-	Integration         string   `json:"integration"`
-	Workspace           string   `json:"workspace"`
-	Team                string   `json:"team"`
-	TriggerStatus       string   `json:"triggerStatus"`
-	DoneStatus          string   `json:"doneStatus"`
-	TerminateOnLeave    bool     `json:"terminateOnLeave"`
-	Template            string   `json:"template"`
-	NamePattern         string   `json:"namePattern"`
-	WebhookSecretSet    bool     `json:"webhookSecretSet"`
-	WebhookSecretRef    string   `json:"webhookSecretRef,omitempty"`
-	PipelineYAML        string   `json:"pipelineYAML,omitempty"`
-	Tags                []string `json:"tags"`
-	Color               string   `json:"color"`
-	Labels              []string `json:"labels,omitempty"`
-	AssignedTo          string   `json:"assigned_to,omitempty"`
-	Enabled             bool     `json:"enabled"`
-	ConcurrencyGroup    string   `json:"concurrencyGroup,omitempty"`
-	EnableManualTrigger bool     `json:"enable_manual_trigger,omitempty"`
-	SecretRefs          map[string]string `json:"secret_refs,omitempty"`
+	Name                string                 `json:"name"`
+	Integration         string                 `json:"integration"`
+	Workspace           string                 `json:"workspace"`
+	Team                string                 `json:"team"`
+	TriggerStatus       string                 `json:"triggerStatus"`
+	DoneStatus          string                 `json:"doneStatus"`
+	TerminateOnLeave    bool                   `json:"terminateOnLeave"`
+	Template            string                 `json:"template"`
+	NamePattern         string                 `json:"namePattern"`
+	WebhookSecretSet    bool                   `json:"webhookSecretSet"`
+	WebhookSecretRef    string                 `json:"webhookSecretRef,omitempty"`
+	PipelineYAML        string                 `json:"pipelineYAML,omitempty"`
+	Tags                []string               `json:"tags"`
+	Color               string                 `json:"color"`
+	Labels              []string               `json:"labels,omitempty"`
+	ExcludeLabels       []string               `json:"exclude_labels,omitempty"`
+	AssignedTo          string                 `json:"assigned_to,omitempty"`
+	Enabled             bool                   `json:"enabled"`
+	ConcurrencyGroup    string                 `json:"concurrencyGroup,omitempty"`
+	EnableManualTrigger bool                   `json:"enable_manual_trigger,omitempty"`
+	SecretRefs          map[string]string      `json:"secret_refs,omitempty"`
 	ExternalTrigger     *types.ExternalTrigger `json:"externalTrigger,omitempty"`
 }
 
@@ -153,12 +154,12 @@ type ProviderView struct {
 	DefaultTTL          string `json:"defaultTtl,omitempty"`
 	DefaultInstanceType string `json:"defaultInstanceType,omitempty"`
 	// exe.dev
-	SSHKeySet       bool   `json:"sshKeySet,omitempty"`
-	SSHPublicKey    string `json:"sshPublicKey,omitempty"`
-	DefaultCPU      int    `json:"defaultCpu,omitempty"`
-	DefaultMemory   string `json:"defaultMemory,omitempty"`
-	DefaultDisk     string `json:"defaultDisk,omitempty"`
-	_sshKeyPath     string `json:"-"` // internal: path for file I/O outside lock
+	SSHKeySet     bool   `json:"sshKeySet,omitempty"`
+	SSHPublicKey  string `json:"sshPublicKey,omitempty"`
+	DefaultCPU    int    `json:"defaultCpu,omitempty"`
+	DefaultMemory string `json:"defaultMemory,omitempty"`
+	DefaultDisk   string `json:"defaultDisk,omitempty"`
+	_sshKeyPath   string `json:"-"` // internal: path for file I/O outside lock
 }
 
 // GitHubAppPermission is a single permission check result for a GitHub App.
@@ -170,12 +171,12 @@ type GitHubAppPermission struct {
 }
 
 type GitHubAppView struct {
-	AppID       int64                 `json:"appId"`
-	URL         string                `json:"url,omitempty"`
-	KeySet      bool                  `json:"keySet"`
-	Permissions []GitHubAppPermission `json:"permissions,omitempty"`
-	PermCheckOK *bool                 `json:"permCheckOk,omitempty"` // nil = not checked yet
-	PermCheckError string           `json:"permCheckError,omitempty"`
+	AppID          int64                 `json:"appId"`
+	URL            string                `json:"url,omitempty"`
+	KeySet         bool                  `json:"keySet"`
+	Permissions    []GitHubAppPermission `json:"permissions,omitempty"`
+	PermCheckOK    *bool                 `json:"permCheckOk,omitempty"` // nil = not checked yet
+	PermCheckError string                `json:"permCheckError,omitempty"`
 }
 
 // SettingsPatch is the request body for PATCH /api/settings.
@@ -279,30 +280,31 @@ type GitHubIssuesIntegrationPatch struct {
 }
 
 type FactoryPatch struct {
-	Name                string              `json:"name"`
-	OriginalName        string              `json:"originalName,omitempty"`
-	Integration         string              `json:"integration"`
-	Workspace           string              `json:"workspace"`
-	Team                string              `json:"team,omitempty"`
-	TriggerStatus       string              `json:"triggerStatus"`
-	DoneStatus          string              `json:"doneStatus,omitempty"`
-	TerminateOnLeave    bool                `json:"terminateOnLeave"`
-	Template            string              `json:"template"`
-	NamePattern         string              `json:"namePattern,omitempty"`
-	WebhookSecret       string              `json:"webhookSecret,omitempty"`
-	WebhookSecretRef    string              `json:"webhookSecretRef,omitempty"`
-	PipelineYAML        string              `json:"pipelineYAML,omitempty"`
-	Tags                []string            `json:"tags,omitempty"`
-	Color               string              `json:"color,omitempty"`
-	Labels              []string            `json:"labels,omitempty"`
-	AssignedTo          string              `json:"assigned_to,omitempty"`
-	Enabled             *bool               `json:"enabled,omitempty"`
-	ConcurrencyGroup    string              `json:"concurrencyGroup,omitempty"`
-	EnableManualTrigger bool                `json:"enable_manual_trigger,omitempty"`
-	SecretRefs          map[string]string   `json:"secret_refs,omitempty"`
-	Inputs              []types.FactoryInput `json:"inputs,omitempty"`
-	Repos               []string            `json:"repos,omitempty"`
-	Trigger             *types.GitHubTrigger `json:"trigger,omitempty"`
+	Name                string                 `json:"name"`
+	OriginalName        string                 `json:"originalName,omitempty"`
+	Integration         string                 `json:"integration"`
+	Workspace           string                 `json:"workspace"`
+	Team                string                 `json:"team,omitempty"`
+	TriggerStatus       string                 `json:"triggerStatus"`
+	DoneStatus          string                 `json:"doneStatus,omitempty"`
+	TerminateOnLeave    bool                   `json:"terminateOnLeave"`
+	Template            string                 `json:"template"`
+	NamePattern         string                 `json:"namePattern,omitempty"`
+	WebhookSecret       string                 `json:"webhookSecret,omitempty"`
+	WebhookSecretRef    string                 `json:"webhookSecretRef,omitempty"`
+	PipelineYAML        string                 `json:"pipelineYAML,omitempty"`
+	Tags                []string               `json:"tags,omitempty"`
+	Color               string                 `json:"color,omitempty"`
+	Labels              []string               `json:"labels,omitempty"`
+	ExcludeLabels       []string               `json:"exclude_labels,omitempty"`
+	AssignedTo          string                 `json:"assigned_to,omitempty"`
+	Enabled             *bool                  `json:"enabled,omitempty"`
+	ConcurrencyGroup    string                 `json:"concurrencyGroup,omitempty"`
+	EnableManualTrigger bool                   `json:"enable_manual_trigger,omitempty"`
+	SecretRefs          map[string]string      `json:"secret_refs,omitempty"`
+	Inputs              []types.FactoryInput   `json:"inputs,omitempty"`
+	Repos               []string               `json:"repos,omitempty"`
+	Trigger             *types.GitHubTrigger   `json:"trigger,omitempty"`
 	ExternalTrigger     *types.ExternalTrigger `json:"externalTrigger,omitempty"`
 }
 
@@ -523,6 +525,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Tags:                f.Tags,
 			Color:               f.Color,
 			Labels:              f.Labels,
+			ExcludeLabels:       f.ExcludeLabels,
 			AssignedTo:          f.AssignedTo,
 			Enabled:             isFactoryEnabled(f),
 			ConcurrencyGroup:    f.ConcurrencyGroup,
@@ -1081,6 +1084,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if fp.Labels != nil {
 				disk.Labels = fp.Labels
+			}
+			if fp.ExcludeLabels != nil {
+				disk.ExcludeLabels = fp.ExcludeLabels
 			}
 			if fp.AssignedTo != "" {
 				disk.AssignedTo = fp.AssignedTo

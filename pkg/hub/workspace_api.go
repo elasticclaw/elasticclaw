@@ -41,6 +41,7 @@ type WorkflowView struct {
 	TriggerStatus        string                 `json:"triggerStatus,omitempty"`
 	DoneStatus           string                 `json:"doneStatus,omitempty"`
 	Labels               []string               `json:"labels,omitempty"`
+	ExcludeLabels        []string               `json:"exclude_labels,omitempty"`
 	AssignedTo           string                 `json:"assignedTo,omitempty"`
 	Enabled              bool                   `json:"enabled"`
 	HasWebhookSecret     bool                   `json:"hasWebhookSecret"`
@@ -493,6 +494,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		IntegrationWorkspace: workflow.Workspace,
 		TriggerStatus:        workflow.TriggerStatus,
 		Labels:               append([]string(nil), workflow.Labels...),
+		ExcludeLabels:        append([]string(nil), workflow.ExcludeLabels...),
 		AssignedTo:           workflow.AssignedTo,
 		Enabled:              workflow.Enabled == nil || *workflow.Enabled,
 		EnableManualTrigger:  workflow.EnableManualTrigger,

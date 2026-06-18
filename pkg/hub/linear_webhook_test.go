@@ -1,6 +1,7 @@
 package hub_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -100,6 +101,143 @@ func TestLinearWorkflowCreateFailureDoesNotReprocessErrorStatusWebhook(t *testin
 	}))
 
 	assertLinearIssueCommentCountStable(t, linear, "ELA-123", 1)
+}
+
+func TestLinearWorkflowExcludeLabelsRoutesGenericAndBugWorkflows(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	linear := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+	saveLinearRoutingWorkflowFixture(t, "workspace-a")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithLabels(t, linear, "ELA-124", "Backlog", "Ready For Agent", nil))
+	waitForLinearClawCount(t, db, "ELA-124", 1)
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithLabels(t, linear, "ELA-125", "Backlog", "Ready For Agent", []string{"Bug"}))
+	waitForLinearClawCount(t, db, "ELA-125", 1)
+	assertLinearClawTagsContain(t, db, "ELA-125", "workflow:bug-workflow")
+}
+
+func saveLinearRoutingWorkflowFixture(t *testing.T, workspace string) {
+	t.Helper()
+	hub.SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          workspace,
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: " + workspace + "\nprovider: noop\n",
+				"CONTEXT.md":              "Test context\n",
+			},
+		},
+		[]*types.WorkflowConfig{
+			{
+				SchemaVersion: "v1",
+				Name:          "generic-workflow",
+				Trigger: &types.WorkflowTrigger{
+					Linear: &types.LinearWorkflowTrigger{
+						Event:         "status_changed",
+						Team:          "ELA",
+						States:        []string{"Ready For Agent"},
+						ExcludeLabels: []string{"Bug"},
+					},
+				},
+				Stages: workflowPollTestStages(),
+			},
+			{
+				SchemaVersion: "v1",
+				Name:          "bug-workflow",
+				Trigger: &types.WorkflowTrigger{
+					Linear: &types.LinearWorkflowTrigger{
+						Event:  "status_changed",
+						Team:   "ELA",
+						States: []string{"Ready For Agent"},
+						Labels: []string{"Bug"},
+					},
+				},
+				Stages: workflowPollTestStages(),
+			},
+		},
+	)
+}
+
+func linearWebhookPayloadWithLabels(t *testing.T, linear *factorytest.MockLinear, issueID, prevStatus, newStatus string, labels []string) []byte {
+	t.Helper()
+	payload, _ := linear.BuildWebhookPayload(issueID, prevStatus, newStatus)
+	var data map[string]interface{}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	rawLabels := make([]map[string]string, 0, len(labels))
+	for _, label := range labels {
+		rawLabels = append(rawLabels, map[string]string{"name": label})
+	}
+	dataMap := data["data"].(map[string]interface{})
+	dataMap["labels"] = rawLabels
+	out, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return out
+}
+
+func waitForLinearClawCount(t *testing.T, db interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, issueID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if count == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claws for %s = %d, want %d", issueID, count, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertLinearClawCountStable(t *testing.T, db interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, issueID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if count != want {
+			t.Fatalf("claws for %s = %d, want %d", issueID, count, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertLinearClawTagsContain(t *testing.T, db interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, issueID, want string) {
+	t.Helper()
+	var tags string
+	if err := db.QueryRow(`SELECT tags FROM claws WHERE linear_issue_id=? LIMIT 1`, issueID).Scan(&tags); err != nil {
+		t.Fatalf("query claw tags: %v", err)
+	}
+	if !strings.Contains(tags, want) {
+		t.Fatalf("tags for %s = %s, want %q", issueID, tags, want)
+	}
 }
 
 func saveLinearIssueWorkflowFixtureWithProviderAndErrorStatus(t *testing.T, workspace, provider, agentStatusError string) {

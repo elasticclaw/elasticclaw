@@ -18,6 +18,7 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			workflow.Integration = "github-issues"
 			workflow.TriggerRepos = append([]string(nil), workflow.Trigger.GitHubIssues.Repositories...)
 			workflow.Labels = append([]string(nil), workflow.Trigger.GitHubIssues.Labels...)
+			workflow.ExcludeLabels = append([]string(nil), workflow.Trigger.GitHubIssues.ExcludeLabels...)
 			workflow.AssignedTo = workflow.Trigger.GitHubIssues.AssignedTo
 			workflow.AllowedLabelers = nil
 			for _, labeler := range workflow.Trigger.GitHubIssues.Labelers {
@@ -36,6 +37,7 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			workflow.Workspace = workflow.Trigger.Linear.Workspace
 			workflow.Team = workflow.Trigger.Linear.Team
 			workflow.Labels = append([]string(nil), workflow.Trigger.Linear.Labels...)
+			workflow.ExcludeLabels = append([]string(nil), workflow.Trigger.Linear.ExcludeLabels...)
 			workflow.AssignedTo = workflow.Trigger.Linear.AssignedTo
 			if len(workflow.Trigger.Linear.States) > 0 {
 				workflow.TriggerStatus = workflow.Trigger.Linear.States[0]
@@ -44,6 +46,7 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			workflow.Integration = "shortcut"
 			workflow.Workspace = workflow.Trigger.Shortcut.Workspace
 			workflow.Labels = append([]string(nil), workflow.Trigger.Shortcut.Labels...)
+			workflow.ExcludeLabels = append([]string(nil), workflow.Trigger.Shortcut.ExcludeLabels...)
 			workflow.AssignedTo = workflow.Trigger.Shortcut.AssignedTo
 			if len(workflow.Trigger.Shortcut.States) > 0 {
 				workflow.TriggerStatus = workflow.Trigger.Shortcut.States[0]

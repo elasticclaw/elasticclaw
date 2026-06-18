@@ -277,17 +277,8 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 					continue
 				}
 			} else {
-				if len(workflow.Labels) > 0 {
-					allMatch := true
-					for _, required := range workflow.Labels {
-						if !issueLabels[strings.ToLower(required)] {
-							allMatch = false
-							break
-						}
-					}
-					if !allMatch {
-						continue
-					}
+				if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
+					continue
 				}
 				if len(workflow.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
 					allowed := false
@@ -353,12 +344,12 @@ func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload 
 		return false
 	}
 	if trigger.GitHubIssues != nil {
-		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
+		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.ExcludeLabels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
 	}
 	return false
 }
 
-func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
+func githubIssuesWorkflowSourceMatches(event string, states, labels, excludeLabels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
 	switch event {
 	case "issue_labeled":
 		if payload.Action != "labeled" {
@@ -402,10 +393,8 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 			return false
 		}
 	}
-	for _, required := range labels {
-		if !issueLabels[strings.ToLower(required)] {
-			return false
-		}
+	if !labelSetAllowed(issueLabels, labels, excludeLabels) {
+		return false
 	}
 	if len(labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
 		for _, labeler := range labelers {

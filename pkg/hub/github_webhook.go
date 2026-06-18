@@ -74,6 +74,16 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch event {
+	case "issues":
+		var payload githubIssuesWebhookPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse issues payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] issues action=%q repo=%q issue=#%d author=%q",
+			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Issue.User.Login)
+		go s.processGitHubIssueEvent(payload)
 	case "pull_request":
 		var payload githubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -208,6 +218,14 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				log.Printf("[github-webhook] factory %q: skipped (base_branch mismatch: want %q, got %q)", factory.Name, f.BaseBranch, payload.PullRequest.Base.Ref)
 				continue
 			}
+		}
+		currentLabels, labelsOK := s.githubFactoryPRLabels(factory, repoFullName, payload.Number)
+		if !labelsOK {
+			continue
+		}
+		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
+			log.Printf("[github-webhook] factory %q: skipped (PR backing issue labels did not match)", factory.Name)
+			continue
 		}
 
 		// Check if a claw already exists for this PR
@@ -494,6 +512,14 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 				continue
 			}
 		}
+		currentLabels, labelsOK := s.githubFactoryPRLabels(factory, repoFullName, prNumber)
+		if !labelsOK {
+			continue
+		}
+		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
+			log.Printf("[github-webhook] factory %q: issue_comment skipped (PR backing issue labels did not match)", factory.Name)
+			continue
+		}
 		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
 		if err := s.createClawForGitHubPR(factory, prPayload, "github-pr webhook (issue_comment)"); err != nil {
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
@@ -506,6 +532,90 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		}
 		break // success — one factory match is enough
 	}
+}
+
+func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
+	if payload.Issue.Number == 0 {
+		return
+	}
+	factories := s.resolveFactories()
+	repoFullName := payload.Repository.FullName
+	issueID := fmt.Sprintf("%s/%d", repoFullName, payload.Issue.Number)
+	currentLabels := make([]string, 0, len(payload.Issue.Labels))
+	for _, label := range payload.Issue.Labels {
+		currentLabels = append(currentLabels, label.Name)
+	}
+
+	for _, factory := range factories {
+		if factory.Integration != "github" {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
+		if factory.Trigger == nil || factory.Trigger.On != "issue" {
+			continue
+		}
+		if factory.Trigger.Action != "" && !strings.EqualFold(factory.Trigger.Action, payload.Action) {
+			continue
+		}
+		if !githubRepoMatches(repoFullName, factory.Repos) {
+			continue
+		}
+		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
+			log.Printf("[github-webhook] factory %q: skipped issue %s (labels did not match)", factory.Name, issueID)
+			continue
+		}
+		log.Printf("[factory:%s] github issue %s (action=%s) — creating claw", factory.Name, issueID, payload.Action)
+		if err := s.createClawForGitHubIssue(factory, payload, "github-issue webhook"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
+			log.Printf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
+			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", payload.Action, "error", "", err.Error())
+		}
+	}
+}
+
+func (s *Server) githubFactoryPRLabels(factory *types.FactoryConfig, repo string, prNumber int) ([]string, bool) {
+	if len(factory.Labels) == 0 && len(factory.ExcludeLabels) == 0 {
+		return nil, true
+	}
+	labels, err := s.fetchGitHubIssueLabelsForFactory(factory, repo, prNumber)
+	if err != nil {
+		log.Printf("[github-webhook] factory %q: skipping PR %s#%d because backing issue labels could not be fetched: %v", factory.Name, repo, prNumber, err)
+		return nil, false
+	}
+	return labels, true
+}
+
+func (s *Server) fetchGitHubIssueLabelsForFactory(factory *types.FactoryConfig, repo string, issueNumber int) ([]string, error) {
+	token := s.resolveGitHubTokenForRepo(repo)
+	if token == "" {
+		token = s.resolveGitHubIssuesTokenForFactory(factory)
+	}
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token available")
+	}
+	base := s.githubBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	data, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
+	if err != nil {
+		return nil, err
+	}
+	rawLabels, _ := data["labels"].([]interface{})
+	labels := make([]string, 0, len(rawLabels))
+	for _, raw := range rawLabels {
+		label, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := label["name"].(string)
+		labels = append(labels, name)
+	}
+	return labels, nil
 }
 
 // githubRepoMatches returns true if fullName matches any entry in repos.

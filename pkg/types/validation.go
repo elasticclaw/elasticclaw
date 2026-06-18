@@ -121,6 +121,9 @@ func (f *FactoryConfig) Validate() error {
 	if err := validateRunKind("factory", f.Name, f.RunKind); err != nil {
 		return err
 	}
+	if err := validateLabelList("factory", f.Name, "exclude_labels", f.ExcludeLabels); err != nil {
+		return err
+	}
 
 	// Validate name_pattern if provided
 	if f.NamePattern != "" && !namePatternRegex.MatchString(f.NamePattern) {
@@ -200,6 +203,9 @@ func (w *WorkflowConfig) Validate() error {
 		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
 	}
 	if err := validateRunKind("workflow", w.Name, w.RunKind); err != nil {
+		return err
+	}
+	if err := validateLabelList("workflow", w.Name, "exclude_labels", w.ExcludeLabels); err != nil {
 		return err
 	}
 	if w.NamePattern != "" && !namePatternRegex.MatchString(w.NamePattern) {
@@ -364,6 +370,9 @@ func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIss
 	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
 		return fmt.Errorf("workflow %q: trigger.github_issues.agent_status_error cannot be blank", workflowName)
 	}
+	if err := validateLabelList("workflow", workflowName, "trigger.github_issues.exclude_labels", trigger.ExcludeLabels); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -387,6 +396,9 @@ func validateLinearWorkflowTrigger(workflowName string, trigger *LinearWorkflowT
 	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
 		return fmt.Errorf("workflow %q: trigger.linear.agent_status_error cannot be blank", workflowName)
 	}
+	if err := validateLabelList("workflow", workflowName, "trigger.linear.exclude_labels", trigger.ExcludeLabels); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -405,6 +417,18 @@ func validateShortcutWorkflowTrigger(workflowName string, trigger *ShortcutWorkf
 	for i, state := range trigger.States {
 		if strings.TrimSpace(state) == "" {
 			return fmt.Errorf("workflow %q: trigger.shortcut.states[%d] cannot be empty", workflowName, i)
+		}
+	}
+	if err := validateLabelList("workflow", workflowName, "trigger.shortcut.exclude_labels", trigger.ExcludeLabels); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateLabelList(entityType, entityName, field string, labels []string) error {
+	for i, label := range labels {
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("%s %q: %s[%d] cannot be blank", entityType, entityName, field, i)
 		}
 	}
 	return nil
