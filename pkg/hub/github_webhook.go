@@ -573,6 +573,8 @@ func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
 			}
 			log.Printf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
 			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", payload.Action, "error", "", err.Error())
+		} else {
+			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", payload.Action, "claw_created", "", "github-issue webhook")
 		}
 	}
 }

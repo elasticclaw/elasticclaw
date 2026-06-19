@@ -187,6 +187,42 @@ func TestGitHubIssuesIntegrationWebhookRejectsUnsignedWithoutConfiguredSecret(t 
 	}
 }
 
+func TestGitHubIssuesWorkspaceWebhookAllowsUnsignedWithoutConfiguredSecret(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	ghi := factorytest.NewMockGitHubIssues(t)
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}
+	s, _ := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	saveGitHubIssueWorkflowFixture(t, "workspace-a", "")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 45, factorytest.IssueState{Title: "Unsigned Workspace Issue", Body: "Test body", State: "open"})
+	payload, _ := ghi.BuildWebhookPayload("testorg/testrepo", 45, "closed", "open")
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/github-issues", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Delivery", "delivery-workspace-unsigned-no-secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestGitHubIssuesWorkspaceWebhookOnlyDispatchesThatWorkspace(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	ghi := factorytest.NewMockGitHubIssues(t)

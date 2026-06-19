@@ -210,23 +210,6 @@ func waitForLinearClawCount(t *testing.T, db interface {
 	}
 }
 
-func assertLinearClawCountStable(t *testing.T, db interface {
-	QueryRow(string, ...interface{}) *sql.Row
-}, issueID string, want int) {
-	t.Helper()
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
-			t.Fatalf("count claws: %v", err)
-		}
-		if count != want {
-			t.Fatalf("claws for %s = %d, want %d", issueID, count, want)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func assertLinearClawTagsContain(t *testing.T, db interface {
 	QueryRow(string, ...interface{}) *sql.Row
 }, issueID, want string) {

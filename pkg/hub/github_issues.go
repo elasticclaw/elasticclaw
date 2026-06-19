@@ -164,7 +164,7 @@ func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body 
 		}
 		return "no configured factory webhook secret"
 	}
-	return "no configured workspace webhook secret"
+	return ""
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {
