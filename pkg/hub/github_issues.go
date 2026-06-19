@@ -162,8 +162,9 @@ func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body 
 		if factorySecretCount > 0 {
 			return fmt.Sprintf("signature did not match any configured factory webhook secret (%d checked)", factorySecretCount)
 		}
+		return "no configured factory webhook secret"
 	}
-	return ""
+	return "no configured workspace webhook secret"
 }
 
 func verifyGitHubHMAC(body []byte, sig, secret string) bool {

@@ -140,6 +140,53 @@ func TestGitHubIssuesIntegrationWebhookHonorsExcludeLabels(t *testing.T) {
 	}
 }
 
+func TestGitHubIssuesIntegrationWebhookRejectsUnsignedWithoutConfiguredSecret(t *testing.T) {
+	ghi := factorytest.NewMockGitHubIssues(t)
+	li := factorytest.NewMockLinear(t)
+
+	cfg := &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Factories: []*types.FactoryConfig{{
+			Name:          "legacy",
+			Integration:   "github-issues",
+			Workspace:     "test-workspace",
+			TriggerStatus: "open",
+			Template:      "elasticclaw",
+			Provider:      "noop",
+			TriggerRepos:  []string{"testorg/testrepo"},
+		}},
+		Integrations: &types.IntegrationsConfig{
+			GitHubIssues: []*types.GitHubIssuesIntegrationConfig{{
+				Workspace: "test-workspace",
+				Token:     "test-github-issues-token",
+			}},
+		},
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}
+
+	s, _ := hub.NewTestServerWithConfig(t, cfg, ghi.URL, li.URL, "")
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ghi.SetIssue("testorg/testrepo", 44, factorytest.IssueState{Title: "Unsigned Issue", Body: "Test body", State: "open"})
+	payload, _ := ghi.BuildWebhookPayload("testorg/testrepo", 44, "closed", "open")
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/integrations/github-issues/webhook", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Delivery", "delivery-unsigned-no-secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
 func TestGitHubIssuesWorkspaceWebhookOnlyDispatchesThatWorkspace(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	ghi := factorytest.NewMockGitHubIssues(t)
