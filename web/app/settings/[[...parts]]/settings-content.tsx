@@ -2449,7 +2449,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   {activeTrackerType === "shortcut"
                     ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
                     : activeTrackerType === "jira"
-                    ? "Generate one here, then add it to the Jira webhook URL as a secret query parameter or send it in X-ElasticClaw-Webhook-Secret."
+                    ? "Generate one here, then send it in the X-ElasticClaw-Webhook-Secret header."
                     : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
                 </p>
               </div>

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -107,15 +108,19 @@ func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request
 		return true
 	}
 	got := r.Header.Get("X-ElasticClaw-Webhook-Secret")
-	if got == "" {
-		got = r.URL.Query().Get("secret")
-	}
 	for _, secret := range secrets {
-		if got != "" && got == secret {
+		if constantTimeStringEqual(got, secret) {
 			return true
 		}
 	}
 	return false
+}
+
+func constantTimeStringEqual(a, b string) bool {
+	if a == "" || b == "" || len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func jiraWebhookDedupKey(payload jiraWebhookPayload) string {
@@ -221,6 +226,9 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 			}
 			matched = true
 			if err := s.createClawForJiraWorkflow(workspace, workflow, payload, reason); err != nil {
+				if isFactoryTriggerAlreadyClaimed(err) {
+					continue
+				}
 				log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
 			}
 		}
@@ -515,11 +523,25 @@ func (s *Server) resolveJiraTrackerForFactory(factory *types.FactoryConfig) (wor
 }
 
 func (s *Server) resolveJiraTrackerByIssue(issue jiraIssue) (workspaceIssueTracker, bool) {
-	if s.hubCfg.Integrations != nil {
-		for _, ji := range s.hubCfg.Integrations.Jira {
-			if ji.BaseURL != "" {
-				return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+	if s.hubCfg.Integrations == nil {
+		return workspaceIssueTracker{}, false
+	}
+	if issue.Self != "" {
+		if u, err := url.Parse(issue.Self); err == nil {
+			issueHost := strings.ToLower(u.Host)
+			for _, ji := range s.hubCfg.Integrations.Jira {
+				if ji.BaseURL == "" {
+					continue
+				}
+				if bu, err := url.Parse(ji.BaseURL); err == nil && strings.ToLower(bu.Host) == issueHost {
+					return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+				}
 			}
+		}
+	}
+	for _, ji := range s.hubCfg.Integrations.Jira {
+		if ji.BaseURL != "" {
+			return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
 		}
 	}
 	return workspaceIssueTracker{}, false

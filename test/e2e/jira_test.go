@@ -289,11 +289,12 @@ func (c jiraClient) postElasticClawWebhook(ctx context.Context, t *testing.T, we
 	if err != nil {
 		t.Fatalf("marshal Jira webhook payload: %v", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL+"?secret="+url.QueryEscape(secret), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("build Jira webhook request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ElasticClaw-Webhook-Secret", secret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post Jira webhook: %v", err)

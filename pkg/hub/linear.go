@@ -1295,9 +1295,6 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			if ghToken != "" {
 				// Parse gh-owner/repo/number from issueID
 				rest := strings.TrimPrefix(issueID, "gh-")
-				if rest == issueID {
-					rest = issueID
-				}
 				lastSlash := strings.LastIndex(rest, "/")
 				if lastSlash > 0 {
 					repo := rest[:lastSlash]

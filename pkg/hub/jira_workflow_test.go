@@ -25,11 +25,12 @@ func TestJiraWorkflowWebhookCreatesClaw(t *testing.T) {
 	t.Cleanup(httpSrv.Close)
 
 	payload := jiraWebhookPayload(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent"})
-	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/jira?secret=jira-secret", strings.NewReader(string(payload)))
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/jira", strings.NewReader(string(payload)))
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ElasticClaw-Webhook-Secret", "jira-secret")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
