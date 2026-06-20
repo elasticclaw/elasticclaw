@@ -43,6 +43,36 @@ func TestJiraWorkflowWebhookCreatesClaw(t *testing.T) {
 	waitForJiraClawCount(t, db, "EC-123", 1)
 }
 
+func TestJiraGlobalWebhookCreatesClaw(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	cfg := jiraWorkflowTestConfig()
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	saveJiraWorkflowFixture(t, "workspace-a")
+	hub.SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace-a", "jira", "default", "https://jira.example.test", "", "jira-token", "jira-secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraWebhookPayload(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent"})
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/integrations/jira/webhook", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ElasticClaw-Webhook-Secret", "jira-secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	waitForJiraClawCount(t, db, "EC-123", 1)
+}
+
 func TestJiraWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")

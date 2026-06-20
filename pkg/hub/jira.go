@@ -67,10 +67,6 @@ func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
-	if workspaceName == "" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -104,6 +100,9 @@ func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request) bool {
 	secrets := workspaceIssueTrackerWebhookSecrets(workspaceName, "jira")
+	if workspaceName == "" {
+		secrets = append(secrets, s.globalJiraWebhookSecrets()...)
+	}
 	if len(secrets) == 0 {
 		return true
 	}
@@ -114,6 +113,52 @@ func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request
 		}
 	}
 	return false
+}
+
+func (s *Server) globalJiraWebhookSecrets() []string {
+	s.mu.RLock()
+	integrations := s.hubCfg.Integrations
+	secretRefs := s.hubCfg.Secrets
+	s.mu.RUnlock()
+
+	var secrets []string
+	if integrations != nil {
+		for _, ji := range integrations.Jira {
+			if ji.WebhookSecret != "" {
+				secrets = append(secrets, ji.WebhookSecret)
+			}
+		}
+	}
+
+	for _, factory := range s.resolveFactories() {
+		if factory.Integration != "jira" {
+			continue
+		}
+		secret := factory.WebhookSecret
+		if secret == "" && factory.WebhookSecretRef != "" && secretRefs != nil {
+			secret = secretRefs[factory.WebhookSecretRef]
+		}
+		if secret != "" {
+			secrets = append(secrets, secret)
+		}
+	}
+
+	workspaces, err := loadExternalWorkflowsByIntegration("jira")
+	if err != nil {
+		return secrets
+	}
+	for _, workspace := range workspaces {
+		secrets = append(secrets, workspaceIssueTrackerWebhookSecrets(workspace.Name, "jira")...)
+		for _, secretRef := range workspace.WebhookSecrets {
+			if secretRef == "" || secretRefs == nil {
+				continue
+			}
+			if secret := secretRefs[secretRef]; secret != "" {
+				secrets = append(secrets, secret)
+			}
+		}
+	}
+	return secrets
 }
 
 func constantTimeStringEqual(a, b string) bool {
