@@ -226,12 +226,14 @@ func (w *WorkflowConfig) Validate() error {
 			return fmt.Errorf("workflow %q: repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
 		}
 	}
-	for i, repo := range w.TriggerRepos {
-		if repo == "" {
-			return fmt.Errorf("workflow %q: trigger_repos[%d] cannot be empty", w.Name, i)
-		}
-		if !validRepoSelector(repo) {
-			return fmt.Errorf("workflow %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+	if workflowTriggerReposAreRepoSelectors(w) {
+		for i, repo := range w.TriggerRepos {
+			if repo == "" {
+				return fmt.Errorf("workflow %q: trigger_repos[%d] cannot be empty", w.Name, i)
+			}
+			if !validRepoSelector(repo) {
+				return fmt.Errorf("workflow %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", w.Name, i, repo)
+			}
 		}
 	}
 	for i, input := range w.Inputs {
@@ -251,6 +253,18 @@ func (w *WorkflowConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func workflowTriggerReposAreRepoSelectors(w *WorkflowConfig) bool {
+	if w == nil || len(w.TriggerRepos) == 0 {
+		return false
+	}
+	switch w.Integration {
+	case "", "github", "github-issues":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateWorkflowVolume(workflowName string, index int, volume WorkflowVolume, seen map[string]struct{}) error {
