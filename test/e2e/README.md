@@ -125,7 +125,8 @@ The Jira Cloud user is configured with `ELASTICCLAW_E2E_JIRA_USERNAME` and
 `ELASTICCLAW_E2E_JIRA_TOKEN`. It must be able to browse the project, create
 issues, edit issues, transition issues, add labels, and delete issues for
 cleanup. `ELASTICCLAW_E2E_JIRA_PROJECT_KEY` must point at an existing project
-whose workflow supports `Bug` issues moving from `To do` to `Ready for Agent`.
+whose workflow supports `Bug` issues moving from `To do` to `Ready for Agent`
+and then to `Agent Working`.
 
 Jira Cloud dynamic webhook registration is restricted to Connect and OAuth apps,
 so the default E2E mode uses real Jira Cloud REST mutations and then posts a

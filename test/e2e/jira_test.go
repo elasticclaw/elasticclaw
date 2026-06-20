@@ -22,6 +22,7 @@ const (
 	jiraE2EIssueType    = "Bug"
 	jiraE2EInitialState = "To do"
 	jiraE2ETriggerState = "Ready for Agent"
+	jiraE2EWorkingState = "Agent Working"
 )
 
 func TestDaytonaJiraWorkflowE2E(t *testing.T) {
@@ -116,6 +117,7 @@ func runJiraWorkflowE2E(t *testing.T, sandboxProvider string) {
 	}
 
 	agentID = waitForOneAgent(ctx, t, hub, issueKey)
+	jira.waitForIssueStatus(ctx, t, issueKey, jiraE2EWorkingState)
 	waitForAgentStatus(ctx, t, hub, agentID, "connected")
 	waitForAgentReply(ctx, t, hub, agentID)
 
@@ -160,6 +162,7 @@ trigger:
       - %s
 
 concurrency_group: e2e-jira-%s
+working_status: %s
 
 stages:
   - id: working
@@ -172,7 +175,7 @@ stages:
 
         Do exactly what this issue asks.
         Do not create a pull request.
-`, workflowName, env.JiraProjectKey, jiraE2ETriggerState, labelName, env.RunID))
+`, workflowName, env.JiraProjectKey, jiraE2ETriggerState, labelName, env.RunID, jiraE2EWorkingState))
 	return root
 }
 
@@ -263,6 +266,21 @@ func (c jiraClient) transitionIssue(ctx context.Context, t *testing.T, key, targ
 	c.api(ctx, t, http.MethodPost, "/rest/api/3/issue/"+url.PathEscape(key)+"/transitions", map[string]any{
 		"transition": map[string]string{"id": transitionID},
 	}, nil)
+}
+
+func (c jiraClient) waitForIssueStatus(ctx context.Context, t *testing.T, key, targetStatus string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastStatus string
+	for time.Now().Before(deadline) {
+		issue := c.getIssue(ctx, t, key)
+		lastStatus = issue.Fields.Status.Name
+		if strings.EqualFold(lastStatus, targetStatus) {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("timed out waiting for Jira issue %s status %q; last status %q", key, targetStatus, lastStatus)
 }
 
 func (c jiraClient) deleteIssue(ctx context.Context, key string) error {
