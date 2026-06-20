@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-replicated-github e2e-replicated-linear e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -53,7 +53,7 @@ test-factory: ## Run factory integration tests
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
 
-e2e: e2e-github e2e-linear e2e-replicated-github e2e-replicated-linear ## Run all real E2E suites sequentially
+e2e: e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira ## Run all real E2E suites sequentially
 
 e2e-github: ## Run the real Daytona + GitHub Issues E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDaytonaGitHubIssuesWorkflowE2E
@@ -61,11 +61,17 @@ e2e-github: ## Run the real Daytona + GitHub Issues E2E suite
 e2e-linear: ## Run the real Daytona + Linear E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDaytonaLinearWorkflowE2E
 
+e2e-jira: ## Run the real Daytona + Jira Cloud E2E suite
+	$(MAKE) e2e-run E2E_TEST=TestDaytonaJiraWorkflowE2E
+
 e2e-replicated-github: ## Run the real Replicated CMX + GitHub Issues E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestReplicatedGitHubIssuesWorkflowE2E
 
 e2e-replicated-linear: ## Run the real Replicated CMX + Linear E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestReplicatedLinearWorkflowE2E
+
+e2e-replicated-jira: ## Run the real Replicated CMX + Jira Cloud E2E suite
+	$(MAKE) e2e-run E2E_TEST=TestReplicatedJiraWorkflowE2E
 
 e2e-run: build-dev build-bridge-linux
 	@command -v ngrok >/dev/null 2>&1 || (echo "ngrok is required for make e2e" && exit 1)

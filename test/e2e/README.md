@@ -8,6 +8,7 @@ The E2E paths run against real services:
 ```text
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
+Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
 ```
 
 Each test creates a workspace and workflow with the ElasticClaw CLI, configures
@@ -15,7 +16,10 @@ a workspace GitHub App with the CLI so repositories can clone in Daytona, then
 configures the issue tracker through the server API. The GitHub Issues test
 creates a real GitHub issue and labels it. The Linear test creates a real Linear
 webhook, creates a real Linear issue in a non-trigger state, moves it into the
-trigger state, then waits for one Daytona-backed agent to connect and reply.
+trigger state, then waits for one Daytona-backed agent to connect and reply. The
+Jira test creates a real Jira Cloud issue, labels it, transitions it into the
+trigger state, delivers a Jira-shaped webhook payload to the E2E hub, and lets
+the poller run long enough to verify duplicate prevention.
 
 ## Fixture Repo
 
@@ -42,8 +46,10 @@ Run one suite:
 ```sh
 make e2e-github
 make e2e-linear
+make e2e-jira
 make e2e-replicated-github
 make e2e-replicated-linear
+make e2e-replicated-jira
 ```
 
 The make targets build `bin/elasticclaw` and `bin/claw-bridge-linux-amd64`,
@@ -73,6 +79,10 @@ ELASTICCLAW_E2E_GITHUB_APP_ID
 ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY
 ELASTICCLAW_E2E_LINEAR_API_KEY
 ELASTICCLAW_E2E_LINEAR_TEAM_KEY
+ELASTICCLAW_E2E_JIRA_BASE_URL
+ELASTICCLAW_E2E_JIRA_USERNAME
+ELASTICCLAW_E2E_JIRA_TOKEN
+ELASTICCLAW_E2E_JIRA_PROJECT_KEY
 DAYTONA_API_KEY
 REPLICATED_API_TOKEN
 FIREWORKS_API_KEY
@@ -88,11 +98,13 @@ ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
 ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
 ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE=Todo
 ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
+ELASTICCLAW_E2E_JIRA_ISSUE_TYPE=Task
+ELASTICCLAW_E2E_JIRA_TRIGGER_STATE="In Progress"
+ELASTICCLAW_E2E_JIRA_INITIAL_STATE=
+ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
 ELASTICCLAW_E2E_REPLICATED_TTL=1h
-ELASTICCLAW_E2E_JIRA=false
-ELASTICCLAW_E2E_JIRA_IMAGE=atlassian/jira-software:latest
 ```
 
 The GitHub token needs access to the fixture repo with:
@@ -112,12 +124,19 @@ The Linear API key must be able to create webhooks and issues for the team in
 workflow to watch. Set `ELASTICCLAW_E2E_LINEAR_INITIAL_STATE` only if the test
 cannot infer a non-trigger state for the initial issue creation.
 
-Jira E2E should run as a separate gated job because the Atlassian Jira Software
-container is heavier than the API-backed tracker tests and may require instance
-bootstrap/licensing. The intended path is: start `atlassian/jira-software`,
-create a project/workflow/statuses, configure `/api/workspaces/{workspace}/webhooks/jira`,
-transition an issue into the trigger status, then verify webhook delivery and
-polling recovery both create exactly one agent.
+The Jira Cloud user is configured with `ELASTICCLAW_E2E_JIRA_USERNAME` and
+`ELASTICCLAW_E2E_JIRA_TOKEN`. It must be able to browse the project, create
+issues, edit issues, transition issues, add labels, and delete issues for
+cleanup. `ELASTICCLAW_E2E_JIRA_PROJECT_KEY` must point at an existing project
+whose workflow has a transition to `ELASTICCLAW_E2E_JIRA_TRIGGER_STATE`, which
+defaults to `In Progress`.
+
+Jira Cloud dynamic webhook registration is restricted to Connect and OAuth apps,
+so the default E2E mode uses real Jira Cloud REST mutations and then posts a
+Jira-shaped webhook payload to the ngrok-backed ElasticClaw webhook endpoint.
+Leave `ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true` for CI. Set it to `false` only
+when a separate Jira app or automation rule is already delivering real Jira
+webhooks to the current E2E ngrok URL.
 
 ## Planned Matrix
 
@@ -127,7 +146,7 @@ The suite should grow in separate jobs so failures stay attributable:
 github-issues: webhook, polling recovery, duplicate prevention
 linear: webhook, polling recovery, duplicate prevention
 shortcut: webhook, polling recovery, duplicate prevention
-jira: container-backed webhook, polling recovery, duplicate prevention
+jira: Jira Cloud REST mutation, webhook processing, polling duplicate prevention
 exedev: provisioning reaches agent connected
 daytona: provisioning reaches agent connected and repositories clone
 replicated: provisioning reaches agent connected and repositories clone

@@ -130,6 +130,12 @@ type e2eEnv struct {
 	LinearTeamKey       string
 	LinearTriggerState  string
 	LinearInitialState  string
+	JiraBaseURL         string
+	JiraUsername        string
+	JiraToken           string
+	JiraProjectKey      string
+	JiraTriggerState    string
+	JiraInitialState    string
 	DaytonaAPIKey       string
 	ReplicatedToken     string
 	ReplicatedAPIURL    string
@@ -160,6 +166,12 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
 		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
 		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
+		JiraBaseURL:         strings.TrimRight(os.Getenv("ELASTICCLAW_E2E_JIRA_BASE_URL"), "/"),
+		JiraUsername:        os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
+		JiraToken:           os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
+		JiraProjectKey:      os.Getenv("ELASTICCLAW_E2E_JIRA_PROJECT_KEY"),
+		JiraTriggerState:    envOrDefault("ELASTICCLAW_E2E_JIRA_TRIGGER_STATE", "In Progress"),
+		JiraInitialState:    os.Getenv("ELASTICCLAW_E2E_JIRA_INITIAL_STATE"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
 		BridgeToken:         "bridge-" + runID,
@@ -407,12 +419,16 @@ func runCLI(ctx context.Context, t *testing.T, workdir string, env e2eEnv, args 
 
 func (h *hubProcess) putIssueTracker(ctx context.Context, t *testing.T, workspaceName, trackerType, name, token, webhookSecret string) {
 	t.Helper()
-	body := map[string]string{
+	h.putIssueTrackerWithConfig(ctx, t, workspaceName, map[string]string{
 		"type":          trackerType,
 		"workspace":     name,
 		"token":         token,
 		"webhookSecret": webhookSecret,
-	}
+	})
+}
+
+func (h *hubProcess) putIssueTrackerWithConfig(ctx context.Context, t *testing.T, workspaceName string, body map[string]string) {
+	t.Helper()
 	h.api(ctx, t, http.MethodPut, "/api/workspaces/"+workspaceName+"/issue-trackers", body, nil)
 }
 
