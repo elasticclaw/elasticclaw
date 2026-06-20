@@ -134,8 +134,6 @@ type e2eEnv struct {
 	JiraUsername        string
 	JiraToken           string
 	JiraProjectKey      string
-	JiraTriggerState    string
-	JiraInitialState    string
 	DaytonaAPIKey       string
 	ReplicatedToken     string
 	ReplicatedAPIURL    string
@@ -170,8 +168,6 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		JiraUsername:        os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
 		JiraToken:           os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
 		JiraProjectKey:      os.Getenv("ELASTICCLAW_E2E_JIRA_PROJECT_KEY"),
-		JiraTriggerState:    envOrDefault("ELASTICCLAW_E2E_JIRA_TRIGGER_STATE", "In Progress"),
-		JiraInitialState:    os.Getenv("ELASTICCLAW_E2E_JIRA_INITIAL_STATE"),
 		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
 		BridgeToken:         "bridge-" + runID,

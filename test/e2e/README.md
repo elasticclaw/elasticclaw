@@ -98,9 +98,6 @@ ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
 ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
 ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE=Todo
 ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
-ELASTICCLAW_E2E_JIRA_ISSUE_TYPE=Task
-ELASTICCLAW_E2E_JIRA_TRIGGER_STATE="In Progress"
-ELASTICCLAW_E2E_JIRA_INITIAL_STATE=
 ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
@@ -128,8 +125,7 @@ The Jira Cloud user is configured with `ELASTICCLAW_E2E_JIRA_USERNAME` and
 `ELASTICCLAW_E2E_JIRA_TOKEN`. It must be able to browse the project, create
 issues, edit issues, transition issues, add labels, and delete issues for
 cleanup. `ELASTICCLAW_E2E_JIRA_PROJECT_KEY` must point at an existing project
-whose workflow has a transition to `ELASTICCLAW_E2E_JIRA_TRIGGER_STATE`, which
-defaults to `In Progress`.
+whose workflow supports `Bug` issues moving from `To do` to `Ready for Agent`.
 
 Jira Cloud dynamic webhook registration is restricted to Connect and OAuth apps,
 so the default E2E mode uses real Jira Cloud REST mutations and then posts a

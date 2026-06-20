@@ -18,6 +18,12 @@ import (
 	"time"
 )
 
+const (
+	jiraE2EIssueType    = "Bug"
+	jiraE2EInitialState = "To do"
+	jiraE2ETriggerState = "Ready for Agent"
+)
+
 func TestDaytonaJiraWorkflowE2E(t *testing.T) {
 	runJiraWorkflowE2E(t, "daytona")
 }
@@ -97,15 +103,15 @@ func runJiraWorkflowE2E(t *testing.T, sandboxProvider string) {
 	issue := jira.createIssue(ctx, t, env.JiraProjectKey, labelName, "Tell a dad joke. Do not make a PR.", "Tell a dad joke. Do not make a PR.\n\nElasticClaw E2E run: "+env.RunID)
 	issueKey = issue.Key
 	before := jira.getIssue(ctx, t, issueKey)
-	if env.JiraInitialState != "" && !strings.EqualFold(before.Fields.Status.Name, env.JiraInitialState) {
-		jira.transitionIssue(ctx, t, issueKey, env.JiraInitialState)
+	if !strings.EqualFold(before.Fields.Status.Name, jiraE2EInitialState) {
+		jira.transitionIssue(ctx, t, issueKey, jiraE2EInitialState)
 		before = jira.getIssue(ctx, t, issueKey)
 	}
-	jira.transitionIssue(ctx, t, issueKey, env.JiraTriggerState)
+	jira.transitionIssue(ctx, t, issueKey, jiraE2ETriggerState)
 	after := jira.getIssue(ctx, t, issueKey)
 
 	if jiraManualWebhookDelivery() {
-		payload := jiraWebhookPayloadForE2E(after, before.Fields.Status.Name, env.JiraTriggerState, env.RunID)
+		payload := jiraWebhookPayloadForE2E(after, before.Fields.Status.Name, jiraE2ETriggerState, env.RunID)
 		jira.postElasticClawWebhook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/jira", webhookSecret, payload)
 	}
 
@@ -166,7 +172,7 @@ stages:
 
         Do exactly what this issue asks.
         Do not create a pull request.
-`, workflowName, env.JiraProjectKey, env.JiraTriggerState, labelName, env.RunID))
+`, workflowName, env.JiraProjectKey, jiraE2ETriggerState, labelName, env.RunID))
 	return root
 }
 
@@ -205,7 +211,7 @@ func (c jiraClient) createIssue(ctx context.Context, t *testing.T, projectKey, l
 	body := map[string]any{
 		"fields": map[string]any{
 			"project":     map[string]string{"key": projectKey},
-			"issuetype":   map[string]string{"name": envOrDefault("ELASTICCLAW_E2E_JIRA_ISSUE_TYPE", "Task")},
+			"issuetype":   map[string]string{"name": jiraE2EIssueType},
 			"summary":     summary,
 			"description": jiraADFDocument(description),
 			"labels":      []string{labelName},
