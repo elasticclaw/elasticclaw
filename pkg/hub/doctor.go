@@ -585,7 +585,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		// Check 5: overlapping triggers
 		var key triggerKey
 		switch f.Integration {
-		case "linear", "shortcut", "github-issues":
+		case "linear", "shortcut", "github-issues", "jira":
 			key = triggerKey{integration: f.Integration, workspace: f.Workspace, trigger: f.TriggerStatus}
 		case "github":
 			if f.Trigger != nil {
@@ -909,7 +909,70 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 		}
 	}
 
-	if len(cfg.Integrations.Linear) == 0 && len(cfg.Integrations.Shortcut) == 0 && len(cfg.Integrations.GitHubIssues) == 0 {
+	for _, ji := range cfg.Integrations.Jira {
+		if ji.Token == "" {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Jira workspace %q missing token", ji.Workspace),
+				Description: fmt.Sprintf("Jira integration workspace %q has no API token configured.", ji.Workspace),
+				OK:          false,
+				FixAction: &FixAction{
+					Type:   "navigate",
+					Target: "/settings/issue-trackers",
+					Label:  "Add Token",
+				},
+			})
+		}
+		if ji.BaseURL == "" {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Jira workspace %q missing base URL", ji.Workspace),
+				Description: fmt.Sprintf("Jira integration workspace %q has no base URL configured.", ji.Workspace),
+				OK:          false,
+				FixAction: &FixAction{
+					Type:   "navigate",
+					Target: "/settings/issue-trackers",
+					Label:  "Add Base URL",
+				},
+			})
+		}
+		if ji.Token != "" && ji.BaseURL != "" {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "info",
+				Title:       fmt.Sprintf("Jira workspace %q configured", ji.Workspace),
+				Description: fmt.Sprintf("Jira workspace %q has a base URL and token configured.", ji.Workspace),
+				OK:          true,
+			})
+		}
+		if ji.WebhookSecret == "" {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "warning",
+				Title:       fmt.Sprintf("Jira workspace %q missing webhook secret", ji.Workspace),
+				Description: fmt.Sprintf("Jira workspace %q has no webhook secret. Webhooks will not be validated.", ji.Workspace),
+				OK:          false,
+				FixAction: &FixAction{
+					Type:   "navigate",
+					Target: "/settings/issue-trackers",
+					Label:  "Add Secret",
+				},
+			})
+		}
+		if !factoryWorkspaces["jira"][ji.Workspace] {
+			checks = append(checks, DoctorCheck{
+				Category:    "integrations",
+				Severity:    "info",
+				Title:       fmt.Sprintf("Jira workspace %q has no factory using it", ji.Workspace),
+				Description: fmt.Sprintf("Jira workspace %q is configured but no factory references it.", ji.Workspace),
+				OK:          false,
+			})
+		}
+	}
+
+	if len(cfg.Integrations.Linear) == 0 && len(cfg.Integrations.Shortcut) == 0 && len(cfg.Integrations.GitHubIssues) == 0 && len(cfg.Integrations.Jira) == 0 {
 		checks = append(checks, DoctorCheck{
 			Category:    "integrations",
 			Severity:    "info",

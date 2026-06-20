@@ -113,6 +113,23 @@ func SaveWorkspaceIssueTrackerForTest(t interface {
 	}
 }
 
+// SaveWorkspaceIssueTrackerWithBaseForTest writes a workspace-managed issue tracker
+// with tracker-specific connection details.
+func SaveWorkspaceIssueTrackerWithBaseForTest(t interface {
+	Helper()
+	Fatalf(string, ...interface{})
+}, workspace, trackerType, name, baseURL, username, token, webhookSecret string) {
+	t.Helper()
+	if err := saveWorkspaceIssueTracker(workspace, trackerType, name, workspaceIssueTracker{
+		BaseURL:       baseURL,
+		Username:      username,
+		Token:         token,
+		WebhookSecret: webhookSecret,
+	}); err != nil {
+		t.Fatalf("save workspace issue tracker: %v", err)
+	}
+}
+
 // Handler returns the server's HTTP handler (mux). Must be called after setupRoutes.
 func (s *Server) Handler() http.Handler {
 	return s.mux

@@ -68,6 +68,8 @@ type Server struct {
 	linearBaseURL string
 	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
 	shortcutBaseURL string
+	// jiraBaseURL overrides the Jira API base for testing.
+	jiraBaseURL string
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -289,11 +291,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
+	mux.HandleFunc("/api/integrations/jira/webhook", s.handleJiraWebhook)
 	mux.HandleFunc("/api/integrations/external/webhook", s.handleExternalWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/linear", s.handleLinearWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github-issues", s.handleGitHubIssuesWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/shortcut", s.handleShortcutWebhook)
+	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/jira", s.handleJiraWebhook)
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger

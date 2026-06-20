@@ -91,6 +91,8 @@ ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
 ELASTICCLAW_E2E_REPLICATED_TTL=1h
+ELASTICCLAW_E2E_JIRA=false
+ELASTICCLAW_E2E_JIRA_IMAGE=atlassian/jira-software:latest
 ```
 
 The GitHub token needs access to the fixture repo with:
@@ -110,6 +112,13 @@ The Linear API key must be able to create webhooks and issues for the team in
 workflow to watch. Set `ELASTICCLAW_E2E_LINEAR_INITIAL_STATE` only if the test
 cannot infer a non-trigger state for the initial issue creation.
 
+Jira E2E should run as a separate gated job because the Atlassian Jira Software
+container is heavier than the API-backed tracker tests and may require instance
+bootstrap/licensing. The intended path is: start `atlassian/jira-software`,
+create a project/workflow/statuses, configure `/api/workspaces/{workspace}/webhooks/jira`,
+transition an issue into the trigger status, then verify webhook delivery and
+polling recovery both create exactly one agent.
+
 ## Planned Matrix
 
 The suite should grow in separate jobs so failures stay attributable:
@@ -118,6 +127,7 @@ The suite should grow in separate jobs so failures stay attributable:
 github-issues: webhook, polling recovery, duplicate prevention
 linear: webhook, polling recovery, duplicate prevention
 shortcut: webhook, polling recovery, duplicate prevention
+jira: container-backed webhook, polling recovery, duplicate prevention
 exedev: provisioning reaches agent connected
 daytona: provisioning reaches agent connected and repositories clone
 replicated: provisioning reaches agent connected and repositories clone

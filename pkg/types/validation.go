@@ -19,7 +19,7 @@ var validColors = map[string]bool{
 
 // Valid integration types
 var validIntegrations = map[string]bool{
-	"linear": true, "shortcut": true, "github-issues": true, "github": true, "external": true,
+	"linear": true, "shortcut": true, "github-issues": true, "jira": true, "github": true, "external": true,
 }
 
 // Valid workflow integration types. Cron is workflow-only; factories still use
@@ -106,7 +106,7 @@ func (f *FactoryConfig) Validate() error {
 		return fmt.Errorf("factory %q: integration is required", f.Name)
 	}
 	if !validIntegrations[f.Integration] {
-		return fmt.Errorf("factory %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external)", f.Name, f.Integration)
+		return fmt.Errorf("factory %q: invalid integration %q (must be one of: linear, shortcut, github-issues, jira, github, external)", f.Name, f.Integration)
 	}
 
 	// Template is required
@@ -181,6 +181,11 @@ func (f *FactoryConfig) Validate() error {
 			return fmt.Errorf("factory %q: trigger_repos[%d] invalid format %q (expected owner/repo or owner/*)", f.Name, i, repo)
 		}
 	}
+	for i, project := range f.Projects {
+		if strings.TrimSpace(project) == "" {
+			return fmt.Errorf("factory %q: projects[%d] cannot be empty", f.Name, i)
+		}
+	}
 
 	return nil
 }
@@ -194,7 +199,7 @@ func (w *WorkflowConfig) Validate() error {
 		return fmt.Errorf("workflow name is required")
 	}
 	if w.Integration != "" && !validWorkflowIntegrations[w.Integration] {
-		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, github, external, cron)", w.Name, w.Integration)
+		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, jira, github, external, cron)", w.Name, w.Integration)
 	}
 	if w.Color != "" && !validColors[w.Color] {
 		return fmt.Errorf("workflow %q: invalid color %q", w.Name, w.Color)
@@ -301,6 +306,9 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	if trigger.Shortcut != nil {
 		nestedCount++
 	}
+	if trigger.Jira != nil {
+		nestedCount++
+	}
 	if trigger.Cron != nil {
 		nestedCount++
 	}
@@ -315,6 +323,9 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	}
 	if trigger.Cron != nil {
 		return validateCronWorkflowTrigger(workflowName, trigger.Cron)
+	}
+	if trigger.Jira != nil {
+		return validateJiraWorkflowTrigger(workflowName, trigger.Jira)
 	}
 	return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
 }
@@ -406,6 +417,34 @@ func validateShortcutWorkflowTrigger(workflowName string, trigger *ShortcutWorkf
 		if strings.TrimSpace(state) == "" {
 			return fmt.Errorf("workflow %q: trigger.shortcut.states[%d] cannot be empty", workflowName, i)
 		}
+	}
+	return nil
+}
+
+func validateJiraWorkflowTrigger(workflowName string, trigger *JiraWorkflowTrigger) error {
+	if trigger.Event == "" {
+		return fmt.Errorf("workflow %q: trigger.jira.event is required", workflowName)
+	}
+	switch trigger.Event {
+	case "status", "status_changed", "issue_status_changed", "issue_created", "issue_updated":
+	default:
+		return fmt.Errorf("workflow %q: invalid trigger.jira.event %q", workflowName, trigger.Event)
+	}
+	if len(trigger.States) == 0 {
+		return fmt.Errorf("workflow %q: trigger.jira.states must include at least one status", workflowName)
+	}
+	for i, state := range trigger.States {
+		if strings.TrimSpace(state) == "" {
+			return fmt.Errorf("workflow %q: trigger.jira.states[%d] cannot be empty", workflowName, i)
+		}
+	}
+	for i, project := range trigger.Projects {
+		if strings.TrimSpace(project) == "" {
+			return fmt.Errorf("workflow %q: trigger.jira.projects[%d] cannot be empty", workflowName, i)
+		}
+	}
+	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
+		return fmt.Errorf("workflow %q: trigger.jira.agent_status_error cannot be blank", workflowName)
 	}
 	return nil
 }
@@ -558,9 +597,9 @@ func validateSecretRef(path string, secret SecretRef) error {
 		return fmt.Errorf("%s: type is required", path)
 	}
 
-	validTypes := map[string]bool{"linear": true, "shortcut": true, "github": true, "github-issues": true, "custom": true}
+	validTypes := map[string]bool{"linear": true, "shortcut": true, "github": true, "github-issues": true, "jira": true, "custom": true}
 	if !validTypes[secret.Type] {
-		return fmt.Errorf("%s: invalid type %q (must be one of: linear, shortcut, github, github-issues, custom)", path, secret.Type)
+		return fmt.Errorf("%s: invalid type %q (must be one of: linear, shortcut, github, github-issues, jira, custom)", path, secret.Type)
 	}
 
 	if secret.Type == "custom" && secret.Name == "" {

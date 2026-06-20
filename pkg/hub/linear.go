@@ -609,8 +609,8 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 func (s *Server) terminateClawForIssue(issueID string) {
 	var clawID, tenantID, factoryName string
 	if err := s.db.QueryRow(
-		`SELECT id, tenant_id, factory_name FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
-		issueID, issueID,
+		`SELECT id, tenant_id, factory_name FROM claws WHERE (linear_issue_id = ? OR shortcut_story_id = ? OR jira_issue_id = ?) AND status NOT IN ('error','deleted') LIMIT 1`,
+		issueID, issueID, issueID,
 	).Scan(&clawID, &tenantID, &factoryName); err != nil {
 		return
 	}
@@ -652,6 +652,14 @@ func (s *Server) terminateClawForIssue(issueID string) {
 							log.Printf("[factory] commented GitHub issue %s", issueID)
 						}
 					}
+				}
+			}
+		case "jira":
+			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+				if err := s.commentJiraIssue(tracker, issueID, "Agent stopped: issue left trigger status"); err != nil {
+					log.Printf("[factory] failed to comment Jira issue %s: %v", issueID, err)
+				} else {
+					log.Printf("[factory] commented Jira issue %s", issueID)
 				}
 			}
 		}
@@ -766,6 +774,20 @@ func (s *Server) resolveSecretRef(ref types.SecretRef, factory *types.FactoryCon
 		for _, gi := range s.hubCfg.Integrations.GitHubIssues {
 			if ws == "" || strings.EqualFold(gi.Workspace, ws) {
 				return gi.Token, envName, true
+			}
+		}
+		return "", envName, false
+	case "jira":
+		if s.hubCfg.Integrations == nil {
+			return "", envName, false
+		}
+		ws := ref.Workspace
+		if ws == "" && factory != nil {
+			ws = factory.Workspace
+		}
+		for _, ji := range s.hubCfg.Integrations.Jira {
+			if ws == "" || strings.EqualFold(ji.Workspace, ws) {
+				return ji.Token, envName, true
 			}
 		}
 		return "", envName, false
@@ -937,7 +959,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		tenantID                                                  string
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')) FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')) FROM claws WHERE id=?`,
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &issueID)
 	if err != nil {
@@ -964,12 +986,15 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		factory = s.findFactoryForIssue(issueID)
 	}
 
-	// Resolve tokens for env (Linear, GitHub Issues, Shortcut)
+	// Resolve tokens for env (Linear, GitHub Issues, Shortcut, Jira)
 	var linearToken, githubToken, shortcutToken string
+	var jiraTracker workspaceIssueTracker
+	var hasJiraTracker bool
 	if factory != nil {
 		linearToken = s.resolveLinearTokenForFactory(factory)
 		githubToken = s.resolveGitHubIssuesTokenForFactory(factory)
 		shortcutToken = s.resolveShortcutToken(factory.Workspace)
+		jiraTracker, hasJiraTracker = s.resolveJiraTrackerForFactory(factory)
 	}
 
 	s.mu.RLock()
@@ -991,6 +1016,15 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	}
 	if shortcutToken != "" {
 		env["SHORTCUT_API_KEY"] = shortcutToken
+	}
+	if hasJiraTracker && jiraTracker.Token != "" {
+		env["JIRA_API_KEY"] = jiraTracker.Token
+		if jiraTracker.BaseURL != "" {
+			env["JIRA_BASE_URL"] = jiraTracker.BaseURL
+		}
+		if jiraTracker.Username != "" {
+			env["JIRA_USERNAME"] = jiraTracker.Username
+		}
 	}
 
 	// Parse elasticclaw-config.yaml from recovered template files to honour
@@ -1135,9 +1169,9 @@ func buildLinearContext(payload linearWebhookPayload, requiresPR bool) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
-	// Get the issue ID and tenant for this claw (linear or github-issues)
+	// Get the issue ID and tenant for this claw.
 	var issueID, tenantID string
-	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,'')), tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
 		return // not a factory claw
 	}
 
@@ -1236,7 +1270,16 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		targetStatus = factory.DoneStatus
 	}
 	if !pipelineHandledDone && targetStatus != "" {
-		if strings.HasPrefix(issueID, "sc-") {
+		switch factory.Integration {
+		case "jira":
+			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+				if err := s.moveJiraIssue(tracker, issueID, targetStatus); err != nil {
+					log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
+				} else {
+					log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
+				}
+			}
+		case "shortcut":
 			// Shortcut story
 			scToken := s.resolveShortcutToken(factory.Workspace)
 			if scToken != "" {
@@ -1246,12 +1289,15 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
 				}
 			}
-		} else if strings.HasPrefix(issueID, "gh-") {
+		case "github-issues":
 			// GitHub issue
 			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
 			if ghToken != "" {
 				// Parse gh-owner/repo/number from issueID
 				rest := strings.TrimPrefix(issueID, "gh-")
+				if rest == issueID {
+					rest = issueID
+				}
 				lastSlash := strings.LastIndex(rest, "/")
 				if lastSlash > 0 {
 					repo := rest[:lastSlash]
@@ -1270,7 +1316,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 					}
 				}
 			}
-		} else {
+		default:
 			// Linear issue
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken != "" {
@@ -1378,7 +1424,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
-	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
 		log.Printf("[terminate] claw %s not found in DB: %v", clawID[:8], err)
 		return
 	}
@@ -1540,6 +1586,22 @@ func (s *Server) findFactoryForIssue(issueID string) *types.FactoryConfig {
 	}
 	// Also check github_issue_id column
 	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
+		var tags []string
+		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
+		var tags []string
+		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+			if factory := s.factoryFromTags(tags, factories); factory != nil {
+				return factory
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT tags FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&tagsJSON); err == nil {
 		var tags []string
 		if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
 			if factory := s.factoryFromTags(tags, factories); factory != nil {

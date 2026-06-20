@@ -29,9 +29,12 @@ type workspaceIssueTrackers struct {
 	Linear       map[string]workspaceIssueTracker `yaml:"linear,omitempty"`
 	Shortcut     map[string]workspaceIssueTracker `yaml:"shortcut,omitempty"`
 	GitHubIssues map[string]workspaceIssueTracker `yaml:"github_issues,omitempty"`
+	Jira         map[string]workspaceIssueTracker `yaml:"jira,omitempty"`
 }
 
 type workspaceIssueTracker struct {
+	BaseURL       string `yaml:"base_url,omitempty" json:"baseUrl,omitempty"`
+	Username      string `yaml:"username,omitempty" json:"username,omitempty"`
 	Token         string `yaml:"token,omitempty" json:"token,omitempty"`
 	WebhookSecret string `yaml:"webhook_secret,omitempty" json:"webhookSecret,omitempty"`
 }
@@ -41,6 +44,8 @@ type workspaceIssueTrackerView struct {
 	Workspace        string `json:"workspace"`
 	TokenSet         bool   `json:"tokenSet"`
 	WebhookSecretSet bool   `json:"webhookSecretSet"`
+	BaseURL          string `json:"baseUrl,omitempty"`
+	Username         string `json:"username,omitempty"`
 }
 
 type workspaceGitHubApp struct {
@@ -159,6 +164,8 @@ func saveWorkspaceIssueTracker(workspace, trackerType, name string, tracker work
 		trackers.Shortcut[name] = tracker
 	case "github-issues":
 		trackers.GitHubIssues[name] = tracker
+	case "jira":
+		trackers.Jira[name] = tracker
 	default:
 		return fmt.Errorf("invalid issue tracker type %q", trackerType)
 	}
@@ -180,6 +187,8 @@ func deleteWorkspaceIssueTracker(workspace, trackerType, name string) error {
 		delete(trackers.Shortcut, name)
 	case "github-issues":
 		delete(trackers.GitHubIssues, name)
+	case "jira":
+		delete(trackers.Jira, name)
 	default:
 		return fmt.Errorf("invalid issue tracker type %q", trackerType)
 	}
@@ -191,7 +200,7 @@ func workspaceIssueTrackerViews(workspace string) ([]workspaceIssueTrackerView, 
 	if err != nil {
 		return nil, err
 	}
-	views := make([]workspaceIssueTrackerView, 0, len(trackers.Linear)+len(trackers.Shortcut)+len(trackers.GitHubIssues))
+	views := make([]workspaceIssueTrackerView, 0, len(trackers.Linear)+len(trackers.Shortcut)+len(trackers.GitHubIssues)+len(trackers.Jira))
 	appendViews := func(trackerType string, values map[string]workspaceIssueTracker) {
 		names := make([]string, 0, len(values))
 		for name := range values {
@@ -205,12 +214,15 @@ func workspaceIssueTrackerViews(workspace string) ([]workspaceIssueTrackerView, 
 				Workspace:        name,
 				TokenSet:         tracker.Token != "",
 				WebhookSecretSet: tracker.WebhookSecret != "",
+				BaseURL:          tracker.BaseURL,
+				Username:         tracker.Username,
 			})
 		}
 	}
 	appendViews("linear", trackers.Linear)
 	appendViews("shortcut", trackers.Shortcut)
 	appendViews("github-issues", trackers.GitHubIssues)
+	appendViews("jira", trackers.Jira)
 	return views, nil
 }
 
@@ -242,6 +254,8 @@ func findWorkspaceIssueTracker(workspace, trackerType, name string) (workspaceIs
 		return find(trackers.Shortcut)
 	case "github-issues":
 		return find(trackers.GitHubIssues)
+	case "jira":
+		return find(trackers.Jira)
 	default:
 		return workspaceIssueTracker{}, false
 	}
@@ -260,6 +274,8 @@ func workspaceIssueTrackerWebhookSecrets(workspace, trackerType string) []string
 		values = trackers.Shortcut
 	case "github-issues":
 		values = trackers.GitHubIssues
+	case "jira":
+		values = trackers.Jira
 	default:
 		return nil
 	}
@@ -281,6 +297,9 @@ func ensureIssueTrackerMaps(trackers *workspaceIssueTrackers) {
 	}
 	if trackers.GitHubIssues == nil {
 		trackers.GitHubIssues = map[string]workspaceIssueTracker{}
+	}
+	if trackers.Jira == nil {
+		trackers.Jira = map[string]workspaceIssueTracker{}
 	}
 }
 

@@ -1,0 +1,705 @@
+package hub
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
+
+type jiraWebhookPayload struct {
+	WebhookEvent string    `json:"webhookEvent"`
+	Timestamp    int64     `json:"timestamp"`
+	Issue        jiraIssue `json:"issue"`
+	User         jiraUser  `json:"user"`
+	Changelog    *struct {
+		ID    string `json:"id"`
+		Items []struct {
+			Field      string `json:"field"`
+			FromString string `json:"fromString"`
+			ToString   string `json:"toString"`
+		} `json:"items"`
+	} `json:"changelog,omitempty"`
+}
+
+type jiraIssue struct {
+	ID     string `json:"id"`
+	Key    string `json:"key"`
+	Self   string `json:"self"`
+	Fields struct {
+		Summary     string   `json:"summary"`
+		Description any      `json:"description"`
+		Labels      []string `json:"labels"`
+		Updated     string   `json:"updated"`
+		Status      struct {
+			Name string `json:"name"`
+		} `json:"status"`
+		Project struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+		} `json:"project"`
+		Assignee *jiraUser `json:"assignee"`
+	} `json:"fields"`
+}
+
+type jiraUser struct {
+	AccountID    string `json:"accountId"`
+	Name         string `json:"name"`
+	Key          string `json:"key"`
+	DisplayName  string `json:"displayName"`
+	EmailAddress string `json:"emailAddress"`
+}
+
+type jiraPollIssue = jiraIssue
+
+func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	if workspaceName == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	if !s.validateJiraWebhookSecret(workspaceName, r) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	var payload jiraWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	if payload.Issue.Key == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	dedupKey := jiraWebhookDedupKey(payload)
+	if dedupKey != "" && s.isDuplicateWebhook(dedupKey) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	go s.processJiraEvent(workspaceName, payload)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request) bool {
+	secrets := workspaceIssueTrackerWebhookSecrets(workspaceName, "jira")
+	if len(secrets) == 0 {
+		return true
+	}
+	got := r.Header.Get("X-ElasticClaw-Webhook-Secret")
+	if got == "" {
+		got = r.URL.Query().Get("secret")
+	}
+	for _, secret := range secrets {
+		if got != "" && got == secret {
+			return true
+		}
+	}
+	return false
+}
+
+func jiraWebhookDedupKey(payload jiraWebhookPayload) string {
+	key := strings.TrimSpace(payload.Issue.Key)
+	if key == "" {
+		return ""
+	}
+	if payload.Changelog != nil && payload.Changelog.ID != "" {
+		return "jira:" + key + ":" + payload.Changelog.ID
+	}
+	if payload.Timestamp > 0 {
+		return fmt.Sprintf("jira:%s:%d", key, payload.Timestamp)
+	}
+	return ""
+}
+
+func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPayload) {
+	workspaces, err := loadExternalWorkflowsByIntegration("jira")
+	if err != nil {
+		log.Printf("[jira-webhook] failed to load workflows: %v", err)
+		return
+	}
+	workspaces = filterWorkflowWorkspacesByName(workspaces, workspaceName)
+	_ = s.processJiraWorkflowEvent(workspaces, payload, "jira webhook")
+
+	factories := s.resolveFactories()
+	if len(factories) == 0 {
+		return
+	}
+
+	currentStatus, previousStatus := jiraWebhookStatuses(payload)
+	labels := jiraIssueLabels(payload.Issue)
+	assignee := jiraIssueAssignee(payload.Issue)
+	for _, factory := range factories {
+		if factory.Integration != "jira" {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
+		if !jiraProjectMatches(payload.Issue.Fields.Project.Key, factory.Projects) {
+			continue
+		}
+		if factory.TriggerStatus == "" || !strings.EqualFold(currentStatus, factory.TriggerStatus) || strings.EqualFold(previousStatus, factory.TriggerStatus) {
+			continue
+		}
+		if !s.labelsMatch(labels, factory.Labels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
+			continue
+		}
+		if err := s.createClawForJiraIssue(factory, payload, "jira webhook"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
+			log.Printf("[factory:%s] failed to create claw for Jira issue %s: %v", factory.Name, payload.Issue.Key, err)
+			s.trackFactoryCreationFailure(factory.Name, payload.Issue.Key, err.Error())
+		}
+	}
+	for _, factory := range factories {
+		if factory.Integration != "jira" || !factory.TerminateOnLeave {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
+		if !jiraProjectMatches(payload.Issue.Fields.Project.Key, factory.Projects) {
+			continue
+		}
+		if factory.TriggerStatus == "" || strings.EqualFold(currentStatus, factory.TriggerStatus) {
+			continue
+		}
+		var activeClaw string
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
+		if activeClaw != "" {
+			s.terminateClawForIssue(payload.Issue.Key)
+		}
+	}
+}
+
+func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, payload jiraWebhookPayload, reason string) bool {
+	currentStatus, previousStatus := jiraWebhookStatuses(payload)
+	labels := jiraIssueLabels(payload.Issue)
+	assignee := jiraIssueAssignee(payload.Issue)
+	matched := false
+	for _, workspace := range workspaces {
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "jira" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			if !jiraWorkflowMatchesProject(workflow, payload.Issue.Fields.Project.Key) {
+				continue
+			}
+			if workflow.TriggerStatus == "" || !strings.EqualFold(currentStatus, workflow.TriggerStatus) || strings.EqualFold(previousStatus, workflow.TriggerStatus) {
+				continue
+			}
+			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+				continue
+			}
+			if !jiraLabelsMapMatches(labels, workflow.Labels) {
+				continue
+			}
+			matched = true
+			if err := s.createClawForJiraWorkflow(workspace, workflow, payload, reason); err != nil {
+				log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
+			}
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "jira" || !workflow.TerminateOnLeave {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			if !jiraWorkflowMatchesProject(workflow, payload.Issue.Fields.Project.Key) {
+				continue
+			}
+			if workflow.TriggerStatus == "" || strings.EqualFold(currentStatus, workflow.TriggerStatus) {
+				continue
+			}
+			var activeClaw string
+			_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
+			if activeClaw != "" {
+				matched = true
+				s.terminateClawForIssue(payload.Issue.Key)
+			}
+		}
+	}
+	return matched
+}
+
+func jiraWebhookStatuses(payload jiraWebhookPayload) (string, string) {
+	current := payload.Issue.Fields.Status.Name
+	previous := ""
+	if payload.Changelog != nil {
+		for _, item := range payload.Changelog.Items {
+			if strings.EqualFold(item.Field, "status") {
+				if item.ToString != "" {
+					current = item.ToString
+				}
+				previous = item.FromString
+				break
+			}
+		}
+	}
+	return current, previous
+}
+
+func jiraIssueLabels(issue jiraIssue) []string {
+	return append([]string(nil), issue.Fields.Labels...)
+}
+
+func jiraIssueAssignee(issue jiraIssue) string {
+	if issue.Fields.Assignee == nil {
+		return ""
+	}
+	for _, value := range []string{issue.Fields.Assignee.Name, issue.Fields.Assignee.DisplayName, issue.Fields.Assignee.EmailAddress, issue.Fields.Assignee.AccountID} {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func jiraLabelsMapMatches(labels, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	set := map[string]bool{}
+	for _, label := range labels {
+		set[strings.ToLower(strings.TrimSpace(label))] = true
+	}
+	for _, label := range required {
+		if !set[strings.ToLower(strings.TrimSpace(label))] {
+			return false
+		}
+	}
+	return true
+}
+
+func jiraProjectMatches(project string, projects []string) bool {
+	if len(projects) == 0 {
+		return true
+	}
+	for _, candidate := range projects {
+		if strings.EqualFold(strings.TrimSpace(candidate), project) {
+			return true
+		}
+	}
+	return false
+}
+
+func jiraWorkflowMatchesProject(workflow *types.WorkflowConfig, project string) bool {
+	if workflow == nil {
+		return false
+	}
+	projects := workflow.TriggerRepos
+	if workflow.Trigger != nil && workflow.Trigger.Jira != nil && len(workflow.Trigger.Jira.Projects) > 0 {
+		projects = workflow.Trigger.Jira.Projects
+	}
+	return jiraProjectMatches(project, projects)
+}
+
+func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload jiraWebhookPayload, reason string) error {
+	issueID := payload.Issue.Key
+	var existing string
+	_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
+	if existing != "" {
+		return nil
+	}
+
+	triggerKey := factoryTriggerKey("jira", issueID)
+	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
+	claimed, err := s.claimFactoryTrigger(triggerOwner, "jira", triggerKey, reason, map[string]string{
+		"issue_id":  issueID,
+		"source":    reason,
+		"workspace": workspace.Name,
+		"workflow":  workflow.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("claim workflow trigger: %w", err)
+	}
+	if !claimed {
+		return errFactoryTriggerAlreadyClaimed
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(triggerOwner, "jira", triggerKey)
+		}
+	}()
+
+	templateFiles := cloneStringMap(workspace.Files)
+	templateFiles["CONTEXT.md"] = s.buildJiraContext(payload)
+	clawName := issueID
+	if workflow.NamePattern != "" {
+		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", issueID)
+		clawName = strings.ReplaceAll(clawName, "{project}", payload.Issue.Fields.Project.Key)
+	}
+	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		workspaceFiles: templateFiles,
+		clawName:       clawName,
+		jiraIssueID:    issueID,
+		reason:         reason,
+		triggerActor: &triggerActor{
+			ID:    firstNonEmpty(payload.User.AccountID, payload.User.Name, payload.User.Key),
+			Type:  "User",
+			Name:  payload.User.DisplayName,
+			Email: payload.User.EmailAddress,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.completeFactoryTrigger(triggerOwner, "jira", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete workflow trigger: %w", err)
+	}
+	claimOpen = false
+	if !isPending && workflow.WorkingStatus != "" {
+		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow); ok {
+			if err := s.moveJiraIssue(tracker, issueID, workflow.WorkingStatus); err != nil {
+				log.Printf("[workflow:%s/%s] failed to move Jira issue %s to %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload jiraWebhookPayload, reason string) error {
+	issueID := payload.Issue.Key
+	triggerKey := factoryTriggerKey("jira", issueID)
+	claimed, err := s.claimFactoryTrigger(factory.Name, "jira", triggerKey, reason, map[string]string{
+		"issue_id": issueID,
+		"source":   reason,
+	})
+	if err != nil {
+		return fmt.Errorf("claim factory trigger: %w", err)
+	}
+	if !claimed {
+		return errFactoryTriggerAlreadyClaimed
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "jira", triggerKey)
+		}
+	}()
+	if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+		if _, err := s.fetchJiraIssue(tracker, issueID); err != nil {
+			return fmt.Errorf("cannot read Jira issue %s: %w", issueID, err)
+		}
+	}
+	templateFiles, err := s.resolveTemplateFiles(factory.Template)
+	if err != nil {
+		return err
+	}
+	templateFiles["CONTEXT.md"] = s.buildJiraContext(payload)
+	clawID, isPending, err := s.createClawFromFactory(factory, issueID, nil, templateFiles, reason)
+	if err != nil {
+		return err
+	}
+	if err := s.completeFactoryTrigger(factory.Name, "jira", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("complete factory trigger: %w", err)
+	}
+	claimOpen = false
+	if !isPending && factory.WorkingStatus != "" {
+		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if err := s.moveJiraIssue(tracker, issueID, factory.WorkingStatus); err != nil {
+				log.Printf("[factory:%s] failed to move Jira issue %s to %q: %v", factory.Name, issueID, factory.WorkingStatus, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) buildJiraContext(payload jiraWebhookPayload) string {
+	issue := payload.Issue
+	url := s.jiraBrowseURL(issue)
+	var b strings.Builder
+	b.WriteString("# Jira Issue Context\n\n")
+	fmt.Fprintf(&b, "Issue: %s\n", issue.Key)
+	if url != "" {
+		fmt.Fprintf(&b, "URL: %s\n", url)
+	}
+	fmt.Fprintf(&b, "Project: %s\n", issue.Fields.Project.Key)
+	fmt.Fprintf(&b, "Status: %s\n", issue.Fields.Status.Name)
+	if len(issue.Fields.Labels) > 0 {
+		fmt.Fprintf(&b, "Labels: %s\n", strings.Join(issue.Fields.Labels, ", "))
+	}
+	if assignee := jiraIssueAssignee(issue); assignee != "" {
+		fmt.Fprintf(&b, "Assignee: %s\n", assignee)
+	}
+	fmt.Fprintf(&b, "Title: %s\n\n", issue.Fields.Summary)
+	if text := jiraDescriptionText(issue.Fields.Description); text != "" {
+		b.WriteString(text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (s *Server) jiraBrowseURL(issue jiraIssue) string {
+	if issue.Key == "" {
+		return ""
+	}
+	base := ""
+	if tracker, ok := s.resolveJiraTrackerByIssue(issue); ok {
+		base = tracker.BaseURL
+	}
+	if base == "" {
+		base = s.jiraBaseURL
+	}
+	if base == "" && issue.Self != "" {
+		if u, err := url.Parse(issue.Self); err == nil {
+			base = u.Scheme + "://" + u.Host
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/browse/" + url.PathEscape(issue.Key)
+}
+
+func jiraDescriptionText(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case nil:
+		return ""
+	default:
+		b, _ := json.MarshalIndent(t, "", "  ")
+		return string(b)
+	}
+}
+
+func (s *Server) resolveJiraTrackerForWorkflow(workspaceName string, workflow *types.WorkflowConfig) (workspaceIssueTracker, bool) {
+	if workflow == nil {
+		return workspaceIssueTracker{}, false
+	}
+	return findWorkspaceIssueTracker(workspaceName, "jira", workflow.Workspace)
+}
+
+func (s *Server) resolveJiraTrackerForFactory(factory *types.FactoryConfig) (workspaceIssueTracker, bool) {
+	if factory == nil {
+		return workspaceIssueTracker{}, false
+	}
+	if s.hubCfg.Integrations != nil {
+		for _, ji := range s.hubCfg.Integrations.Jira {
+			if factory.Workspace == "" || strings.EqualFold(ji.Workspace, factory.Workspace) {
+				return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+			}
+		}
+	}
+	return workspaceIssueTracker{}, false
+}
+
+func (s *Server) resolveJiraTrackerByIssue(issue jiraIssue) (workspaceIssueTracker, bool) {
+	if s.hubCfg.Integrations != nil {
+		for _, ji := range s.hubCfg.Integrations.Jira {
+			if ji.BaseURL != "" {
+				return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+			}
+		}
+	}
+	return workspaceIssueTracker{}, false
+}
+
+func (s *Server) jiraBaseForTracker(tracker workspaceIssueTracker) string {
+	if tracker.BaseURL != "" {
+		return strings.TrimRight(tracker.BaseURL, "/")
+	}
+	if s.jiraBaseURL != "" {
+		return strings.TrimRight(s.jiraBaseURL, "/")
+	}
+	return ""
+}
+
+func (s *Server) fetchJiraIssue(tracker workspaceIssueTracker, key string) (jiraIssue, error) {
+	var issue jiraIssue
+	base := s.jiraBaseForTracker(tracker)
+	if base == "" {
+		return issue, fmt.Errorf("missing Jira base URL")
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/rest/api/2/issue/"+url.PathEscape(key)+"?fields=summary,description,status,labels,assignee,project,updated", nil)
+	if err != nil {
+		return issue, err
+	}
+	applyJiraAuth(req, tracker)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return issue, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return issue, fmt.Errorf("jira API error %d: %s", resp.StatusCode, string(body))
+	}
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return issue, err
+	}
+	return issue, nil
+}
+
+func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time, projects []string) ([]jiraPollIssue, error) {
+	base := s.jiraBaseForTracker(tracker)
+	if base == "" {
+		return nil, fmt.Errorf("missing Jira base URL")
+	}
+	jql := fmt.Sprintf("updated >= %q", since.Format("2006-01-02 15:04"))
+	if len(projects) > 0 {
+		quoted := make([]string, 0, len(projects))
+		for _, project := range projects {
+			project = strings.TrimSpace(project)
+			if project != "" {
+				quoted = append(quoted, fmt.Sprintf("%q", project))
+			}
+		}
+		if len(quoted) > 0 {
+			jql = "project in (" + strings.Join(quoted, ",") + ") AND " + jql
+		}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"jql":        jql,
+		"maxResults": 100,
+		"fields":     []string{"summary", "description", "status", "labels", "assignee", "project", "updated"},
+	})
+	req, err := http.NewRequest(http.MethodPost, base+"/rest/api/2/search", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	applyJiraAuth(req, tracker)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("jira API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Issues []jiraPollIssue `json:"issues"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	return result.Issues, nil
+}
+
+func (s *Server) moveJiraIssue(tracker workspaceIssueTracker, key, targetStatus string) error {
+	base := s.jiraBaseForTracker(tracker)
+	if base == "" {
+		return fmt.Errorf("missing Jira base URL")
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/rest/api/2/issue/"+url.PathEscape(key)+"/transitions", nil)
+	if err != nil {
+		return err
+	}
+	applyJiraAuth(req, tracker)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("jira transitions API error %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Transitions []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			To   struct {
+				Name string `json:"name"`
+			} `json:"to"`
+		} `json:"transitions"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return err
+	}
+	transitionID := ""
+	for _, transition := range result.Transitions {
+		if strings.EqualFold(transition.Name, targetStatus) || strings.EqualFold(transition.To.Name, targetStatus) {
+			transitionID = transition.ID
+			break
+		}
+	}
+	if transitionID == "" {
+		return fmt.Errorf("no Jira transition to status %q", targetStatus)
+	}
+	payload, _ := json.Marshal(map[string]any{"transition": map[string]string{"id": transitionID}})
+	req, err = http.NewRequest(http.MethodPost, base+"/rest/api/2/issue/"+url.PathEscape(key)+"/transitions", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	applyJiraAuth(req, tracker)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("jira transition API error %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (s *Server) commentJiraIssue(tracker workspaceIssueTracker, key, text string) error {
+	base := s.jiraBaseForTracker(tracker)
+	if base == "" {
+		return fmt.Errorf("missing Jira base URL")
+	}
+	payload, _ := json.Marshal(map[string]string{"body": text})
+	req, err := http.NewRequest(http.MethodPost, base+"/rest/api/2/issue/"+url.PathEscape(key)+"/comment", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	applyJiraAuth(req, tracker)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("jira comment API error %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func applyJiraAuth(req *http.Request, tracker workspaceIssueTracker) {
+	if tracker.Token == "" {
+		return
+	}
+	if tracker.Username != "" {
+		raw := tracker.Username + ":" + tracker.Token
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(raw)))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+tracker.Token)
+}

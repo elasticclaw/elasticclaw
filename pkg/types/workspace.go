@@ -88,6 +88,7 @@ type WorkflowTrigger struct {
 	GitHubIssues *GitHubIssuesWorkflowTrigger `yaml:"github_issues,omitempty" json:"github_issues,omitempty"`
 	Linear       *LinearWorkflowTrigger       `yaml:"linear,omitempty" json:"linear,omitempty"`
 	Shortcut     *ShortcutWorkflowTrigger     `yaml:"shortcut,omitempty" json:"shortcut,omitempty"`
+	Jira         *JiraWorkflowTrigger         `yaml:"jira,omitempty" json:"jira,omitempty"`
 	Cron         *CronWorkflowTrigger         `yaml:"cron,omitempty" json:"cron,omitempty"`
 }
 
@@ -141,6 +142,16 @@ type ShortcutWorkflowTrigger struct {
 	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+}
+
+type JiraWorkflowTrigger struct {
+	Event            string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Workspace        string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	Projects         []string `yaml:"projects,omitempty" json:"projects,omitempty"`
+	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	AssignedTo       string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
 }
 
 // WorkflowStage is one step in a workflow state machine. It intentionally mirrors
