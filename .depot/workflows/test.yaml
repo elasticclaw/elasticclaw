@@ -214,7 +214,7 @@ jobs:
           #!/usr/bin/env sh
           set -eu
 
-          BASE_URL="${LATEST_BASE}"
+          BASE_URL="${PREVIEW_BASE}"
           HUB_BINARY_URL="\${BASE_URL}/elasticclaw-linux-amd64"
 
           os="\$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -231,8 +231,30 @@ jobs:
           esac
 
           tmp="\$(mktemp)"
-          trap 'rm -f "\$tmp"' EXIT
+          sums="\$(mktemp)"
+          trap 'rm -f "\$tmp" "\$sums"' EXIT
           curl -fsSL "\${BASE_URL}/\${asset}" -o "\$tmp"
+          curl -fsSL "\${BASE_URL}/checksums.txt" -o "\$sums"
+
+          expected="\$(awk -v asset="\$asset" '\$2 == asset { print \$1 }' "\$sums")"
+          if [ -z "\$expected" ]; then
+            echo "checksum for \$asset not found" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="\$(sha256sum "\$tmp" | awk '{ print \$1 }')"
+          elif command -v shasum >/dev/null 2>&1; then
+            actual="\$(shasum -a 256 "\$tmp" | awk '{ print \$1 }')"
+          else
+            echo "sha256sum or shasum is required to verify preview download" >&2
+            exit 1
+          fi
+          if [ "\$actual" != "\$expected" ]; then
+            echo "checksum mismatch for \$asset" >&2
+            echo "expected \$expected" >&2
+            echo "actual   \$actual" >&2
+            exit 1
+          fi
           chmod +x "\$tmp"
 
           if [ "\${1:-}" = "install" ]; then
@@ -272,22 +294,25 @@ jobs:
             local file="$1"
             local key="$2"
             local content_type="$3"
+            local cache_control="$4"
             aws s3 cp "$file" "s3://${PREVIEW_R2_BUCKET}/${key}" \
               --endpoint-url "$PREVIEW_R2_ENDPOINT" \
               --content-type "$content_type" \
-              --cache-control "public, max-age=300"
+              --cache-control "$cache_control"
           }
 
-          for prefix in "pr/${PR}/${SHORT_SHA}" "pr/${PR}/latest"; do
-            upload dist/elasticclaw-linux-amd64 "${prefix}/elasticclaw-linux-amd64" application/octet-stream
-            upload dist/elasticclaw-linux-arm64 "${prefix}/elasticclaw-linux-arm64" application/octet-stream
-            upload dist/elasticclaw-darwin-amd64 "${prefix}/elasticclaw-darwin-amd64" application/octet-stream
-            upload dist/elasticclaw-darwin-arm64 "${prefix}/elasticclaw-darwin-arm64" application/octet-stream
-            upload dist/elasticclaw-windows-amd64.exe "${prefix}/elasticclaw-windows-amd64.exe" application/octet-stream
-            upload dist/claw-bridge-linux-amd64 "${prefix}/claw-bridge-linux-amd64" application/octet-stream
-            upload dist/checksums.txt "${prefix}/checksums.txt" text/plain
-            upload dist/manifest.json "${prefix}/manifest.json" application/json
-            upload dist/install.sh "${prefix}/install.sh" text/x-shellscript
+          for item in "pr/${PR}/${SHORT_SHA}|public, max-age=31536000, immutable" "pr/${PR}/latest|public, max-age=300"; do
+            prefix="${item%%|*}"
+            cache_control="${item#*|}"
+            upload dist/elasticclaw-linux-amd64 "${prefix}/elasticclaw-linux-amd64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-linux-arm64 "${prefix}/elasticclaw-linux-arm64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-darwin-amd64 "${prefix}/elasticclaw-darwin-amd64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-darwin-arm64 "${prefix}/elasticclaw-darwin-arm64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-windows-amd64.exe "${prefix}/elasticclaw-windows-amd64.exe" application/octet-stream "$cache_control"
+            upload dist/claw-bridge-linux-amd64 "${prefix}/claw-bridge-linux-amd64" application/octet-stream "$cache_control"
+            upload dist/checksums.txt "${prefix}/checksums.txt" text/plain "$cache_control"
+            upload dist/manifest.json "${prefix}/manifest.json" application/json "$cache_control"
+            upload dist/install.sh "${prefix}/install.sh" text/x-shellscript "$cache_control"
           done
 
       - name: Comment preview install instructions

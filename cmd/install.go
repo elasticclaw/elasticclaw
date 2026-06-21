@@ -75,6 +75,7 @@ func init() {
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
 	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")
+	installCmd.MarkFlagsMutuallyExclusive("version", "hub-binary-url")
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
@@ -141,9 +142,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	installBinaryScript := install.ScriptInstallBinary(version, useSudo)
+	var installBinaryScript string
 	if installHubBinaryURL != "" {
 		installBinaryScript = install.ScriptInstallBinaryFromURL(installHubBinaryURL, useSudo)
+	} else {
+		installBinaryScript = install.ScriptInstallBinary(version, useSudo)
 	}
 	steps := []struct {
 		name   string

@@ -29,6 +29,31 @@ func TestResolveInstallVersion(t *testing.T) {
 	}
 }
 
+func TestInstallVersionAndHubBinaryURLAreMutuallyExclusive(t *testing.T) {
+	versionFlag := installCmd.Flag("version")
+	if versionFlag == nil {
+		t.Fatal("version flag not found")
+	}
+	groups := versionFlag.Annotations["cobra_annotation_mutually_exclusive"]
+	for _, group := range groups {
+		fields := strings.Fields(group)
+		hasVersion := false
+		hasHubBinaryURL := false
+		for _, field := range fields {
+			if field == "version" {
+				hasVersion = true
+			}
+			if field == "hub-binary-url" {
+				hasHubBinaryURL = true
+			}
+		}
+		if hasVersion && hasHubBinaryURL {
+			return
+		}
+	}
+	t.Fatalf("version flag mutually exclusive annotations = %#v, want version and hub-binary-url", groups)
+}
+
 func TestKnownHostsCallbackVerifiesServerKey(t *testing.T) {
 	trustedKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
