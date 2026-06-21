@@ -137,11 +137,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'web/package.json'
 
-      - name: Install AWS CLI
+      - name: Verify AWS CLI
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y awscli
+        run: aws --version
 
       - name: Build preview binaries
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}
