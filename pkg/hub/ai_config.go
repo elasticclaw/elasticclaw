@@ -599,7 +599,7 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 	case "codex":
 		return "codex/o4-mini"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/kimi-k2p6"
+		return defaultFireworksModel
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":

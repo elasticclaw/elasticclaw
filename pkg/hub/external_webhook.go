@@ -775,7 +775,7 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/kimi-k2p6"
+		return defaultFireworksModel
 	case "openai":
 		return "openai/gpt-5.5"
 	case "groq":
