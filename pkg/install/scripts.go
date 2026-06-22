@@ -7,11 +7,11 @@ import "fmt"
 
 // Params holds all inputs needed to generate install scripts.
 type Params struct {
-	Domain       string
-	Version      string
-	Token        string
-	ClawToken    string
-	UIPassword   string
+	Domain     string
+	Version    string
+	Token      string
+	ClawToken  string
+	UIPassword string
 }
 
 // HubBinaryURL returns the GitHub releases download URL for the hub binary.
@@ -71,7 +71,11 @@ func sudoPrefix(useSudo bool) string {
 
 // ScriptInstallBinary returns the shell script to download and install the hub binary.
 func ScriptInstallBinary(version string, useSudo bool) string {
-	url := HubBinaryURL(version)
+	return ScriptInstallBinaryFromURL(HubBinaryURL(version), useSudo)
+}
+
+// ScriptInstallBinaryFromURL returns the shell script to download and install a hub binary.
+func ScriptInstallBinaryFromURL(url string, useSudo bool) string {
 	sudo := sudoPrefix(useSudo)
 	return fmt.Sprintf(`set -ex
 curl -fsSL %q -o /tmp/elasticclaw-bin
