@@ -503,7 +503,7 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	cmd := exec.Command("bash", "-c", snippet)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		"OPENCLAW_DEFAULT_MODEL=fireworks/accounts/fireworks/models/kimi-k2p6",
+		"OPENCLAW_DEFAULT_MODEL="+defaultFireworksModel,
 		keys[0].EnvVarName()+"=fw-test",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -529,7 +529,7 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	if !ok {
 		t.Fatalf("agents.defaults missing or wrong type: %#v", agents["defaults"])
 	}
-	if defaults["model"] != "fireworks/accounts/fireworks/models/kimi-k2p6" {
+	if defaults["model"] != defaultFireworksModel {
 		t.Fatalf("default model not patched: %#v", defaults["model"])
 	}
 	agentModels, ok := defaults["models"].(map[string]interface{})

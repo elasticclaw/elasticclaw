@@ -178,7 +178,7 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			key: &types.LLMKeyConfig{
 				Provider: "fireworks",
 			},
-			expectedModel: "fireworks/accounts/fireworks/models/kimi-k2p6",
+			expectedModel: defaultFireworksModel,
 		},
 		{
 			name: "unknown provider - fall back to hub default",
