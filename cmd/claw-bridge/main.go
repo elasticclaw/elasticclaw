@@ -2058,6 +2058,8 @@ echo "Git: $(git --version)"
 }
 
 const openClawVersion = "2026.6.1"
+const codexCLIVersion = "0.141.0"
+const grokCLIVersion = "0.1.0"
 
 // installOpenClaw installs the pinned OpenClaw CLI via npm.
 func installOpenClaw() error {
@@ -2068,6 +2070,58 @@ func installOpenClaw() error {
 	out, _ := exec.Command("openclaw", "--version").Output()
 	log.Printf("[bootstrap] OpenClaw: %s", strings.TrimSpace(string(out)))
 	return nil
+}
+
+func cliCodingProviderForModel(model string) string {
+	switch {
+	case strings.HasPrefix(model, "codex/"):
+		return "codex"
+	case strings.HasPrefix(model, "grok/"):
+		return "grok"
+	default:
+		return ""
+	}
+}
+
+func cliVersion(envName, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func installNPMCLI(packageName, version, binaryName string) error {
+	if strings.TrimSpace(version) == "" {
+		return fmt.Errorf("empty version for %s", packageName)
+	}
+	spec := packageName + "@" + version
+	log.Printf("[bootstrap] installing %s...", spec)
+	if err := runShell(fmt.Sprintf("sudo npm install -g %s --ignore-scripts", shellQuote(spec))); err != nil {
+		return fmt.Errorf("npm install %s: %w", spec, err)
+	}
+	out, err := exec.Command(binaryName, "--version").CombinedOutput()
+	if err != nil {
+		log.Printf("[bootstrap] %s version check warning: %v: %s", binaryName, err, strings.TrimSpace(string(out)))
+		return nil
+	}
+	log.Printf("[bootstrap] %s: %s", binaryName, strings.TrimSpace(string(out)))
+	return nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func installSelectedCodingModelCLI() error {
+	model := envOr("OPENCLAW_DEFAULT_MODEL", "")
+	switch cliCodingProviderForModel(model) {
+	case "codex":
+		return installNPMCLI("@openai/codex", cliVersion("ELASTICCLAW_CODEX_CLI_VERSION", codexCLIVersion), "codex")
+	case "grok":
+		return installNPMCLI("@xai-official/grok", cliVersion("ELASTICCLAW_GROK_CLI_VERSION", grokCLIVersion), "grok")
+	default:
+		return nil
+	}
 }
 
 // configureOpenClaw patches ~/.openclaw/openclaw.json with model, LLM keys,
@@ -2403,6 +2457,11 @@ func runBootstrap() error {
 	// Step 3: Install OpenClaw (needs Node)
 	if err := installOpenClaw(); err != nil {
 		return fmt.Errorf("installOpenClaw: %w", err)
+	}
+
+	// Step 3b: Install pinned CLI-backed model providers when selected.
+	if err := installSelectedCodingModelCLI(); err != nil {
+		return fmt.Errorf("installSelectedCodingModelCLI: %w", err)
 	}
 
 	// Step 4: Run openclaw onboard (initializes ~/.openclaw directory)

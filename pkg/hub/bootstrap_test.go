@@ -300,6 +300,13 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 			authChoice: "codex-api-key",
 			flagName:   "--codex-api-key",
 		},
+		{
+			name:       "grok",
+			provider:   "grok",
+			envVar:     "XAI_API_KEY",
+			authChoice: "openai-api-key",
+			flagName:   "--openai-api-key",
+		},
 	}
 
 	for _, tc := range cases {
@@ -415,6 +422,19 @@ func TestBuildOpenClawProviderConfig_ConfiguresOllamaProviderBaseURL(t *testing.
 	assertContains(t, snippet, "'compat': {'supportsTools': True, 'supportsUsageInStreaming': True}", "keeps tool support while lean mode reduces local model prompt pressure")
 	assertContains(t, snippet, "providers['ollama']", "writes only the built-in Ollama provider config")
 	assertNotContains(t, snippet, "'ollama-cloud'", "does not rewrite Ollama Cloud")
+}
+
+func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "grok-main", Provider: "grok", Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "grok-main")
+
+	assertContains(t, snippet, "if model.startswith('grok/'):", "only configures Grok when selected model is Grok")
+	assertContains(t, snippet, "'baseUrl': 'https://api.x.ai/v1'", "uses xAI OpenAI-compatible base URL")
+	assertContains(t, snippet, "'apiKey': 'XAI_API_KEY'", "uses Grok API key env var")
+	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")
 }
 
 func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T) {

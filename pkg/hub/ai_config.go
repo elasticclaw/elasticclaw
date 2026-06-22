@@ -547,7 +547,7 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	if anthropicKey != nil {
 		return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 	}
-	for _, provider := range []string{"openai", "codex", "fireworks", "groq", "deepseek", "ollama"} {
+	for _, provider := range []string{"openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama"} {
 		if key := openAIKeys[provider]; key != nil {
 			return &aiConfigProviderChoice{
 				Key:      key,
@@ -559,9 +559,9 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 
 	availableProviders := uniqueProviders(llmKeys)
 	if defaultProvider != "" {
-		return nil, fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex, fireworks, groq, deepseek, ollama; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
+		return nil, fmt.Errorf("no supported LLM key configured for default_model provider %q (supported providers: anthropic, openai, codex, grok, fireworks, groq, deepseek, ollama; configured: %s)", defaultProvider, strings.Join(availableProviders, ", "))
 	}
-	return nil, fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex, fireworks, groq, deepseek, ollama; configured: %s)", strings.Join(availableProviders, ", "))
+	return nil, fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex, grok, fireworks, groq, deepseek, ollama; configured: %s)", strings.Join(availableProviders, ", "))
 }
 
 func llmKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
@@ -573,7 +573,7 @@ func llmKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
 
 func isOpenAICompatibleConfigProvider(provider string) bool {
 	switch provider {
-	case "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
+	case "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama":
 		return true
 	default:
 		return false
@@ -597,7 +597,9 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 	case "openai":
 		return "openai/gpt-5.5"
 	case "codex":
-		return "codex/o4-mini"
+		return "codex/gpt-5.5"
+	case "grok":
+		return "grok/grok-build-0.1"
 	case "fireworks":
 		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "groq":

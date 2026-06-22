@@ -778,6 +778,10 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 		return "fireworks/accounts/fireworks/models/kimi-k2p6"
 	case "openai":
 		return "openai/gpt-5.5"
+	case "codex":
+		return "codex/gpt-5.5"
+	case "grok":
+		return "grok/grok-build-0.1"
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":

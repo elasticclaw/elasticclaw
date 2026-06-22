@@ -64,6 +64,8 @@ func (k *LLMKeyConfig) EnvVarName() string {
 		return "FIREWORKS_API_KEY"
 	case "codex":
 		return "CODEX_API_KEY"
+	case "grok":
+		return "XAI_API_KEY"
 	default:
 		// Generic: PROVIDER_API_KEY uppercased
 		return strings.ToUpper(k.Provider) + "_API_KEY"
