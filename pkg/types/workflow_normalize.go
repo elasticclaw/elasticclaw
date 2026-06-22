@@ -52,6 +52,7 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			workflow.Integration = "jira"
 			workflow.Workspace = workflow.Trigger.Jira.Workspace
 			workflow.Labels = append([]string(nil), workflow.Trigger.Jira.Labels...)
+			workflow.ExcludeLabels = append([]string(nil), workflow.Trigger.Jira.ExcludeLabels...)
 			workflow.AssignedTo = workflow.Trigger.Jira.AssignedTo
 			if len(workflow.Trigger.Jira.Projects) > 0 {
 				workflow.TriggerRepos = append([]string(nil), workflow.Trigger.Jira.Projects...)

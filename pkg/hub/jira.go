@@ -212,7 +212,7 @@ func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPaylo
 		if factory.TriggerStatus == "" || !strings.EqualFold(currentStatus, factory.TriggerStatus) || strings.EqualFold(previousStatus, factory.TriggerStatus) {
 			continue
 		}
-		if !s.labelsMatch(labels, factory.Labels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
+		if !labelsAllowed(labels, factory.Labels, factory.ExcludeLabels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
 			continue
 		}
 		if err := s.createClawForJiraIssue(factory, payload, "jira webhook"); err != nil {
@@ -266,7 +266,7 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
 				continue
 			}
-			if !jiraLabelsMapMatches(labels, workflow.Labels) {
+			if !labelsAllowed(labels, workflow.Labels, workflow.ExcludeLabels) {
 				continue
 			}
 			matched = true
@@ -332,22 +332,6 @@ func jiraIssueAssignee(issue jiraIssue) string {
 		}
 	}
 	return ""
-}
-
-func jiraLabelsMapMatches(labels, required []string) bool {
-	if len(required) == 0 {
-		return true
-	}
-	set := map[string]bool{}
-	for _, label := range labels {
-		set[strings.ToLower(strings.TrimSpace(label))] = true
-	}
-	for _, label := range required {
-		if !set[strings.ToLower(strings.TrimSpace(label))] {
-			return false
-		}
-	}
-	return true
 }
 
 func jiraProjectMatches(project string, projects []string) bool {

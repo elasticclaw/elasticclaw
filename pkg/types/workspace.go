@@ -41,6 +41,7 @@ type WorkflowConfig struct {
 	AnalyticsEnabled    *bool             `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`
 	RequiresPR          *bool             `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
 	Labels              []string          `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels       []string          `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	AssignedTo          string            `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AllowedLabelers     []string          `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`
 	SecretRefs          map[string]string `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
@@ -150,6 +151,7 @@ type JiraWorkflowTrigger struct {
 	Projects         []string `yaml:"projects,omitempty" json:"projects,omitempty"`
 	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels    []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	AssignedTo       string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
 }

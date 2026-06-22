@@ -1374,7 +1374,7 @@ func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.Fac
 		if factory.TriggerStatus == "" || !strings.EqualFold(issue.Fields.Status.Name, factory.TriggerStatus) {
 			continue
 		}
-		if !s.labelsMatch(labels, factory.Labels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
+		if !labelsAllowed(labels, factory.Labels, factory.ExcludeLabels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
 			continue
 		}
 		if err := s.createClawForJiraIssue(factory, payload, "poll"); err != nil {
@@ -1406,7 +1406,7 @@ func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jira
 		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
 			continue
 		}
-		if !jiraLabelsMapMatches(labels, workflow.Labels) {
+		if !labelsAllowed(labels, workflow.Labels, workflow.ExcludeLabels) {
 			continue
 		}
 		if err := s.createClawForJiraWorkflow(workspace, workflow, payload, "poll"); err != nil {

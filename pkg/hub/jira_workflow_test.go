@@ -97,6 +97,66 @@ func TestJiraWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	}
 }
 
+func TestJiraWorkflowExcludeLabelsBlockWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	cfg := jiraWorkflowTestConfig()
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	saveJiraWorkflowFixtureWithExclude(t, "workspace-a", []string{"blocked"})
+	hub.SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace-a", "jira", "default", "https://jira.example.test", "", "jira-token", "jira-secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraWebhookPayload(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent", "blocked"})
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/jira", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ElasticClaw-Webhook-Secret", "jira-secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	assertJiraClawCountStable(t, db, "EC-123", 0)
+}
+
+func TestJiraFactoryExcludeLabelsBlockWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	jira := newMockJira(t)
+	cfg := jiraFactoryTestConfig(jira.URL)
+	cfg.Factories[0].ExcludeLabels = []string{"blocked"}
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	jira.setIssue("EC-123", "EC", "Ready for Agent", []string{"agent", "blocked"})
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraWebhookPayload(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent", "blocked"})
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/integrations/jira/webhook", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	assertJiraClawCountStable(t, db, "EC-123", 0)
+}
+
 func TestJiraTerminateSignalCommentsIssue(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -153,6 +213,21 @@ func waitForJiraClawCount(t *testing.T, db *sql.DB, issueID string, want int) {
 	t.Fatalf("created %d Jira claws, want %d", last, want)
 }
 
+func assertJiraClawCountStable(t *testing.T, db *sql.DB, issueID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	var last int
+	for time.Now().Before(deadline) {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE jira_issue_id=?`, issueID).Scan(&last); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if last != want {
+			t.Fatalf("created %d Jira claws, want %d", last, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func jiraWorkflowTestConfig() *types.HubConfig {
 	return &types.HubConfig{
 		ClawToken: "test-claw-token",
@@ -189,6 +264,10 @@ func jiraFactoryTestConfig(jiraURL string) *types.HubConfig {
 }
 
 func saveJiraWorkflowFixture(t *testing.T, workspace string) {
+	saveJiraWorkflowFixtureWithExclude(t, workspace, nil)
+}
+
+func saveJiraWorkflowFixtureWithExclude(t *testing.T, workspace string, excludeLabels []string) {
 	t.Helper()
 	hub.SaveWorkspaceForTest(t,
 		&types.WorkspaceConfig{
@@ -204,10 +283,11 @@ func saveJiraWorkflowFixture(t *testing.T, workspace string) {
 			Name:          "jira-workflow",
 			Trigger: &types.WorkflowTrigger{
 				Jira: &types.JiraWorkflowTrigger{
-					Event:    "status_changed",
-					Projects: []string{"EC"},
-					States:   []string{"Ready for Agent"},
-					Labels:   []string{"agent"},
+					Event:         "status_changed",
+					Projects:      []string{"EC"},
+					States:        []string{"Ready for Agent"},
+					Labels:        []string{"agent"},
+					ExcludeLabels: append([]string(nil), excludeLabels...),
 				},
 			},
 			Stages: []types.WorkflowStage{{
