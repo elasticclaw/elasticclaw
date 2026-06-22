@@ -35,6 +35,26 @@ interface LLMKeyView {
   keySet: boolean
   default: boolean
   defaultModel?: string
+  authProfile?: string
+}
+
+interface ModelAuthProfileView {
+  name: string
+  provider: string
+  mode: string
+  authenticated: boolean
+  updatedAt?: string
+}
+
+interface ModelAuthLoginJob {
+  id: string
+  provider: string
+  profile: string
+  status: string
+  url?: string
+  code?: string
+  output?: string
+  error?: string
 }
 
 interface LLMModelOption {
@@ -71,6 +91,7 @@ interface WorkspaceGitHubAppView {
 interface SettingsData {
   llmKeys: LLMKeyView[]
   modelOptions?: Record<string, LLMModelOption[]>
+  modelAuthProfiles?: ModelAuthProfileView[]
   providers: Record<string, {
     type: string
     enabled: boolean
@@ -149,6 +170,28 @@ async function patchSettings(patch: object): Promise<void> {
     body: JSON.stringify(patch),
   })
   if (!res.ok) throw new Error(await res.text())
+}
+
+async function startModelAuthLogin(provider: string, profile: string): Promise<ModelAuthLoginJob> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/settings/model-auth/login`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, profile, mode: "device" }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+async function fetchModelAuthLogin(id: string): Promise<ModelAuthLoginJob> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/settings/model-auth/login/${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 // Sentinel value used in static-export paths to represent "select first workspace"
@@ -926,13 +969,18 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formDefault, setFormDefault] = useState(false)
   const [formDefaultModel, setFormDefaultModel] = useState("")
   const [formCustomModel, setFormCustomModel] = useState("")
+  const [formAuthProfile, setFormAuthProfile] = useState("")
+  const [loginJob, setLoginJob] = useState<ModelAuthLoginJob | null>(null)
+  const [loginError, setLoginError] = useState("")
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
   const providerModels = (p: string) => settings.modelOptions?.[p] ?? PROVIDER_MODELS[p] ?? []
+  const supportsCLIAuth = formProvider === "codex" || formProvider === "grok"
+  const authProfiles = (settings.modelAuthProfiles || []).filter(p => p.provider === formProvider)
 
   const resetForm = () => {
-    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setEditIdx(null)
+    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setFormAuthProfile(""); setLoginJob(null); setLoginError(""); setEditIdx(null)
   }
 
   const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
@@ -944,6 +992,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     setFormCustomProvider(isCustom ? k.provider : "")
     setFormKey("")
     setFormDefault(k.default)
+    setFormAuthProfile(k.authProfile || "")
     const options = providerModels(k.provider)
     if (k.defaultModel && options.length > 0 && !options.some(m => m.id === k.defaultModel)) {
       setFormDefaultModel("__custom")
@@ -963,9 +1012,10 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   function doSave() {
     const actualProvider = formProvider === "other" ? formCustomProvider : formProvider
     const actualDefaultModel = formDefaultModel === "__custom" ? formCustomModel.trim() : formDefaultModel
+    const actualAuthProfile = supportsCLIAuth ? formAuthProfile.trim() : ""
     if (modalMode === "add") {
-      if (!formName.trim() || (!formKey.trim() && actualProvider !== "ollama")) return
-      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: actualDefaultModel || undefined }] })
+      if (!formName.trim() || (!formKey.trim() && actualProvider !== "ollama" && !actualAuthProfile)) return
+      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: actualDefaultModel || undefined, authProfile: actualAuthProfile || undefined }] })
     } else if (editIdx !== null) {
       const existing = llmKeys[editIdx]
       const patch: Record<string, unknown> = {
@@ -975,6 +1025,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       if (formKey.trim()) patch.apiKey = formKey.trim()
       patch.default = formDefault       // always send so user can unset
       if (actualDefaultModel) patch.defaultModel = actualDefaultModel
+      patch.authProfile = actualAuthProfile
       if (actualProvider !== existing.provider) patch.provider = actualProvider
       onSave({ llmKeys: [patch] })
     }
@@ -991,6 +1042,31 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   function setDefault(i: number) {
     onSave({ llmKeys: [{ name: llmKeys[i].name, default: true }] })
   }
+
+  async function doStartLogin() {
+    const profile = formAuthProfile.trim() || `${formProvider}-default`
+    setFormAuthProfile(profile)
+    setLoginError("")
+    try {
+      const job = await startModelAuthLogin(formProvider, profile)
+      setLoginJob(job)
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  useEffect(() => {
+    if (!loginJob || loginJob.status !== "running") return
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await fetchModelAuthLogin(loginJob.id)
+        setLoginJob(next)
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err))
+      }
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [loginJob])
 
   const formProviderModels = providerModels(formProvider)
 
@@ -1157,6 +1233,46 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                   placeholder={modalMode === "edit" ? "Leave blank to keep existing" : providerPlaceholder(formProvider)}
                 />
               </div>
+              {supportsCLIAuth && (
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground mb-1 block">CLI auth profile <span className="text-muted-foreground/60">(optional)</span></label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={formAuthProfile}
+                      onChange={e => setFormAuthProfile(e.target.value)}
+                      className="h-8 text-sm"
+                      placeholder={`${formProvider}-default`}
+                    />
+                    <Button type="button" size="sm" variant="outline" onClick={doStartLogin} disabled={saving}>
+                      Login
+                    </Button>
+                  </div>
+                  {authProfiles.length > 0 && (
+                    <select
+                      value={formAuthProfile}
+                      onChange={e => setFormAuthProfile(e.target.value)}
+                      className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
+                    >
+                      <option value="">No CLI auth profile</option>
+                      {authProfiles.map(p => (
+                        <option key={p.name} value={p.name}>{p.name}{p.authenticated ? " (authenticated)" : ""}</option>
+                      ))}
+                    </select>
+                  )}
+                  {loginJob && (
+                    <div className="rounded-md border border-border p-3 text-xs space-y-1">
+                      <div className="text-muted-foreground">Login status: {loginJob.status}</div>
+                      {loginJob.url && (
+                        <a href={loginJob.url} target="_blank" rel="noopener noreferrer" className="underline break-all">{loginJob.url}</a>
+                      )}
+                      {loginJob.code && <div>Code: <span className="font-mono">{loginJob.code}</span></div>}
+                      {loginJob.error && <div className="text-red-400">{loginJob.error}</div>}
+                      {loginJob.status === "complete" && <div className="text-green-400">Profile saved. Save this model key to use it.</div>}
+                    </div>
+                  )}
+                  {loginError && <div className="text-xs text-red-400">{loginError}</div>}
+                </div>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
                 {formProviderModels.length > 0 ? (
@@ -1198,7 +1314,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                 <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
                 <Button
                   size="sm"
-                  disabled={saving || !formName.trim() || (modalMode === "add" && !formKey.trim()) || (formProvider === "other" && !formCustomProvider.trim())}
+                  disabled={saving || !formName.trim() || (modalMode === "add" && !formKey.trim() && formProvider !== "ollama" && !formAuthProfile.trim()) || (formProvider === "other" && !formCustomProvider.trim())}
                   onClick={doSave}
                 >
                   {modalMode === "add" ? "Add Model Key" : "Save changes"}

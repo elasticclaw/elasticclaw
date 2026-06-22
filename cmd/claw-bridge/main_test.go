@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -350,6 +351,33 @@ func TestCLIVersionAllowsPinnedOverride(t *testing.T) {
 	}
 	if got := cliVersion("ELASTICCLAW_MISSING_VERSION", "1.2.3"); got != "1.2.3" {
 		t.Fatalf("cliVersion fallback = %q", got)
+	}
+}
+
+func TestRestoreCLIModelAuthWritesBundleFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bundle := cliAuthBundle{
+		Files: map[string]string{
+			".codex/auth.json": base64.StdEncoding.EncodeToString([]byte(`{"token":"test"}`)),
+		},
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_PROVIDER", "codex")
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_STATE", base64.StdEncoding.EncodeToString(data))
+
+	if err := restoreCLIModelAuth(); err != nil {
+		t.Fatalf("restore auth: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	if err != nil {
+		t.Fatalf("read restored auth: %v", err)
+	}
+	if string(got) != `{"token":"test"}` {
+		t.Fatalf("restored auth = %q", string(got))
 	}
 }
 

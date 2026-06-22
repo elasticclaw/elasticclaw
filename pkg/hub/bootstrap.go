@@ -38,6 +38,7 @@ type BootstrapParams struct {
 
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
+	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
 	LinearEnv      string // pre-built export line
 	ProviderConfig string // python snippet to patch OpenClaw config
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
@@ -235,6 +236,7 @@ export ELASTICCLAW_NIX=%s
 export ELASTICCLAW_DOCKER=%s
 %s
 %s
+%s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
@@ -322,7 +324,7 @@ exit 1
 `,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
-		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
+		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
 	)
 }

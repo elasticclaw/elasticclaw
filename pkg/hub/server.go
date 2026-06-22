@@ -76,6 +76,8 @@ type Server struct {
 	fireworksModelsCacheKey   string
 	fireworksModelsCache      []LLMModelOption
 	fireworksModelsCacheUntil time.Time
+	modelAuthJobsMu           sync.Mutex
+	modelAuthJobs             map[string]*modelAuthLoginJob
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -287,6 +289,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
+	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
+	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -3074,6 +3078,7 @@ docker --version`); err != nil {
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	if activeKeyDaytona != nil {
@@ -3084,6 +3089,16 @@ docker --version`); err != nil {
 	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
 		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
+	if restoreShell := buildModelAuthRestoreShell(modelAuthEnvDaytona); restoreShell != "" {
+		if err := exec("restore model auth", 30*time.Second, "export HOME=/home/daytona; "+restoreShell); err != nil {
+			return fmt.Errorf("restore model auth: %w", err)
+		}
+	}
+	if installCmd := daytonaInstallCodingModelCLICommand(defaultModelDaytona); installCmd != "" {
+		if err := exec("install selected model cli", 2*time.Minute, installCmd); err != nil {
+			return fmt.Errorf("install selected model cli: %w", err)
+		}
+	}
 	onboardCmd := fmt.Sprintf(
 		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
@@ -3610,6 +3625,35 @@ STATUS=/tmp/openclaw-install.status
 rm -f "$LOG" "$STATUS"
 setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
 echo "openclaw-install-status=started"`, shellQuote(installScript))
+}
+
+func daytonaInstallCodingModelCLICommand(model string) string {
+	var packageSpec, binary string
+	switch {
+	case strings.HasPrefix(model, "codex/"):
+		packageSpec = "@openai/codex@" + cliVersionFromEnv("ELASTICCLAW_CODEX_CLI_VERSION", "0.141.0")
+		binary = "codex"
+	case strings.HasPrefix(model, "grok/"):
+		packageSpec = "@xai-official/grok@" + cliVersionFromEnv("ELASTICCLAW_GROK_CLI_VERSION", "0.1.0")
+		binary = "grok"
+	default:
+		return ""
+	}
+	return fmt.Sprintf(`export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+NPM="$NVM_DIR/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g %s --prefix "$PREFIX" --ignore-scripts
+hash -r
+%s --version 2>&1 || true`, shellQuote(packageSpec), binary)
+}
+
+func cliVersionFromEnv(envName, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func daytonaOpenClawInstallStatusCommand(version string) string {
@@ -4168,6 +4212,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 	s.mu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
@@ -4203,6 +4248,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
+		ModelAuthEnv:    modelAuthEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
@@ -4274,6 +4320,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 
 	s.mu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
@@ -4307,7 +4354,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
-	for _, line := range strings.Split(llmKeyEnv, "\n") {
+	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "export ") {
 			continue
@@ -5038,6 +5085,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	s.mu.RLock()
 	// Inject all configured LLM keys, prioritizing the selected key if specified
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
@@ -5056,6 +5104,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		HubCfg:          hubCfg,
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
+		ModelAuthEnv:    modelAuthEnv,
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),

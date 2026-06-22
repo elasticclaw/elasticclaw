@@ -348,6 +348,22 @@ func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
 }
 
+func TestBuildModelAuthEnvUsesSelectedProfile(t *testing.T) {
+	cfg := &types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "codex-main", Provider: "codex", AuthProfile: "codex-profile", Default: true},
+		},
+		ModelAuthProfiles: []*types.ModelAuthProfileConfig{
+			{Name: "codex-profile", Provider: "codex", AuthState: "encoded-state"},
+		},
+	}
+
+	env := buildModelAuthEnv(cfg, "codex-main")
+
+	assertContains(t, env, "ELASTICCLAW_MODEL_AUTH_PROVIDER=\"codex\"", "exports auth provider")
+	assertContains(t, env, "ELASTICCLAW_MODEL_AUTH_STATE=\"encoded-state\"", "exports auth state")
+}
+
 func TestResolveModelAndLLMKeyReplacesUnusableSelectedKey(t *testing.T) {
 	hubCfg := &types.HubConfig{
 		LLMKeys: types.LLMKeysList{

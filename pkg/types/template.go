@@ -16,6 +16,15 @@ type LLMKeyConfig struct {
 	APIKey       string `yaml:"api_key"       json:"-"`                       // the actual key (never exposed in API)
 	Default      bool   `yaml:"default"       json:"default"`                 // use when no llm_key specified
 	DefaultModel string `yaml:"default_model" json:"default_model,omitempty"` // preferred model for this key, e.g. "fireworks/accounts/fireworks/models/kimi-k2p7"
+	AuthProfile  string `yaml:"auth_profile,omitempty" json:"auth_profile,omitempty"`
+}
+
+type ModelAuthProfileConfig struct {
+	Name      string `yaml:"name" json:"name"`
+	Provider  string `yaml:"provider" json:"provider"`
+	Mode      string `yaml:"mode" json:"mode"`
+	AuthState string `yaml:"auth_state,omitempty" json:"-"`
+	UpdatedAt string `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 // LLMKeysList is a custom YAML type that handles both the legacy flat-map format
@@ -481,6 +490,8 @@ type HubConfig struct {
 	// LLMKeys is a list of named LLM API keys. One can be marked default:true.
 	// Legacy flat map {"anthropic": "sk-..."} is still accepted for backwards compat.
 	LLMKeys LLMKeysList `yaml:"llm_keys,omitempty"`
+	// ModelAuthProfiles stores CLI-backed model login state for providers such as Codex and Grok.
+	ModelAuthProfiles []*ModelAuthProfileConfig `yaml:"model_auth_profiles,omitempty"`
 	// Linear is a list of Linear workspace configs for injecting API tokens into claws.
 	Linear []*LinearConfig `yaml:"linear,omitempty"`
 
