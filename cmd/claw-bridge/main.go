@@ -144,6 +144,10 @@ type bridgeSessionFile struct {
 	SessionKey string `json:"sessionKey"`
 }
 
+type cliAuthBundle struct {
+	Files map[string]string `json:"files"`
+}
+
 func bridgeSessionPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -2112,6 +2116,44 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+func restoreCLIModelAuth() error {
+	state := strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_STATE"))
+	if state == "" {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(state)
+	if err != nil {
+		return fmt.Errorf("decode auth state: %w", err)
+	}
+	var bundle cliAuthBundle
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return fmt.Errorf("parse auth state: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	for rel, encoded := range bundle.Files {
+		clean := filepath.Clean(rel)
+		if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+			continue
+		}
+		content, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return fmt.Errorf("decode auth file %s: %w", rel, err)
+		}
+		path := filepath.Join(home, clean)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return fmt.Errorf("create auth dir %s: %w", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			return fmt.Errorf("write auth file %s: %w", rel, err)
+		}
+	}
+	log.Printf("[bootstrap] restored %d CLI auth files for %s", len(bundle.Files), os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER"))
+	return nil
+}
+
 func installSelectedCodingModelCLI() error {
 	model := envOr("OPENCLAW_DEFAULT_MODEL", "")
 	switch cliCodingProviderForModel(model) {
@@ -2462,6 +2504,10 @@ func runBootstrap() error {
 	// Step 3b: Install pinned CLI-backed model providers when selected.
 	if err := installSelectedCodingModelCLI(); err != nil {
 		return fmt.Errorf("installSelectedCodingModelCLI: %w", err)
+	}
+
+	if err := restoreCLIModelAuth(); err != nil {
+		return fmt.Errorf("restoreCLIModelAuth: %w", err)
 	}
 
 	// Step 4: Run openclaw onboard (initializes ~/.openclaw directory)

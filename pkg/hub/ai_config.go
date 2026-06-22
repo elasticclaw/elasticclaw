@@ -568,7 +568,7 @@ func llmKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
 	if key == nil {
 		return false
 	}
-	return key.APIKey != "" || key.Provider == "ollama"
+	return key.APIKey != "" || key.Provider == "ollama" || key.AuthProfile != ""
 }
 
 func isOpenAICompatibleConfigProvider(provider string) bool {
