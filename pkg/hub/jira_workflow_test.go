@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -95,6 +97,46 @@ func TestJiraWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	}
 }
 
+func TestJiraTerminateSignalCommentsIssue(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	jira := newMockJira(t)
+	cfg := jiraFactoryTestConfig(jira.URL)
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	jira.setIssue("EC-123", "EC", "Ready for Agent", []string{"agent"})
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraWebhookPayload(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent"})
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/integrations/jira/webhook", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	waitForJiraClawCount(t, db, "EC-123", 1)
+	var clawID string
+	if err := db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id='EC-123'`).Scan(&clawID); err != nil {
+		t.Fatalf("find claw: %v", err)
+	}
+	bridge := factorytest.ConnectFakeBridge(t, httpSrv.URL, clawID, "EC-123", "test-claw-token")
+	bridge.SendMessage("Stopping now. [TERMINATE]")
+
+	comment := jira.waitForComment(t, "EC-123")
+	if !strings.Contains(comment, "Agent stopped: claw requested self-termination") {
+		t.Fatalf("comment = %q, want self-termination message", comment)
+	}
+}
+
 func waitForJiraClawCount(t *testing.T, db *sql.DB, issueID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -117,6 +159,32 @@ func jiraWorkflowTestConfig() *types.HubConfig {
 		Providers: map[string]types.ProviderConfig{
 			"noop": {Type: "noop"},
 		},
+	}
+}
+
+func jiraFactoryTestConfig(jiraURL string) *types.HubConfig {
+	return &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+		Integrations: &types.IntegrationsConfig{
+			Jira: []*types.JiraIntegrationConfig{{
+				Workspace: "workspace-a",
+				BaseURL:   jiraURL,
+				Token:     "jira-token",
+			}},
+		},
+		Factories: []*types.FactoryConfig{{
+			Name:          "jira-factory",
+			Integration:   "jira",
+			Workspace:     "workspace-a",
+			Projects:      []string{"EC"},
+			Labels:        []string{"agent"},
+			TriggerStatus: "Ready for Agent",
+			Template:      "jira-template",
+			Provider:      "noop",
+		}},
 	}
 }
 
@@ -196,17 +264,35 @@ func jiraWebhookPayload(t *testing.T, key, project, previousStatus, status strin
 
 type mockJira struct {
 	*httptest.Server
-	issue map[string]interface{}
+	mu       sync.Mutex
+	issue    map[string]interface{}
+	comments map[string][]string
 }
 
 func newMockJira(t *testing.T) *mockJira {
 	t.Helper()
-	m := &mockJira{}
+	m := &mockJira{comments: map[string][]string{}}
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/2/search":
+			m.mu.Lock()
+			defer m.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"issues": []interface{}{m.issue}})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/") && strings.HasSuffix(r.URL.Path, "/comment"):
+			var payload struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			key := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			key = strings.TrimSuffix(key, "/comment")
+			m.mu.Lock()
+			m.comments[key] = append(m.comments[key], payload.Body)
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": "comment-1"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/"):
+			m.mu.Lock()
+			defer m.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(m.issue)
 		default:
 			http.NotFound(w, r)
@@ -217,6 +303,8 @@ func newMockJira(t *testing.T) *mockJira {
 }
 
 func (m *mockJira) setIssue(key, project, status string, labels []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.issue = map[string]interface{}{
 		"id":   "10001",
 		"key":  key,
@@ -233,4 +321,20 @@ func (m *mockJira) setIssue(key, project, status string, labels []string) {
 			},
 		},
 	}
+}
+
+func (m *mockJira) waitForComment(t *testing.T, key string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		comments := append([]string(nil), m.comments[key]...)
+		m.mu.Unlock()
+		if len(comments) > 0 {
+			return comments[len(comments)-1]
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for Jira comment on %s", key)
+	return ""
 }

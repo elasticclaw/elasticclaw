@@ -1467,6 +1467,14 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 					}
 				}
 			}
+		case "jira":
+			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+				if err := s.commentJiraIssue(tracker, issueID, "Agent stopped: claw requested self-termination"); err != nil {
+					log.Printf("[terminate] failed to comment Jira issue %s: %v", issueID, err)
+				} else {
+					log.Printf("[terminate] commented Jira issue %s", issueID)
+				}
+			}
 		}
 	}
 
