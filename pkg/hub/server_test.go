@@ -209,6 +209,26 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			expectedModel: "groq/llama-3.3-70b-versatile",
 		},
 		{
+			name: "codex provider",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "",
+			},
+			key: &types.LLMKeyConfig{
+				Provider: "codex",
+			},
+			expectedModel: "codex/gpt-5.5",
+		},
+		{
+			name: "grok provider",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "",
+			},
+			key: &types.LLMKeyConfig{
+				Provider: "grok",
+			},
+			expectedModel: "grok/grok-build-0.1",
+		},
+		{
 			name: "deepseek provider",
 			hubCfg: &types.HubConfig{
 				DefaultModel: "",

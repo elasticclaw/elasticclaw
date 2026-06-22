@@ -855,6 +855,7 @@ const PROVIDER_OPTIONS = [
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
   { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
   { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
+  { value: "grok",       label: "Grok Build", placeholder: "xai-..." },
   { value: "ollama",     label: "Ollama",     placeholder: "ollama-local" },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
@@ -892,11 +893,15 @@ const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
     { id: "__custom",             name: "Custom OpenAI model" },
   ],
   codex: [
-    // Codex is an autonomous agentic coding platform — it selects and routes to the
-    // appropriate underlying model (including special Codex checkpoints) on its own.
-    { id: "codex/codex",      name: "Codex (auto)" },
-    { id: "codex/codex-pro",  name: "Codex Pro (auto)" },
-    { id: "__custom",         name: "Custom Codex model" },
+    { id: "codex/gpt-5.5",      name: "GPT-5.5" },
+    { id: "codex/gpt-5.5-high", name: "GPT-5.5 High" },
+    { id: "codex/gpt-5.4",      name: "GPT-5.4" },
+    { id: "__custom",           name: "Custom Codex model" },
+  ],
+  grok: [
+    { id: "grok/grok-build-0.1", name: "Grok Build" },
+    { id: "grok/grok-4.3",       name: "Grok 4.3" },
+    { id: "__custom",            name: "Custom Grok model" },
   ],
   ollama: [
     { id: "ollama/qwen2.5-coder:1.5b", name: "Qwen2.5 Coder 1.5B" },

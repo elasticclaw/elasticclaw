@@ -363,7 +363,7 @@ func summarizeFailureWithLLM(ctx context.Context, sanitizedReason string, llmKey
 	switch key.Provider {
 	case "anthropic":
 		return callAnthropicModel(ctx, key.APIKey, stripProviderPrefix(model), systemPrompt, msgs, 700)
-	case "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
+	case "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama":
 		return callOpenAICompatible(ctx, openAICompatibleConfig(key.Provider), key.APIKey, stripProviderPrefix(model), systemPrompt, msgs)
 	default:
 		return "", fmt.Errorf("unsupported LLM provider %q", key.Provider)
@@ -397,7 +397,7 @@ func selectFailureSummaryModel(llmKeys types.LLMKeysList, defaultModel string) (
 
 func isFailureSummaryProvider(provider string) bool {
 	switch provider {
-	case "anthropic", "openai", "codex", "fireworks", "groq", "deepseek", "ollama":
+	case "anthropic", "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama":
 		return true
 	default:
 		return false
@@ -420,7 +420,9 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 	case "openai":
 		return "openai/gpt-5.4-mini"
 	case "codex":
-		return "codex/o4-mini"
+		return "codex/gpt-5.5"
+	case "grok":
+		return "grok/grok-build-0.1"
 	case "fireworks":
 		return defaultFireworksModel
 	case "groq":
@@ -453,6 +455,8 @@ func openAICompatibleConfig(provider string) openAICompatibleProvider {
 		return openAICompatibleProvider{Name: "Fireworks", BaseURL: "https://api.fireworks.ai/inference/v1"}
 	case "groq":
 		return openAICompatibleProvider{Name: "Groq", BaseURL: "https://api.groq.com/openai/v1"}
+	case "grok":
+		return openAICompatibleProvider{Name: "Grok", BaseURL: "https://api.x.ai/v1"}
 	case "deepseek":
 		return openAICompatibleProvider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
 	case "ollama":

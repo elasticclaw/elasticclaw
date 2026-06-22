@@ -329,6 +329,30 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	}
 }
 
+func TestCLICodingProviderForModel(t *testing.T) {
+	tests := map[string]string{
+		"codex/gpt-5.5":        "codex",
+		"grok/grok-build-0.1":  "grok",
+		"anthropic/claude-foo": "",
+		"":                     "",
+	}
+	for model, want := range tests {
+		if got := cliCodingProviderForModel(model); got != want {
+			t.Fatalf("cliCodingProviderForModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestCLIVersionAllowsPinnedOverride(t *testing.T) {
+	t.Setenv("ELASTICCLAW_CODEX_CLI_VERSION", "9.8.7")
+	if got := cliVersion("ELASTICCLAW_CODEX_CLI_VERSION", "1.2.3"); got != "9.8.7" {
+		t.Fatalf("cliVersion override = %q", got)
+	}
+	if got := cliVersion("ELASTICCLAW_MISSING_VERSION", "1.2.3"); got != "1.2.3" {
+		t.Fatalf("cliVersion fallback = %q", got)
+	}
+}
+
 func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
 	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
 	got := sanitizeActivityText(input)

@@ -379,6 +379,8 @@ func modelDependency(provider string) (id, name string, ok bool) {
 		return "model:anthropic", "Anthropic", true
 	case "openai", "codex":
 		return "model:openai", "OpenAI", true
+	case "grok":
+		return "model:grok", "Grok", true
 	case "fireworks":
 		return "model:fireworks", "Fireworks", true
 	default:

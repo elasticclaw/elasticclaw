@@ -156,6 +156,25 @@ if model.startswith('ollama/'):
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
+if model.startswith('grok/'):
+    model_id = model.split('/', 1)[1]
+    config.setdefault('models', {})['mode'] = 'merge'
+    providers = config['models'].setdefault('providers', {})
+    providers['grok'] = {
+        'baseUrl': 'https://api.x.ai/v1',
+        'api': 'openai',
+        'apiKey': 'XAI_API_KEY',
+        'models': [{
+            'id': model_id,
+            'name': model_id,
+            'reasoning': True,
+            'input': ['text', 'image'],
+            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+            'contextWindow': 256000,
+            'maxTokens': 8192,
+            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+        }],
+    }
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
@@ -336,6 +355,8 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	case "codex":
 		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
+	case "grok":
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "ollama":
 		model := active.DefaultModel
 		if model == "" || !strings.HasPrefix(model, active.Provider+"/") {
