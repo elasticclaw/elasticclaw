@@ -107,6 +107,9 @@ func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request
 		return true
 	}
 	got := r.Header.Get("X-ElasticClaw-Webhook-Secret")
+	if got == "" {
+		got = r.URL.Query().Get("secret")
+	}
 	for _, secret := range secrets {
 		if constantTimeStringEqual(got, secret) {
 			return true
