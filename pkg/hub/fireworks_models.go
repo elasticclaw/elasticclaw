@@ -33,6 +33,12 @@ var fallbackFireworksModelOptions = []LLMModelOption{
 	{ID: "__custom", Name: "Custom Fireworks model"},
 }
 
+var (
+	kimiVersionRE          = regexp.MustCompile(`k(?:imi[-_ ]*)?2(?:p|\.)(\d+)`)
+	decimalVersionRE       = regexp.MustCompile(`(?:p|\.)(\d+)`)
+	slugVersionSeparatorRE = regexp.MustCompile(`(\d)p(\d)`)
+)
+
 func (s *Server) fireworksModelOptions(ctx context.Context, apiKey string) []LLMModelOption {
 	fallback := cloneModelOptions(fallbackFireworksModelOptions)
 	apiKey = strings.TrimSpace(apiKey)
@@ -221,8 +227,7 @@ func fireworksModelRank(option LLMModelOption) int {
 }
 
 func parseKimiVersion(value string) int {
-	re := regexp.MustCompile(`k(?:imi[-_ ]*)?2(?:p|\.)(\d+)`)
-	if match := re.FindStringSubmatch(value); len(match) == 2 {
+	if match := kimiVersionRE.FindStringSubmatch(value); len(match) == 2 {
 		n, _ := strconv.Atoi(match[1])
 		return n
 	}
@@ -230,8 +235,7 @@ func parseKimiVersion(value string) int {
 }
 
 func parseDecimalVersion(value string) int {
-	re := regexp.MustCompile(`(?:p|\.)(\d+)`)
-	if match := re.FindStringSubmatch(value); len(match) == 2 {
+	if match := decimalVersionRE.FindStringSubmatch(value); len(match) == 2 {
 		n, _ := strconv.Atoi(match[1])
 		return n
 	}
@@ -244,7 +248,7 @@ func humanizeFireworksModelName(id string) string {
 		return id
 	}
 	slug := parts[len(parts)-1]
-	slug = strings.ReplaceAll(slug, "p", ".")
+	slug = slugVersionSeparatorRE.ReplaceAllString(slug, "$1.$2")
 	words := strings.FieldsFunc(slug, func(r rune) bool {
 		return r == '-' || r == '_'
 	})

@@ -135,3 +135,17 @@ func TestFireworksModelOptionsFallsBackWithoutAPIKey(t *testing.T) {
 		t.Fatalf("fallback options = %#v", options)
 	}
 }
+
+func TestHumanizeFireworksModelNameOnlyReplacesVersionSeparator(t *testing.T) {
+	tests := map[string]string{
+		"fireworks/accounts/fireworks/models/deepseek-v4-pro": "Deepseek V4 Pro",
+		"fireworks/accounts/fireworks/models/qwen3p6-plus":    "Qwen3.6 Plus",
+		"fireworks/accounts/fireworks/models/gpt-oss-120b":    "Gpt Oss 120b",
+		"fireworks/accounts/fireworks/models/kimi-k2p7":       "Kimi K2.7",
+	}
+	for id, want := range tests {
+		if got := humanizeFireworksModelName(id); got != want {
+			t.Fatalf("humanizeFireworksModelName(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
