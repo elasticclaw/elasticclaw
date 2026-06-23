@@ -972,6 +972,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formAuthProfile, setFormAuthProfile] = useState("")
   const [loginJob, setLoginJob] = useState<ModelAuthLoginJob | null>(null)
   const [loginError, setLoginError] = useState("")
+  const loginWindowRef = useRef<Window | null>(null)
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
@@ -1047,10 +1048,23 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     const profile = formAuthProfile.trim() || `${formProvider}-default`
     setFormAuthProfile(profile)
     setLoginError("")
+    loginWindowRef.current = window.open("", "_blank")
+    if (loginWindowRef.current) {
+      loginWindowRef.current.document.title = "Model login"
+      loginWindowRef.current.document.body.textContent = "Waiting for login URL..."
+    }
     try {
       const job = await startModelAuthLogin(formProvider, profile)
       setLoginJob(job)
+      if (job.url && loginWindowRef.current && !loginWindowRef.current.closed) {
+        loginWindowRef.current.location.href = job.url
+        loginWindowRef.current = null
+      }
     } catch (err) {
+      if (loginWindowRef.current && !loginWindowRef.current.closed) {
+        loginWindowRef.current.close()
+      }
+      loginWindowRef.current = null
       setLoginError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -1067,6 +1081,12 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     }, 1500)
     return () => window.clearInterval(timer)
   }, [loginJob])
+
+  useEffect(() => {
+    if (!loginJob?.url || !loginWindowRef.current || loginWindowRef.current.closed) return
+    loginWindowRef.current.location.href = loginJob.url
+    loginWindowRef.current = null
+  }, [loginJob?.url])
 
   const formProviderModels = providerModels(formProvider)
 

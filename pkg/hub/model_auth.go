@@ -39,8 +39,9 @@ type cliAuthBundle struct {
 }
 
 var (
+	modelAuthANSIRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	modelAuthURLRE  = regexp.MustCompile(`https?://[^\s"']+`)
-	modelAuthCodeRE = regexp.MustCompile(`(?i)(?:code|user code|verification code)[^A-Z0-9]*([A-Z0-9][A-Z0-9-]{3,})`)
+	modelAuthCodeRE = regexp.MustCompile(`(?i)\b(?:code|device code|user code|verification code)\b[^A-Z0-9]*([A-Z0-9][A-Z0-9-]{3,})\b`)
 )
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +177,7 @@ func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, don
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := normalizeModelAuthOutput(scanner.Text())
 		s.modelAuthJobsMu.Lock()
 		if job.Output != "" {
 			job.Output += "\n"
@@ -195,6 +196,10 @@ func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, don
 		job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		s.modelAuthJobsMu.Unlock()
 	}
+}
+
+func normalizeModelAuthOutput(line string) string {
+	return modelAuthANSIRE.ReplaceAllString(line, "")
 }
 
 func (s *Server) finishModelAuthJob(job *modelAuthLoginJob, status, _ string, err error) {
