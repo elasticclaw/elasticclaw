@@ -25,6 +25,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
@@ -3621,10 +3622,10 @@ func daytonaInstallCodingModelCLICommand(model string) string {
 	var packageSpec, binary string
 	switch {
 	case strings.HasPrefix(model, "codex/"):
-		packageSpec = "@openai/codex@" + cliVersionFromEnv("ELASTICCLAW_CODEX_CLI_VERSION", "0.141.0")
+		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", "0.141.0")
 		binary = "codex"
 	case strings.HasPrefix(model, "grok/"):
-		packageSpec = "@xai-official/grok@" + cliVersionFromEnv("ELASTICCLAW_GROK_CLI_VERSION", "0.1.0")
+		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", "0.1.0")
 		binary = "grok"
 	default:
 		return ""
@@ -3637,13 +3638,6 @@ export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g %s --prefix "$PREFIX" --ignore-scripts
 hash -r
 %s --version 2>&1 || true`, shellQuote(packageSpec), binary)
-}
-
-func cliVersionFromEnv(envName, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func daytonaOpenClawInstallStatusCommand(version string) string {

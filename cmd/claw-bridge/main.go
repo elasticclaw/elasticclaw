@@ -43,6 +43,8 @@ import (
 
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
+
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 )
 
 var (
@@ -2087,13 +2089,6 @@ func cliCodingProviderForModel(model string) string {
 	}
 }
 
-func cliVersion(envName, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func installNPMCLI(packageName, version, binaryName string) error {
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for %s", packageName)
@@ -2158,9 +2153,9 @@ func installSelectedCodingModelCLI() error {
 	model := envOr("OPENCLAW_DEFAULT_MODEL", "")
 	switch cliCodingProviderForModel(model) {
 	case "codex":
-		return installNPMCLI("@openai/codex", cliVersion("ELASTICCLAW_CODEX_CLI_VERSION", codexCLIVersion), "codex")
+		return installNPMCLI("@openai/codex", cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", codexCLIVersion), "codex")
 	case "grok":
-		return installNPMCLI("@xai-official/grok", cliVersion("ELASTICCLAW_GROK_CLI_VERSION", grokCLIVersion), "grok")
+		return installNPMCLI("@xai-official/grok", cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", grokCLIVersion), "grok")
 	default:
 		return nil
 	}

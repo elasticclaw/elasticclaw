@@ -364,6 +364,13 @@ func TestBuildModelAuthEnvUsesSelectedProfile(t *testing.T) {
 	assertContains(t, env, "ELASTICCLAW_MODEL_AUTH_STATE=\"encoded-state\"", "exports auth state")
 }
 
+func TestBuildModelAuthRestoreShellRejectsParentDirectory(t *testing.T) {
+	shell := buildModelAuthRestoreShell("export ELASTICCLAW_MODEL_AUTH_STATE=\"encoded-state\"\n")
+
+	assertContains(t, shell, "clean == '..'", "rejects exact parent directory path")
+	assertContains(t, shell, "clean.startswith('../')", "rejects nested parent directory path")
+}
+
 func TestResolveModelAndLLMKeyReplacesUnusableSelectedKey(t *testing.T) {
 	hubCfg := &types.HubConfig{
 		LLMKeys: types.LLMKeysList{
