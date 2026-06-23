@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +22,7 @@ var upgradeCmd = &cobra.Command{
 Stable clients upgrade to the latest stable release; prerelease clients
 (e.g. beta, rc) upgrade to the latest release on the same prerelease track.
 Cross-track jumps (beta → stable) are prevented.`,
-	RunE:  runUpgrade,
+	RunE: runUpgrade,
 }
 
 func init() {
@@ -147,10 +148,28 @@ func restartHub() {
 		return
 	}
 	fmt.Println("Restarting hub service...")
+	if err := installNodeNPMForLocalHub(); err != nil {
+		fmt.Printf("  Warning: could not install Node.js/npm dependency: %v\n", err)
+		fmt.Println("  Grok/Codex model login may fail until npm is installed on this server.")
+	}
 	if err := exec.Command("systemctl", "restart", "elasticclaw").Run(); err != nil {
 		fmt.Printf("  Warning: could not restart service: %v\n", err)
 		fmt.Println("  Run: sudo systemctl restart elasticclaw")
 		return
 	}
 	fmt.Println("✓ Hub service restarted")
+}
+
+func installNodeNPMForLocalHub() error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	if _, err := exec.LookPath("npm"); err == nil {
+		return nil
+	}
+	useSudo := os.Geteuid() != 0
+	cmd := exec.Command("bash", "-c", install.ScriptInstallNodeNPM(useSudo))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

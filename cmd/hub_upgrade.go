@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 )
 
@@ -133,13 +134,15 @@ curl -fsSL %q -o /tmp/elasticclaw-new
 chmod +x /tmp/elasticclaw-new
 SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
 %s
+echo "Ensuring Node.js/npm dependencies..."
+%s
 echo "Upgraded to $(%s)"
 if %s; then
   echo "Restarting hub service..."
   %s
   echo "Hub service restarted."
 fi
-`, targetVer, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
+`, targetVer, downloadURL, moveCmd, install.ScriptInstallNodeNPM(useSudo), versionCmd, restartCheckCmd, restartCmd)
 
 	fmt.Printf("Upgrading remote hub to %s...\n", targetVer)
 	out, err := sshRunClient(client, script)
