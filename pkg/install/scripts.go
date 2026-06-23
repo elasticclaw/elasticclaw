@@ -83,6 +83,46 @@ chmod +x /tmp/elasticclaw-bin
 %s mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw`, url, sudo)
 }
 
+// ScriptInstallNodeNPM installs Node.js/npm when they are not already present.
+func ScriptInstallNodeNPM(useSudo bool) string {
+	sudo := sudoPrefix(useSudo)
+	return fmt.Sprintf(`if ! command -v npm >/dev/null 2>&1; then
+  set -eu
+
+  SUDO=%q
+  sh_c() {
+    if [ -n "$SUDO" ]; then
+      sudo sh -c "$1"
+    else
+      sh -c "$1"
+    fi
+  }
+
+  if command -v apt-get >/dev/null 2>&1; then
+    sh_c 'apt-get update -qq'
+    sh_c 'apt-get install -y curl ca-certificates gnupg'
+    sh_c 'install -d /etc/apt/keyrings'
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sh_c 'gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg'
+    echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main' | sh_c 'tee /etc/apt/sources.list.d/nodesource.list >/dev/null'
+    sh_c 'apt-get update -qq'
+    sh_c 'apt-get install -y nodejs'
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    PKG_MGR=dnf
+    if ! command -v dnf >/dev/null 2>&1; then
+      PKG_MGR=yum
+    fi
+    sh_c "$PKG_MGR install -y curl"
+    curl -fsSL https://rpm.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh
+    sh_c 'bash /tmp/nodesource_setup.sh'
+    sh_c "$PKG_MGR install -y nodejs"
+  else
+    echo "unsupported Linux distribution for automatic Node.js/npm install" >&2
+    exit 1
+  fi
+fi
+npm --version >/dev/null`, sudo)
+}
+
 // ScriptWriteConfig returns the shell script to write the hub config.
 func ScriptWriteConfig(p Params, useSudo bool) string {
 	configDir := "$HOME/.elasticclaw"
