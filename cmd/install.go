@@ -153,7 +153,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		script string
 	}{
 		{"Installing hub binary", installBinaryScript},
-		{"Installing Node.js/npm", install.ScriptInstallNodeNPM(useSudo)},
 		{"Writing hub config", install.ScriptWriteConfig(params, useSudo)},
 		{"Installing systemd service", install.ScriptInstallSystemd(useSudo)},
 	}

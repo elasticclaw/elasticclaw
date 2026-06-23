@@ -1,75 +1,14 @@
 package hub
 
 import (
-	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
-
-func TestModelAuthCLIUsesPinnedVersions(t *testing.T) {
-	t.Setenv("ELASTICCLAW_CODEX_CLI_VERSION", "1.2.3")
-	t.Setenv("ELASTICCLAW_GROK_CLI_VERSION", "4.5.6")
-
-	codex, err := modelAuthCLI("codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if codex.PackageName != "@openai/codex" || codex.Version != "1.2.3" || codex.BinaryName != "codex" {
-		t.Fatalf("codex CLI = %#v", codex)
-	}
-	if got := strings.Join(codex.LoginArgs, " "); got != "login --device-auth" {
-		t.Fatalf("codex login args = %q", got)
-	}
-
-	grok, err := modelAuthCLI("grok")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if grok.PackageName != "@xai-official/grok" || grok.Version != "4.5.6" || grok.BinaryName != "grok" {
-		t.Fatalf("grok CLI = %#v", grok)
-	}
-}
-
-func TestEnsureModelAuthCLIUsesManagedBinary(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("ELASTICCLAW_MODEL_CLI_DIR", filepath.Join(root, "model-clis"))
-	t.Setenv("ELASTICCLAW_GROK_CLI_VERSION", "9.9.9")
-
-	binDir := filepath.Join(root, "model-clis", "grok", "9.9.9", "node_modules", ".bin")
-	if err := os.MkdirAll(binDir, 0750); err != nil {
-		t.Fatal(err)
-	}
-	binaryPath := filepath.Join(binDir, "grok")
-	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0750); err != nil {
-		t.Fatal(err)
-	}
-
-	cli, gotBinDir, err := ensureModelAuthCLI(context.Background(), "grok")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cli.BinaryName != binaryPath {
-		t.Fatalf("BinaryName = %q, want managed binary %q", cli.BinaryName, binaryPath)
-	}
-	if gotBinDir != binDir {
-		t.Fatalf("binDir = %q, want %q", gotBinDir, binDir)
-	}
-}
-
-func TestModelAuthCLIInstallLockIsScopedByInstallDir(t *testing.T) {
-	first := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/codex/1")
-	again := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/codex/1")
-	other := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/grok/1")
-
-	if first != again {
-		t.Fatal("same install dir returned different locks")
-	}
-	if first == other {
-		t.Fatal("different install dirs shared the same lock")
-	}
-}
 
 func TestCaptureModelAuthOutputStripsANSIFromURL(t *testing.T) {
 	s := &Server{}
@@ -208,4 +147,90 @@ func TestAppendModelAuthOutputExtractsOSCURL(t *testing.T) {
 	if strings.Contains(job.Output, "\x1b") {
 		t.Fatalf("Output = %q, want terminal hyperlink escapes stripped", job.Output)
 	}
+}
+
+func TestWriteCodexAuthFiles(t *testing.T) {
+	root := t.TempDir()
+	idToken := testJWT(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acct-123",
+		},
+	})
+	err := writeCodexAuthFiles(root, oauthTokenResponse{
+		IDToken:      idToken,
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		AuthMode string `json:"auth_mode"`
+		Tokens   struct {
+			IDToken      string `json:"id_token"`
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			AccountID    string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	readJSON(t, filepath.Join(root, ".codex", "auth.json"), &got)
+	if got.AuthMode != "chatgpt" || got.Tokens.AccountID != "acct-123" {
+		t.Fatalf("auth json = %#v", got)
+	}
+	if got.Tokens.IDToken != idToken || got.Tokens.AccessToken != "access-token" || got.Tokens.RefreshToken != "refresh-token" {
+		t.Fatalf("tokens not persisted correctly: %#v", got.Tokens)
+	}
+}
+
+func TestWriteGrokAuthFiles(t *testing.T) {
+	root := t.TempDir()
+	accessToken := testJWT(map[string]any{
+		"sub":            "user-123",
+		"principal_type": "User",
+		"principal_id":   "principal-123",
+		"team_id":        "team-123",
+	})
+	userInfo := map[string]any{
+		"sub":        "user-123",
+		"email":      "marc@example.com",
+		"given_name": "Marc",
+		"picture":    "users/avatar.webp",
+	}
+
+	err := writeGrokAuthFilesFromUserInfo(root, oauthTokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: "refresh-token",
+		ExpiresIn:    3600,
+	}, userInfo, time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got map[string]map[string]any
+	readJSON(t, filepath.Join(root, ".grok", "auth.json"), &got)
+	entry := got[grokAuthIssuer+"::"+grokAuthClientID]
+	if entry["key"] != accessToken || entry["refresh_token"] != "refresh-token" {
+		t.Fatalf("tokens not persisted correctly: %#v", entry)
+	}
+	if entry["auth_mode"] != "oidc" || entry["team_id"] != "team-123" || entry["email"] != "marc@example.com" {
+		t.Fatalf("metadata not persisted correctly: %#v", entry)
+	}
+}
+
+func readJSON(t *testing.T, path string, out any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testJWT(claims map[string]any) string {
+	header, _ := json.Marshal(map[string]any{"alg": "none"})
+	payload, _ := json.Marshal(claims)
+	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

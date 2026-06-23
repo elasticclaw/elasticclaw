@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
@@ -39,29 +38,21 @@ type cliAuthBundle struct {
 }
 
 var (
-	modelAuthANSIRE          = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	modelAuthOSC8RE          = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	modelAuthURLRE           = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
-	modelAuthCodeRE          = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
-	modelAuthOneTimeCodeRE   = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
-	modelAuth9DigitCodeRE    = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
-	modelAuthCLIInstallMu    sync.Mutex
-	modelAuthCLIInstallLocks = map[string]*sync.Mutex{}
+	modelAuthANSIRE        = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	modelAuthOSC8RE        = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	modelAuthURLRE         = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
+	modelAuthCodeRE        = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
+	modelAuthOneTimeCodeRE = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
+	modelAuth9DigitCodeRE  = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
 )
 
 const (
-	defaultCodexCLIVersion = "0.141.0"
-	defaultGrokCLIVersion  = "0.1.0"
+	codexAuthIssuer   = "https://auth.openai.com"
+	codexAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	grokAuthIssuer    = "https://auth.x.ai"
+	grokAuthClientID  = "b1a00492-073a-47ea-816f-4c329264a828"
+	grokAuthScope     = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write"
 )
-
-type modelAuthCLISpec struct {
-	Provider      string
-	PackageName   string
-	Version       string
-	BinaryName    string
-	LoginArgs     []string
-	VersionEnvVar string
-}
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -147,39 +138,10 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 	}
 	defer os.RemoveAll(authDir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	cli, binDir, err := ensureModelAuthCLI(ctx, job.Provider)
-	if err != nil {
-		s.finishModelAuthJob(job, "error", "", err)
-		return
-	}
-
-	cmd := exec.CommandContext(ctx, cli.BinaryName, cli.LoginArgs...)
-	cmd.Env = append(os.Environ(), "HOME="+authDir, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.finishModelAuthJob(job, "error", "", err)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		s.finishModelAuthJob(job, "error", "", err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		s.finishModelAuthJob(job, "error", "", err)
-		return
-	}
-
-	done := make(chan struct{}, 2)
-	go s.captureModelAuthOutput(job, stdout, done)
-	go s.captureModelAuthOutput(job, stderr, done)
-	<-done
-	<-done
-	err = cmd.Wait()
-	if err != nil {
+	if err := s.runModelAuthDeviceLogin(ctx, job, authDir); err != nil {
 		s.finishModelAuthJob(job, "error", "", err)
 		return
 	}
@@ -195,90 +157,418 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 	s.finishModelAuthJob(job, "complete", bundle, nil)
 }
 
-func modelAuthCLI(provider string) (modelAuthCLISpec, error) {
-	switch provider {
+func (s *Server) runModelAuthDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+	switch job.Provider {
 	case "codex":
-		return modelAuthCLISpec{
-			Provider:      "codex",
-			PackageName:   "@openai/codex",
-			Version:       cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", defaultCodexCLIVersion),
-			BinaryName:    "codex",
-			LoginArgs:     []string{"login", "--device-auth"},
-			VersionEnvVar: "ELASTICCLAW_CODEX_CLI_VERSION",
-		}, nil
+		return s.runCodexDeviceLogin(ctx, job, authDir)
 	case "grok":
-		return modelAuthCLISpec{
-			Provider:      "grok",
-			PackageName:   "@xai-official/grok",
-			Version:       cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", defaultGrokCLIVersion),
-			BinaryName:    "grok",
-			LoginArgs:     []string{"login", "--device-auth"},
-			VersionEnvVar: "ELASTICCLAW_GROK_CLI_VERSION",
-		}, nil
+		return s.runGrokDeviceLogin(ctx, job, authDir)
 	default:
-		return modelAuthCLISpec{}, fmt.Errorf("unsupported provider %q", provider)
+		return fmt.Errorf("unsupported provider %q", job.Provider)
 	}
 }
 
-func ensureModelAuthCLI(ctx context.Context, provider string) (modelAuthCLISpec, string, error) {
-	cli, err := modelAuthCLI(provider)
-	if err != nil {
-		return modelAuthCLISpec{}, "", err
-	}
-	if strings.TrimSpace(cli.Version) == "" {
-		return modelAuthCLISpec{}, "", fmt.Errorf("empty %s for %s CLI", cli.VersionEnvVar, cli.Provider)
-	}
-	installDir := filepath.Join(modelAuthCLIRoot(), cli.Provider, cli.Version)
-	binDir := filepath.Join(installDir, "node_modules", ".bin")
-	binaryPath := filepath.Join(binDir, cli.BinaryName)
-	if _, err := os.Stat(binaryPath); err == nil {
-		cli.BinaryName = binaryPath
-		return cli, binDir, nil
-	}
-
-	installLock := modelAuthCLIInstallLock(installDir)
-	installLock.Lock()
-	defer installLock.Unlock()
-	if _, err := os.Stat(binaryPath); err == nil {
-		cli.BinaryName = binaryPath
-		return cli, binDir, nil
-	}
-	if err := os.MkdirAll(installDir, 0750); err != nil {
-		return modelAuthCLISpec{}, "", fmt.Errorf("create model CLI install dir: %w", err)
-	}
-	npm, err := exec.LookPath("npm")
-	if err != nil {
-		return modelAuthCLISpec{}, "", fmt.Errorf("npm is required to install %s@%s for model login: %w", cli.PackageName, cli.Version, err)
-	}
-	spec := cli.PackageName + "@" + cli.Version
-	cmd := exec.CommandContext(ctx, npm, "install", "--prefix", installDir, "--ignore-scripts", spec)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return modelAuthCLISpec{}, "", fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
-	}
-	if _, err := os.Stat(binaryPath); err != nil {
-		return modelAuthCLISpec{}, "", fmt.Errorf("installed %s but binary %s was not found: %w", spec, binaryPath, err)
-	}
-	cli.BinaryName = binaryPath
-	return cli, binDir, nil
+func (s *Server) setModelAuthDevicePrompt(job *modelAuthLoginJob, authURL, code string) {
+	s.modelAuthJobsMu.Lock()
+	defer s.modelAuthJobsMu.Unlock()
+	job.URL = authURL
+	job.Code = code
+	job.Output = strings.TrimSpace(authURL + "\n" + code)
+	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 }
 
-func modelAuthCLIInstallLock(installDir string) *sync.Mutex {
-	modelAuthCLIInstallMu.Lock()
-	defer modelAuthCLIInstallMu.Unlock()
-	if lock := modelAuthCLIInstallLocks[installDir]; lock != nil {
-		return lock
-	}
-	lock := &sync.Mutex{}
-	modelAuthCLIInstallLocks[installDir] = lock
-	return lock
+type codexUserCodeResponse struct {
+	DeviceAuthID string `json:"device_auth_id"`
+	UserCode     string `json:"user_code"`
+	UserCodeAlt  string `json:"usercode"`
+	Interval     string `json:"interval"`
 }
 
-func modelAuthCLIRoot() string {
-	if dir := strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_CLI_DIR")); dir != "" {
-		return dir
+type codexDeviceTokenResponse struct {
+	AuthorizationCode string `json:"authorization_code"`
+	CodeChallenge     string `json:"code_challenge"`
+	CodeVerifier      string `json:"code_verifier"`
+}
+
+type oauthTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	Error        string `json:"error"`
+	Description  string `json:"error_description"`
+}
+
+func (s *Server) runCodexDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+	client := http.DefaultClient
+	var uc codexUserCodeResponse
+	if err := postJSON(ctx, client, codexAuthIssuer+"/api/accounts/deviceauth/usercode", map[string]string{
+		"client_id": codexAuthClientID,
+	}, &uc); err != nil {
+		return fmt.Errorf("request Codex device code: %w", err)
 	}
-	return filepath.Join(hubDataDir(), "model-clis")
+	userCode := uc.UserCode
+	if userCode == "" {
+		userCode = uc.UserCodeAlt
+	}
+	interval := parsePositiveInt64(uc.Interval, 5)
+	if uc.DeviceAuthID == "" || userCode == "" {
+		return fmt.Errorf("Codex device code response missing device_auth_id or user_code")
+	}
+	s.setModelAuthDevicePrompt(job, codexAuthIssuer+"/codex/device", userCode)
+
+	var code codexDeviceTokenResponse
+	if err := pollCodexDeviceToken(ctx, client, uc.DeviceAuthID, userCode, time.Duration(interval)*time.Second, &code); err != nil {
+		return err
+	}
+	if code.AuthorizationCode == "" || code.CodeVerifier == "" {
+		return fmt.Errorf("Codex device token response missing authorization code or verifier")
+	}
+
+	var token oauthTokenResponse
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code.AuthorizationCode)
+	form.Set("redirect_uri", codexAuthIssuer+"/deviceauth/callback")
+	form.Set("client_id", codexAuthClientID)
+	form.Set("code_verifier", code.CodeVerifier)
+	if err := postForm(ctx, client, codexAuthIssuer+"/oauth/token", form, &token); err != nil {
+		return fmt.Errorf("exchange Codex authorization code: %w", err)
+	}
+	if token.IDToken == "" || token.AccessToken == "" || token.RefreshToken == "" {
+		return fmt.Errorf("Codex token response missing id, access, or refresh token")
+	}
+	return writeCodexAuthFiles(authDir, token)
+}
+
+func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration, out *codexDeviceTokenResponse) error {
+	deadline := time.NewTimer(15 * time.Minute)
+	defer deadline.Stop()
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	for {
+		var resp codexDeviceTokenResponse
+		status, body, err := postJSONStatus(ctx, client, codexAuthIssuer+"/api/accounts/deviceauth/token", map[string]string{
+			"device_auth_id": deviceAuthID,
+			"user_code":      userCode,
+		}, &resp)
+		if err != nil {
+			return fmt.Errorf("poll Codex device token: %w", err)
+		}
+		if status >= 200 && status < 300 {
+			*out = resp
+			return nil
+		}
+		if status != http.StatusForbidden && status != http.StatusNotFound {
+			return fmt.Errorf("Codex device auth failed with status %d: %s", status, strings.TrimSpace(string(body)))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("Codex device auth timed out after 15 minutes")
+		case <-time.After(interval):
+		}
+	}
+}
+
+type grokDeviceCodeResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int64  `json:"expires_in"`
+	Interval                int64  `json:"interval"`
+	Error                   string `json:"error"`
+	Description             string `json:"error_description"`
+}
+
+func (s *Server) runGrokDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+	client := http.DefaultClient
+	var dc grokDeviceCodeResponse
+	form := url.Values{}
+	form.Set("client_id", grokAuthClientID)
+	form.Set("scope", grokAuthScope)
+	if err := postForm(ctx, client, grokAuthIssuer+"/oauth2/device/code", form, &dc); err != nil {
+		return fmt.Errorf("request Grok device code: %w", err)
+	}
+	if dc.DeviceCode == "" || dc.UserCode == "" {
+		return fmt.Errorf("Grok device code response missing device_code or user_code")
+	}
+	authURL := dc.VerificationURIComplete
+	if authURL == "" {
+		authURL = dc.VerificationURI
+	}
+	s.setModelAuthDevicePrompt(job, authURL, dc.UserCode)
+
+	var token oauthTokenResponse
+	if err := pollGrokDeviceToken(ctx, client, dc.DeviceCode, time.Duration(dc.Interval)*time.Second, &token); err != nil {
+		return err
+	}
+	if token.AccessToken == "" || token.RefreshToken == "" {
+		return fmt.Errorf("Grok token response missing access or refresh token")
+	}
+	return writeGrokAuthFiles(ctx, client, authDir, token)
+}
+
+func pollGrokDeviceToken(ctx context.Context, client *http.Client, deviceCode string, interval time.Duration, out *oauthTokenResponse) error {
+	deadline := time.NewTimer(30 * time.Minute)
+	defer deadline.Stop()
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	for {
+		form := url.Values{}
+		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+		form.Set("device_code", deviceCode)
+		form.Set("client_id", grokAuthClientID)
+		var token oauthTokenResponse
+		status, body, err := postFormStatus(ctx, client, grokAuthIssuer+"/oauth2/token", form, &token)
+		if err != nil {
+			return fmt.Errorf("poll Grok device token: %w", err)
+		}
+		if status >= 200 && status < 300 {
+			*out = token
+			return nil
+		}
+		if token.Error != "authorization_pending" && token.Error != "slow_down" {
+			return fmt.Errorf("Grok device auth failed with status %d: %s", status, strings.TrimSpace(string(body)))
+		}
+		if token.Error == "slow_down" {
+			interval += 5 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("Grok device auth timed out after 30 minutes")
+		case <-time.After(interval):
+		}
+	}
+}
+
+func writeCodexAuthFiles(root string, token oauthTokenResponse) error {
+	authPath := filepath.Join(root, ".codex", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
+		return err
+	}
+	auth := map[string]any{
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"tokens": map[string]any{
+			"id_token":      token.IDToken,
+			"access_token":  token.AccessToken,
+			"refresh_token": token.RefreshToken,
+			"account_id":    jwtStringClaim(token.IDToken, "https://api.openai.com/auth", "chatgpt_account_id"),
+		},
+		"last_refresh": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return writePrettyJSON(authPath, auth, 0600)
+}
+
+func writeGrokAuthFiles(ctx context.Context, client *http.Client, root string, token oauthTokenResponse) error {
+	userInfo, err := getGrokUserInfo(ctx, client, token.AccessToken)
+	if err != nil {
+		return err
+	}
+	return writeGrokAuthFilesFromUserInfo(root, token, userInfo, time.Now().UTC())
+}
+
+func writeGrokAuthFilesFromUserInfo(root string, token oauthTokenResponse, userInfo map[string]any, now time.Time) error {
+	expiresAt := now.UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
+	if token.ExpiresIn <= 0 {
+		expiresAt = now.UTC().Add(6 * time.Hour)
+	}
+	claims := jwtClaims(token.AccessToken)
+	userID := firstNonEmptyString(stringFromMap(userInfo, "sub"), stringFromMap(claims, "sub"))
+	principalID := firstNonEmptyString(stringFromMap(claims, "principal_id"), userID)
+	principalType := firstNonEmptyString(stringFromMap(claims, "principal_type"), "User")
+	entry := map[string]any{
+		"key":                           token.AccessToken,
+		"auth_mode":                     "oidc",
+		"create_time":                   now.UTC().Format(time.RFC3339Nano),
+		"user_id":                       userID,
+		"email":                         stringFromMap(userInfo, "email"),
+		"first_name":                    firstNonEmptyString(stringFromMap(userInfo, "given_name"), stringFromMap(userInfo, "name")),
+		"profile_image_asset_id":        stringFromMap(userInfo, "picture"),
+		"principal_type":                principalType,
+		"principal_id":                  principalID,
+		"team_id":                       stringFromMap(claims, "team_id"),
+		"coding_data_retention_opt_out": false,
+		"refresh_token":                 token.RefreshToken,
+		"expires_at":                    expiresAt.Format(time.RFC3339Nano),
+		"oidc_issuer":                   grokAuthIssuer,
+		"oidc_client_id":                grokAuthClientID,
+	}
+	authPath := filepath.Join(root, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
+		return err
+	}
+	return writePrettyJSON(authPath, map[string]any{grokAuthIssuer + "::" + grokAuthClientID: entry}, 0600)
+}
+
+func getGrokUserInfo(ctx context.Context, client *http.Client, accessToken string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, grokAuthIssuer+"/oauth2/userinfo", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Grok userinfo failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func postJSON(ctx context.Context, client *http.Client, endpoint string, body any, out any) error {
+	status, respBody, err := postJSONStatus(ctx, client, endpoint, body, out)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+func postJSONStatus(ctx context.Context, client *http.Client, endpoint string, body any, out any) (int, []byte, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(data)))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	if out != nil && len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return resp.StatusCode, respBody, err
+		}
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+func postForm(ctx context.Context, client *http.Client, endpoint string, form url.Values, out any) error {
+	status, respBody, err := postFormStatus(ctx, client, endpoint, form, out)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+func postFormStatus(ctx context.Context, client *http.Client, endpoint string, form url.Values, out any) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	if out != nil && len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return resp.StatusCode, respBody, err
+		}
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+func writePrettyJSON(path string, value any, mode os.FileMode) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, mode)
+}
+
+func parsePositiveInt64(value string, fallback int64) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func jwtStringClaim(jwt string, objectClaim string, nestedKey string) string {
+	claims := jwtClaims(jwt)
+	if objectClaim == "" {
+		return stringFromMap(claims, nestedKey)
+	}
+	nested, _ := claims[objectClaim].(map[string]any)
+	return stringFromMap(nested, nestedKey)
+}
+
+func jwtClaims(jwt string) map[string]any {
+	parts := strings.Split(jwt, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(data, &claims); err != nil {
+		return nil
+	}
+	return claims
+}
+
+func stringFromMap(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	switch value := values[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, done chan<- struct{}) {
