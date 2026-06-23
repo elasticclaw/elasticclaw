@@ -813,6 +813,8 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = s.provisionDaytona(context.Background(), clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
+		case "lambda-microvms":
+			provErr = s.provisionLambdaMicroVMs(context.Background(), clawID, req, provCfg, fileBytes)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}

@@ -346,6 +346,20 @@ func TestSettingsStatusProviderReadiness(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "lambda microvms requires image identifier",
+			provider: map[string]types.ProviderConfig{
+				"lambda-microvms": {},
+			},
+			want: false,
+		},
+		{
+			name: "lambda microvms with image identifier",
+			provider: map[string]types.ProviderConfig{
+				"lambda-microvms": {ImageIdentifier: "arn:aws:lambda:us-east-1:123456789012:microvm-image/elasticclaw"},
+			},
+			want: true,
+		},
+		{
 			name: "named provider uses explicit type",
 			provider: map[string]types.ProviderConfig{
 				"primary": {Type: "daytona", APIKey: "daytona-key"},

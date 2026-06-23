@@ -749,6 +749,21 @@ type ProviderConfig struct {
 	// Network is the Docker network to attach agent containers to so they can
 	// reach the hub by service name (e.g. "elasticclaw-dev").
 	Network string `yaml:"network,omitempty"`
+
+	// AWS Lambda MicroVMs (alpha)
+	AWSRegion                  string   `yaml:"aws_region,omitempty"`
+	AWSProfile                 string   `yaml:"aws_profile,omitempty"`
+	ImageIdentifier            string   `yaml:"image_identifier,omitempty"`
+	ImageVersion               string   `yaml:"image_version,omitempty"`
+	ExecutionRoleARN           string   `yaml:"execution_role_arn,omitempty"`
+	IngressNetworkConnectors   []string `yaml:"ingress_network_connectors,omitempty"`
+	EgressNetworkConnectors    []string `yaml:"egress_network_connectors,omitempty"`
+	IdleMaxDurationSeconds     int      `yaml:"idle_max_duration_seconds,omitempty"`
+	SuspendedDurationSeconds   int      `yaml:"suspended_duration_seconds,omitempty"`
+	AutoResume                 *bool    `yaml:"auto_resume,omitempty"`
+	MaximumDurationSeconds     int      `yaml:"maximum_duration_seconds,omitempty"`
+	MicroVMBridgePort          int      `yaml:"bridge_port,omitempty"`
+	AuthTokenExpirationMinutes int      `yaml:"auth_token_expiration_minutes,omitempty"`
 }
 
 // MCPConfig is the resolved MCP server configuration passed to a claw at creation time.

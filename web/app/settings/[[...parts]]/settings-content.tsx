@@ -106,6 +106,19 @@ interface SettingsData {
     defaultDisk?: string
     sshKeySet?: boolean
     sshPublicKey?: string
+    awsRegion?: string
+    awsProfile?: string
+    imageIdentifier?: string
+    imageVersion?: string
+    executionRoleArn?: string
+    ingressNetworkConnectors?: string[]
+    egressNetworkConnectors?: string[]
+    idleMaxDurationSeconds?: number
+    suspendedDurationSeconds?: number
+    autoResume?: boolean
+    maximumDurationSeconds?: number
+    bridgePort?: number
+    authTokenExpirationMinutes?: number
   }>
   github: GitHubAppView[]
   sshPublicKeys: string[]
@@ -493,6 +506,7 @@ const SANDBOX_PROVIDER_OPTIONS = [
   { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
   { value: "daytona", label: "Daytona", description: "Development environment provider" },
   { value: "exedev", label: "exe.dev", description: "Persistent VM provider with SSH access" },
+  { value: "lambda-microvms", label: "AWS Lambda MicroVMs", description: "Serverless Firecracker MicroVM provider", alpha: true },
 ]
 
 interface SandboxProviderView {
@@ -500,6 +514,7 @@ interface SandboxProviderView {
   type: string
   label: string
   description: string
+  alpha?: boolean
   configured: boolean
   apiUrl?: string
   apiKeySet?: boolean
@@ -507,6 +522,7 @@ interface SandboxProviderView {
   tokenSet?: boolean
   defaultTtl?: string
   defaultInstanceType?: string
+  imageIdentifier?: string
 }
 
 function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean }) {
@@ -522,13 +538,15 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
         type: p.type || name,
         label: opt?.label || name,
         description: opt?.description || "",
-        configured: !!(p.tokenSet || p.apiKeySet),
+        alpha: opt?.alpha,
+        configured: !!(p.tokenSet || p.apiKeySet || p.imageIdentifier || name === "exedev"),
         apiUrl: p.apiUrl,
         apiKeySet: p.apiKeySet,
         defaultSnapshot: p.defaultSnapshot,
         tokenSet: p.tokenSet,
         defaultTtl: p.defaultTtl,
         defaultInstanceType: p.defaultInstanceType,
+        imageIdentifier: p.imageIdentifier,
         defaultCpu: p.defaultCpu,
         defaultMemory: p.defaultMemory,
         defaultDisk: p.defaultDisk,
@@ -552,6 +570,19 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formDefaultCpu, setFormDefaultCpu] = useState("")
   const [formDefaultMemory, setFormDefaultMemory] = useState("")
   const [formDefaultDisk, setFormDefaultDisk] = useState("")
+  const [formAwsRegion, setFormAwsRegion] = useState("")
+  const [formAwsProfile, setFormAwsProfile] = useState("")
+  const [formImageIdentifier, setFormImageIdentifier] = useState("")
+  const [formImageVersion, setFormImageVersion] = useState("")
+  const [formExecutionRoleArn, setFormExecutionRoleArn] = useState("")
+  const [formIngressConnectors, setFormIngressConnectors] = useState("")
+  const [formEgressConnectors, setFormEgressConnectors] = useState("")
+  const [formIdleMaxDuration, setFormIdleMaxDuration] = useState("")
+  const [formSuspendedDuration, setFormSuspendedDuration] = useState("")
+  const [formAutoResume, setFormAutoResume] = useState(true)
+  const [formMaximumDuration, setFormMaximumDuration] = useState("")
+  const [formBridgePort, setFormBridgePort] = useState("")
+  const [formAuthTokenExpiration, setFormAuthTokenExpiration] = useState("")
 
   const resetForm = () => {
     setFormProvider("replicated")
@@ -564,6 +595,19 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultCpu("")
     setFormDefaultMemory("")
     setFormDefaultDisk("")
+    setFormAwsRegion("")
+    setFormAwsProfile("")
+    setFormImageIdentifier("")
+    setFormImageVersion("")
+    setFormExecutionRoleArn("")
+    setFormIngressConnectors("")
+    setFormEgressConnectors("")
+    setFormIdleMaxDuration("900")
+    setFormSuspendedDuration("300")
+    setFormAutoResume(true)
+    setFormMaximumDuration("28800")
+    setFormBridgePort("8080")
+    setFormAuthTokenExpiration("30")
     setEditName(null)
   }
 
@@ -594,12 +638,37 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultCpu(p?.defaultCpu?.toString() || "")
     setFormDefaultMemory(p?.defaultMemory ? p.defaultMemory.replace(/GB$/, "") : "")
     setFormDefaultDisk(p?.defaultDisk ? p.defaultDisk.replace(/GB$/, "") : "")
+    setFormAwsRegion(p?.awsRegion || "")
+    setFormAwsProfile(p?.awsProfile || "")
+    setFormImageIdentifier(p?.imageIdentifier || "")
+    setFormImageVersion(p?.imageVersion || "")
+    setFormExecutionRoleArn(p?.executionRoleArn || "")
+    setFormIngressConnectors((p?.ingressNetworkConnectors || []).join("\n"))
+    setFormEgressConnectors((p?.egressNetworkConnectors || []).join("\n"))
+    setFormIdleMaxDuration(p?.idleMaxDurationSeconds?.toString() || "900")
+    setFormSuspendedDuration(p?.suspendedDurationSeconds?.toString() || "300")
+    setFormAutoResume(p?.autoResume ?? true)
+    setFormMaximumDuration(p?.maximumDurationSeconds?.toString() || "28800")
+    setFormBridgePort(p?.bridgePort?.toString() || "8080")
+    setFormAuthTokenExpiration(p?.authTokenExpirationMinutes?.toString() || "30")
     setEditName(name)
     setModalMode("edit")
     setShowModal(true)
   }
 
   const availableProviders = SANDBOX_PROVIDER_OPTIONS.filter(o => !providers[o.value])
+
+  function splitConnectorList(value: string) {
+    return value
+      .split(/[\n,]/)
+      .map(v => v.trim())
+      .filter(Boolean)
+  }
+
+  function setPositiveInt(patch: Record<string, unknown>, key: string, value: string) {
+    const parsed = parseInt(value, 10)
+    if (value && !isNaN(parsed) && parsed > 0) patch[key] = parsed
+  }
 
   function doSave() {
     const patch: Record<string, unknown> = {}
@@ -618,6 +687,21 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       if (formDefaultCpu && !isNaN(parsedCpu)) patch.defaultCpu = parsedCpu
       if (formDefaultMemory) patch.defaultMemory = formDefaultMemory + "GB"
       if (formDefaultDisk) patch.defaultDisk = formDefaultDisk + "GB"
+    } else if (formProvider === "lambda-microvms") {
+      patch.enabled = true
+      if (formAwsRegion) patch.awsRegion = formAwsRegion.trim()
+      if (formAwsProfile) patch.awsProfile = formAwsProfile.trim()
+      if (formImageIdentifier) patch.imageIdentifier = formImageIdentifier.trim()
+      if (formImageVersion) patch.imageVersion = formImageVersion.trim()
+      if (formExecutionRoleArn) patch.executionRoleArn = formExecutionRoleArn.trim()
+      patch.ingressNetworkConnectors = splitConnectorList(formIngressConnectors)
+      patch.egressNetworkConnectors = splitConnectorList(formEgressConnectors)
+      setPositiveInt(patch, "idleMaxDurationSeconds", formIdleMaxDuration)
+      setPositiveInt(patch, "suspendedDurationSeconds", formSuspendedDuration)
+      patch.autoResume = formAutoResume
+      setPositiveInt(patch, "maximumDurationSeconds", formMaximumDuration)
+      setPositiveInt(patch, "bridgePort", formBridgePort)
+      setPositiveInt(patch, "authTokenExpirationMinutes", formAuthTokenExpiration)
     }
     onSave({ providers: { [formProvider]: patch } })
     setShowModal(false)
@@ -663,6 +747,11 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{p.label}</span>
+                    {p.alpha && (
+                      <span className="text-xs bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">
+                        Alpha
+                      </span>
+                    )}
                     {p.configured && (
                       <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded flex items-center gap-1">
                         <CheckCircle2 className="size-3" /> Configured
@@ -744,7 +833,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                   onChange={e => setFormProvider(e.target.value)}
                   className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
                 >
-                  {availableProviders.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {availableProviders.map(o => <option key={o.value} value={o.value}>{o.label}{o.alpha ? " (alpha)" : ""}</option>)}
                 </select>
               </div>
             )}
@@ -868,6 +957,103 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 </div>
               </>
             )}
+
+            {formProvider === "lambda-microvms" && (
+              <>
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Alpha</span>
+                    <p className="text-xs font-medium">AWS Lambda MicroVMs</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Requires an image that starts the Elastic Claw bridge from the MicroVM run hook payload.
+                  </p>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Image identifier</label>
+                  <Input
+                    value={formImageIdentifier}
+                    onChange={e => setFormImageIdentifier(e.target.value)}
+                    className="h-8 text-sm font-mono"
+                    placeholder="arn:aws:lambda:us-east-1:123456789012:microvm-image/elasticclaw"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">AWS Region</label>
+                    <Input value={formAwsRegion} onChange={e => setFormAwsRegion(e.target.value)} className="h-8 text-sm" placeholder="us-east-1" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">AWS Profile</label>
+                    <Input value={formAwsProfile} onChange={e => setFormAwsProfile(e.target.value)} className="h-8 text-sm" placeholder="default" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Image version</label>
+                  <Input value={formImageVersion} onChange={e => setFormImageVersion(e.target.value)} className="h-8 text-sm" placeholder="latest" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Execution role ARN</label>
+                  <Input
+                    value={formExecutionRoleArn}
+                    onChange={e => setFormExecutionRoleArn(e.target.value)}
+                    className="h-8 text-sm font-mono"
+                    placeholder="arn:aws:iam::123456789012:role/elasticclaw-microvm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Ingress network connectors</label>
+                  <textarea
+                    value={formIngressConnectors}
+                    onChange={e => setFormIngressConnectors(e.target.value)}
+                    className="min-h-16 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+                    placeholder="One ARN per line"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Egress network connectors</label>
+                  <textarea
+                    value={formEgressConnectors}
+                    onChange={e => setFormEgressConnectors(e.target.value)}
+                    className="min-h-16 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+                    placeholder="One ARN per line"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Idle max seconds</label>
+                    <Input type="number" min={1} value={formIdleMaxDuration} onChange={e => setFormIdleMaxDuration(e.target.value)} className="h-8 text-sm" placeholder="900" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Suspended seconds</label>
+                    <Input type="number" min={1} value={formSuspendedDuration} onChange={e => setFormSuspendedDuration(e.target.value)} className="h-8 text-sm" placeholder="300" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Max seconds</label>
+                    <Input type="number" min={1} value={formMaximumDuration} onChange={e => setFormMaximumDuration(e.target.value)} className="h-8 text-sm" placeholder="28800" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Bridge port</label>
+                    <Input type="number" min={1} value={formBridgePort} onChange={e => setFormBridgePort(e.target.value)} className="h-8 text-sm" placeholder="8080" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Token minutes</label>
+                    <Input type="number" min={1} value={formAuthTokenExpiration} onChange={e => setFormAuthTokenExpiration(e.target.value)} className="h-8 text-sm" placeholder="30" />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={formAutoResume}
+                    onChange={e => setFormAutoResume(e.target.checked)}
+                    className="size-4 rounded border-border"
+                  />
+                  Auto resume suspended MicroVMs
+                </label>
+              </>
+            )}
           </div>
 
           <div className="flex items-center justify-between px-5 py-4 border-t border-border">
@@ -880,7 +1066,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
               <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
               <Button
                 size="sm"
-                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev" && (!formDefaultCpu || !formDefaultMemory || !formDefaultDisk))}
+                disabled={saving || (modalMode === "add" && formProvider === "replicated" && !formToken) || (modalMode === "add" && formProvider === "daytona" && !formApiKey) || (modalMode === "add" && formProvider === "exedev" && (!formDefaultCpu || !formDefaultMemory || !formDefaultDisk)) || (formProvider === "lambda-microvms" && !formImageIdentifier.trim())}
                 onClick={doSave}
               >
                 {modalMode === "add" ? "Add Provider" : "Save changes"}

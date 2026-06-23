@@ -432,7 +432,7 @@ hub.yaml schema overview:
 - token: web UI password (shared secret)
 - claw_token: token agents use to connect (required)
 - default_model: default LLM model (e.g. "anthropic/claude-sonnet-4-6")
-- providers: daytona, replicated, exedev sandbox providers
+- providers: daytona, replicated, exedev, docker, lambda-microvms sandbox providers
 - github: list of GitHub App configs (app_id, private_key_pem, url)
 - integrations: linear, shortcut workspace tokens and webhook secrets
 - llm_keys: [{name, provider, api_key, default: bool}]

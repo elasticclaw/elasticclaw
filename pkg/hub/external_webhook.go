@@ -669,6 +669,8 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 		case "exedev":
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		case "lambda-microvms":
+			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
 		case "noop":
 			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
