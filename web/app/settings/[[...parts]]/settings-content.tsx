@@ -1304,6 +1304,9 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                         <a href={loginJob.url} target="_blank" rel="noopener noreferrer" className="underline break-all">{loginJob.url}</a>
                       )}
                       {loginJob.code && <div>Code: <span className="font-mono">{loginJob.code}</span></div>}
+                      {!loginJob.code && loginJob.output && (
+                        <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/60 p-2 text-[11px] text-muted-foreground">{loginJob.output}</pre>
+                      )}
                       {loginJob.error && <div className="text-red-400">{loginJob.error}</div>}
                       {loginJob.status === "complete" && <div className="text-green-400">Profile saved. Save this model key to use it.</div>}
                     </div>

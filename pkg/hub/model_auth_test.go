@@ -52,6 +52,28 @@ func TestCaptureModelAuthOutputExtractsNumericDeviceCode(t *testing.T) {
 	}
 }
 
+func TestCaptureModelAuthOutputExtractsStandaloneNineDigitCode(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.captureModelAuthOutput(job, strings.NewReader("Enter this authorization code:\n123 456 789\n"), make(chan struct{}, 1))
+
+	if job.Code != "123456789" {
+		t.Fatalf("Code = %q, want normalized 9 digit device code", job.Code)
+	}
+}
+
+func TestCaptureModelAuthOutputExtractsUnlabeledNineDigitCode(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.captureModelAuthOutput(job, strings.NewReader("Open https://auth.openai.com/codex/device\n987654321\n"), make(chan struct{}, 1))
+
+	if job.Code != "987654321" {
+		t.Fatalf("Code = %q, want unlabeled 9 digit device code", job.Code)
+	}
+}
+
 func TestAppendModelAuthOutputReplacesBadCodeWithRealCode(t *testing.T) {
 	s := &Server{}
 	job := &modelAuthLoginJob{}

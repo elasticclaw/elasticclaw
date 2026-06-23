@@ -38,10 +38,11 @@ type cliAuthBundle struct {
 }
 
 var (
-	modelAuthANSIRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	modelAuthOSC8RE = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	modelAuthURLRE  = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
-	modelAuthCodeRE = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
+	modelAuthANSIRE       = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	modelAuthOSC8RE       = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	modelAuthURLRE        = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
+	modelAuthCodeRE       = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
+	modelAuth9DigitCodeRE = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
 )
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +221,9 @@ func extractModelAuthCode(output string) string {
 		if isValidModelAuthCode(code) {
 			return code
 		}
+	}
+	if match := modelAuth9DigitCodeRE.FindString(output); match != "" {
+		return strings.NewReplacer(" ", "", "-", "").Replace(match)
 	}
 	return ""
 }
