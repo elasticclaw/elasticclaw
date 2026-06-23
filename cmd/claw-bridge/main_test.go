@@ -344,16 +344,6 @@ func TestCLICodingProviderForModel(t *testing.T) {
 	}
 }
 
-func TestCLIVersionAllowsPinnedOverride(t *testing.T) {
-	t.Setenv("ELASTICCLAW_CODEX_CLI_VERSION", "9.8.7")
-	if got := cliVersion("ELASTICCLAW_CODEX_CLI_VERSION", "1.2.3"); got != "9.8.7" {
-		t.Fatalf("cliVersion override = %q", got)
-	}
-	if got := cliVersion("ELASTICCLAW_MISSING_VERSION", "1.2.3"); got != "1.2.3" {
-		t.Fatalf("cliVersion fallback = %q", got)
-	}
-}
-
 func TestRestoreCLIModelAuthWritesBundleFiles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

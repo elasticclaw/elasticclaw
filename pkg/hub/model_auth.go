@@ -115,6 +115,7 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 		s.finishModelAuthJob(job, "error", "", err)
 		return
 	}
+	defer os.RemoveAll(authDir)
 	job.authDir = authDir
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -151,9 +152,9 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 	done := make(chan struct{}, 2)
 	go s.captureModelAuthOutput(job, stdout, done)
 	go s.captureModelAuthOutput(job, stderr, done)
+	<-done
+	<-done
 	err = cmd.Wait()
-	<-done
-	<-done
 	if err != nil {
 		s.finishModelAuthJob(job, "error", "", err)
 		return
@@ -324,7 +325,7 @@ if state:
     home = os.path.expanduser('~')
     for rel, encoded in bundle.get('files', {}).items():
         clean = os.path.normpath(rel)
-        if clean == '.' or clean.startswith('../') or os.path.isabs(clean):
+        if clean == '.' or clean == '..' or clean.startswith('../') or os.path.isabs(clean):
             continue
         path = os.path.join(home, clean)
         os.makedirs(os.path.dirname(path), exist_ok=True)
