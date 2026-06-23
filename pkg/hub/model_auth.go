@@ -39,13 +39,14 @@ type cliAuthBundle struct {
 }
 
 var (
-	modelAuthANSIRE        = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	modelAuthOSC8RE        = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	modelAuthURLRE         = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
-	modelAuthCodeRE        = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
-	modelAuthOneTimeCodeRE = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
-	modelAuth9DigitCodeRE  = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
-	modelAuthCLIInstallMu  sync.Mutex
+	modelAuthANSIRE          = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	modelAuthOSC8RE          = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	modelAuthURLRE           = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
+	modelAuthCodeRE          = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
+	modelAuthOneTimeCodeRE   = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
+	modelAuth9DigitCodeRE    = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
+	modelAuthCLIInstallMu    sync.Mutex
+	modelAuthCLIInstallLocks = map[string]*sync.Mutex{}
 )
 
 const (
@@ -235,8 +236,9 @@ func ensureModelAuthCLI(ctx context.Context, provider string) (modelAuthCLISpec,
 		return cli, binDir, nil
 	}
 
-	modelAuthCLIInstallMu.Lock()
-	defer modelAuthCLIInstallMu.Unlock()
+	installLock := modelAuthCLIInstallLock(installDir)
+	installLock.Lock()
+	defer installLock.Unlock()
 	if _, err := os.Stat(binaryPath); err == nil {
 		cli.BinaryName = binaryPath
 		return cli, binDir, nil
@@ -259,6 +261,17 @@ func ensureModelAuthCLI(ctx context.Context, provider string) (modelAuthCLISpec,
 	}
 	cli.BinaryName = binaryPath
 	return cli, binDir, nil
+}
+
+func modelAuthCLIInstallLock(installDir string) *sync.Mutex {
+	modelAuthCLIInstallMu.Lock()
+	defer modelAuthCLIInstallMu.Unlock()
+	if lock := modelAuthCLIInstallLocks[installDir]; lock != nil {
+		return lock
+	}
+	lock := &sync.Mutex{}
+	modelAuthCLIInstallLocks[installDir] = lock
+	return lock
 }
 
 func modelAuthCLIRoot() string {

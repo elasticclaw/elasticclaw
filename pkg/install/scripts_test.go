@@ -120,7 +120,8 @@ func TestScriptInstallNodeNPM(t *testing.T) {
 	assertContains(t, s, "command -v npm", "npm detection")
 	assertContains(t, s, "https://deb.nodesource.com/node_24.x", "NodeSource Node 24 repo")
 	assertContains(t, s, "apt-get install -y nodejs", "apt node install")
-	assertContains(t, s, "$PKG_MGR install -y nodejs npm", "rpm node install")
+	assertContains(t, s, "https://rpm.nodesource.com/setup_24.x", "NodeSource RPM Node 24 setup")
+	assertContains(t, s, "$PKG_MGR install -y nodejs", "rpm node install")
 	assertContains(t, s, "npm --version", "npm verification")
 }
 

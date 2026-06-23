@@ -58,6 +58,19 @@ func TestEnsureModelAuthCLIUsesManagedBinary(t *testing.T) {
 	}
 }
 
+func TestModelAuthCLIInstallLockIsScopedByInstallDir(t *testing.T) {
+	first := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/codex/1")
+	again := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/codex/1")
+	other := modelAuthCLIInstallLock("/tmp/elasticclaw/model-clis/grok/1")
+
+	if first != again {
+		t.Fatal("same install dir returned different locks")
+	}
+	if first == other {
+		t.Fatal("different install dirs shared the same lock")
+	}
+}
+
 func TestCaptureModelAuthOutputStripsANSIFromURL(t *testing.T) {
 	s := &Server{}
 	job := &modelAuthLoginJob{}

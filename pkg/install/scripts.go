@@ -111,7 +111,10 @@ func ScriptInstallNodeNPM(useSudo bool) string {
     if ! command -v dnf >/dev/null 2>&1; then
       PKG_MGR=yum
     fi
-    sh_c "$PKG_MGR install -y nodejs npm"
+    sh_c "$PKG_MGR install -y curl"
+    curl -fsSL https://rpm.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh
+    sh_c 'bash /tmp/nodesource_setup.sh'
+    sh_c "$PKG_MGR install -y nodejs"
   else
     echo "unsupported Linux distribution for automatic Node.js/npm install" >&2
     exit 1
