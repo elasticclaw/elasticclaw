@@ -90,10 +90,11 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		s.modelAuthJobs = map[string]*modelAuthLoginJob{}
 	}
 	s.modelAuthJobs[job.ID] = job
+	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 
 	go s.runModelAuthLoginJob(job)
-	jsonOK(w, job)
+	jsonOK(w, snapshot)
 }
 
 func (s *Server) handleModelAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
@@ -104,12 +105,22 @@ func (s *Server) handleModelAuthLoginStatus(w http.ResponseWriter, r *http.Reque
 	id := r.PathValue("id")
 	s.modelAuthJobsMu.Lock()
 	job := s.modelAuthJobs[id]
+	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 	if job == nil {
 		http.NotFound(w, r)
 		return
 	}
-	jsonOK(w, job)
+	jsonOK(w, snapshot)
+}
+
+func snapshotModelAuthLoginJob(job *modelAuthLoginJob) *modelAuthLoginJob {
+	if job == nil {
+		return nil
+	}
+	snapshot := *job
+	snapshot.authDir = ""
+	return &snapshot
 }
 
 func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
