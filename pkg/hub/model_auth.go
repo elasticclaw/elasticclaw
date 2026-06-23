@@ -38,11 +38,12 @@ type cliAuthBundle struct {
 }
 
 var (
-	modelAuthANSIRE       = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	modelAuthOSC8RE       = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	modelAuthURLRE        = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
-	modelAuthCodeRE       = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
-	modelAuth9DigitCodeRE = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
+	modelAuthANSIRE        = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	modelAuthOSC8RE        = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	modelAuthURLRE         = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
+	modelAuthCodeRE        = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
+	modelAuthOneTimeCodeRE = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
+	modelAuth9DigitCodeRE  = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
 )
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +213,9 @@ func updateModelAuthURL(job *modelAuthLoginJob, url string) {
 }
 
 func extractModelAuthCode(output string) string {
+	if match := modelAuthOneTimeCodeRE.FindStringSubmatch(output); len(match) == 2 {
+		return match[1]
+	}
 	matches := modelAuthCodeRE.FindAllStringSubmatch(output, -1)
 	for _, match := range matches {
 		if len(match) != 2 {

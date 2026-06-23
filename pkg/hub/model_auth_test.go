@@ -41,6 +41,27 @@ func TestCaptureModelAuthOutputExtractsDeviceCode(t *testing.T) {
 	}
 }
 
+func TestCaptureModelAuthOutputExtractsCodexOneTimeCode(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+	output := `Follow these steps to sign in with ChatGPT using device code authorization:
+
+1. Open this link in your browser and sign in to your account
+   https://auth.openai.com/codex/device
+
+2. Enter this one-time code (expires in 15 minutes)
+   2VX0-20MIV
+
+Device codes are a common phishing target. Never share this code.
+`
+
+	s.captureModelAuthOutput(job, strings.NewReader(output), make(chan struct{}, 1))
+
+	if job.Code != "2VX0-20MIV" {
+		t.Fatalf("Code = %q, want Codex one-time code", job.Code)
+	}
+}
+
 func TestCaptureModelAuthOutputExtractsNumericDeviceCode(t *testing.T) {
 	s := &Server{}
 	job := &modelAuthLoginJob{}
