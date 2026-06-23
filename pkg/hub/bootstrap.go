@@ -38,6 +38,7 @@ type BootstrapParams struct {
 
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
+	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
 	LinearEnv      string // pre-built export line
 	ProviderConfig string // python snippet to patch OpenClaw config
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
@@ -156,6 +157,25 @@ if model.startswith('ollama/'):
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
+if model.startswith('grok/'):
+    model_id = model.split('/', 1)[1]
+    config.setdefault('models', {})['mode'] = 'merge'
+    providers = config['models'].setdefault('providers', {})
+    providers['grok'] = {
+        'baseUrl': 'https://api.x.ai/v1',
+        'api': 'openai',
+        'apiKey': 'XAI_API_KEY',
+        'models': [{
+            'id': model_id,
+            'name': model_id,
+            'reasoning': True,
+            'input': ['text', 'image'],
+            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+            'contextWindow': 256000,
+            'maxTokens': 8192,
+            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+        }],
+    }
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
@@ -214,6 +234,7 @@ export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
 export OPENCLAW_DEFAULT_MODEL=%s
 export ELASTICCLAW_NIX=%s
 export ELASTICCLAW_DOCKER=%s
+%s
 %s
 %s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
@@ -303,7 +324,7 @@ exit 1
 `,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
-		p.LLMKeyEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
+		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
 	)
 }
@@ -336,6 +357,8 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	case "codex":
 		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
+	case "grok":
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "ollama":
 		model := active.DefaultModel
 		if model == "" || !strings.HasPrefix(model, active.Provider+"/") {

@@ -29,6 +29,15 @@ type LLMKeyView struct {
 	KeySet       bool   `json:"keySet"`
 	Default      bool   `json:"default"`
 	DefaultModel string `json:"defaultModel,omitempty"`
+	AuthProfile  string `json:"authProfile,omitempty"`
+}
+
+type ModelAuthProfileView struct {
+	Name          string `json:"name"`
+	Provider      string `json:"provider"`
+	Mode          string `json:"mode"`
+	Authenticated bool   `json:"authenticated"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
 }
 
 // MCPView is the redacted view of an MCP server config for the settings page.
@@ -53,16 +62,17 @@ type ConcurrencyGroupView struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys       []LLMKeyView                `json:"llmKeys"`
-	ModelOptions  map[string][]LLMModelOption `json:"modelOptions,omitempty"`
-	Providers     map[string]ProviderView     `json:"providers"`
-	GitHub        []GitHubAppView             `json:"github"`
-	SSHPublicKeys []string                    `json:"sshPublicKeys"`
-	Integrations  *IntegrationsView           `json:"integrations"`
-	Factories     []FactoryView               `json:"factories"`
-	Secrets       []string                    `json:"secrets"`
-	MCPServers    []MCPView                   `json:"mcpServers,omitempty"`
-	Auth          *AuthView                   `json:"auth,omitempty"`
+	LLMKeys           []LLMKeyView                `json:"llmKeys"`
+	ModelOptions      map[string][]LLMModelOption `json:"modelOptions,omitempty"`
+	ModelAuthProfiles []ModelAuthProfileView      `json:"modelAuthProfiles,omitempty"`
+	Providers         map[string]ProviderView     `json:"providers"`
+	GitHub            []GitHubAppView             `json:"github"`
+	SSHPublicKeys     []string                    `json:"sshPublicKeys"`
+	Integrations      *IntegrationsView           `json:"integrations"`
+	Factories         []FactoryView               `json:"factories"`
+	Secrets           []string                    `json:"secrets"`
+	MCPServers        []MCPView                   `json:"mcpServers,omitempty"`
+	Auth              *AuthView                   `json:"auth,omitempty"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
@@ -191,6 +201,14 @@ type LLMKeyPatch struct {
 	Default      *bool   `json:"default,omitempty"`
 	Delete       bool    `json:"delete,omitempty"`
 	DefaultModel *string `json:"defaultModel,omitempty"`
+	AuthProfile  *string `json:"authProfile,omitempty"`
+}
+
+type ModelAuthProfilePatch struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Delete   bool   `json:"delete,omitempty"`
 }
 
 // ConcurrencyGroupPatch is a patch for a concurrency group.
@@ -201,15 +219,16 @@ type ConcurrencyGroupPatch struct {
 }
 
 type SettingsPatch struct {
-	LLMKeys       []LLMKeyPatch            `json:"llmKeys,omitempty"`
-	Providers     map[string]ProviderPatch `json:"providers,omitempty"`
-	GitHub        []GitHubAppPatch         `json:"github,omitempty"`
-	UIPassword    string                   `json:"uiPassword,omitempty"`
-	SSHPublicKeys *[]string                `json:"sshPublicKeys,omitempty"`
-	Integrations  *IntegrationsPatch       `json:"integrations,omitempty"`
-	Factories     []FactoryPatch           `json:"factories,omitempty"`
-	MCPServers    []MCPPatch               `json:"mcpServers,omitempty"`
-	Auth          *AuthPatch               `json:"auth,omitempty"`
+	LLMKeys           []LLMKeyPatch            `json:"llmKeys,omitempty"`
+	ModelAuthProfiles []ModelAuthProfilePatch  `json:"modelAuthProfiles,omitempty"`
+	Providers         map[string]ProviderPatch `json:"providers,omitempty"`
+	GitHub            []GitHubAppPatch         `json:"github,omitempty"`
+	UIPassword        string                   `json:"uiPassword,omitempty"`
+	SSHPublicKeys     *[]string                `json:"sshPublicKeys,omitempty"`
+	Integrations      *IntegrationsPatch       `json:"integrations,omitempty"`
+	Factories         []FactoryPatch           `json:"factories,omitempty"`
+	MCPServers        []MCPPatch               `json:"mcpServers,omitempty"`
+	Auth              *AuthPatch               `json:"auth,omitempty"`
 	// ConcurrencyGroups replaces the full list of concurrency groups.
 	ConcurrencyGroups *[]ConcurrencyGroupPatch `json:"concurrencyGroups,omitempty"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
@@ -403,6 +422,20 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			KeySet:       llmKeyHasRequiredAPIKey(k),
 			Default:      k.Default,
 			DefaultModel: k.DefaultModel,
+			AuthProfile:  k.AuthProfile,
+		})
+	}
+	view.ModelAuthProfiles = []ModelAuthProfileView{}
+	for _, profile := range s.hubCfg.ModelAuthProfiles {
+		if profile == nil {
+			continue
+		}
+		view.ModelAuthProfiles = append(view.ModelAuthProfiles, ModelAuthProfileView{
+			Name:          profile.Name,
+			Provider:      profile.Provider,
+			Mode:          profile.Mode,
+			Authenticated: profile.AuthState != "",
+			UpdatedAt:     profile.UpdatedAt,
 		})
 	}
 
@@ -775,8 +808,55 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if kp.DefaultModel != nil {
 				found.DefaultModel = *kp.DefaultModel
 			}
+			if kp.AuthProfile != nil {
+				found.AuthProfile = *kp.AuthProfile
+			}
 		}
 		updatedCfg.LLMKeys = existing
+	}
+
+	if len(patch.ModelAuthProfiles) > 0 {
+		existing := make([]*types.ModelAuthProfileConfig, len(updatedCfg.ModelAuthProfiles))
+		for i, p := range updatedCfg.ModelAuthProfiles {
+			if p == nil {
+				continue
+			}
+			copy := *p
+			existing[i] = &copy
+		}
+		for _, pp := range patch.ModelAuthProfiles {
+			if pp.Name == "" {
+				continue
+			}
+			if pp.Delete {
+				filtered := existing[:0]
+				for _, p := range existing {
+					if p == nil || p.Name != pp.Name {
+						filtered = append(filtered, p)
+					}
+				}
+				existing = filtered
+				continue
+			}
+			var found *types.ModelAuthProfileConfig
+			for _, p := range existing {
+				if p != nil && p.Name == pp.Name {
+					found = p
+					break
+				}
+			}
+			if found == nil {
+				found = &types.ModelAuthProfileConfig{Name: pp.Name}
+				existing = append(existing, found)
+			}
+			if pp.Provider != "" {
+				found.Provider = pp.Provider
+			}
+			if pp.Mode != "" {
+				found.Mode = pp.Mode
+			}
+		}
+		updatedCfg.ModelAuthProfiles = existing
 	}
 
 	// Providers

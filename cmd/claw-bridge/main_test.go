@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -326,6 +327,47 @@ func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	otherModel := local.Models[1]
 	if otherModel.BaseURL != "http://127.0.0.1:11434" || otherModel.ContextWindow != 4096 || otherModel.MaxTokens != 2048 {
 		t.Fatalf("non-selected model was modified: %+v", otherModel)
+	}
+}
+
+func TestCLICodingProviderForModel(t *testing.T) {
+	tests := map[string]string{
+		"codex/gpt-5.5":        "codex",
+		"grok/grok-build-0.1":  "grok",
+		"anthropic/claude-foo": "",
+		"":                     "",
+	}
+	for model, want := range tests {
+		if got := cliCodingProviderForModel(model); got != want {
+			t.Fatalf("cliCodingProviderForModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestRestoreCLIModelAuthWritesBundleFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bundle := cliAuthBundle{
+		Files: map[string]string{
+			".codex/auth.json": base64.StdEncoding.EncodeToString([]byte(`{"token":"test"}`)),
+		},
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_PROVIDER", "codex")
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_STATE", base64.StdEncoding.EncodeToString(data))
+
+	if err := restoreCLIModelAuth(); err != nil {
+		t.Fatalf("restore auth: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	if err != nil {
+		t.Fatalf("read restored auth: %v", err)
+	}
+	if string(got) != `{"token":"test"}` {
+		t.Fatalf("restored auth = %q", string(got))
 	}
 }
 

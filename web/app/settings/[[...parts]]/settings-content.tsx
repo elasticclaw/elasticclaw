@@ -35,6 +35,26 @@ interface LLMKeyView {
   keySet: boolean
   default: boolean
   defaultModel?: string
+  authProfile?: string
+}
+
+interface ModelAuthProfileView {
+  name: string
+  provider: string
+  mode: string
+  authenticated: boolean
+  updatedAt?: string
+}
+
+interface ModelAuthLoginJob {
+  id: string
+  provider: string
+  profile: string
+  status: string
+  url?: string
+  code?: string
+  output?: string
+  error?: string
 }
 
 interface LLMModelOption {
@@ -71,6 +91,7 @@ interface WorkspaceGitHubAppView {
 interface SettingsData {
   llmKeys: LLMKeyView[]
   modelOptions?: Record<string, LLMModelOption[]>
+  modelAuthProfiles?: ModelAuthProfileView[]
   providers: Record<string, {
     type: string
     enabled: boolean
@@ -149,6 +170,28 @@ async function patchSettings(patch: object): Promise<void> {
     body: JSON.stringify(patch),
   })
   if (!res.ok) throw new Error(await res.text())
+}
+
+async function startModelAuthLogin(provider: string, profile: string): Promise<ModelAuthLoginJob> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/settings/model-auth/login`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, profile, mode: "device" }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+async function fetchModelAuthLogin(id: string): Promise<ModelAuthLoginJob> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/settings/model-auth/login/${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 // Sentinel value used in static-export paths to represent "select first workspace"
@@ -855,6 +898,7 @@ const PROVIDER_OPTIONS = [
   { value: "fireworks",  label: "Fireworks",  placeholder: "fw_..." },
   { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
   { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
+  { value: "grok",       label: "Grok Build", placeholder: "xai-..." },
   { value: "ollama",     label: "Ollama",     placeholder: "ollama-local" },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
@@ -892,11 +936,15 @@ const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
     { id: "__custom",             name: "Custom OpenAI model" },
   ],
   codex: [
-    // Codex is an autonomous agentic coding platform — it selects and routes to the
-    // appropriate underlying model (including special Codex checkpoints) on its own.
-    { id: "codex/codex",      name: "Codex (auto)" },
-    { id: "codex/codex-pro",  name: "Codex Pro (auto)" },
-    { id: "__custom",         name: "Custom Codex model" },
+    { id: "codex/gpt-5.5",      name: "GPT-5.5" },
+    { id: "codex/gpt-5.5-high", name: "GPT-5.5 High" },
+    { id: "codex/gpt-5.4",      name: "GPT-5.4" },
+    { id: "__custom",           name: "Custom Codex model" },
+  ],
+  grok: [
+    { id: "grok/grok-build-0.1", name: "Grok Build" },
+    { id: "grok/grok-4.3",       name: "Grok 4.3" },
+    { id: "__custom",            name: "Custom Grok model" },
   ],
   ollama: [
     { id: "ollama/qwen2.5-coder:1.5b", name: "Qwen2.5 Coder 1.5B" },
@@ -921,13 +969,20 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formDefault, setFormDefault] = useState(false)
   const [formDefaultModel, setFormDefaultModel] = useState("")
   const [formCustomModel, setFormCustomModel] = useState("")
+  const [formAuthProfile, setFormAuthProfile] = useState("")
+  const [loginJob, setLoginJob] = useState<ModelAuthLoginJob | null>(null)
+  const [loginError, setLoginError] = useState("")
+  const [copiedLoginCode, setCopiedLoginCode] = useState(false)
+  const loginWindowRef = useRef<Window | null>(null)
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
   const providerModels = (p: string) => settings.modelOptions?.[p] ?? PROVIDER_MODELS[p] ?? []
+  const supportsCLIAuth = formProvider === "codex" || formProvider === "grok"
+  const authProfiles = (settings.modelAuthProfiles || []).filter(p => p.provider === formProvider)
 
   const resetForm = () => {
-    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setEditIdx(null)
+    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setFormAuthProfile(""); setLoginJob(null); setLoginError(""); setCopiedLoginCode(false); setEditIdx(null)
   }
 
   const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
@@ -939,6 +994,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     setFormCustomProvider(isCustom ? k.provider : "")
     setFormKey("")
     setFormDefault(k.default)
+    setFormAuthProfile(k.authProfile || "")
     const options = providerModels(k.provider)
     if (k.defaultModel && options.length > 0 && !options.some(m => m.id === k.defaultModel)) {
       setFormDefaultModel("__custom")
@@ -958,9 +1014,10 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   function doSave() {
     const actualProvider = formProvider === "other" ? formCustomProvider : formProvider
     const actualDefaultModel = formDefaultModel === "__custom" ? formCustomModel.trim() : formDefaultModel
+    const actualAuthProfile = supportsCLIAuth ? formAuthProfile.trim() : ""
     if (modalMode === "add") {
-      if (!formName.trim() || (!formKey.trim() && actualProvider !== "ollama")) return
-      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: actualDefaultModel || undefined }] })
+      if (!formName.trim() || (!formKey.trim() && actualProvider !== "ollama" && !actualAuthProfile)) return
+      onSave({ llmKeys: [{ name: formName.trim(), provider: actualProvider, apiKey: formKey.trim(), default: formDefault, defaultModel: actualDefaultModel || undefined, authProfile: actualAuthProfile || undefined }] })
     } else if (editIdx !== null) {
       const existing = llmKeys[editIdx]
       const patch: Record<string, unknown> = {
@@ -970,6 +1027,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       if (formKey.trim()) patch.apiKey = formKey.trim()
       patch.default = formDefault       // always send so user can unset
       if (actualDefaultModel) patch.defaultModel = actualDefaultModel
+      patch.authProfile = actualAuthProfile
       if (actualProvider !== existing.provider) patch.provider = actualProvider
       onSave({ llmKeys: [patch] })
     }
@@ -986,6 +1044,75 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   function setDefault(i: number) {
     onSave({ llmKeys: [{ name: llmKeys[i].name, default: true }] })
   }
+
+  function renderLoginWindow(win: Window, text: string) {
+    win.document.body.style.margin = "0"
+    win.document.body.style.background = "#0a0a0a"
+    win.document.body.style.color = "#f5f5f5"
+    win.document.body.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+    win.document.body.style.whiteSpace = "pre-wrap"
+    win.document.body.style.padding = "24px"
+    win.document.body.textContent = text
+  }
+
+  function copyLoginCode(code: string) {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopiedLoginCode(true)
+      setTimeout(() => setCopiedLoginCode(false), 2000)
+    })
+  }
+
+  async function doStartLogin() {
+    const profile = formAuthProfile.trim() || `${formProvider}-default`
+    setFormAuthProfile(profile)
+    setLoginError("")
+    loginWindowRef.current = window.open("", "_blank")
+    if (loginWindowRef.current) {
+      loginWindowRef.current.document.title = "Model login"
+      renderLoginWindow(loginWindowRef.current, "Waiting for login URL...")
+    }
+    try {
+      const job = await startModelAuthLogin(formProvider, profile)
+      setLoginJob(job)
+      if (job.url && loginWindowRef.current && !loginWindowRef.current.closed) {
+        loginWindowRef.current.location.href = job.url
+        loginWindowRef.current = null
+      }
+    } catch (err) {
+      if (loginWindowRef.current && !loginWindowRef.current.closed) {
+        loginWindowRef.current.close()
+      }
+      loginWindowRef.current = null
+      setLoginError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  useEffect(() => {
+    if (!loginJob || loginJob.status !== "running") return
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await fetchModelAuthLogin(loginJob.id)
+        setLoginJob(next)
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err))
+      }
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [loginJob])
+
+  useEffect(() => {
+    if (!loginJob?.url || !loginWindowRef.current || loginWindowRef.current.closed) return
+    loginWindowRef.current.location.href = loginJob.url
+    loginWindowRef.current = null
+  }, [loginJob?.url])
+
+  useEffect(() => {
+    if (!loginJob || !loginWindowRef.current || loginWindowRef.current.closed || loginJob.url) return
+    const lines = [`Login status: ${loginJob.status}`]
+    if (loginJob.error) lines.push("", loginJob.error)
+    if (loginJob.output) lines.push("", loginJob.output)
+    renderLoginWindow(loginWindowRef.current, lines.join("\n"))
+  }, [loginJob])
 
   const formProviderModels = providerModels(formProvider)
 
@@ -1152,6 +1279,62 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                   placeholder={modalMode === "edit" ? "Leave blank to keep existing" : providerPlaceholder(formProvider)}
                 />
               </div>
+              {supportsCLIAuth && (
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground mb-1 block">CLI auth profile <span className="text-muted-foreground/60">(optional)</span></label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={formAuthProfile}
+                      onChange={e => setFormAuthProfile(e.target.value)}
+                      className="h-8 text-sm"
+                      placeholder={`${formProvider}-default`}
+                    />
+                    <Button type="button" size="sm" variant="outline" onClick={doStartLogin} disabled={saving}>
+                      Login
+                    </Button>
+                  </div>
+                  {authProfiles.length > 0 && (
+                    <select
+                      value={formAuthProfile}
+                      onChange={e => setFormAuthProfile(e.target.value)}
+                      className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
+                    >
+                      <option value="">No CLI auth profile</option>
+                      {authProfiles.map(p => (
+                        <option key={p.name} value={p.name}>{p.name}{p.authenticated ? " (authenticated)" : ""}</option>
+                      ))}
+                    </select>
+                  )}
+                  {loginJob && (
+                    <div className="rounded-md border border-border p-3 text-xs space-y-1">
+                      <div className="text-muted-foreground">Login status: {loginJob.status}</div>
+                      {loginJob.url && (
+                        <a href={loginJob.url} target="_blank" rel="noopener noreferrer" className="underline break-all">{loginJob.url}</a>
+                      )}
+                      {loginJob.code && (
+                        <div className="rounded-md border border-primary/30 bg-primary/10 p-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-[11px] uppercase text-muted-foreground">One-time code</div>
+                              <div className="font-mono text-lg font-semibold tracking-wide text-foreground">{loginJob.code}</div>
+                            </div>
+                            <Button type="button" size="sm" variant="outline" className="h-8 shrink-0 gap-1.5" onClick={() => copyLoginCode(loginJob.code || "")}>
+                              {copiedLoginCode ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                              {copiedLoginCode ? "Copied" : "Copy"}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                      {!loginJob.code && loginJob.output && (
+                        <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/60 p-2 text-[11px] text-muted-foreground">{loginJob.output}</pre>
+                      )}
+                      {loginJob.error && <div className="text-red-400">{loginJob.error}</div>}
+                      {loginJob.status === "complete" && <div className="text-green-400">Profile saved. Save this model key to use it.</div>}
+                    </div>
+                  )}
+                  {loginError && <div className="text-xs text-red-400">{loginError}</div>}
+                </div>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
                 {formProviderModels.length > 0 ? (
@@ -1193,7 +1376,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                 <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
                 <Button
                   size="sm"
-                  disabled={saving || !formName.trim() || (modalMode === "add" && !formKey.trim()) || (formProvider === "other" && !formCustomProvider.trim())}
+                  disabled={saving || !formName.trim() || (modalMode === "add" && !formKey.trim() && formProvider !== "ollama" && !formAuthProfile.trim()) || (formProvider === "other" && !formCustomProvider.trim())}
                   onClick={doSave}
                 >
                   {modalMode === "add" ? "Add Model Key" : "Save changes"}
