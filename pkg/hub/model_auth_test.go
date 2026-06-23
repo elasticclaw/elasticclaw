@@ -40,3 +40,40 @@ func TestCaptureModelAuthOutputExtractsDeviceCode(t *testing.T) {
 		t.Fatalf("Code = %q, want device code", job.Code)
 	}
 }
+
+func TestCaptureModelAuthOutputExtractsURLWithoutNewline(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.captureModelAuthOutput(job, strings.NewReader("Open https://auth.openai.com/codex/device_authorization"), make(chan struct{}, 1))
+
+	if job.URL != "https://auth.openai.com/codex/device_authorization" {
+		t.Fatalf("URL = %q, want URL before process exits without newline", job.URL)
+	}
+}
+
+func TestAppendModelAuthOutputExtractsSplitURL(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.appendModelAuthOutput(job, "Open https://auth.openai.com/codex/")
+	s.appendModelAuthOutput(job, "device_authorization")
+
+	if job.URL != "https://auth.openai.com/codex/device_authorization" {
+		t.Fatalf("URL = %q, want URL reconstructed from streamed chunks", job.URL)
+	}
+}
+
+func TestAppendModelAuthOutputExtractsOSCURL(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.appendModelAuthOutput(job, "\x1b]8;;https://auth.openai.com/codex/device_authorization\x07click here\x1b]8;;\x07")
+
+	if job.URL != "https://auth.openai.com/codex/device_authorization" {
+		t.Fatalf("URL = %q, want URL from terminal hyperlink", job.URL)
+	}
+	if strings.Contains(job.Output, "\x1b") {
+		t.Fatalf("Output = %q, want terminal hyperlink escapes stripped", job.Output)
+	}
+}

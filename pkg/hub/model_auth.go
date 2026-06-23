@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -40,7 +39,8 @@ type cliAuthBundle struct {
 
 var (
 	modelAuthANSIRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	modelAuthURLRE  = regexp.MustCompile(`https?://[^\s"']+`)
+	modelAuthOSC8RE = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	modelAuthURLRE  = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
 	modelAuthCodeRE = regexp.MustCompile(`(?i)\b(?:code|device code|user code|verification code)\b[^A-Z0-9]*([A-Z0-9][A-Z0-9-]{3,})\b`)
 )
 
@@ -174,32 +174,56 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 
 func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := normalizeModelAuthOutput(scanner.Text())
-		s.modelAuthJobsMu.Lock()
-		if job.Output != "" {
-			job.Output += "\n"
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			s.appendModelAuthOutput(job, string(buf[:n]))
 		}
-		job.Output += line
-		if job.URL == "" {
-			if match := modelAuthURLRE.FindString(line); match != "" {
-				job.URL = strings.TrimRight(match, ".,)")
-			}
+		if err != nil {
+			return
 		}
-		if job.Code == "" {
-			if match := modelAuthCodeRE.FindStringSubmatch(line); len(match) == 2 {
-				job.Code = match[1]
-			}
+	}
+}
+
+func (s *Server) appendModelAuthOutput(job *modelAuthLoginJob, raw string) {
+	chunk := normalizeModelAuthOutput(raw)
+	s.modelAuthJobsMu.Lock()
+	defer s.modelAuthJobsMu.Unlock()
+	job.Output += chunk
+	if match := modelAuthURLRE.FindString(raw); match != "" {
+		updateModelAuthURL(job, match)
+	}
+	if match := modelAuthURLRE.FindString(job.Output); match != "" {
+		updateModelAuthURL(job, match)
+	}
+	if job.Code == "" {
+		if match := modelAuthCodeRE.FindStringSubmatch(job.Output); len(match) == 2 {
+			job.Code = match[1]
 		}
-		job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.modelAuthJobsMu.Unlock()
+	}
+	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+}
+
+func updateModelAuthURL(job *modelAuthLoginJob, url string) {
+	url = strings.TrimRight(url, ".,)")
+	if len(url) > len(job.URL) {
+		job.URL = url
 	}
 }
 
 func normalizeModelAuthOutput(line string) string {
-	return modelAuthANSIRE.ReplaceAllString(line, "")
+	line = modelAuthOSC8RE.ReplaceAllString(line, "")
+	line = modelAuthANSIRE.ReplaceAllString(line, "")
+	var b strings.Builder
+	b.Grow(len(line))
+	for _, r := range line {
+		if (r >= 0 && r < 32 && r != '\n' && r != '\t') || r == 127 {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func (s *Server) finishModelAuthJob(job *modelAuthLoginJob, status, _ string, err error) {
