@@ -1044,6 +1044,16 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     onSave({ llmKeys: [{ name: llmKeys[i].name, default: true }] })
   }
 
+  function renderLoginWindow(win: Window, text: string) {
+    win.document.body.style.margin = "0"
+    win.document.body.style.background = "#0a0a0a"
+    win.document.body.style.color = "#f5f5f5"
+    win.document.body.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+    win.document.body.style.whiteSpace = "pre-wrap"
+    win.document.body.style.padding = "24px"
+    win.document.body.textContent = text
+  }
+
   async function doStartLogin() {
     const profile = formAuthProfile.trim() || `${formProvider}-default`
     setFormAuthProfile(profile)
@@ -1051,7 +1061,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     loginWindowRef.current = window.open("", "_blank")
     if (loginWindowRef.current) {
       loginWindowRef.current.document.title = "Model login"
-      loginWindowRef.current.document.body.textContent = "Waiting for login URL..."
+      renderLoginWindow(loginWindowRef.current, "Waiting for login URL...")
     }
     try {
       const job = await startModelAuthLogin(formProvider, profile)
@@ -1087,6 +1097,14 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     loginWindowRef.current.location.href = loginJob.url
     loginWindowRef.current = null
   }, [loginJob?.url])
+
+  useEffect(() => {
+    if (!loginJob || !loginWindowRef.current || loginWindowRef.current.closed || loginJob.url) return
+    const lines = [`Login status: ${loginJob.status}`]
+    if (loginJob.error) lines.push("", loginJob.error)
+    if (loginJob.output) lines.push("", loginJob.output)
+    renderLoginWindow(loginWindowRef.current, lines.join("\n"))
+  }, [loginJob])
 
   const formProviderModels = providerModels(formProvider)
 
