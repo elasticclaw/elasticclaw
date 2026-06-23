@@ -21,7 +21,7 @@ var upgradeCmd = &cobra.Command{
 Stable clients upgrade to the latest stable release; prerelease clients
 (e.g. beta, rc) upgrade to the latest release on the same prerelease track.
 Cross-track jumps (beta → stable) are prevented.`,
-	RunE:  runUpgrade,
+	RunE: runUpgrade,
 }
 
 func init() {
