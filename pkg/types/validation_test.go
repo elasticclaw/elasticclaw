@@ -3,6 +3,8 @@ package types
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestFactoryConfigValidate(t *testing.T) {
@@ -204,6 +206,35 @@ func TestFactoryConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid factory exclude labels",
+			factory: &FactoryConfig{
+				Name:          "test-factory",
+				Integration:   "github",
+				Template:      "base",
+				ExcludeLabels: []string{"Bug"},
+				Trigger: &GitHubTrigger{
+					On:     "issue",
+					Action: "opened",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid factory blank exclude label",
+			factory: &FactoryConfig{
+				Name:          "test-factory",
+				Integration:   "github",
+				Template:      "base",
+				ExcludeLabels: []string{" "},
+				Trigger: &GitHubTrigger{
+					On:     "issue",
+					Action: "opened",
+				},
+			},
+			wantErr: true,
+			errMsg:  "exclude_labels[0] cannot be blank",
+		},
+		{
 			name: "github factory missing trigger",
 			factory: &FactoryConfig{
 				Name:        "test-factory",
@@ -379,6 +410,33 @@ func TestFactoryConfigValidate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGitHubFactoryConfigLoadsExcludeLabels(t *testing.T) {
+	data := []byte(`
+name: github-pr
+integration: github
+template: base
+repos:
+  - elastic/claw
+labels:
+  - agent-ready
+exclude_labels:
+  - Bug
+trigger:
+  on: pull_request
+  action: opened
+`)
+	var factory FactoryConfig
+	if err := yaml.Unmarshal(data, &factory); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := factory.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := strings.Join(factory.ExcludeLabels, ","); got != "Bug" {
+		t.Fatalf("ExcludeLabels = %q, want Bug", got)
 	}
 }
 

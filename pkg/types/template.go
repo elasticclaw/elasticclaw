@@ -608,6 +608,8 @@ type FactoryConfig struct {
 	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
 	// Labels: all must be present on the issue to trigger (AND)
 	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	// ExcludeLabels: none may be present on the issue to trigger (NOT)
+	ExcludeLabels []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
 	AssignedTo string `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	// AllowedLabelers restricts who can trigger claw creation by labeling an issue.

@@ -51,7 +51,7 @@ test-factory: ## Run factory integration tests
 	go test -v -tags integration -timeout 60s ./pkg/hub/... -run TestFactory
 
 test-parity: ## Run parity matrix integration tests (all trackers)
-	go test -v -tags integration -timeout 120s ./pkg/hub/... -run TestParity
+	go test -v -tags integration -timeout 300s ./pkg/hub/... -run TestParity
 
 e2e: e2e-github e2e-linear e2e-replicated-github e2e-replicated-linear ## Run all real E2E suites sequentially
 

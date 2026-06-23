@@ -134,6 +134,7 @@ type FactoryView struct {
 	Tags                []string               `json:"tags"`
 	Color               string                 `json:"color"`
 	Labels              []string               `json:"labels,omitempty"`
+	ExcludeLabels       []string               `json:"exclude_labels,omitempty"`
 	AssignedTo          string                 `json:"assigned_to,omitempty"`
 	Enabled             bool                   `json:"enabled"`
 	ConcurrencyGroup    string                 `json:"concurrencyGroup,omitempty"`
@@ -296,6 +297,7 @@ type FactoryPatch struct {
 	Tags                []string               `json:"tags,omitempty"`
 	Color               string                 `json:"color,omitempty"`
 	Labels              []string               `json:"labels,omitempty"`
+	ExcludeLabels       []string               `json:"exclude_labels,omitempty"`
 	AssignedTo          string                 `json:"assigned_to,omitempty"`
 	Enabled             *bool                  `json:"enabled,omitempty"`
 	ConcurrencyGroup    string                 `json:"concurrencyGroup,omitempty"`
@@ -528,6 +530,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			Tags:                f.Tags,
 			Color:               f.Color,
 			Labels:              f.Labels,
+			ExcludeLabels:       f.ExcludeLabels,
 			AssignedTo:          f.AssignedTo,
 			Enabled:             isFactoryEnabled(f),
 			ConcurrencyGroup:    f.ConcurrencyGroup,
@@ -1090,6 +1093,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			if fp.Labels != nil {
 				disk.Labels = fp.Labels
 			}
+			if fp.ExcludeLabels != nil {
+				disk.ExcludeLabels = fp.ExcludeLabels
+			}
 			if fp.AssignedTo != "" {
 				disk.AssignedTo = fp.AssignedTo
 			}
@@ -1117,6 +1123,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				disk.ExternalTrigger = fp.ExternalTrigger
 			}
 
+			if err := disk.Validate(); err != nil {
+				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			if err := saveExternalFactory(disk); err != nil {
 				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
 				return
