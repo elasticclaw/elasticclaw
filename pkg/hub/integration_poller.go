@@ -333,7 +333,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 		if !strings.EqualFold(currentStatus, factory.TriggerStatus) {
 			continue
 		}
-		if !s.labelsMatch(currentLabels, factory.Labels) {
+		if !s.labelsMatch(currentLabels, factory.Labels, factory.ExcludeLabels) {
 			continue
 		}
 		if !s.assigneeMatches(currentAssignee, factory.AssignedTo) {
@@ -388,14 +388,7 @@ func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []
 		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
 			continue
 		}
-		labelsMatched := true
-		for _, required := range workflow.Labels {
-			if !currentLabels[strings.ToLower(required)] {
-				labelsMatched = false
-				break
-			}
-		}
-		if !labelsMatched {
+		if !labelSetAllowed(currentLabels, workflow.Labels, workflow.ExcludeLabels) {
 			continue
 		}
 
@@ -613,7 +606,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 		if !strings.EqualFold(currentStateName, factory.TriggerStatus) {
 			continue
 		}
-		if !s.labelsMatch(currentLabels, factory.Labels) {
+		if !s.labelsMatch(currentLabels, factory.Labels, factory.ExcludeLabels) {
 			continue
 		}
 		if !s.assigneeMatches(currentAssignee, factory.AssignedTo) {
@@ -688,14 +681,7 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
 			continue
 		}
-		labelsMatched := true
-		for _, required := range workflow.Labels {
-			if !currentLabels[strings.ToLower(required)] {
-				labelsMatched = false
-				break
-			}
-		}
-		if !labelsMatched {
+		if !labelSetAllowed(currentLabels, workflow.Labels, workflow.ExcludeLabels) {
 			continue
 		}
 		log.Printf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
@@ -970,7 +956,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 			continue
 		}
 
-		if !s.labelsMatch(currentLabels, factory.Labels) {
+		if !s.labelsMatch(currentLabels, factory.Labels, factory.ExcludeLabels) {
 			continue
 		}
 		if !s.assigneeMatches(currentAssignee, factory.AssignedTo) {
@@ -1091,12 +1077,8 @@ func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo strin
 		}
 		return payload, true
 	}
-	if len(workflow.Labels) > 0 {
-		for _, required := range workflow.Labels {
-			if !issueLabels[strings.ToLower(required)] {
-				return payload, false
-			}
-		}
+	if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
+		return payload, false
 	}
 	triggerStatus := workflow.TriggerStatus
 	if triggerStatus == "" {
@@ -1542,6 +1524,13 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 				continue
 			}
 		}
+		currentLabels, labelsOK := s.githubFactoryPRLabels(factory, repo, pr.Number)
+		if !labelsOK {
+			continue
+		}
+		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
+			continue
+		}
 
 		payload := s.buildGitHubPRPollPayload(pr, repo)
 		if err := s.createClawForGitHubPR(factory, payload, "poll"); err != nil {
@@ -1582,24 +1571,8 @@ func (s *Server) factoryMatchesWorkspace(factory *types.FactoryConfig, workspace
 	return true
 }
 
-func (s *Server) labelsMatch(currentLabels []string, requiredLabels []string) bool {
-	if len(requiredLabels) == 0 {
-		return true
-	}
-	currentSet := map[string]bool{}
-	for _, l := range currentLabels {
-		currentSet[strings.ToLower(strings.TrimSpace(l))] = true
-	}
-	for _, required := range requiredLabels {
-		required = strings.ToLower(strings.TrimSpace(required))
-		if required == "" {
-			continue
-		}
-		if !currentSet[required] {
-			return false
-		}
-	}
-	return true
+func (s *Server) labelsMatch(currentLabels []string, requiredLabels []string, excludedLabels []string) bool {
+	return labelsAllowed(currentLabels, requiredLabels, excludedLabels)
 }
 
 func (s *Server) assigneeMatches(currentAssignee, filter string) bool {

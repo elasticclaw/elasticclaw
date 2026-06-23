@@ -83,11 +83,6 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
-	if workspaceName == "" {
-		log.Printf("[github-issues-webhook] %s ignored; use /api/workspaces/{workspace}/webhooks/github-issues", r.URL.Path)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -143,6 +138,32 @@ func (s *Server) validateGitHubIssuesSignatureReason(workspaceName string, body 
 	if workspaceSecretCount > 0 {
 		return fmt.Sprintf("signature did not match any configured workspace webhook secret (%d checked)", workspaceSecretCount)
 	}
+	if workspaceName == "" {
+		factorySecretCount := 0
+		s.mu.RLock()
+		secrets := s.hubCfg.Secrets
+		s.mu.RUnlock()
+		for _, factory := range s.resolveFactories() {
+			if factory.Integration != "github-issues" {
+				continue
+			}
+			secret := factory.WebhookSecret
+			if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
+				secret = secrets[factory.WebhookSecretRef]
+			}
+			if secret == "" {
+				continue
+			}
+			factorySecretCount++
+			if verifyGitHubHMAC(body, sig, secret) {
+				return ""
+			}
+		}
+		if factorySecretCount > 0 {
+			return fmt.Sprintf("signature did not match any configured factory webhook secret (%d checked)", factorySecretCount)
+		}
+		return "no configured factory webhook secret"
+	}
 	return ""
 }
 
@@ -162,14 +183,6 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
-
-	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("github-issues")
-	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
-	if len(workflowWorkspaces) == 0 {
-		log.Printf("[github-issues-webhook] no workflows configured — nothing to do")
-		return
-	}
-	log.Printf("[github-issues-webhook] checking %d workflow workspace(s)", len(workflowWorkspaces))
 
 	currentStatus := payload.Issue.State
 	previousStatus := ""
@@ -232,6 +245,21 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 		}
 	}
 
+	if workspaceName == "" {
+		if !s.processGitHubIssuesFactoryEvent(payload, issueID, currentStatus, issueLabels, assignee) {
+			log.Printf("[github-issues-webhook] no factory matched for issue %s", issueID)
+		}
+		return
+	}
+
+	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("github-issues")
+	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
+	if len(workflowWorkspaces) == 0 {
+		log.Printf("[github-issues-webhook] no workflows configured — nothing to do")
+		return
+	}
+	log.Printf("[github-issues-webhook] checking %d workflow workspace(s)", len(workflowWorkspaces))
+
 	if !s.processGitHubIssuesWorkflowEvent(workflowWorkspaces, payload, issueID, issueTitle, currentStatus, previousStatus, previousLabels, issueLabels, assignee) {
 		log.Printf("[github-issues-webhook] no workflow matched for issue %s", issueID)
 	}
@@ -253,6 +281,57 @@ func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
 		return workflow.TriggerRepos
 	}
 	return workflow.Repos
+}
+
+func (s *Server) processGitHubIssuesFactoryEvent(payload githubIssuesWebhookPayload, issueID, currentStatus string, issueLabels map[string]bool, assignee string) bool {
+	matched := false
+	for _, factory := range s.resolveFactories() {
+		if factory.Integration != "github-issues" {
+			continue
+		}
+		if factory.Enabled != nil && !*factory.Enabled {
+			continue
+		}
+		if !githubRepoMatches(payload.Repository.FullName, githubIssuesTriggerRepos(factory)) {
+			continue
+		}
+		if factory.TriggerStatus == "" {
+			continue
+		}
+		if !strings.EqualFold(currentStatus, factory.TriggerStatus) && !issueLabels[strings.ToLower(factory.TriggerStatus)] {
+			continue
+		}
+		if !labelSetAllowed(issueLabels, factory.Labels, factory.ExcludeLabels) {
+			continue
+		}
+		if !s.assigneeMatches(assignee, factory.AssignedTo) {
+			continue
+		}
+		if len(factory.AllowedLabelers) > 0 && payload.Action == "labeled" {
+			allowed := false
+			for _, labeler := range factory.AllowedLabelers {
+				if strings.EqualFold(labeler, payload.Sender.Login) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				continue
+			}
+		}
+		matched = true
+		log.Printf("[factory:%s] GitHub issue %s matched factory trigger — creating claw", factory.Name, issueID)
+		if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
+			log.Printf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
+			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", currentStatus, "error", "", err.Error())
+		} else {
+			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", currentStatus, "claw_created", "", "github-issues webhook")
+		}
+	}
+	return matched
 }
 
 func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceConfig, payload githubIssuesWebhookPayload, issueID, issueTitle, currentStatus, previousStatus string, previousLabels, issueLabels map[string]bool, assignee string) bool {
@@ -277,17 +356,8 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 					continue
 				}
 			} else {
-				if len(workflow.Labels) > 0 {
-					allMatch := true
-					for _, required := range workflow.Labels {
-						if !issueLabels[strings.ToLower(required)] {
-							allMatch = false
-							break
-						}
-					}
-					if !allMatch {
-						continue
-					}
+				if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
+					continue
 				}
 				if len(workflow.AllowedLabelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
 					allowed := false
@@ -353,12 +423,12 @@ func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload 
 		return false
 	}
 	if trigger.GitHubIssues != nil {
-		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
+		return githubIssuesWorkflowSourceMatches(trigger.GitHubIssues.Event, trigger.GitHubIssues.States, trigger.GitHubIssues.Labels, trigger.GitHubIssues.ExcludeLabels, trigger.GitHubIssues.Labelers, payload, currentStatus, issueLabels)
 	}
 	return false
 }
 
-func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
+func githubIssuesWorkflowSourceMatches(event string, states, labels, excludeLabels, labelers []string, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {
 	switch event {
 	case "issue_labeled":
 		if payload.Action != "labeled" {
@@ -402,10 +472,8 @@ func githubIssuesWorkflowSourceMatches(event string, states, labels, labelers []
 			return false
 		}
 	}
-	for _, required := range labels {
-		if !issueLabels[strings.ToLower(required)] {
-			return false
-		}
+	if !labelSetAllowed(issueLabels, labels, excludeLabels) {
+		return false
 	}
 	if len(labelers) > 0 && (payload.Action == "labeled" || payload.Action == "unlabeled") {
 		for _, labeler := range labelers {

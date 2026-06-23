@@ -245,6 +245,9 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 	if f == nil || f.Name == "" {
 		return fmt.Errorf("factory name required")
 	}
+	if err := f.Validate(); err != nil {
+		return err
+	}
 	if err := validateName(f.Name); err != nil {
 		return err
 	}

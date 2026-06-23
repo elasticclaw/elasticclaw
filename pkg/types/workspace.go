@@ -122,6 +122,7 @@ type GitHubIssuesWorkflowTrigger struct {
 	Repositories     []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
 	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels    []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	Labelers         []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
 	AssignedTo       string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
@@ -133,16 +134,18 @@ type LinearWorkflowTrigger struct {
 	Team             string   `yaml:"team,omitempty" json:"team,omitempty"`
 	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels    []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	AssignedTo       string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
 }
 
 type ShortcutWorkflowTrigger struct {
-	Event      string   `yaml:"event,omitempty" json:"event,omitempty"`
-	Workspace  string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
-	States     []string `yaml:"states,omitempty" json:"states,omitempty"`
-	Labels     []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	AssignedTo string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	Event         string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Workspace     string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	States        []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels        []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
+	AssignedTo    string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
 }
 
 type JiraWorkflowTrigger struct {

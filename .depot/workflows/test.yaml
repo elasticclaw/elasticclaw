@@ -3,6 +3,11 @@ name: Test
 on:
   pull_request:
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   unit:
     name: Unit tests
@@ -84,3 +89,299 @@ jobs:
       - name: Build (static export)
         run: npm run build
         working-directory: web
+
+  preview:
+    name: Preview build
+    runs-on: depot-ubuntu-24.04
+    needs:
+      - unit
+      - build
+      - web
+    if: ${{ success() && github.event.pull_request.head.repo.full_name == github.repository }}
+    env:
+      PREVIEW_R2_ENDPOINT: ${{ secrets.PREVIEW_R2_ENDPOINT }}
+      PREVIEW_R2_BUCKET: ${{ secrets.PREVIEW_R2_BUCKET }}
+      PREVIEW_R2_ACCESS_KEY_ID: ${{ secrets.PREVIEW_R2_ACCESS_KEY_ID }}
+      PREVIEW_R2_SECRET_ACCESS_KEY: ${{ secrets.PREVIEW_R2_SECRET_ACCESS_KEY }}
+      PREVIEW_PUBLIC_BASE_URL: ${{ secrets.PREVIEW_PUBLIC_BASE_URL }}
+    steps:
+      - name: Check preview publishing config
+        id: preview_config
+        run: |
+          missing=0
+          for name in PREVIEW_R2_ENDPOINT PREVIEW_R2_BUCKET PREVIEW_R2_ACCESS_KEY_ID PREVIEW_R2_SECRET_ACCESS_KEY PREVIEW_PUBLIC_BASE_URL; do
+            if [ -z "${!name}" ]; then
+              echo "Missing $name; skipping preview publish"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 0 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+
+      - uses: actions/setup-go@v5
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'web/package.json'
+
+      - name: Verify AWS CLI
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        run: aws --version
+
+      - name: Build preview binaries
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          PR="${{ github.event.pull_request.number }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION="preview-pr-${PR}-${SHORT_SHA}"
+          COMMIT="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          make build-web
+          mkdir -p dist
+
+          CLI_LDFLAGS="-X github.com/elasticclaw/elasticclaw/cmd.Version=${VERSION} \
+                       -X github.com/elasticclaw/elasticclaw/cmd.Commit=${COMMIT} \
+                       -X github.com/elasticclaw/elasticclaw/cmd.BuildDate=${BUILD_DATE}"
+          BRIDGE_LDFLAGS="-X main.Version=${VERSION} \
+                          -X main.Commit=${COMMIT} \
+                          -X main.BuildDate=${BUILD_DATE}"
+
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -tags embedweb -ldflags "$CLI_LDFLAGS" -o dist/elasticclaw-linux-amd64   .
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -tags embedweb -ldflags "$CLI_LDFLAGS" -o dist/elasticclaw-linux-arm64   .
+          GOOS=darwin  GOARCH=amd64 go build -tags embedweb -ldflags "$CLI_LDFLAGS" -o dist/elasticclaw-darwin-amd64  .
+          GOOS=darwin  GOARCH=arm64 go build -tags embedweb -ldflags "$CLI_LDFLAGS" -o dist/elasticclaw-darwin-arm64  .
+          GOOS=windows GOARCH=amd64 go build -tags embedweb -ldflags "$CLI_LDFLAGS" -o dist/elasticclaw-windows-amd64.exe .
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$BRIDGE_LDFLAGS" -o dist/claw-bridge-linux-amd64 ./cmd/claw-bridge/
+
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Generate preview manifest and install script
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          PR="${{ github.event.pull_request.number }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION="preview-pr-${PR}-${SHORT_SHA}"
+          PUBLIC_BASE="${PREVIEW_PUBLIC_BASE_URL%/}"
+          PREVIEW_BASE="${PUBLIC_BASE}/pr/${PR}/${SHORT_SHA}"
+          LATEST_BASE="${PUBLIC_BASE}/pr/${PR}/latest"
+
+          cat > dist/manifest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "pr": ${PR},
+            "sha": "${GITHUB_SHA}",
+            "shortSha": "${SHORT_SHA}",
+            "runId": "${GITHUB_RUN_ID}",
+            "runAttempt": "${GITHUB_RUN_ATTEMPT}",
+            "baseUrl": "${PREVIEW_BASE}",
+            "latestUrl": "${LATEST_BASE}",
+            "assets": {
+              "linux-amd64": "${PREVIEW_BASE}/elasticclaw-linux-amd64",
+              "linux-arm64": "${PREVIEW_BASE}/elasticclaw-linux-arm64",
+              "darwin-amd64": "${PREVIEW_BASE}/elasticclaw-darwin-amd64",
+              "darwin-arm64": "${PREVIEW_BASE}/elasticclaw-darwin-arm64",
+              "windows-amd64": "${PREVIEW_BASE}/elasticclaw-windows-amd64.exe",
+              "clawBridgeLinuxAmd64": "${PREVIEW_BASE}/claw-bridge-linux-amd64",
+              "checksums": "${PREVIEW_BASE}/checksums.txt",
+              "installScript": "${PREVIEW_BASE}/install.sh"
+            }
+          }
+          EOF
+
+          cat > dist/install.sh <<EOF
+          #!/usr/bin/env sh
+          set -eu
+
+          BASE_URL="${PREVIEW_BASE}"
+          HUB_BINARY_URL="\${BASE_URL}/elasticclaw-linux-amd64"
+
+          os="\$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="\$(uname -m)"
+          case "\$arch" in
+            x86_64|amd64) arch="amd64" ;;
+            arm64|aarch64) arch="arm64" ;;
+            *) echo "unsupported architecture: \$arch" >&2; exit 1 ;;
+          esac
+          case "\$os" in
+            linux) asset="elasticclaw-linux-\$arch" ;;
+            darwin) asset="elasticclaw-darwin-\$arch" ;;
+            *) echo "unsupported OS: \$os" >&2; exit 1 ;;
+          esac
+
+          tmp="\$(mktemp)"
+          sums="\$(mktemp)"
+          trap 'rm -f "\$tmp" "\$sums"' EXIT
+          curl -fsSL "\${BASE_URL}/\${asset}" -o "\$tmp"
+          curl -fsSL "\${BASE_URL}/checksums.txt" -o "\$sums"
+
+          expected="\$(awk -v asset="\$asset" '\$2 == asset { print \$1 }' "\$sums")"
+          if [ -z "\$expected" ]; then
+            echo "checksum for \$asset not found" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="\$(sha256sum "\$tmp" | awk '{ print \$1 }')"
+          elif command -v shasum >/dev/null 2>&1; then
+            actual="\$(shasum -a 256 "\$tmp" | awk '{ print \$1 }')"
+          else
+            echo "sha256sum or shasum is required to verify preview download" >&2
+            exit 1
+          fi
+          if [ "\$actual" != "\$expected" ]; then
+            echo "checksum mismatch for \$asset" >&2
+            echo "expected \$expected" >&2
+            echo "actual   \$actual" >&2
+            exit 1
+          fi
+          chmod +x "\$tmp"
+
+          if [ "\${1:-}" = "install" ]; then
+            shift
+            exec "\$tmp" install --hub-binary-url "\$HUB_BINARY_URL" "\$@"
+          fi
+
+          dest_dir="\${ELASTICCLAW_INSTALL_DIR:-/usr/local/bin}"
+          dest="\${dest_dir}/elasticclaw"
+          if [ ! -d "\$dest_dir" ]; then
+            mkdir -p "\$dest_dir" 2>/dev/null || sudo mkdir -p "\$dest_dir"
+          fi
+          if [ -w "\$dest_dir" ]; then
+            cp "\$tmp" "\$dest"
+            chmod +x "\$dest"
+          else
+            sudo cp "\$tmp" "\$dest"
+            sudo chmod +x "\$dest"
+          fi
+          echo "Installed ElasticClaw preview ${VERSION} to \$dest"
+          EOF
+          chmod +x dist/install.sh
+
+      - name: Publish preview to R2
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PREVIEW_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PREVIEW_R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+
+          PR="${{ github.event.pull_request.number }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          upload() {
+            local file="$1"
+            local key="$2"
+            local content_type="$3"
+            local cache_control="$4"
+            aws s3 cp "$file" "s3://${PREVIEW_R2_BUCKET}/${key}" \
+              --endpoint-url "$PREVIEW_R2_ENDPOINT" \
+              --content-type "$content_type" \
+              --cache-control "$cache_control"
+          }
+
+          for item in "pr/${PR}/${SHORT_SHA}|public, max-age=31536000, immutable" "pr/${PR}/latest|public, max-age=300"; do
+            prefix="${item%%|*}"
+            cache_control="${item#*|}"
+            upload dist/elasticclaw-linux-amd64 "${prefix}/elasticclaw-linux-amd64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-linux-arm64 "${prefix}/elasticclaw-linux-arm64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-darwin-amd64 "${prefix}/elasticclaw-darwin-amd64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-darwin-arm64 "${prefix}/elasticclaw-darwin-arm64" application/octet-stream "$cache_control"
+            upload dist/elasticclaw-windows-amd64.exe "${prefix}/elasticclaw-windows-amd64.exe" application/octet-stream "$cache_control"
+            upload dist/claw-bridge-linux-amd64 "${prefix}/claw-bridge-linux-amd64" application/octet-stream "$cache_control"
+            upload dist/checksums.txt "${prefix}/checksums.txt" text/plain "$cache_control"
+            upload dist/manifest.json "${prefix}/manifest.json" application/json "$cache_control"
+            upload dist/install.sh "${prefix}/install.sh" text/x-shellscript "$cache_control"
+          done
+
+      - name: Comment preview install instructions
+        if: ${{ steps.preview_config.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          PR="${{ github.event.pull_request.number }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION="preview-pr-${PR}-${SHORT_SHA}"
+          PUBLIC_BASE="${PREVIEW_PUBLIC_BASE_URL%/}"
+          LATEST_BASE="${PUBLIC_BASE}/pr/${PR}/latest"
+          IMMUTABLE_BASE="${PUBLIC_BASE}/pr/${PR}/${SHORT_SHA}"
+          MARKER="<!-- elasticclaw-preview-build -->"
+
+          cat > /tmp/preview-comment.md <<EOF
+          ${MARKER}
+          ## Preview build ready
+
+          Version: \`${VERSION}\`  
+          Commit: \`${GITHUB_SHA}\`
+
+          Install the preview CLI:
+
+          \`\`\`bash
+          curl -fsSL ${LATEST_BASE}/install.sh | sh
+          \`\`\`
+
+          Install a preview hub on a server:
+
+          \`\`\`bash
+          curl -fsSL ${LATEST_BASE}/install.sh | sh -s -- install \\
+            --server ssh://root@your-server \\
+            --domain preview.example.com
+          \`\`\`
+
+          Assets:
+          - Latest: ${LATEST_BASE}/manifest.json
+          - This commit: ${IMMUTABLE_BASE}/manifest.json
+          - Checksums: ${IMMUTABLE_BASE}/checksums.txt
+          EOF
+
+          python3 - <<'PY'
+          import json
+          with open("/tmp/preview-comment.md", "r", encoding="utf-8") as f:
+            body = f.read()
+          with open("/tmp/preview-comment.json", "w", encoding="utf-8") as f:
+            json.dump({"body": body}, f)
+          PY
+
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate > /tmp/preview-comments.json
+          comment_id="$(python3 - <<'PY'
+          import json, sys
+          marker = "<!-- elasticclaw-preview-build -->"
+          with open("/tmp/preview-comments.json", "r", encoding="utf-8") as f:
+            comments = json.load(f)
+          for comment in comments:
+            if marker in (comment.get("body") or ""):
+              print(comment["id"])
+              break
+          PY
+          )"
+
+          if [ -n "$comment_id" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              --method PATCH \
+              --input /tmp/preview-comment.json >/dev/null
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --method POST \
+              --input /tmp/preview-comment.json >/dev/null
+          fi

@@ -2057,7 +2057,7 @@ echo "Git: $(git --version)"
 	return runShell(script)
 }
 
-const openClawVersion = "2026.6.1"
+const openClawVersion = "2026.6.9"
 
 // installOpenClaw installs the pinned OpenClaw CLI via npm.
 func installOpenClaw() error {

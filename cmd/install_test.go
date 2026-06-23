@@ -12,6 +12,48 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
+func TestResolveInstallVersion(t *testing.T) {
+	version, fetchLatest := resolveInstallVersion("", "")
+	if version != "" || !fetchLatest {
+		t.Fatalf("empty inputs = (%q, %t), want empty version and fetch latest", version, fetchLatest)
+	}
+
+	version, fetchLatest = resolveInstallVersion("2026.6.21", "")
+	if version != "2026.6.21" || fetchLatest {
+		t.Fatalf("explicit version = (%q, %t), want explicit version without fetch", version, fetchLatest)
+	}
+
+	version, fetchLatest = resolveInstallVersion("", "https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64")
+	if version != "custom" || fetchLatest {
+		t.Fatalf("custom URL = (%q, %t), want custom without fetch", version, fetchLatest)
+	}
+}
+
+func TestInstallVersionAndHubBinaryURLAreMutuallyExclusive(t *testing.T) {
+	versionFlag := installCmd.Flag("version")
+	if versionFlag == nil {
+		t.Fatal("version flag not found")
+	}
+	groups := versionFlag.Annotations["cobra_annotation_mutually_exclusive"]
+	for _, group := range groups {
+		fields := strings.Fields(group)
+		hasVersion := false
+		hasHubBinaryURL := false
+		for _, field := range fields {
+			if field == "version" {
+				hasVersion = true
+			}
+			if field == "hub-binary-url" {
+				hasHubBinaryURL = true
+			}
+		}
+		if hasVersion && hasHubBinaryURL {
+			return
+		}
+	}
+	t.Fatalf("version flag mutually exclusive annotations = %#v, want version and hub-binary-url", groups)
+}
+
 func TestKnownHostsCallbackVerifiesServerKey(t *testing.T) {
 	trustedKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

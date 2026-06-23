@@ -10,10 +10,10 @@ import (
 )
 
 var testParams = install.Params{
-	Domain:    "hub.example.com",
-	Version:   "v0.0.3",
-	Token:     "test-hub-token",
-	ClawToken: "test-claw-token",
+	Domain:     "hub.example.com",
+	Version:    "v0.0.3",
+	Token:      "test-hub-token",
+	ClawToken:  "test-claw-token",
 	UIPassword: "test-ui-password",
 }
 
@@ -79,6 +79,13 @@ func TestScriptInstallBinary(t *testing.T) {
 	assertContains(t, s, "v0.0.3", "version in URL")
 	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
 	assertContains(t, s, "elasticclaw-bin", "binary download")
+}
+
+func TestScriptInstallBinaryFromURL(t *testing.T) {
+	s := install.ScriptInstallBinaryFromURL("https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64", true)
+	assertContains(t, s, "https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64", "custom binary URL")
+	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
+	assertContains(t, s, "sudo ", "sudo prefix")
 }
 
 func TestScriptWriteConfig(t *testing.T) {
@@ -147,11 +154,11 @@ func TestScripts_Shellcheck(t *testing.T) {
 	}
 
 	scripts := map[string]string{
-		"install_binary":   install.ScriptInstallBinary("v0.0.3", true),
-		"write_config":     install.ScriptWriteConfig(testParams, true),
-		"install_systemd":  install.ScriptInstallSystemd(true),
-		"install_caddy":    install.ScriptInstallCaddy(true),
-		"write_caddyfile":  install.ScriptWriteCaddyfile("hub.example.com", true),
+		"install_binary":  install.ScriptInstallBinary("v0.0.3", true),
+		"write_config":    install.ScriptWriteConfig(testParams, true),
+		"install_systemd": install.ScriptInstallSystemd(true),
+		"install_caddy":   install.ScriptInstallCaddy(true),
+		"write_caddyfile": install.ScriptWriteCaddyfile("hub.example.com", true),
 	}
 
 	for name, script := range scripts {

@@ -37,6 +37,11 @@ interface LLMKeyView {
   defaultModel?: string
 }
 
+interface LLMModelOption {
+  id: string
+  name: string
+}
+
 interface GitHubAppPermission {
   name: string
   granted: string
@@ -65,6 +70,7 @@ interface WorkspaceGitHubAppView {
 
 interface SettingsData {
   llmKeys: LLMKeyView[]
+  modelOptions?: Record<string, LLMModelOption[]>
   providers: Record<string, {
     type: string
     enabled: boolean
@@ -853,7 +859,7 @@ const PROVIDER_OPTIONS = [
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
-const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
+const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
   anthropic: [
     { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
     { id: "anthropic/claude-opus-4-5",   name: "Claude Opus 4.5" },
@@ -861,11 +867,11 @@ const PROVIDER_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: "__custom",                    name: "Custom Anthropic model" },
   ],
   fireworks: [
-    { id: "fireworks/accounts/fireworks/models/kimi-k2p6",                  name: "Kimi K2.6" },
+    { id: "fireworks/accounts/fireworks/models/kimi-k2p7",                  name: "Kimi K2.7" },
+    { id: "fireworks/accounts/fireworks/models/glm-5p2",                    name: "GLM 5.2" },
     { id: "fireworks/accounts/fireworks/models/deepseek-v4-pro",            name: "DeepSeek V4 Pro" },
     { id: "fireworks/accounts/fireworks/models/deepseek-v4-flash",          name: "DeepSeek V4 Flash" },
     { id: "fireworks/accounts/fireworks/models/minimax-m2p7",               name: "MiniMax M2.7" },
-    { id: "fireworks/accounts/fireworks/models/glm-5p1",                    name: "GLM 5.1" },
     { id: "fireworks/accounts/fireworks/models/qwen3p6-plus",               name: "Qwen3.6 Plus" },
     { id: "fireworks/accounts/fireworks/models/gpt-oss-120b",               name: "OpenAI gpt-oss-120b" },
     { id: "fireworks/accounts/fireworks/models/gpt-oss-20b",                name: "OpenAI gpt-oss-20b" },
@@ -918,6 +924,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
   const providerPlaceholder = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.placeholder ?? ""
+  const providerModels = (p: string) => settings.modelOptions?.[p] ?? PROVIDER_MODELS[p] ?? []
 
   const resetForm = () => {
     setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setEditIdx(null)
@@ -932,8 +939,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     setFormCustomProvider(isCustom ? k.provider : "")
     setFormKey("")
     setFormDefault(k.default)
-    const providerModels = PROVIDER_MODELS[k.provider] || []
-    if (k.defaultModel && providerModels.length > 0 && !providerModels.some(m => m.id === k.defaultModel)) {
+    const options = providerModels(k.provider)
+    if (k.defaultModel && options.length > 0 && !options.some(m => m.id === k.defaultModel)) {
       setFormDefaultModel("__custom")
       setFormCustomModel(k.defaultModel)
     } else {
@@ -979,6 +986,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   function setDefault(i: number) {
     onSave({ llmKeys: [{ name: llmKeys[i].name, default: true }] })
   }
+
+  const formProviderModels = providerModels(formProvider)
 
   return (
     <div className="space-y-6">
@@ -1145,21 +1154,21 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Default model <span className="text-muted-foreground/60">(optional)</span></label>
-                {PROVIDER_MODELS[formProvider] ? (
+                {formProviderModels.length > 0 ? (
                   <select
                     value={formDefaultModel}
                     onChange={e => setFormDefaultModel(e.target.value)}
                     className="h-8 text-sm w-full rounded-md border border-input bg-background px-2 py-1"
                   >
                     <option value="">— use provider default —</option>
-                    {PROVIDER_MODELS[formProvider].map(m => (
+                    {formProviderModels.map(m => (
                       <option key={m.id} value={m.id}>{m.name}</option>
                     ))}
                   </select>
                 ) : (
                   <Input value={formDefaultModel} onChange={e => setFormDefaultModel(e.target.value)} className="h-8 text-sm" placeholder="e.g. myprovider/model-name" />
                 )}
-                {PROVIDER_MODELS[formProvider] && formDefaultModel === "__custom" && (
+                {formProviderModels.length > 0 && formDefaultModel === "__custom" && (
                   <Input
                     value={formCustomModel}
                     onChange={e => setFormCustomModel(e.target.value)}
