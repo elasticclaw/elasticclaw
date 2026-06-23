@@ -53,15 +53,16 @@ type ConcurrencyGroupView struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys       []LLMKeyView            `json:"llmKeys"`
-	Providers     map[string]ProviderView `json:"providers"`
-	GitHub        []GitHubAppView         `json:"github"`
-	SSHPublicKeys []string                `json:"sshPublicKeys"`
-	Integrations  *IntegrationsView       `json:"integrations"`
-	Factories     []FactoryView           `json:"factories"`
-	Secrets       []string                `json:"secrets"`
-	MCPServers    []MCPView               `json:"mcpServers,omitempty"`
-	Auth          *AuthView               `json:"auth,omitempty"`
+	LLMKeys       []LLMKeyView                `json:"llmKeys"`
+	ModelOptions  map[string][]LLMModelOption `json:"modelOptions,omitempty"`
+	Providers     map[string]ProviderView     `json:"providers"`
+	GitHub        []GitHubAppView             `json:"github"`
+	SSHPublicKeys []string                    `json:"sshPublicKeys"`
+	Integrations  *IntegrationsView           `json:"integrations"`
+	Factories     []FactoryView               `json:"factories"`
+	Secrets       []string                    `json:"secrets"`
+	MCPServers    []MCPView                   `json:"mcpServers,omitempty"`
+	Auth          *AuthView                   `json:"auth,omitempty"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
@@ -389,9 +390,13 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
+	var fireworksAPIKey string
 	// LLM keys — mask actual key values
 	view.LLMKeys = []LLMKeyView{}
 	for _, k := range s.hubCfg.LLMKeys {
+		if k.Provider == "fireworks" && k.APIKey != "" && fireworksAPIKey == "" {
+			fireworksAPIKey = k.APIKey
+		}
 		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
 			Name:         k.Name,
 			Provider:     k.Provider,
@@ -563,6 +568,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	view.Auth = authView
+	view.ModelOptions = map[string][]LLMModelOption{
+		"fireworks": s.fireworksModelOptions(r.Context(), fireworksAPIKey),
+	}
 
 	// Read SSH public keys outside the lock (file I/O)
 	for name, pv := range view.Providers {

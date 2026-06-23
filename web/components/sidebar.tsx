@@ -117,32 +117,60 @@ export function Sidebar({
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
+  const [loadingManualWorkflows, setLoadingManualWorkflows] = useState(false)
 
-  // Load manual-trigger workflows from persisted workspaces.
+  const fetchManualWorkflows = useCallback(async () => {
+    const data = await fetchWorkspaces()
+    const workflows = data.flatMap((workspace) => workspace.workflows || [])
+    return workflows.filter((workflow) => workflow.enableManualTrigger)
+  }, [])
+
+  const openWorkflowLauncher = useCallback(async () => {
+    setLoadingManualWorkflows(true)
+    try {
+      const workflows = await fetchManualWorkflows()
+      setManualWorkflows(workflows)
+      if (workflows.length === 1) {
+        onSelectWorkflow?.(workflows[0])
+      } else if (workflows.length > 1) {
+        setShowWorkflowPicker(true)
+      } else {
+        setShowWorkflowPicker(true)
+      }
+    } catch (err) {
+      console.error("[sidebar] fetchWorkflows error:", err)
+      if (manualWorkflows.length === 1) {
+        onSelectWorkflow?.(manualWorkflows[0])
+      } else if (manualWorkflows.length > 1) {
+        setShowWorkflowPicker(true)
+      }
+    } finally {
+      setLoadingManualWorkflows(false)
+    }
+  }, [fetchManualWorkflows, manualWorkflows, onSelectWorkflow])
+
+  // Warm the manual-trigger workflow cache from persisted workspaces.
   useEffect(() => {
     let cancelled = false
     let attempts = 0
-    const load = () => {
-      fetchWorkspaces()
-        .then((data) => {
-          if (cancelled) return
-          const workflows = data.flatMap((workspace) => workspace.workflows || [])
-          const manual = workflows.filter((workflow) => workflow.enableManualTrigger)
-          console.log("[sidebar] loaded workflows:", workflows.length, "manual:", manual.length)
-          setManualWorkflows(manual)
-        })
-        .catch((err) => {
-          if (cancelled) return
-          console.error("[sidebar] fetchWorkflows error (attempt", attempts + 1, "):", err)
-          attempts++
-          if (attempts < 3) {
-            setTimeout(load, attempts * 500)
-          }
-        })
+    const load = async () => {
+      try {
+        const manual = await fetchManualWorkflows()
+        if (cancelled) return
+        setManualWorkflows(manual)
+        console.log("[sidebar] loaded manual workflows:", manual.length)
+      } catch (err) {
+        if (cancelled) return
+        console.error("[sidebar] fetchWorkflows error (attempt", attempts + 1, "):", err)
+        attempts++
+        if (attempts < 3) {
+          setTimeout(load, attempts * 500)
+        }
+      }
     }
     load()
     return () => { cancelled = true }
-  }, [claws.length]) // re-check when claws change (new claw from trigger)
+  }, [claws.length, fetchManualWorkflows]) // re-check when claws change (new claw from trigger)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -212,15 +240,10 @@ export function Sidebar({
               size="icon"
               className="size-8"
               title="Create Agent"
-              onClick={() => {
-                if (manualWorkflows.length === 1) {
-                  onSelectWorkflow?.(manualWorkflows[0])
-                } else {
-                  setShowWorkflowPicker(true)
-                }
-              }}
+              onClick={openWorkflowLauncher}
+              disabled={loadingManualWorkflows}
             >
-              <Plus className="size-4" />
+              {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
         </div>
@@ -279,15 +302,10 @@ export function Sidebar({
               size="icon"
               className="size-8"
               title="Create Agent"
-              onClick={() => {
-                if (manualWorkflows.length === 1) {
-                  onSelectWorkflow?.(manualWorkflows[0])
-                } else {
-                  setShowWorkflowPicker(true)
-                }
-              }}
+              onClick={openWorkflowLauncher}
+              disabled={loadingManualWorkflows}
             >
-              <Plus className="size-4" />
+              {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
           <Button
@@ -549,9 +567,13 @@ function WorkflowPickerOverlay({
           </Button>
         </div>
         <div className="p-2 space-y-1">
-          {workflows.map((workflow) => (
+          {workflows.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-muted-foreground">
+              No manual workflows are available.
+            </div>
+          ) : workflows.map((workflow) => (
             <button
-              key={workflow.name}
+              key={`${workflow.workspaceName}/${workflow.name}`}
               className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors"
               onClick={() => onSelect(workflow)}
             >

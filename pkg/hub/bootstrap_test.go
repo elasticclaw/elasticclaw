@@ -82,20 +82,20 @@ func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 }
 
 func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
-	start := daytonaStartOpenClawInstallCommand("2026.6.1")
-	status := daytonaOpenClawInstallStatusCommand("2026.6.1")
+	start := daytonaStartOpenClawInstallCommand("2026.6.9")
+	status := daytonaOpenClawInstallStatusCommand("2026.6.9")
 
 	assertContains(t, start, "setsid nohup bash -c", "install starts in a detached process")
 	assertContains(t, start, "openclaw-install.log", "install writes a log for diagnostics")
 	assertContains(t, start, "openclaw-install.status", "install writes a status marker")
-	assertContains(t, start, "openclaw@2026.6.1", "install pins the expected openclaw version")
+	assertContains(t, start, "openclaw@2026.6.9", "install pins the expected openclaw version")
 	assertContains(t, start, "openclaw-install-status=started", "start command returns quickly after launching")
 
 	assertContains(t, status, "openclaw-install-status=ok", "status reports completion")
 	assertContains(t, status, "openclaw-install-status=pending", "status reports in-progress install")
 	assertContains(t, status, "openclaw-install-status=failed", "status reports failed install")
 	assertContains(t, status, "tail -n 120", "status includes install diagnostics")
-	assertContains(t, status, "openclaw@2026.6.1", "status checks the pinned install process")
+	assertContains(t, status, "openclaw@2026.6.9", "status checks the pinned install process")
 }
 
 func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
@@ -503,7 +503,7 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	cmd := exec.Command("bash", "-c", snippet)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		"OPENCLAW_DEFAULT_MODEL=fireworks/accounts/fireworks/models/kimi-k2p6",
+		"OPENCLAW_DEFAULT_MODEL="+defaultFireworksModel,
 		keys[0].EnvVarName()+"=fw-test",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -529,7 +529,7 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	if !ok {
 		t.Fatalf("agents.defaults missing or wrong type: %#v", agents["defaults"])
 	}
-	if defaults["model"] != "fireworks/accounts/fireworks/models/kimi-k2p6" {
+	if defaults["model"] != defaultFireworksModel {
 		t.Fatalf("default model not patched: %#v", defaults["model"])
 	}
 	agentModels, ok := defaults["models"].(map[string]interface{})
@@ -742,7 +742,7 @@ for cmd in curl apt-get npm sudo systemctl git gh oras python3 gpg tee chmod mv 
 done
 curl() { echo stub_curl_output; return 0; }
 openclaw() {
-  if [ "$1" = "--version" ]; then echo "OpenClaw 2026.1.0"; fi
+  if [ "$1" = "--version" ]; then echo "OpenClaw 2026.6.9"; fi
   return 0
 }
 `

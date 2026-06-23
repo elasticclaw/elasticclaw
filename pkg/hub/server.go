@@ -68,6 +68,12 @@ type Server struct {
 	linearBaseURL string
 	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
 	shortcutBaseURL string
+	// fireworksBaseURL overrides the Fireworks API base for testing (default: https://api.fireworks.ai)
+	fireworksBaseURL          string
+	fireworksModelsMu         sync.Mutex
+	fireworksModelsCacheKey   string
+	fireworksModelsCache      []LLMModelOption
+	fireworksModelsCacheUntil time.Time
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -2965,7 +2971,7 @@ echo uninstalled`); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
-	const daytonaOpenClawVersion = "2026.6.1"
+	const daytonaOpenClawVersion = "2026.6.9"
 	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
 	}
@@ -5361,7 +5367,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "openai":
 		return "openai/gpt-5.5"
 	case "fireworks":
-		return "fireworks/accounts/fireworks/models/kimi-k2p6"
+		return defaultFireworksModel
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":

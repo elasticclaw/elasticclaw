@@ -56,6 +56,7 @@ var (
 	installDomain          string
 	installSSHKey          string
 	installVersion         string
+	installHubBinaryURL    string
 	installToken           string
 	installUIPassword      string
 	installTrustNewHostKey bool
@@ -67,18 +68,20 @@ func init() {
 	installCmd.Flags().StringVar(&installDomain, "domain", "", "Domain name that resolves to the server (e.g. hub.mycompany.com)")
 	installCmd.Flags().StringVar(&installSSHKey, "ssh-key", "", "Path to SSH private key (default: SSH agent or ~/.ssh/id_rsa)")
 	installCmd.Flags().StringVar(&installVersion, "version", "", "Hub version to install (default: latest release)")
+	installCmd.Flags().StringVar(&installHubBinaryURL, "hub-binary-url", "", "Direct URL for the Linux amd64 hub binary (overrides --version download URL)")
 	installCmd.Flags().StringVar(&installToken, "token", "", "Hub user token (default: randomly generated)")
 	installCmd.Flags().StringVar(&installUIPassword, "ui-password", "", "Web UI login password (used as ui_password in hub.yaml) (default: randomly generated)")
 	installCmd.Flags().BoolVar(&installTrustNewHostKey, "trust-new-host-key", false, "Trust and persist an unknown SSH host key on first connection; prints the fingerprint after adding it")
 	installCmd.Flags().Bool("skip-caddy", false, "Skip Caddy installation and TLS (useful when domain/DNS not ready)")
 	installCmd.MarkFlagRequired("server")
 	installCmd.MarkFlagRequired("domain")
+	installCmd.MarkFlagsMutuallyExclusive("version", "hub-binary-url")
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
 	// ── Resolve version ───────────────────────────────────────────────────────
-	version := installVersion
-	if version == "" {
+	version, shouldFetchLatest := resolveInstallVersion(installVersion, installHubBinaryURL)
+	if shouldFetchLatest {
 		fmt.Print("Fetching latest release... ")
 		var err error
 		version, err = latestGitHubRelease("elasticclaw", "elasticclaw")
@@ -139,11 +142,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	var installBinaryScript string
+	if installHubBinaryURL != "" {
+		installBinaryScript = install.ScriptInstallBinaryFromURL(installHubBinaryURL, useSudo)
+	} else {
+		installBinaryScript = install.ScriptInstallBinary(version, useSudo)
+	}
 	steps := []struct {
 		name   string
 		script string
 	}{
-		{"Installing hub binary", install.ScriptInstallBinary(version, useSudo)},
+		{"Installing hub binary", installBinaryScript},
 		{"Writing hub config", install.ScriptWriteConfig(params, useSudo)},
 		{"Installing systemd service", install.ScriptInstallSystemd(useSudo)},
 	}
@@ -184,6 +193,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+func resolveInstallVersion(version, hubBinaryURL string) (string, bool) {
+	if version != "" {
+		return version, false
+	}
+	if hubBinaryURL != "" {
+		return "custom", false
+	}
+	return "", true
+}
 
 func latestGitHubRelease(owner, repo string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
