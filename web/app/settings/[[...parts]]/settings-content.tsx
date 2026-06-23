@@ -972,6 +972,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const [formAuthProfile, setFormAuthProfile] = useState("")
   const [loginJob, setLoginJob] = useState<ModelAuthLoginJob | null>(null)
   const [loginError, setLoginError] = useState("")
+  const [copiedLoginCode, setCopiedLoginCode] = useState(false)
   const loginWindowRef = useRef<Window | null>(null)
 
   const providerLabel = (p: string) => PROVIDER_OPTIONS.find(o => o.value === p)?.label ?? p
@@ -981,7 +982,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   const authProfiles = (settings.modelAuthProfiles || []).filter(p => p.provider === formProvider)
 
   const resetForm = () => {
-    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setFormAuthProfile(""); setLoginJob(null); setLoginError(""); setEditIdx(null)
+    setFormName(""); setFormProvider("anthropic"); setFormCustomProvider(""); setFormKey(""); setFormDefault(false); setFormDefaultModel(""); setFormCustomModel(""); setFormAuthProfile(""); setLoginJob(null); setLoginError(""); setCopiedLoginCode(false); setEditIdx(null)
   }
 
   const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
@@ -1052,6 +1053,13 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
     win.document.body.style.whiteSpace = "pre-wrap"
     win.document.body.style.padding = "24px"
     win.document.body.textContent = text
+  }
+
+  function copyLoginCode(code: string) {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopiedLoginCode(true)
+      setTimeout(() => setCopiedLoginCode(false), 2000)
+    })
   }
 
   async function doStartLogin() {
@@ -1305,8 +1313,16 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                       )}
                       {loginJob.code && (
                         <div className="rounded-md border border-primary/30 bg-primary/10 p-2">
-                          <div className="text-[11px] uppercase text-muted-foreground">One-time code</div>
-                          <div className="font-mono text-lg font-semibold tracking-wide text-foreground">{loginJob.code}</div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-[11px] uppercase text-muted-foreground">One-time code</div>
+                              <div className="font-mono text-lg font-semibold tracking-wide text-foreground">{loginJob.code}</div>
+                            </div>
+                            <Button type="button" size="sm" variant="outline" className="h-8 shrink-0 gap-1.5" onClick={() => copyLoginCode(loginJob.code || "")}>
+                              {copiedLoginCode ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                              {copiedLoginCode ? "Copied" : "Copy"}
+                            </Button>
+                          </div>
                         </div>
                       )}
                       {!loginJob.code && loginJob.output && (
