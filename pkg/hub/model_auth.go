@@ -30,7 +30,6 @@ type modelAuthLoginJob struct {
 	Error     string `json:"error,omitempty"`
 	StartedAt string `json:"startedAt"`
 	UpdatedAt string `json:"updatedAt"`
-	authDir   string
 }
 
 type cliAuthBundle struct {
@@ -119,7 +118,6 @@ func snapshotModelAuthLoginJob(job *modelAuthLoginJob) *modelAuthLoginJob {
 		return nil
 	}
 	snapshot := *job
-	snapshot.authDir = ""
 	return &snapshot
 }
 
@@ -130,7 +128,6 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 		return
 	}
 	defer os.RemoveAll(authDir)
-	job.authDir = authDir
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
