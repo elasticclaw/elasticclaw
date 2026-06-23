@@ -23,7 +23,7 @@ func TestCaptureModelAuthOutputDoesNotTreatCodexURLAsCode(t *testing.T) {
 	s := &Server{}
 	job := &modelAuthLoginJob{}
 
-	s.captureModelAuthOutput(job, strings.NewReader("Open https://auth.openai.com/codex/device_authorization\n"), make(chan struct{}, 1))
+	s.captureModelAuthOutput(job, strings.NewReader("Open https://auth.openai.com/codex/device_authorization\nCode: authorization\n"), make(chan struct{}, 1))
 
 	if job.Code != "" {
 		t.Fatalf("Code = %q, want no code extracted from codex URL", job.Code)
@@ -38,6 +38,29 @@ func TestCaptureModelAuthOutputExtractsDeviceCode(t *testing.T) {
 
 	if job.Code != "ABCD-EFGH" {
 		t.Fatalf("Code = %q, want device code", job.Code)
+	}
+}
+
+func TestCaptureModelAuthOutputExtractsNumericDeviceCode(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.captureModelAuthOutput(job, strings.NewReader("Authorization code: 123-456-789\n"), make(chan struct{}, 1))
+
+	if job.Code != "123-456-789" {
+		t.Fatalf("Code = %q, want numeric device code", job.Code)
+	}
+}
+
+func TestAppendModelAuthOutputReplacesBadCodeWithRealCode(t *testing.T) {
+	s := &Server{}
+	job := &modelAuthLoginJob{}
+
+	s.appendModelAuthOutput(job, "Code: authorization\n")
+	s.appendModelAuthOutput(job, "Authorization code: 123-456-789\n")
+
+	if job.Code != "123-456-789" {
+		t.Fatalf("Code = %q, want real code after rejected prose token", job.Code)
 	}
 }
 

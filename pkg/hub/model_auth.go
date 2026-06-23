@@ -41,7 +41,7 @@ var (
 	modelAuthANSIRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	modelAuthOSC8RE = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 	modelAuthURLRE  = regexp.MustCompile(`https?://[^\s"'\x00-\x1f\x7f]+`)
-	modelAuthCodeRE = regexp.MustCompile(`(?i)\b(?:code|device code|user code|verification code)\b[^A-Z0-9]*([A-Z0-9][A-Z0-9-]{3,})\b`)
+	modelAuthCodeRE = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
 )
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -197,10 +197,8 @@ func (s *Server) appendModelAuthOutput(job *modelAuthLoginJob, raw string) {
 	if match := modelAuthURLRE.FindString(job.Output); match != "" {
 		updateModelAuthURL(job, match)
 	}
-	if job.Code == "" {
-		if match := modelAuthCodeRE.FindStringSubmatch(job.Output); len(match) == 2 {
-			job.Code = match[1]
-		}
+	if code := extractModelAuthCode(job.Output); code != "" {
+		job.Code = code
 	}
 	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 }
@@ -210,6 +208,49 @@ func updateModelAuthURL(job *modelAuthLoginJob, url string) {
 	if len(url) > len(job.URL) {
 		job.URL = url
 	}
+}
+
+func extractModelAuthCode(output string) string {
+	matches := modelAuthCodeRE.FindAllStringSubmatch(output, -1)
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		code := strings.Trim(match[1], ".,)")
+		if isValidModelAuthCode(code) {
+			return code
+		}
+	}
+	return ""
+}
+
+func isValidModelAuthCode(code string) bool {
+	if len(code) < 4 {
+		return false
+	}
+	lower := strings.ToLower(code)
+	switch lower {
+	case "authorization", "authenticate", "authentication", "login", "device", "verify", "verification":
+		return false
+	}
+	hasDigit := false
+	hasHyphen := false
+	hasUpper := false
+	for _, r := range code {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '-':
+			hasHyphen = true
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			// Lowercase-only English words are usually CLI prose, not device codes.
+		default:
+			return false
+		}
+	}
+	return hasDigit || hasHyphen || hasUpper
 }
 
 func normalizeModelAuthOutput(line string) string {
