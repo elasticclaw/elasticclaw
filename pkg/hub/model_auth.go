@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
@@ -43,7 +45,22 @@ var (
 	modelAuthCodeRE        = regexp.MustCompile(`(?i:\b(?:device code|user code|verification code|code)\b)[^A-Za-z0-9]*([A-Za-z0-9][A-Za-z0-9-]{3,})\b`)
 	modelAuthOneTimeCodeRE = regexp.MustCompile(`(?is)\bone-time code\b.*?\n\s*([A-Z0-9]{4,5}-[A-Z0-9]{4,5})\b`)
 	modelAuth9DigitCodeRE  = regexp.MustCompile(`\b\d(?:[ -]?\d){8}\b`)
+	modelAuthCLIInstallMu  sync.Mutex
 )
+
+const (
+	defaultCodexCLIVersion = "0.141.0"
+	defaultGrokCLIVersion  = "0.1.0"
+)
+
+type modelAuthCLISpec struct {
+	Provider      string
+	PackageName   string
+	Version       string
+	BinaryName    string
+	LoginArgs     []string
+	VersionEnvVar string
+}
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -132,19 +149,14 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	var args []string
-	switch job.Provider {
-	case "codex":
-		args = []string{"codex", "login", "--device-auth"}
-	case "grok":
-		args = []string{"grok", "login", "--device-auth"}
-	default:
-		s.finishModelAuthJob(job, "error", "", fmt.Errorf("unsupported provider %q", job.Provider))
+	cli, binDir, err := ensureModelAuthCLI(ctx, job.Provider)
+	if err != nil {
+		s.finishModelAuthJob(job, "error", "", err)
 		return
 	}
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), "HOME="+authDir)
+	cmd := exec.CommandContext(ctx, cli.BinaryName, cli.LoginArgs...)
+	cmd.Env = append(os.Environ(), "HOME="+authDir, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.finishModelAuthJob(job, "error", "", err)
@@ -180,6 +192,80 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 		return
 	}
 	s.finishModelAuthJob(job, "complete", bundle, nil)
+}
+
+func modelAuthCLI(provider string) (modelAuthCLISpec, error) {
+	switch provider {
+	case "codex":
+		return modelAuthCLISpec{
+			Provider:      "codex",
+			PackageName:   "@openai/codex",
+			Version:       cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", defaultCodexCLIVersion),
+			BinaryName:    "codex",
+			LoginArgs:     []string{"login", "--device-auth"},
+			VersionEnvVar: "ELASTICCLAW_CODEX_CLI_VERSION",
+		}, nil
+	case "grok":
+		return modelAuthCLISpec{
+			Provider:      "grok",
+			PackageName:   "@xai-official/grok",
+			Version:       cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", defaultGrokCLIVersion),
+			BinaryName:    "grok",
+			LoginArgs:     []string{"login", "--device-auth"},
+			VersionEnvVar: "ELASTICCLAW_GROK_CLI_VERSION",
+		}, nil
+	default:
+		return modelAuthCLISpec{}, fmt.Errorf("unsupported provider %q", provider)
+	}
+}
+
+func ensureModelAuthCLI(ctx context.Context, provider string) (modelAuthCLISpec, string, error) {
+	cli, err := modelAuthCLI(provider)
+	if err != nil {
+		return modelAuthCLISpec{}, "", err
+	}
+	if strings.TrimSpace(cli.Version) == "" {
+		return modelAuthCLISpec{}, "", fmt.Errorf("empty %s for %s CLI", cli.VersionEnvVar, cli.Provider)
+	}
+	installDir := filepath.Join(modelAuthCLIRoot(), cli.Provider, cli.Version)
+	binDir := filepath.Join(installDir, "node_modules", ".bin")
+	binaryPath := filepath.Join(binDir, cli.BinaryName)
+	if _, err := os.Stat(binaryPath); err == nil {
+		cli.BinaryName = binaryPath
+		return cli, binDir, nil
+	}
+
+	modelAuthCLIInstallMu.Lock()
+	defer modelAuthCLIInstallMu.Unlock()
+	if _, err := os.Stat(binaryPath); err == nil {
+		cli.BinaryName = binaryPath
+		return cli, binDir, nil
+	}
+	if err := os.MkdirAll(installDir, 0750); err != nil {
+		return modelAuthCLISpec{}, "", fmt.Errorf("create model CLI install dir: %w", err)
+	}
+	npm, err := exec.LookPath("npm")
+	if err != nil {
+		return modelAuthCLISpec{}, "", fmt.Errorf("npm is required to install %s@%s for model login: %w", cli.PackageName, cli.Version, err)
+	}
+	spec := cli.PackageName + "@" + cli.Version
+	cmd := exec.CommandContext(ctx, npm, "install", "--prefix", installDir, "--ignore-scripts", spec)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return modelAuthCLISpec{}, "", fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
+	}
+	if _, err := os.Stat(binaryPath); err != nil {
+		return modelAuthCLISpec{}, "", fmt.Errorf("installed %s but binary %s was not found: %w", spec, binaryPath, err)
+	}
+	cli.BinaryName = binaryPath
+	return cli, binDir, nil
+}
+
+func modelAuthCLIRoot() string {
+	if dir := strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_CLI_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(hubDataDir(), "model-clis")
 }
 
 func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, done chan<- struct{}) {

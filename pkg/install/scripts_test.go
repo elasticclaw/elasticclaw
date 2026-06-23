@@ -115,6 +115,15 @@ func TestScriptInstallSystemd(t *testing.T) {
 	assertContains(t, s, "systemctl restart elasticclaw", "start service")
 }
 
+func TestScriptInstallNodeNPM(t *testing.T) {
+	s := install.ScriptInstallNodeNPM(true)
+	assertContains(t, s, "command -v npm", "npm detection")
+	assertContains(t, s, "https://deb.nodesource.com/node_24.x", "NodeSource Node 24 repo")
+	assertContains(t, s, "apt-get install -y nodejs", "apt node install")
+	assertContains(t, s, "$PKG_MGR install -y nodejs npm", "rpm node install")
+	assertContains(t, s, "npm --version", "npm verification")
+}
+
 func TestScriptWriteCaddyfile(t *testing.T) {
 	s := install.ScriptWriteCaddyfile("hub.example.com", true)
 	assertContains(t, s, "/etc/caddy/Caddyfile", "caddyfile path")
@@ -155,6 +164,7 @@ func TestScripts_Shellcheck(t *testing.T) {
 
 	scripts := map[string]string{
 		"install_binary":  install.ScriptInstallBinary("v0.0.3", true),
+		"install_node":    install.ScriptInstallNodeNPM(true),
 		"write_config":    install.ScriptWriteConfig(testParams, true),
 		"install_systemd": install.ScriptInstallSystemd(true),
 		"install_caddy":   install.ScriptInstallCaddy(true),
