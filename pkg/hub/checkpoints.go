@@ -384,6 +384,8 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
 	case "exedev":
 		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+	case "lambda-microvms":
+		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
 	default:
 		provErr = fmt.Errorf("unsupported provider: %s", provider)
 	}

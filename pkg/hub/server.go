@@ -1233,6 +1233,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
 		case "docker":
 			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles)
+		case "lambda-microvms":
+			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, templateFiles)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
 		}
@@ -4400,6 +4402,93 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	return nil
 }
 
+func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
+	p, err := newLambdaMicroVMsProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("lambda microvms init: %w", err)
+	}
+
+	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var nixEnabled, dockerEnabled int
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
+		return fmt.Errorf("load claw config: %w", err)
+	}
+
+	s.mu.RLock()
+	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
+	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
+	clawToken := s.hubCfg.ClawToken
+	hubCfg := s.hubCfg
+	s.mu.RUnlock()
+
+	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
+	defaultModel := templateDefaultModel
+	if defaultModel == "" {
+		defaultModel = hubCfg.DefaultModel
+	}
+	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
+	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+	gatewayPassword := randomHex(16)
+
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
+		"ELASTICCLAW_CLAW_ID":            clawID,
+		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
+		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
+		"ELASTICCLAW_BOOTSTRAP":          "1",
+		"ELASTICCLAW_WAIT_FOR_WORKSPACE": "1",
+		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
+		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
+		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
+		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
+		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
+		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
+		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+	}
+	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+		kv := strings.TrimPrefix(line, "export ")
+		if idx := strings.IndexByte(kv, '='); idx > 0 {
+			k := kv[:idx]
+			v := kv[idx+1:]
+			if unquoted, err := strconv.Unquote(v); err == nil {
+				v = unquoted
+			} else if len(v) >= 2 && strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+				v = v[1 : len(v)-1]
+			}
+			env[k] = v
+		}
+	}
+	if linearToken != "" {
+		env["LINEAR_API_KEY"] = linearToken
+	}
+	for k, v := range req.Env {
+		if _, exists := env[k]; !exists {
+			env[k] = v
+		}
+	}
+
+	createReq := types.CreateRequest{
+		Name:          req.ProviderName,
+		Env:           env,
+		TemplateFiles: files,
+	}
+	instance, err := p.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("lambda microvms create: %w", err)
+	}
+	log.Printf("[lambda-microvms] microvm started: %s (claw %s)", instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='lambda-microvms', provider_id=? WHERE id=?`, instance.ID, clawID)
+	return nil
+}
+
 // boolEnv converts a bool to "true"/"false" for environment variable injection.
 func boolEnv(v bool) string {
 	if v {
@@ -5999,6 +6088,8 @@ func (s *Server) terminateVM(provider, vmID string) {
 		s.terminateExedevVM(vmID)
 	case "docker":
 		s.terminateDockerVM(vmID)
+	case "lambda-microvms":
+		s.terminateLambdaMicroVM(vmID)
 	default:
 		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
@@ -6023,6 +6114,27 @@ func (s *Server) terminateDockerVM(vmID string) {
 		return
 	}
 	log.Printf("Docker container %s terminated", vmID)
+}
+
+// terminateLambdaMicroVM destroys an AWS Lambda MicroVM by ID.
+func (s *Server) terminateLambdaMicroVM(vmID string) {
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers["lambda-microvms"]
+	s.mu.RUnlock()
+	if !ok {
+		log.Printf("terminateLambdaMicroVM: no lambda-microvms provider configured")
+		return
+	}
+	p, err := newLambdaMicroVMsProvider(cfg)
+	if err != nil {
+		log.Printf("terminateLambdaMicroVM: provider init error: %v", err)
+		return
+	}
+	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+		log.Printf("terminateLambdaMicroVM: failed to destroy MicroVM %s: %v", vmID, err)
+		return
+	}
+	log.Printf("Lambda MicroVM %s terminated", vmID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.

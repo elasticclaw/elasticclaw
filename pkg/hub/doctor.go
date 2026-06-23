@@ -335,7 +335,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			Category:    "sandboxes",
 			Severity:    "critical",
 			Title:       "No sandbox providers configured",
-			Description: "At least one sandbox provider (daytona, replicated, exedev) must be configured.",
+			Description: "At least one sandbox provider must be configured.",
 			OK:          false,
 			FixAction: &FixAction{
 				Type:   "navigate",
@@ -347,7 +347,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	validProviders := map[string]bool{
-		"daytona": true, "replicated": true, "exedev": true, "docker": true,
+		"daytona": true, "replicated": true, "exedev": true, "docker": true, "lambda-microvms": true,
 	}
 
 	allProvidersValid := true
@@ -358,7 +358,7 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 				Category:    "sandboxes",
 				Severity:    "warning",
 				Title:       fmt.Sprintf("Unknown sandbox provider: %q", name),
-				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider (daytona, replicated, exedev, docker).", name),
+				Description: fmt.Sprintf("Provider %q is not a recognised sandbox provider.", name),
 				OK:          false,
 				FixAction: &FixAction{
 					Type:   "navigate",
@@ -403,6 +403,22 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 			}
 		case "exedev":
 			// exe.dev uses SSH key authentication; no explicit API key needed in config
+		case "lambda-microvms":
+			if p.ImageIdentifier == "" {
+				allProvidersValid = false
+				checks = append(checks, DoctorCheck{
+					Category:    "sandboxes",
+					Severity:    "critical",
+					Title:       "AWS Lambda MicroVMs provider missing image identifier",
+					Description: "The AWS Lambda MicroVMs sandbox provider is configured but the image identifier is empty.",
+					OK:          false,
+					FixAction: &FixAction{
+						Type:   "navigate",
+						Target: "/settings/runtimes",
+						Label:  "Configure AWS Lambda MicroVMs",
+					},
+				})
+			}
 		}
 	}
 	if allProvidersValid {

@@ -171,6 +171,20 @@ type ProviderView struct {
 	DefaultMemory string `json:"defaultMemory,omitempty"`
 	DefaultDisk   string `json:"defaultDisk,omitempty"`
 	_sshKeyPath   string `json:"-"` // internal: path for file I/O outside lock
+	// AWS Lambda MicroVMs
+	AWSRegion                  string   `json:"awsRegion,omitempty"`
+	AWSProfile                 string   `json:"awsProfile,omitempty"`
+	ImageIdentifier            string   `json:"imageIdentifier,omitempty"`
+	ImageVersion               string   `json:"imageVersion,omitempty"`
+	ExecutionRoleARN           string   `json:"executionRoleArn,omitempty"`
+	IngressNetworkConnectors   []string `json:"ingressNetworkConnectors,omitempty"`
+	EgressNetworkConnectors    []string `json:"egressNetworkConnectors,omitempty"`
+	IdleMaxDurationSeconds     int      `json:"idleMaxDurationSeconds,omitempty"`
+	SuspendedDurationSeconds   int      `json:"suspendedDurationSeconds,omitempty"`
+	AutoResume                 *bool    `json:"autoResume,omitempty"`
+	MaximumDurationSeconds     int      `json:"maximumDurationSeconds,omitempty"`
+	MicroVMBridgePort          int      `json:"bridgePort,omitempty"`
+	AuthTokenExpirationMinutes int      `json:"authTokenExpirationMinutes,omitempty"`
 }
 
 // GitHubAppPermission is a single permission check result for a GitHub App.
@@ -341,6 +355,20 @@ type ProviderPatch struct {
 	DefaultCPU    int    `json:"defaultCpu,omitempty"`
 	DefaultMemory string `json:"defaultMemory,omitempty"`
 	DefaultDisk   string `json:"defaultDisk,omitempty"`
+	// AWS Lambda MicroVMs
+	AWSRegion                  string   `json:"awsRegion,omitempty"`
+	AWSProfile                 string   `json:"awsProfile,omitempty"`
+	ImageIdentifier            string   `json:"imageIdentifier,omitempty"`
+	ImageVersion               string   `json:"imageVersion,omitempty"`
+	ExecutionRoleARN           string   `json:"executionRoleArn,omitempty"`
+	IngressNetworkConnectors   []string `json:"ingressNetworkConnectors,omitempty"`
+	EgressNetworkConnectors    []string `json:"egressNetworkConnectors,omitempty"`
+	IdleMaxDurationSeconds     int      `json:"idleMaxDurationSeconds,omitempty"`
+	SuspendedDurationSeconds   int      `json:"suspendedDurationSeconds,omitempty"`
+	AutoResume                 *bool    `json:"autoResume,omitempty"`
+	MaximumDurationSeconds     int      `json:"maximumDurationSeconds,omitempty"`
+	MicroVMBridgePort          int      `json:"bridgePort,omitempty"`
+	AuthTokenExpirationMinutes int      `json:"authTokenExpirationMinutes,omitempty"`
 	// Delete removes this provider when true.
 	Delete bool `json:"delete,omitempty"`
 }
@@ -382,6 +410,10 @@ func hasConfiguredProvider(providers map[string]types.ProviderConfig) bool {
 			}
 		case "exedev", "docker":
 			return true
+		case "lambda-microvms":
+			if p.ImageIdentifier != "" {
+				return true
+			}
 		default:
 			if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
 				return true
@@ -460,6 +492,20 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			if p.SSHKeyPath != "" {
 				pv._sshKeyPath = p.SSHKeyPath
 			}
+		case "lambda-microvms":
+			pv.AWSRegion = p.AWSRegion
+			pv.AWSProfile = p.AWSProfile
+			pv.ImageIdentifier = p.ImageIdentifier
+			pv.ImageVersion = p.ImageVersion
+			pv.ExecutionRoleARN = p.ExecutionRoleARN
+			pv.IngressNetworkConnectors = append([]string(nil), p.IngressNetworkConnectors...)
+			pv.EgressNetworkConnectors = append([]string(nil), p.EgressNetworkConnectors...)
+			pv.IdleMaxDurationSeconds = p.IdleMaxDurationSeconds
+			pv.SuspendedDurationSeconds = p.SuspendedDurationSeconds
+			pv.AutoResume = p.AutoResume
+			pv.MaximumDurationSeconds = p.MaximumDurationSeconds
+			pv.MicroVMBridgePort = p.MicroVMBridgePort
+			pv.AuthTokenExpirationMinutes = p.AuthTokenExpirationMinutes
 		}
 		view.Providers[name] = pv
 	}
@@ -916,6 +962,46 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				if pp.DefaultDisk != "" {
 					existing.DefaultDisk = pp.DefaultDisk
+				}
+			case "lambda-microvms":
+				if pp.AWSRegion != "" {
+					existing.AWSRegion = pp.AWSRegion
+				}
+				if pp.AWSProfile != "" {
+					existing.AWSProfile = pp.AWSProfile
+				}
+				if pp.ImageIdentifier != "" {
+					existing.ImageIdentifier = pp.ImageIdentifier
+				}
+				if pp.ImageVersion != "" {
+					existing.ImageVersion = pp.ImageVersion
+				}
+				if pp.ExecutionRoleARN != "" {
+					existing.ExecutionRoleARN = pp.ExecutionRoleARN
+				}
+				if pp.IngressNetworkConnectors != nil {
+					existing.IngressNetworkConnectors = append([]string(nil), pp.IngressNetworkConnectors...)
+				}
+				if pp.EgressNetworkConnectors != nil {
+					existing.EgressNetworkConnectors = append([]string(nil), pp.EgressNetworkConnectors...)
+				}
+				if pp.IdleMaxDurationSeconds > 0 {
+					existing.IdleMaxDurationSeconds = pp.IdleMaxDurationSeconds
+				}
+				if pp.SuspendedDurationSeconds > 0 {
+					existing.SuspendedDurationSeconds = pp.SuspendedDurationSeconds
+				}
+				if pp.AutoResume != nil {
+					existing.AutoResume = pp.AutoResume
+				}
+				if pp.MaximumDurationSeconds > 0 {
+					existing.MaximumDurationSeconds = pp.MaximumDurationSeconds
+				}
+				if pp.MicroVMBridgePort > 0 {
+					existing.MicroVMBridgePort = pp.MicroVMBridgePort
+				}
+				if pp.AuthTokenExpirationMinutes > 0 {
+					existing.AuthTokenExpirationMinutes = pp.AuthTokenExpirationMinutes
 				}
 			}
 			updatedCfg.Providers[name] = existing

@@ -60,7 +60,7 @@ func init() {
 	templateCmd.AddCommand(templateCreateCmd)
 	templateCmd.AddCommand(templateListCmd)
 
-	templateCreateCmd.Flags().StringVar(&templateCreateProvider, "provider", "replicated", "provider to use (replicated, daytona, exedev)")
+	templateCreateCmd.Flags().StringVar(&templateCreateProvider, "provider", "replicated", "provider to use (replicated, daytona, exedev, docker, lambda-microvms)")
 	templateCreateCmd.Flags().StringVar(&templateCreateInstanceType, "instance-type", "r1.large", "instance type (e.g. r1.small, r1.large)")
 	templateCreateCmd.Flags().StringVar(&templateCreateTTL, "ttl", "48h", "time-to-live for the VM (e.g. 4h, 24h, 48h)")
 }
