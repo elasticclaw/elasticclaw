@@ -10,6 +10,7 @@ on:
       - 'pkg/hub/github.go'
       - 'pkg/hub/github_issues.go'
       - 'pkg/hub/integration_poller.go'
+      - 'pkg/hub/jira*.go'
       - 'pkg/hub/linear.go'
       - 'pkg/hub/pipeline_runner.go'
       - 'pkg/hub/server.go'
@@ -115,6 +116,11 @@ jobs:
             tracker_name: Linear
             slug: linear
             test: TestDaytonaLinearWorkflowE2E
+          - provider_name: Daytona
+            provider_slug: daytona
+            tracker_name: Jira
+            slug: jira
+            test: TestDaytonaJiraWorkflowE2E
           - provider_name: Replicated
             provider_slug: replicated
             tracker_name: GitHub Issues
@@ -125,6 +131,11 @@ jobs:
             tracker_name: Linear
             slug: linear
             test: TestReplicatedLinearWorkflowE2E
+          - provider_name: Replicated
+            provider_slug: replicated
+            tracker_name: Jira
+            slug: jira
+            test: TestReplicatedJiraWorkflowE2E
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
@@ -141,6 +152,11 @@ jobs:
       ELASTICCLAW_E2E_LINEAR_TEAM_KEY: ${{ secrets.ELASTICCLAW_E2E_LINEAR_TEAM_KEY }}
       ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE: ${{ secrets.ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE }}
       ELASTICCLAW_E2E_LINEAR_INITIAL_STATE: ${{ secrets.ELASTICCLAW_E2E_LINEAR_INITIAL_STATE }}
+      ELASTICCLAW_E2E_JIRA_BASE_URL: ${{ secrets.ELASTICCLAW_E2E_JIRA_BASE_URL }}
+      ELASTICCLAW_E2E_JIRA_USERNAME: ${{ secrets.ELASTICCLAW_E2E_JIRA_USERNAME }}
+      ELASTICCLAW_E2E_JIRA_TOKEN: ${{ secrets.ELASTICCLAW_E2E_JIRA_TOKEN }}
+      ELASTICCLAW_E2E_JIRA_PROJECT_KEY: ${{ secrets.ELASTICCLAW_E2E_JIRA_PROJECT_KEY }}
+      ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK: "true"
       ELASTICCLAW_E2E_MODEL: fireworks/accounts/fireworks/models/kimi-k2p6
       ELASTICCLAW_E2E_RUN_ID: pr-${{ github.event.pull_request.number || github.run_number }}-${{ github.run_attempt }}-${{ matrix.provider_slug }}-${{ matrix.slug }}-${{ github.sha }}
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}

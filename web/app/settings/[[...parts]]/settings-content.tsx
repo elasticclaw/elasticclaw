@@ -92,6 +92,7 @@ interface SettingsData {
     linear?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
     shortcut?: Array<{ workspace: string; tokenSet: boolean }>
     githubIssues?: Array<{ workspace: string; tokenSet: boolean; webhookSecretSet: boolean }>
+    jira?: Array<{ workspace: string; baseUrl?: string; username?: string; tokenSet: boolean; webhookSecretSet: boolean }>
   }
   secrets?: string[]
   mcpServers?: Array<{
@@ -1948,12 +1949,14 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
     </div>
   )
 }
-type TrackerType = "linear" | "shortcut" | "github-issues"
+type TrackerType = "linear" | "shortcut" | "github-issues" | "jira"
 
 interface TrackerItem {
   type: TrackerType
   workspace: string
   tokenSet: boolean
+  baseUrl?: string
+  username?: string
 }
 
 function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubPublicUrl }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string; hubPublicUrl: string }) {
@@ -1967,6 +1970,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const linear = workspaceTrackers.filter(t => t.type === "linear")
   const shortcut = workspaceTrackers.filter(t => t.type === "shortcut")
   const githubIssues = workspaceTrackers.filter(t => t.type === "github-issues")
+  const jira = workspaceTrackers.filter(t => t.type === "jira")
 
   const allTrackers: TrackerItem[] = workspaceTrackers
 
@@ -2018,6 +2022,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const [modalType, setModalType] = useState<TrackerType>("linear")
   const [editIdx, setEditIdx] = useState<number | null>(null)
   const [editType, setEditType] = useState<TrackerType>("linear")
+  const [baseUrl, setBaseUrl] = useState("")
+  const [username, setUsername] = useState("")
   const [token, setToken] = useState("")
   const [webhookSecret, setWebhookSecret] = useState("")
   const [copiedSetup, setCopiedSetup] = useState<string | null>(null)
@@ -2039,7 +2045,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   }, [showAddMenu])
 
   const resetModal = () => {
-    setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setSetupTab("token")
+    setBaseUrl(""); setUsername(""); setToken(""); setWebhookSecret(""); setEditIdx(null); setEditType("linear"); setSetupTab("token")
   }
 
   const openAdd = (type: TrackerType) => {
@@ -2052,6 +2058,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
 
   const openEdit = (tracker: TrackerItem, idx: number) => {
     setToken("")
+    setBaseUrl(tracker.baseUrl || "")
+    setUsername(tracker.username || "")
     setWebhookSecret("")
     setEditIdx(idx)
     setEditType(tracker.type)
@@ -2064,13 +2072,17 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     if (modalMode === "add" && !token.trim()) return
 
     const type = modalMode === "add" ? modalType : editType
+    if (type === "jira" && !baseUrl.trim()) {
+      setError("Jira base URL is required")
+      return
+    }
     const trackerWorkspace = selectedWorkspace
     const originalWorkspace = modalMode === "edit" && editIdx !== null ? allTrackers[editIdx]?.workspace : ""
     setError("")
     const res = await fetch(`${hubUrl}${issueTrackersPath}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${authToken()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type, workspace: trackerWorkspace, originalWorkspace, token: token.trim(), webhookSecret: webhookSecret.trim() }),
+      body: JSON.stringify({ type, workspace: trackerWorkspace, originalWorkspace, baseUrl: baseUrl.trim(), username: username.trim(), token: token.trim(), webhookSecret: webhookSecret.trim() }),
     })
     if (!res.ok) {
       setError(await res.text())
@@ -2104,6 +2116,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
       case "linear": return "Linear"
       case "shortcut": return "Shortcut"
       case "github-issues": return "GitHub Issues"
+      case "jira": return "Jira"
     }
   }
 
@@ -2115,6 +2128,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     ? <Zap className="size-4" />
     : (modalMode === "add" ? modalType : editType) === "shortcut"
     ? <span className="text-[#F4603C]">⚡</span>
+    : (modalMode === "add" ? modalType : editType) === "jira"
+    ? <span className="text-[#0052CC] font-semibold text-sm">J</span>
     : <Github className="size-4" />
 
   const githubIssuesTokenParams = new URLSearchParams({
@@ -2134,12 +2149,15 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
     ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. {githubOwnerHint ? <>The link starts with <code>{githubOwnerHint}</code> as the resource owner. </> : null}Grant repository access to the repos this workspace watches.</>
+    : (modalMode === "add" ? modalType : editType) === "jira"
+    ? <>Use a Jira personal access token or API token with issue read/write permissions.</>
     : null
   const activeTrackerType = modalMode === "add" ? modalType : editType
-  const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut"
+  const canGenerateWebhookSecret = activeTrackerType === "github-issues" || activeTrackerType === "shortcut" || activeTrackerType === "jira"
   const workspaceWebhookBase = hubPublicUrl || hubUrl
   const linearWebhookUrl = `${workspaceWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/linear`
   const githubIssuesWebhookUrl = `${workspaceWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/github-issues`
+  const jiraWebhookUrl = `${workspaceWebhookBase}/api/workspaces/${encodeURIComponent(selectedWorkspace)}/webhooks/jira`
 
   function generateWebhookSecret() {
     const bytes = new Uint8Array(32)
@@ -2174,6 +2192,9 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
           {githubIssues.length > 0 && (
             <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">GitHub Issues: {githubIssues.length}</span>
           )}
+          {jira.length > 0 && (
+            <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded">Jira: {jira.length}</span>
+          )}
         </div>
       </div>
 
@@ -2195,6 +2216,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   <Zap className="size-4 text-muted-foreground" />
                 ) : tracker.type === "shortcut" ? (
                   <span className="text-[#F4603C]">⚡</span>
+                ) : tracker.type === "jira" ? (
+                  <span className="text-[#0052CC] font-semibold text-sm">J</span>
                 ) : (
                   <Github className="size-4 text-muted-foreground" />
                 )}
@@ -2202,6 +2225,12 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   <p className="text-sm font-medium">{tracker.workspace}</p>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <span className="text-xs text-muted-foreground capitalize">{tracker.type === "github-issues" ? "github issues" : tracker.type}</span>
+                    {tracker.type === "jira" && tracker.baseUrl ? (
+                      <>
+                        <span className="text-xs text-muted-foreground">·</span>
+                        <span className="text-xs text-muted-foreground">{tracker.baseUrl}</span>
+                      </>
+                    ) : null}
                     <span className="text-xs text-muted-foreground">·</span>
                     {tracker.tokenSet ? (
                       <span className="text-xs text-green-400 flex items-center gap-1">
@@ -2257,6 +2286,13 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
             >
               <Github className="size-4" />
               <span>GitHub Issues</span>
+            </button>
+            <button
+              onClick={() => openAdd("jira")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+            >
+              <span className="text-[#0052CC] font-semibold text-sm">J</span>
+              <span>Jira</span>
             </button>
           </div>
         )}
@@ -2368,6 +2404,11 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                   <p>Connect Shortcut for this workspace. The API token lets ElasticClaw read stories and update workflow states.</p>
                   <p>Create a Shortcut webhook using the Shortcut URL from the Webhooks page. If Shortcut signs the payload with a secret, paste that same secret below.</p>
                 </div>
+              ) : activeTrackerType === "jira" ? (
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Connect Jira for this workspace. The token lets ElasticClaw read issues, add comments, and transition statuses.</p>
+                  <p>Create a Jira webhook for issue created and issue updated events, then use the payload URL below.</p>
+                </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   Connect {trackerTypeLabel(activeTrackerType)} for this workspace.
@@ -2375,6 +2416,29 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
               )}
               {activeTrackerType !== "github-issues" && activeTrackerType !== "linear" && (
                 <>
+              {activeTrackerType === "jira" && (
+                <>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Jira Base URL</label>
+                    <Input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} className="h-9 text-sm" placeholder="https://jira.example.com" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Username <span className="text-muted-foreground/60">(optional)</span></label>
+                    <Input value={username} onChange={e => setUsername(e.target.value)} className="h-9 text-sm" placeholder="admin@example.com" />
+                    <p className="text-xs text-muted-foreground mt-1">Set for basic auth. Leave blank to send the token as a bearer token.</p>
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Payload URL</label>
+                    <div className="flex gap-2">
+                      <Input readOnly value={jiraWebhookUrl} className="h-9 text-xs font-mono" />
+                      <Button type="button" size="sm" variant="outline" onClick={() => copySetupValue(jiraWebhookUrl, "jira-url")}>
+                        {copiedSetup === "jira-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">Use this URL for Jira issue created and issue updated webhooks.</p>
+                  </div>
+                </>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">API Token</label>
                 <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-9 text-sm" placeholder={`${trackerTypeLabel(activeTrackerType)} API token`} />
@@ -2393,6 +2457,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                 <p className="text-xs text-muted-foreground mt-1">
                   {activeTrackerType === "shortcut"
                     ? "Generate one here, then use the same value when configuring the Shortcut webhook signature secret."
+                    : activeTrackerType === "jira"
+                    ? "Generate one here, then send it in the X-ElasticClaw-Webhook-Secret header."
                     : "Used to verify incoming webhook signatures. Leave blank to keep existing."}
                 </p>
               </div>
@@ -2407,7 +2473,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
               )}
               <div className="flex items-center gap-2 ml-auto">
                 <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetModal() }}>Cancel</Button>
-                <Button size="sm" disabled={saving || (modalMode === "add" && !token.trim())} onClick={saveTracker}>
+                <Button size="sm" disabled={saving || (modalMode === "add" && !token.trim()) || (activeTrackerType === "jira" && !baseUrl.trim())} onClick={saveTracker}>
                   {modalMode === "add" ? "Add tracker" : "Save changes"}
                 </Button>
               </div>
@@ -2440,6 +2506,11 @@ function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; select
       name: "GitHub Issues",
       url: workspaceWebhookBase ? `${workspaceWebhookBase}/github-issues` : "",
       hint: "Use in GitHub repo or org settings. Subscribe to: Issues events.",
+    },
+    {
+      name: "Jira",
+      url: workspaceWebhookBase ? `${workspaceWebhookBase}/jira` : "",
+      hint: "Use in Jira webhook settings. Subscribe to issue created and issue updated events.",
     },
     {
       name: "GitHub (PRs)",

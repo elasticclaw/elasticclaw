@@ -188,6 +188,8 @@ func (r SecretRef) EnvVarName() string {
 		return "SHORTCUT_API_KEY"
 	case "github-issues":
 		return "GITHUB_ISSUES_API_KEY"
+	case "jira":
+		return "JIRA_API_KEY"
 	case "github":
 		return "GITHUB_TOKEN"
 	case "custom":
@@ -534,6 +536,7 @@ type IntegrationsConfig struct {
 	Linear       []*LinearIntegrationConfig       `yaml:"linear,omitempty"`
 	Shortcut     []*ShortcutIntegrationConfig     `yaml:"shortcut,omitempty"`
 	GitHubIssues []*GitHubIssuesIntegrationConfig `yaml:"github_issues,omitempty"`
+	Jira         []*JiraIntegrationConfig         `yaml:"jira,omitempty"`
 }
 
 // ExternalTriggerConfig holds config for external webhook triggers.
@@ -561,6 +564,15 @@ type GitHubIssuesIntegrationConfig struct {
 	Workspace     string `yaml:"workspace"`                // human label (e.g. "my-org")
 	Token         string `yaml:"token"`                    // GitHub personal access token
 	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
+}
+
+// JiraIntegrationConfig holds credentials for one Jira site.
+type JiraIntegrationConfig struct {
+	Workspace     string `yaml:"workspace"`                // human label
+	BaseURL       string `yaml:"base_url,omitempty"`       // Jira base URL, e.g. https://jira.example.com
+	Username      string `yaml:"username,omitempty"`       // optional for basic auth
+	Token         string `yaml:"token"`                    // Jira PAT/API token
+	WebhookSecret string `yaml:"webhook_secret,omitempty"` // shared webhook secret
 }
 
 // FactoryInput defines a user-provided input for manual factory triggers.
@@ -612,6 +624,8 @@ type FactoryConfig struct {
 	ExcludeLabels []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
 	// AssignedTo filter: "@user", "!@user" (exclude), "any", "none"
 	AssignedTo string `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	// Projects limits Jira factory triggers to these project keys.
+	Projects []string `yaml:"projects,omitempty" json:"projects,omitempty"`
 	// AllowedLabelers restricts who can trigger claw creation by labeling an issue.
 	// Only users in this list (GitHub logins, case-insensitive) can trigger.
 	// If empty, any user with label permissions can trigger.

@@ -40,6 +40,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_issue_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN shortcut_story_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN jira_issue_id TEXT NOT NULL DEFAULT ''`)
 	// Migrate existing Shortcut story IDs from linear_issue_id to shortcut_story_id
 	_, _ = db.Exec(`UPDATE claws SET shortcut_story_id = linear_issue_id WHERE linear_issue_id LIKE 'sc-%' AND shortcut_story_id = ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
@@ -127,6 +128,11 @@ func migrate(db *sql.DB) error {
 		SELECT lower(hex(randomblob(16))), factory_name, 'shortcut', 'shortcut:' || shortcut_story_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
 		  FROM claws
 		 WHERE factory_name != '' AND shortcut_story_id != '' AND status != 'deleted'`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
+		SELECT lower(hex(randomblob(16))), factory_name, 'jira', 'jira:' || jira_issue_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
+		  FROM claws
+		 WHERE factory_name != '' AND jira_issue_id != '' AND status != 'deleted'`)
 
 	// Factory analytics — persistent metrics table
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS factory_analytics (
@@ -196,6 +202,7 @@ func migrate(db *sql.DB) error {
 		linear_issue_id  TEXT NOT NULL DEFAULT '',
 		github_issue_id  TEXT NOT NULL DEFAULT '',
 		shortcut_story_id TEXT NOT NULL DEFAULT '',
+		jira_issue_id    TEXT NOT NULL DEFAULT '',
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
 		bootstrap_ok        INTEGER NOT NULL DEFAULT 0,

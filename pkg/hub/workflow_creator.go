@@ -21,6 +21,7 @@ type workflowCreateOptions struct {
 	githubIssueID   string
 	linearIssueID   string
 	shortcutStoryID string
+	jiraIssueID     string
 	reason          string
 	triggerActor    *triggerActor
 }
@@ -117,6 +118,18 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
 			env["LINEAR_API_KEY"] = token
 			resolvedSecrets["LINEAR_API_KEY"] = "Linear integration token"
+		}
+	}
+	if workflow.Integration == "jira" {
+		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow); ok && tracker.Token != "" {
+			env["JIRA_API_KEY"] = tracker.Token
+			resolvedSecrets["JIRA_API_KEY"] = "Jira integration token"
+			if tracker.BaseURL != "" {
+				env["JIRA_BASE_URL"] = tracker.BaseURL
+			}
+			if tracker.Username != "" {
+				env["JIRA_USERNAME"] = tracker.Username
+			}
 		}
 	}
 	if tmplCfg != nil {
@@ -222,6 +235,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if opts.shortcutStoryID != "" {
 		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
 	}
+	if opts.jiraIssueID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET jira_issue_id=? WHERE id=?`, opts.jiraIssueID, clawID)
+	}
 	if opts.triggerActor != nil {
 		actorJSON, err := json.Marshal(opts.triggerActor)
 		if err != nil {
@@ -240,7 +256,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		WorkspaceName:    workspace.Name,
 		WorkflowName:     workflow.Name,
 		Integration:      workflow.Integration,
-		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID),
+		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID, opts.jiraIssueID),
 		Model:            defaultModel,
 		LLMKey:           llmKey,
 		Source:           taskRunSourceWorkflow,

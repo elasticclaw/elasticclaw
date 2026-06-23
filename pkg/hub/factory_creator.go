@@ -132,6 +132,19 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			env["LINEAR_API_KEY"] = linearToken
 		}
 	}
+	if factory.Integration == "jira" {
+		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if tracker.Token != "" {
+				env["JIRA_API_KEY"] = tracker.Token
+			}
+			if tracker.BaseURL != "" {
+				env["JIRA_BASE_URL"] = tracker.BaseURL
+			}
+			if tracker.Username != "" {
+				env["JIRA_USERNAME"] = tracker.Username
+			}
+		}
+	}
 
 	// Resolve and inject template-requested secrets (deprecated list format)
 	resolvedSecrets := make(map[string]string)
@@ -332,7 +345,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		initialStatus = "pending"
 	}
 
-	var linearIssueID, githubIssueID, shortcutStoryID string
+	var linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID string
 	if factory.Integration == "linear" && issueID != "" {
 		linearIssueID = issueID
 	}
@@ -342,13 +355,16 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	if factory.Integration == "shortcut" && issueID != "" {
 		shortcutStoryID = issueID
 	}
+	if factory.Integration == "jira" && issueID != "" {
+		jiraIssueID = issueID
+	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey,
-		linearIssueID, githubIssueID, shortcutStoryID, initialStatus, now, factory.Name, groupName,
+		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, initialStatus, now, factory.Name, groupName,
 	)
 
 	s.promoteMu.Unlock()

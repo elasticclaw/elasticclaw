@@ -172,6 +172,8 @@ type workspaceIssueTrackerUpsertRequest struct {
 	Type              string `json:"type"`
 	Workspace         string `json:"workspace"`
 	OriginalWorkspace string `json:"originalWorkspace,omitempty"`
+	BaseURL           string `json:"baseUrl,omitempty"`
+	Username          string `json:"username,omitempty"`
 	Token             string `json:"token,omitempty"`
 	WebhookSecret     string `json:"webhookSecret,omitempty"`
 }
@@ -198,6 +200,8 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 		}
 		req.Type = strings.TrimSpace(req.Type)
 		req.Workspace = strings.TrimSpace(req.Workspace)
+		req.BaseURL = strings.TrimSpace(req.BaseURL)
+		req.Username = strings.TrimSpace(req.Username)
 		if req.Workspace == "" {
 			req.Workspace = workspaceName
 		}
@@ -215,10 +219,20 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 				if req.WebhookSecret == "" {
 					req.WebhookSecret = existing.WebhookSecret
 				}
+				if req.BaseURL == "" {
+					req.BaseURL = existing.BaseURL
+				}
+				if req.Username == "" {
+					req.Username = existing.Username
+				}
 			}
 		}
 		if req.Token == "" {
 			http.Error(w, "token required", http.StatusBadRequest)
+			return
+		}
+		if req.Type == "jira" && req.BaseURL == "" {
+			http.Error(w, "baseUrl required", http.StatusBadRequest)
 			return
 		}
 		if req.OriginalWorkspace != "" && !strings.EqualFold(req.OriginalWorkspace, req.Workspace) {
@@ -228,6 +242,8 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 			}
 		}
 		if err := saveWorkspaceIssueTracker(workspaceName, req.Type, req.Workspace, workspaceIssueTracker{
+			BaseURL:       req.BaseURL,
+			Username:      req.Username,
 			Token:         req.Token,
 			WebhookSecret: req.WebhookSecret,
 		}); err != nil {

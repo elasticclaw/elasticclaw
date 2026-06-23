@@ -354,6 +354,16 @@ func (s *Server) resolveGitHubIssuesTokenForPipeline(ctx pipelineContext) string
 	return ""
 }
 
+func (s *Server) resolveJiraTrackerForPipeline(ctx pipelineContext) (workspaceIssueTracker, bool) {
+	if ctx.Workflow != nil && ctx.Workspace != nil {
+		return findWorkspaceIssueTracker(ctx.Workspace.Name, "jira", ctx.Workflow.Workspace)
+	}
+	if ctx.Factory != nil {
+		return s.resolveJiraTrackerForFactory(ctx.Factory)
+	}
+	return workspaceIssueTracker{}, false
+}
+
 const defaultPipelineRunTimeout = 10 * time.Minute
 
 type pipelineRunResult struct {
@@ -1252,18 +1262,31 @@ issueResolved:
 
 	// Determine issue tracker: explicit workflow/factory integration takes precedence,
 	// fall back to ID-format heuristics only when integration is empty.
-	var isShortcut, isGitHub bool
+	var isShortcut, isGitHub, isJira bool
 	switch ctx.Integration() {
 	case "shortcut":
 		isShortcut = true
 	case "github", "github-issues":
 		isGitHub = true
+	case "jira":
+		isJira = true
 	default:
 		isShortcut = strings.HasPrefix(resolvedIssueID, "sc-")
 		isGitHub = strings.Contains(resolvedIssueID, "/")
 	}
 
-	if isShortcut {
+	if isJira {
+		tracker, ok := s.resolveJiraTrackerForPipeline(ctx)
+		if !ok {
+			log.Printf("[pipeline] %s: no Jira tracker for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+			return true
+		}
+		if err := s.moveJiraIssue(tracker, resolvedIssueID, targetStatus); err != nil {
+			log.Printf("[pipeline] failed to move Jira issue %s to %q: %v", resolvedIssueID, targetStatus, err)
+		} else {
+			log.Printf("[pipeline] moved Jira issue %s to %q", resolvedIssueID, targetStatus)
+		}
+	} else if isShortcut {
 		// Shortcut story — ensure sc- prefix if missing (e.g. template rendered bare number)
 		scID := resolvedIssueID
 		if !strings.HasPrefix(scID, "sc-") {
@@ -1721,7 +1744,7 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 }
 
 func isFailureFeedbackWorkflowIntegration(integration string) bool {
-	return integration == "github-issues" || integration == "linear"
+	return integration == "github-issues" || integration == "linear" || integration == "jira"
 }
 
 func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineContext, reason string) {
@@ -1762,6 +1785,20 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
 		}
 		s.handleAgentFailureFeedback(feedback, token)
+	case "jira":
+		tracker, ok := s.resolveJiraTrackerForWorkflow(ctx.Workspace.Name, ctx.Workflow)
+		if !ok || tracker.Token == "" {
+			return
+		}
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Jira != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Jira.AgentStatusError)
+		}
+		if feedback.AgentStatusError != "" {
+			_ = s.moveJiraIssue(tracker, ctx.IssueID, feedback.AgentStatusError)
+		}
+		if err := s.commentJiraIssue(tracker, ctx.IssueID, s.buildAgentStopComment(clawID, reason)); err != nil {
+			log.Printf("[stopAgent] failed to comment Jira issue %s: %v", ctx.IssueID, err)
+		}
 	}
 }
 
@@ -1822,22 +1859,32 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 				}
 			}
 		}
+	case "jira":
+		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if err := s.commentJiraIssue(tracker, issueID, getCommentBody()); err != nil {
+				log.Printf("[stopAgent] failed to comment Jira issue %s: %v", issueID, err)
+			} else {
+				log.Printf("[stopAgent] commented Jira issue %s", issueID)
+			}
+		}
 	}
 }
 
 // findFactoryForClaw looks up the factory that created a claw by its claw ID.
 // It uses the factory:<name> tag stored on the claw to identify the factory.
 func (s *Server) findFactoryForClaw(clawID string) (*types.FactoryConfig, string) {
-	var issueID, githubIssueID, shortcutStoryID, tagsJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &tagsJSON); err != nil {
+	var issueID, githubIssueID, shortcutStoryID, jiraIssueID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &jiraIssueID, &tagsJSON); err != nil {
 		return nil, ""
 	}
 
-	// Prefer github_issue_id for GitHub issue-based claws, then shortcut
+	// Prefer provider-specific IDs for non-Linear issue-based claws.
 	if githubIssueID != "" {
 		issueID = githubIssueID
 	} else if shortcutStoryID != "" {
 		issueID = shortcutStoryID
+	} else if jiraIssueID != "" {
+		issueID = jiraIssueID
 	}
 
 	if issueID != "" {
@@ -1892,6 +1939,7 @@ func (s *Server) findPipelineContextForIssue(issueID string) (pipelineContext, b
 		`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
 		`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
 		`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
 	}
 	for _, query := range queries {
 		if err := s.db.QueryRow(query, issueID).Scan(&clawID); err == nil && clawID != "" {
@@ -1902,14 +1950,16 @@ func (s *Server) findPipelineContextForIssue(issueID string) (pipelineContext, b
 }
 
 func (s *Server) clawIssueAndTags(clawID string) (string, []string) {
-	var issueID, githubIssueID, shortcutStoryID, tagsJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &tagsJSON); err != nil {
+	var issueID, githubIssueID, shortcutStoryID, jiraIssueID, tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,''), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&issueID, &githubIssueID, &shortcutStoryID, &jiraIssueID, &tagsJSON); err != nil {
 		return "", nil
 	}
 	if githubIssueID != "" {
 		issueID = githubIssueID
 	} else if shortcutStoryID != "" {
 		issueID = shortcutStoryID
+	} else if jiraIssueID != "" {
+		issueID = jiraIssueID
 	}
 	var tags []string
 	_ = json.Unmarshal([]byte(tagsJSON), &tags)

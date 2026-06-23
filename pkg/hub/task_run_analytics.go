@@ -204,20 +204,20 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 	}
 	defer tx.Rollback()
 
-	var tenantID, existingRunID, rawTags, clawModel, clawLLMKey, clawFactory, externalTriggerID, linearIssue, githubIssue, shortcutStory, clawStatus string
+	var tenantID, existingRunID, rawTags, clawModel, clawLLMKey, clawFactory, externalTriggerID, linearIssue, githubIssue, shortcutStory, jiraIssue, clawStatus string
 	err = tx.QueryRow(`
 		SELECT tenant_id, COALESCE(task_run_id,''), COALESCE(tags,'[]'), COALESCE(default_model,''),
 		       COALESCE(llm_key,''), COALESCE(factory_name,''), COALESCE(external_trigger_id,''),
-		       COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(status,'')
+		       COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,''), COALESCE(status,'')
 		  FROM claws
-		 WHERE id=?`, clawID).Scan(&tenantID, &existingRunID, &rawTags, &clawModel, &clawLLMKey, &clawFactory, &externalTriggerID, &linearIssue, &githubIssue, &shortcutStory, &clawStatus)
+		 WHERE id=?`, clawID).Scan(&tenantID, &existingRunID, &rawTags, &clawModel, &clawLLMKey, &clawFactory, &externalTriggerID, &linearIssue, &githubIssue, &shortcutStory, &jiraIssue, &clawStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", "", fmt.Errorf("ensure task run: claw %s not found", clawID)
 		}
 		return "", "", err
 	}
-	normalizeTaskRunStart(&opts, tenantID, clawModel, clawLLMKey, clawFactory, externalTriggerID, firstNonEmpty(githubIssue, linearIssue, shortcutStory))
+	normalizeTaskRunStart(&opts, tenantID, clawModel, clawLLMKey, clawFactory, externalTriggerID, firstNonEmpty(githubIssue, linearIssue, shortcutStory, jiraIssue))
 
 	if existingRunID != "" {
 		attemptID, err := ensureTaskRunAttemptTx(tx, existingRunID, opts.TenantID, clawID, opts.TriggerID, ts)
@@ -691,7 +691,7 @@ func (s *Server) taskRunRequiresPRForClaw(clawID string) bool {
 
 func isTaskRunAnalyticsIntegration(integration string) bool {
 	switch integration {
-	case "linear", "shortcut", "github-issues", "github":
+	case "linear", "shortcut", "github-issues", "jira", "github":
 		return true
 	default:
 		return false

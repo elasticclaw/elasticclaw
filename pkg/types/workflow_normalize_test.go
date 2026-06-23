@@ -46,6 +46,42 @@ stages:
 	}
 }
 
+func TestWorkflowV1JiraProjectsValidateAsProjectKeys(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: jira-issue
+trigger:
+  jira:
+    event: status_changed
+    workspace: default
+    projects:
+      - KAN
+    states:
+      - Ready for Agent
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: start
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if got := workflow.Integration; got != "jira" {
+		t.Fatalf("integration = %q, want jira", got)
+	}
+	if got := workflow.TriggerRepos; len(got) != 1 || got[0] != "KAN" {
+		t.Fatalf("trigger repos = %#v, want KAN project key", got)
+	}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
 func TestWorkflowV1GitHubIssuesTriggerPreservesAgentStatusError(t *testing.T) {
 	data := []byte(`
 schema_version: v1

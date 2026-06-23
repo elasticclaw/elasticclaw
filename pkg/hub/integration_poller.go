@@ -48,7 +48,11 @@ func (s *Server) pollTick() {
 	if err != nil {
 		log.Printf("[poll] tick: failed to load github-issues workflows: %v", err)
 	}
-	if len(factories) == 0 && len(linearWorkflowWorkspaces) == 0 && len(shortcutWorkflowWorkspaces) == 0 && len(githubIssueWorkflowWorkspaces) == 0 {
+	jiraWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("jira")
+	if err != nil {
+		log.Printf("[poll] tick: failed to load jira workflows: %v", err)
+	}
+	if len(factories) == 0 && len(linearWorkflowWorkspaces) == 0 && len(shortcutWorkflowWorkspaces) == 0 && len(githubIssueWorkflowWorkspaces) == 0 && len(jiraWorkflowWorkspaces) == 0 {
 		log.Printf("[poll] tick: no factories or workflows configured")
 		return
 	}
@@ -79,6 +83,14 @@ func (s *Server) pollTick() {
 	}
 	if len(githubIssueWorkflowWorkspaces) > 0 {
 		s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, since)
+	}
+
+	// === JIRA ===
+	if integrations != nil && len(integrations.Jira) > 0 {
+		s.pollJira(factories, integrations.Jira, now.Add(-2*time.Minute))
+	}
+	if len(jiraWorkflowWorkspaces) > 0 {
+		s.pollJiraWorkflows(jiraWorkflowWorkspaces, now.Add(-2*time.Minute))
 	}
 
 	// === GITHUB PRs ===
@@ -1203,6 +1215,197 @@ func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, act
 	payload.Repository.FullName = repo
 	payload.Sender.Login = issue.User.Login
 	return payload
+}
+
+// ── JIRA POLLER ─────────────────────────────────────────────────────────────
+
+func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.JiraIntegrationConfig, since time.Time) {
+	workspaceFactories := map[string][]*types.FactoryConfig{}
+	for _, f := range factories {
+		if f.Integration != "jira" {
+			continue
+		}
+		if f.Enabled != nil && !*f.Enabled {
+			continue
+		}
+		workspaceFactories[f.Workspace] = append(workspaceFactories[f.Workspace], f)
+	}
+	for _, ji := range jiraCfgs {
+		if ji.Token == "" || ji.BaseURL == "" {
+			continue
+		}
+		factories := append([]*types.FactoryConfig{}, workspaceFactories[ji.Workspace]...)
+		if ji.Workspace != "" {
+			factories = append(factories, workspaceFactories[""]...)
+		}
+		if len(factories) == 0 {
+			continue
+		}
+		projects := jiraFactoryProjects(factories)
+		tracker := workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}
+		issues, err := s.queryJiraIssues(tracker, since, projects)
+		if err != nil {
+			log.Printf("[poll-jira] query failed for workspace %q: %v", ji.Workspace, err)
+			continue
+		}
+		for _, issue := range issues {
+			s.processJiraPollItem(issue, factories, tracker)
+		}
+	}
+}
+
+type jiraWorkflowPollTarget struct {
+	workspace *types.WorkspaceConfig
+	workflow  *types.WorkflowConfig
+	tracker   workspaceIssueTracker
+}
+
+func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since time.Time) {
+	type trackerKey struct {
+		baseURL  string
+		username string
+		token    string
+	}
+	targetsByTracker := map[trackerKey][]jiraWorkflowPollTarget{}
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil || workflow.Integration != "jira" {
+				continue
+			}
+			if workflow.Enabled != nil && !*workflow.Enabled {
+				continue
+			}
+			tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+			if !ok || tracker.Token == "" || tracker.BaseURL == "" {
+				log.Printf("[poll-jira] workflow %s/%s: no Jira tracker configured — skipping", workspace.Name, workflow.Name)
+				continue
+			}
+			key := trackerKey{baseURL: tracker.BaseURL, username: tracker.Username, token: tracker.Token}
+			targetsByTracker[key] = append(targetsByTracker[key], jiraWorkflowPollTarget{workspace: workspace, workflow: workflow, tracker: tracker})
+		}
+	}
+	for _, targets := range targetsByTracker {
+		if len(targets) == 0 {
+			continue
+		}
+		tracker := targets[0].tracker
+		issues, err := s.queryJiraIssues(tracker, since, jiraWorkflowProjects(targets))
+		if err != nil {
+			log.Printf("[poll-jira] workflow query failed: %v", err)
+			continue
+		}
+		for _, issue := range issues {
+			s.processJiraWorkflowPollItem(issue, targets)
+		}
+	}
+}
+
+func jiraFactoryProjects(factories []*types.FactoryConfig) []string {
+	seen := map[string]bool{}
+	var projects []string
+	for _, factory := range factories {
+		for _, project := range factory.Projects {
+			project = strings.TrimSpace(project)
+			if project == "" || seen[strings.ToLower(project)] {
+				continue
+			}
+			seen[strings.ToLower(project)] = true
+			projects = append(projects, project)
+		}
+	}
+	return projects
+}
+
+func jiraWorkflowProjects(targets []jiraWorkflowPollTarget) []string {
+	seen := map[string]bool{}
+	var projects []string
+	for _, target := range targets {
+		if target.workflow == nil {
+			continue
+		}
+		values := target.workflow.TriggerRepos
+		if target.workflow.Trigger != nil && target.workflow.Trigger.Jira != nil && len(target.workflow.Trigger.Jira.Projects) > 0 {
+			values = target.workflow.Trigger.Jira.Projects
+		}
+		for _, project := range values {
+			project = strings.TrimSpace(project)
+			if project == "" || seen[strings.ToLower(project)] {
+				continue
+			}
+			seen[strings.ToLower(project)] = true
+			projects = append(projects, project)
+		}
+	}
+	return projects
+}
+
+func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.FactoryConfig, tracker workspaceIssueTracker) {
+	payload := jiraPollPayload(issue)
+	labels := jiraIssueLabels(issue)
+	assignee := jiraIssueAssignee(issue)
+	for _, factory := range factories {
+		if factory.Integration != "jira" {
+			continue
+		}
+		if !jiraProjectMatches(issue.Fields.Project.Key, factory.Projects) {
+			continue
+		}
+		if factory.TriggerStatus == "" || !strings.EqualFold(issue.Fields.Status.Name, factory.TriggerStatus) {
+			continue
+		}
+		if !labelsAllowed(labels, factory.Labels, factory.ExcludeLabels) || !s.assigneeMatches(assignee, factory.AssignedTo) {
+			continue
+		}
+		if err := s.createClawForJiraIssue(factory, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
+			log.Printf("[poll-jira] failed to create claw for %s: %v", issue.Key, err)
+		}
+	}
+	_ = tracker
+}
+
+func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jiraWorkflowPollTarget) {
+	payload := jiraPollPayload(issue)
+	labels := jiraIssueLabels(issue)
+	assignee := jiraIssueAssignee(issue)
+	for _, target := range targets {
+		workspace := target.workspace
+		workflow := target.workflow
+		if workspace == nil || workflow == nil {
+			continue
+		}
+		if !jiraWorkflowMatchesProject(workflow, issue.Fields.Project.Key) {
+			continue
+		}
+		if workflow.TriggerStatus == "" || !strings.EqualFold(issue.Fields.Status.Name, workflow.TriggerStatus) {
+			continue
+		}
+		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+			continue
+		}
+		if !labelsAllowed(labels, workflow.Labels, workflow.ExcludeLabels) {
+			continue
+		}
+		if err := s.createClawForJiraWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
+			log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s via poll: %v", workspace.Name, workflow.Name, issue.Key, err)
+		}
+	}
+}
+
+func jiraPollPayload(issue jiraPollIssue) jiraWebhookPayload {
+	return jiraWebhookPayload{
+		WebhookEvent: "jira:issue_updated",
+		Timestamp:    time.Now().UnixMilli(),
+		Issue:        jiraIssue(issue),
+	}
 }
 
 // ── GITHUB PRs POLLER ─────────────────────────────────────────────────────────
