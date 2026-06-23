@@ -65,7 +65,7 @@ func TestFetchFireworksModelOptionsFiltersAndSortsLatestKimi(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
-	if len(options) != 3 {
+	if len(options) != 4 {
 		t.Fatalf("options = %#v", options)
 	}
 	if options[0].ID != defaultFireworksModel {
@@ -76,6 +76,51 @@ func TestFetchFireworksModelOptionsFiltersAndSortsLatestKimi(t *testing.T) {
 	}
 	if options[2].ID != "fireworks/accounts/fireworks/models/glm-5p2" {
 		t.Fatalf("third option = %#v, want GLM 5.2", options[2])
+	}
+	if options[3].ID != "fireworks/accounts/fireworks/models/no-chat-template" {
+		t.Fatalf("fourth option = %#v, want model with omitted chat metadata", options[3])
+	}
+}
+
+func TestFetchFireworksModelOptionsIncludesModelsWithSparseMetadata(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"models": []map[string]any{
+				{
+					"name":        "accounts/fireworks/models/sparse-model",
+					"displayName": "Sparse Model",
+				},
+				{
+					"name":               "accounts/fireworks/models/not-serverless",
+					"displayName":        "Not Serverless",
+					"public":             true,
+					"supportsServerless": false,
+				},
+				{
+					"name":               "accounts/fireworks/models/private-model",
+					"displayName":        "Private Model",
+					"public":             false,
+					"supportsServerless": true,
+				},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer api.Close()
+
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.fireworksBaseURL = api.URL
+
+	options, err := s.fetchFireworksModelOptions(t.Context(), "fw-test")
+	if err != nil {
+		t.Fatalf("fetch options: %v", err)
+	}
+	if len(options) != 1 {
+		t.Fatalf("options = %#v, want only sparse model", options)
+	}
+	if options[0].ID != "fireworks/accounts/fireworks/models/sparse-model" {
+		t.Fatalf("option = %#v, want sparse model", options[0])
 	}
 }
 

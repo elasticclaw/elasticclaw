@@ -107,9 +107,9 @@ func (s *Server) fetchFireworksModelOptions(ctx context.Context, apiKey string) 
 			Models []struct {
 				Name               string `json:"name"`
 				DisplayName        string `json:"displayName"`
-				Public             bool   `json:"public"`
+				Public             *bool  `json:"public"`
 				ContextLength      int    `json:"contextLength"`
-				SupportsServerless bool   `json:"supportsServerless"`
+				SupportsServerless *bool  `json:"supportsServerless"`
 				ConversationConfig struct {
 					Style    string `json:"style"`
 					System   string `json:"system"`
@@ -128,7 +128,7 @@ func (s *Server) fetchFireworksModelOptions(ctx context.Context, apiKey string) 
 		}
 
 		for _, model := range body.Models {
-			if !fireworksModelSupported(model.Public, model.SupportsServerless, model.ContextLength, model.ConversationConfig.Style, model.ConversationConfig.System, model.ConversationConfig.Template) {
+			if !fireworksModelSupported(model.Public, model.SupportsServerless) {
 				continue
 			}
 			id := fireworksModelID(model.Name)
@@ -151,13 +151,14 @@ func (s *Server) fetchFireworksModelOptions(ctx context.Context, apiKey string) 
 	return sortFireworksModelOptions(dedupeModelOptions(options)), nil
 }
 
-func fireworksModelSupported(public, supportsServerless bool, contextLength int, conversationStyle, conversationSystem, conversationTemplate string) bool {
-	if !public || !supportsServerless || contextLength <= 0 {
+func fireworksModelSupported(public, supportsServerless *bool) bool {
+	if public != nil && !*public {
 		return false
 	}
-	return strings.TrimSpace(conversationStyle) != "" ||
-		strings.TrimSpace(conversationSystem) != "" ||
-		strings.TrimSpace(conversationTemplate) != ""
+	if supportsServerless != nil && !*supportsServerless {
+		return false
+	}
+	return true
 }
 
 func fireworksModelID(name string) string {
