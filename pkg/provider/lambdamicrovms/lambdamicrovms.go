@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -105,7 +107,12 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	if err != nil {
 		return nil, err
 	}
-	args, err := p.runMicroVMArgs(payload)
+	payloadArg, cleanup, err := writeRunHookPayloadFile(payload)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	args, err := p.runMicroVMArgs(payloadArg)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +243,34 @@ func buildRunHookPayload(req types.CreateRequest) (string, error) {
 	return string(data), nil
 }
 
-func (p *Provider) runMicroVMArgs(runHookPayload string) ([]string, error) {
+func writeRunHookPayloadFile(payload string) (string, func(), error) {
+	if payload == "" {
+		return "", func() {}, nil
+	}
+	f, err := os.CreateTemp("", "elasticclaw-lambda-microvm-run-hook-*.json")
+	if err != nil {
+		return "", nil, fmt.Errorf("create run hook payload file: %w", err)
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("secure run hook payload file: %w", err)
+	}
+	if _, err := f.WriteString(payload); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("write run hook payload file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close run hook payload file: %w", err)
+	}
+	return "file://" + path, cleanup, nil
+}
+
+func (p *Provider) runMicroVMArgs(runHookPayloadArg string) ([]string, error) {
 	args := []string{"lambda-microvms", "run-microvm", "--image-identifier", p.cfg.ImageIdentifier}
 	if p.cfg.ImageVersion != "" {
 		args = append(args, "--image-version", p.cfg.ImageVersion)
@@ -272,8 +306,8 @@ func (p *Provider) runMicroVMArgs(runHookPayload string) ([]string, error) {
 	if p.cfg.MaximumDurationSeconds > 0 {
 		args = append(args, "--maximum-duration-in-seconds", strconv.Itoa(p.cfg.MaximumDurationSeconds))
 	}
-	if runHookPayload != "" {
-		args = append(args, "--run-hook-payload", runHookPayload)
+	if runHookPayloadArg != "" {
+		args = append(args, "--run-hook-payload", runHookPayloadArg)
 	}
 	args = append(args, "--output", "json")
 	return args, nil
@@ -343,7 +377,12 @@ func (p *Provider) bridgeJSON(ctx context.Context, instanceID, method, path stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("microvm bridge %s %s returned HTTP %d", method, path, resp.StatusCode)
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		detail := strings.TrimSpace(string(bodySnippet))
+		if detail == "" {
+			return fmt.Errorf("microvm bridge %s %s returned HTTP %d", method, path, resp.StatusCode)
+		}
+		return fmt.Errorf("microvm bridge %s %s returned HTTP %d: %s", method, path, resp.StatusCode, detail)
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -356,9 +395,11 @@ func (p *Provider) bridgeJSON(ctx context.Context, instanceID, method, path stri
 func (p *Provider) aws(ctx context.Context, args ...string) ([]byte, error) {
 	fullArgs := append(p.awsBaseArgs(), args...)
 	cmd := exec.CommandContext(ctx, "aws", fullArgs...)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("aws %s: %w: %s", strings.Join(fullArgs, " "), err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("aws %s: %w: %s", strings.Join(fullArgs, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }

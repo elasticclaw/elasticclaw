@@ -2,6 +2,7 @@ package lambdamicrovms
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestRunMicroVMArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	args, err := p.runMicroVMArgs(`{"version":1}`)
+	args, err := p.runMicroVMArgs("file:///tmp/elasticclaw-run-hook.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestRunMicroVMArgs(t *testing.T) {
 		"--ingress-network-connectors", "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:ALL_INGRESS",
 		"--egress-network-connectors", "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS",
 		"--maximum-duration-in-seconds", "14400",
-		"--run-hook-payload", `{"version":1}`,
+		"--run-hook-payload", "file:///tmp/elasticclaw-run-hook.json",
 		"--output", "json",
 	} {
 		if !strings.Contains(joined, want) {
@@ -48,6 +49,38 @@ func TestRunMicroVMArgs(t *testing.T) {
 	}
 	if !strings.Contains(joined, `"autoResumeEnabled":true`) || !strings.Contains(joined, `"maxIdleDurationSeconds":900`) {
 		t.Fatalf("args %q missing idle policy JSON", args)
+	}
+}
+
+func TestWriteRunHookPayloadFileKeepsPayloadOutOfArgs(t *testing.T) {
+	payload := `{"env":{"ELASTICCLAW_CLAW_TOKEN":"secret-token"}}`
+
+	arg, cleanup, err := writeRunHookPayloadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if !strings.HasPrefix(arg, "file://") {
+		t.Fatalf("payload arg = %q, want file:// reference", arg)
+	}
+	if strings.Contains(arg, "secret-token") {
+		t.Fatalf("payload arg leaks secret: %q", arg)
+	}
+	path := strings.TrimPrefix(arg, "file://")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != payload {
+		t.Fatalf("payload file = %q, want original payload", string(data))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("payload file permissions = %v, want 0600", got)
 	}
 }
 
