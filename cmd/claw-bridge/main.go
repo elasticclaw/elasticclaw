@@ -2063,7 +2063,7 @@ echo "Git: $(git --version)"
 	return runShell(script)
 }
 
-const openClawVersion = "2026.6.9"
+const openClawVersion = cliversion.OpenClawVersion
 const codexCLIVersion = "0.141.0"
 const grokCLIVersion = "0.1.0"
 
