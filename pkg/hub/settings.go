@@ -973,8 +973,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 					existing.DefaultDisk = pp.DefaultDisk
 				}
 			case "docker":
-				existing.Image = pp.Image
-				existing.Network = pp.Network
+				if pp.Image != "" {
+					existing.Image = pp.Image
+				}
+				if pp.Network != "" {
+					existing.Network = pp.Network
+				}
 			case "lambda-microvms":
 				if pp.AWSRegion != "" {
 					existing.AWSRegion = pp.AWSRegion
