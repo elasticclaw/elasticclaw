@@ -171,6 +171,9 @@ type ProviderView struct {
 	DefaultMemory string `json:"defaultMemory,omitempty"`
 	DefaultDisk   string `json:"defaultDisk,omitempty"`
 	_sshKeyPath   string `json:"-"` // internal: path for file I/O outside lock
+	// Docker
+	Image   string `json:"image,omitempty"`
+	Network string `json:"network,omitempty"`
 	// AWS Lambda MicroVMs
 	AWSRegion                  string   `json:"awsRegion,omitempty"`
 	AWSProfile                 string   `json:"awsProfile,omitempty"`
@@ -355,6 +358,9 @@ type ProviderPatch struct {
 	DefaultCPU    int    `json:"defaultCpu,omitempty"`
 	DefaultMemory string `json:"defaultMemory,omitempty"`
 	DefaultDisk   string `json:"defaultDisk,omitempty"`
+	// Docker
+	Image   string `json:"image,omitempty"`
+	Network string `json:"network,omitempty"`
 	// AWS Lambda MicroVMs
 	AWSRegion                  string   `json:"awsRegion,omitempty"`
 	AWSProfile                 string   `json:"awsProfile,omitempty"`
@@ -492,6 +498,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			if p.SSHKeyPath != "" {
 				pv._sshKeyPath = p.SSHKeyPath
 			}
+		case "docker":
+			pv.Image = p.Image
+			pv.Network = p.Network
 		case "lambda-microvms":
 			pv.AWSRegion = p.AWSRegion
 			pv.AWSProfile = p.AWSProfile
@@ -962,6 +971,13 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				if pp.DefaultDisk != "" {
 					existing.DefaultDisk = pp.DefaultDisk
+				}
+			case "docker":
+				if pp.Image != "" {
+					existing.Image = pp.Image
+				}
+				if pp.Network != "" {
+					existing.Network = pp.Network
 				}
 			case "lambda-microvms":
 				if pp.AWSRegion != "" {
