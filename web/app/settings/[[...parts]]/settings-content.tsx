@@ -106,6 +106,8 @@ interface SettingsData {
     defaultDisk?: string
     sshKeySet?: boolean
     sshPublicKey?: string
+    image?: string
+    network?: string
     awsRegion?: string
     awsProfile?: string
     imageIdentifier?: string
@@ -506,6 +508,7 @@ const SANDBOX_PROVIDER_OPTIONS = [
   { value: "replicated", label: "Replicated CMX", description: "Kubernetes-based VM provider" },
   { value: "daytona", label: "Daytona", description: "Development environment provider" },
   { value: "exedev", label: "exe.dev", description: "Persistent VM provider with SSH access" },
+  { value: "docker", label: "Local Docker", description: "Local Docker daemon provider for development and testing" },
   { value: "lambda-microvms", label: "AWS Lambda MicroVMs", description: "Serverless Firecracker MicroVM provider", alpha: true },
 ]
 
@@ -522,6 +525,8 @@ interface SandboxProviderView {
   tokenSet?: boolean
   defaultTtl?: string
   defaultInstanceType?: string
+  image?: string
+  network?: string
   imageIdentifier?: string
 }
 
@@ -539,13 +544,15 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
         label: opt?.label || name,
         description: opt?.description || "",
         alpha: opt?.alpha,
-        configured: !!(p.tokenSet || p.apiKeySet || p.imageIdentifier || name === "exedev"),
+        configured: !!(p.tokenSet || p.apiKeySet || p.imageIdentifier || name === "exedev" || name === "docker"),
         apiUrl: p.apiUrl,
         apiKeySet: p.apiKeySet,
         defaultSnapshot: p.defaultSnapshot,
         tokenSet: p.tokenSet,
         defaultTtl: p.defaultTtl,
         defaultInstanceType: p.defaultInstanceType,
+        image: p.image,
+        network: p.network,
         imageIdentifier: p.imageIdentifier,
         defaultCpu: p.defaultCpu,
         defaultMemory: p.defaultMemory,
@@ -570,6 +577,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formDefaultCpu, setFormDefaultCpu] = useState("")
   const [formDefaultMemory, setFormDefaultMemory] = useState("")
   const [formDefaultDisk, setFormDefaultDisk] = useState("")
+  const [formDockerImage, setFormDockerImage] = useState("")
+  const [formDockerNetwork, setFormDockerNetwork] = useState("")
   const [formAwsRegion, setFormAwsRegion] = useState("")
   const [formAwsProfile, setFormAwsProfile] = useState("")
   const [formImageIdentifier, setFormImageIdentifier] = useState("")
@@ -595,6 +604,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultCpu("")
     setFormDefaultMemory("")
     setFormDefaultDisk("")
+    setFormDockerImage("")
+    setFormDockerNetwork("")
     setFormAwsRegion("")
     setFormAwsProfile("")
     setFormImageIdentifier("")
@@ -638,6 +649,8 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormDefaultCpu(p?.defaultCpu?.toString() || "")
     setFormDefaultMemory(p?.defaultMemory ? p.defaultMemory.replace(/GB$/, "") : "")
     setFormDefaultDisk(p?.defaultDisk ? p.defaultDisk.replace(/GB$/, "") : "")
+    setFormDockerImage(p?.image || "")
+    setFormDockerNetwork(p?.network || "")
     setFormAwsRegion(p?.awsRegion || "")
     setFormAwsProfile(p?.awsProfile || "")
     setFormImageIdentifier(p?.imageIdentifier || "")
@@ -687,6 +700,10 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
       if (formDefaultCpu && !isNaN(parsedCpu)) patch.defaultCpu = parsedCpu
       if (formDefaultMemory) patch.defaultMemory = formDefaultMemory + "GB"
       if (formDefaultDisk) patch.defaultDisk = formDefaultDisk + "GB"
+    } else if (formProvider === "docker") {
+      patch.enabled = true
+      patch.image = formDockerImage.trim()
+      patch.network = formDockerNetwork.trim()
     } else if (formProvider === "lambda-microvms") {
       patch.enabled = true
       if (formAwsRegion) patch.awsRegion = formAwsRegion.trim()
@@ -954,6 +971,41 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                     className="h-8 text-sm"
                     placeholder="10"
                   />
+                </div>
+              </>
+            )}
+
+            {formProvider === "docker" && (
+              <>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                  <p className="text-xs font-medium">Local Docker provider</p>
+                  <p className="text-xs text-muted-foreground">
+                    Runs agent containers with the hub host&apos;s Docker daemon. If the hub runs in a container, mount the Docker socket so it can create sibling containers.
+                  </p>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Agent image</label>
+                  <Input
+                    value={formDockerImage}
+                    onChange={e => setFormDockerImage(e.target.value)}
+                    className="h-8 text-sm font-mono"
+                    placeholder="elasticclaw/claw-agent:dev"
+                  />
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Leave blank to use the provider default image.
+                  </p>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Docker network</label>
+                  <Input
+                    value={formDockerNetwork}
+                    onChange={e => setFormDockerNetwork(e.target.value)}
+                    className="h-8 text-sm font-mono"
+                    placeholder="elasticclaw-dev"
+                  />
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Optional. Use a network where agent containers can reach the hub.
+                  </p>
                 </div>
               </>
             )}
