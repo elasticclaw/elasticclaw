@@ -1218,11 +1218,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	pipelineHandledDone := false
 	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
 		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
-		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
-				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
-				pipelineHandledDone = true
-			}
+		if stage, ok := s.pipelineStageForMessageContainsInContext(clawID, rawMessage, pipelineCtx); ok {
+			s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+			pipelineHandledDone = true
 		}
 	}
 
@@ -1238,11 +1236,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		s.trackDoneSignal(factory.Name, issueID, clawID, len(prURLs))
 	}
 	if !pipelineHandledDone {
-		if pl := parsePipelineForFactory(factory); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
-				s.transitionPipelineStage(clawID, *stage, factory, issueID)
-				pipelineHandledDone = true
-			}
+		pipelineCtx := pipelineContext{Factory: factory, IssueID: issueID}
+		if stage, ok := s.pipelineStageForMessageContainsInContext(clawID, rawMessage, pipelineCtx); ok {
+			s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
+			pipelineHandledDone = true
 		}
 	}
 

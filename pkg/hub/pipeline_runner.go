@@ -1433,9 +1433,17 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	if !ok {
 		return pipelineContext{}, nil, false
 	}
+	stage, ok := s.pipelineStageForMessageContainsInContext(clawID, message, ctx)
+	if !ok {
+		return pipelineContext{}, nil, false
+	}
+	return ctx, stage, true
+}
+
+func (s *Server) pipelineStageForMessageContainsInContext(clawID, message string, ctx pipelineContext) (*pipeline.Stage, bool) {
 	pl := parsePipelineForContext(ctx)
 	if pl == nil {
-		return pipelineContext{}, nil, false
+		return nil, false
 	}
 	var stage *pipeline.Stage
 	if pl.MessageContainsHasIssueLabelsCondition(message) {
@@ -1449,9 +1457,9 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 		stage = pl.StageForMessageContains(message)
 	}
 	if stage == nil {
-		return pipelineContext{}, nil, false
+		return nil, false
 	}
-	return ctx, stage, true
+	return stage, true
 }
 
 func (s *Server) pipelineIssueLabels(clawID string, ctx pipelineContext) ([]string, bool) {

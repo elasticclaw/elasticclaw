@@ -309,6 +309,77 @@ stages:
 	}
 }
 
+func TestHandleClawDoneSignalFallbacksHonorIssueLabelFilters(t *testing.T) {
+	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"NEXT-257","title":"Test issue","url":"https://linear.app/test/issue/NEXT-257","description":"Test","labels":{"nodes":[{"name":"skip-review"}]}}}}`))
+	}))
+	t.Cleanup(linear.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "faster_apps",
+				Template:      "elasticclaw",
+				Integration:   "linear",
+				Workspace:     "test-workspace",
+				TriggerStatus: "Ready For Agent",
+				PipelineYAML: `
+stages:
+  - id: working
+    label: Working
+    entry: true
+  - id: review_loop
+    label: Review Loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - skip-review
+    on_enter:
+      inject: "Review loop started"
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{
+				{
+					Workspace: "test-workspace",
+					Token:     "test-linear-token",
+				},
+			},
+		},
+	}, "", linear.URL, "")
+
+	const clawID = "claw-done-label-filter"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "NEXT-257", "elasticclaw", "connected", `["factory:faster_apps"]`, "NEXT-257", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select pipeline_stage: %v", err)
+	}
+	if stage != "working" {
+		t.Fatalf("pipeline_stage = %q, want working", stage)
+	}
+
+	var reviewMessages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%Review loop started%'`, clawID).Scan(&reviewMessages); err != nil {
+		t.Fatalf("count review messages: %v", err)
+	}
+	if reviewMessages != 0 {
+		t.Fatalf("expected no review loop inject, got %d", reviewMessages)
+	}
+}
+
 func TestHandleClawDoneSignal_BlockedByErrorRequiredGate(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
