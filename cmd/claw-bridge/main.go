@@ -2161,6 +2161,18 @@ func installSelectedCodingModelCLI() error {
 	}
 }
 
+func syncOpenClawAPIKeyAuth() error {
+	script := strings.TrimSpace(os.Getenv("ELASTICCLAW_API_KEY_AUTH_SYNC"))
+	if script == "" {
+		return nil
+	}
+	log.Printf("[bootstrap] syncing OpenClaw API-key auth...")
+	if err := runShell(script); err != nil {
+		return fmt.Errorf("sync OpenClaw API-key auth: %w", err)
+	}
+	return nil
+}
+
 // configureOpenClaw patches ~/.openclaw/openclaw.json with model, LLM keys,
 // gateway auth, and disables the bonjour plugin.
 func configureOpenClaw() error {
@@ -2514,6 +2526,10 @@ func runBootstrap() error {
 		}
 	} else {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+
+	if err := syncOpenClawAPIKeyAuth(); err != nil {
+		return err
 	}
 
 	// Step 5: Set up flake environment BEFORE starting gateway if flake.nix exists

@@ -39,6 +39,7 @@ type BootstrapParams struct {
 	// Env injection
 	LLMKeyEnv      string // pre-built export lines
 	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
+	APIKeyAuthSync string // shell script that persists API-key auth into OpenClaw's auth store
 	LinearEnv      string // pre-built export line
 	ProviderConfig string // python snippet to patch OpenClaw config
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
@@ -188,6 +189,21 @@ print('OpenClaw config patched')
 PYEOF`, anthropicPatch)
 }
 
+// buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists
+// direct API-key auth into OpenClaw's current auth store. OpenClaw 2026.6.9
+// resolves agent auth from openclaw-agent.sqlite, so writing only the legacy
+// auth-profiles.json file is not enough for embedded agents.
+func buildOpenClawAPIKeyAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	activeKey := resolveActiveKey(keys, selectedKeyName)
+	if activeKey == nil || activeKey.Provider != "anthropic" || !llmKeyHasRequiredAPIKey(activeKey) {
+		return ""
+	}
+	envVar := activeKey.EnvVarName()
+	return fmt.Sprintf(`if [ -n "${%s:-}" ]; then
+  printf '%%s\n' "${%s}" | openclaw models auth paste-api-key --provider anthropic --profile-id anthropic:default
+fi`, envVar, envVar)
+}
+
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads
 // claw-bridge and execs it with --bootstrap. All VM setup logic now lives inside
 // claw-bridge itself (runBootstrap in cmd/claw-bridge/main.go).
@@ -215,6 +231,11 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		providerConfigLine = fmt.Sprintf("export ELASTICCLAW_PROVIDER_CONFIG=%s",
 			shellQuote(p.ProviderConfig))
 	}
+	apiKeyAuthSyncLine := "# No API key auth sync"
+	if p.APIKeyAuthSync != "" {
+		apiKeyAuthSyncLine = fmt.Sprintf("export ELASTICCLAW_API_KEY_AUTH_SYNC=%s",
+			shellQuote(p.APIKeyAuthSync))
+	}
 
 	linearEnvLine := p.LinearEnv
 	if linearEnvLine == "" {
@@ -234,6 +255,7 @@ export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
 export OPENCLAW_DEFAULT_MODEL=%s
 export ELASTICCLAW_NIX=%s
 export ELASTICCLAW_DOCKER=%s
+%s
 %s
 %s
 %s
@@ -324,7 +346,7 @@ exit 1
 `,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
-		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, shellQuote(p.OnboardFlags), providerConfigLine,
+		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
 	)
 }

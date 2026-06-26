@@ -3082,6 +3082,7 @@ docker --version`); err != nil {
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
+	apiKeyAuthSyncDaytona := buildOpenClawAPIKeyAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
 	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	if activeKeyDaytona != nil {
@@ -3123,6 +3124,13 @@ docker --version`); err != nil {
 		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
 	} else {
 		log.Printf("[daytona] onboard openclaw done")
+	}
+
+	if apiKeyAuthSyncDaytona != "" {
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
+		if err := exec("sync openclaw api key auth", 30*time.Second, syncCmd); err != nil {
+			return fmt.Errorf("sync openclaw api key auth: %w", err)
+		}
 	}
 
 	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
@@ -4245,6 +4253,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
+		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
@@ -4329,6 +4338,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 
 	gatewayPassword := randomHex(16)
 	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
+	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
@@ -4346,6 +4356,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
 		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
 	}
 
@@ -4430,6 +4441,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		defaultModel = hubCfg.DefaultModel
 	}
 	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
+	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 	gatewayPassword := randomHex(16)
 
@@ -4447,6 +4459,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
 		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
 	}
 	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
@@ -5188,6 +5201,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
+		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),

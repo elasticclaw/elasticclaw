@@ -191,6 +191,21 @@ export OPENAI_API_KEY="sk-openai-key"`
 	assertContains(t, topSection, "OPENAI_API_KEY", "OPENAI_API_KEY before bridge start")
 }
 
+func TestBootstrapScript_OpenClawAPIKeyAuthSyncInjected(t *testing.T) {
+	p := baseParams()
+	p.APIKeyAuthSync = buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test", Default: true},
+	}, "anthropic-main")
+
+	script := GenerateReplicatedBootstrapScript(p)
+
+	assertContains(t, script, "ELASTICCLAW_API_KEY_AUTH_SYNC", "exports API key auth sync script for claw-bridge")
+	assertContains(t, script, "openclaw models auth paste-api-key", "syncs API key through OpenClaw auth CLI")
+	assertContains(t, script, "--provider anthropic", "syncs Anthropic provider")
+	assertContains(t, script, "--profile-id anthropic:default", "uses stable Anthropic default profile")
+	assertNotContains(t, script, "sk-ant-test", "does not embed the API key in the auth sync script")
+}
+
 func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
 	p := baseParams()
 	p.OnboardFlags = buildOnboardFlags(nil, "", p.DefaultModel)
@@ -346,6 +361,28 @@ func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	assertContains(t, env, "ANTHROPIC_API_KEY", "exports usable external key")
 	assertContains(t, env, "OLLAMA_API_KEY", "exports blank Ollama key because Ollama auth does not require an API key")
 	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
+}
+
+func TestBuildOpenClawAPIKeyAuthSyncShellUsesAnthropicPasteAPIKey(t *testing.T) {
+	shell := buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test", Default: true},
+	}, "anthropic-main")
+
+	assertContains(t, shell, "ANTHROPIC_API_KEY", "reads exported Anthropic key")
+	assertContains(t, shell, "openclaw models auth paste-api-key", "uses OpenClaw to persist the auth store")
+	assertContains(t, shell, "--provider anthropic", "writes Anthropic auth")
+	assertContains(t, shell, "--profile-id anthropic:default", "uses the existing default profile id")
+	assertNotContains(t, shell, "sk-ant-test", "does not inline the secret value")
+}
+
+func TestBuildOpenClawAPIKeyAuthSyncShellSkipsNonAnthropicKeys(t *testing.T) {
+	shell := buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
+		{Name: "openai-main", Provider: "openai", APIKey: "sk-openai-test", Default: true},
+	}, "openai-main")
+
+	if shell != "" {
+		t.Fatalf("expected no auth sync shell for non-Anthropic key, got %q", shell)
+	}
 }
 
 func TestBuildModelAuthEnvUsesSelectedProfile(t *testing.T) {
