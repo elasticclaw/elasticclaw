@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1050,6 +1051,349 @@ stages:
 	}
 	if stage != "pr_ready" {
 		t.Fatalf("stage = %q, want pr_ready", stage)
+	}
+}
+
+func TestCheckPipelineMessageTriggersHonorsLinearIssueLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []map[string]interface{}
+		want   string
+	}{
+		{
+			name: "excluded review loop label skips review",
+			labels: []map[string]interface{}{
+				{"name": "No Review Loop"},
+			},
+			want: "skip_review_loop",
+		},
+		{
+			name:   "no excluded label enters review",
+			labels: nil,
+			want:   "review_loop",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path != "/graphql" {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ELA-123","title":"Test issue","url":"https://linear.app/test/issue/ELA-123","description":"Test","labels":{"nodes":`))
+				if tt.labels == nil {
+					_, _ = w.Write([]byte(`[]`))
+				} else {
+					_ = json.NewEncoder(w).Encode(tt.labels)
+				}
+				_, _ = w.Write([]byte(`}}}}`))
+			}))
+			t.Cleanup(linear.Close)
+
+			cfg := &types.HubConfig{
+				Token: "test-token",
+				Factories: []*types.FactoryConfig{{
+					Name:          "test-factory",
+					Template:      "base",
+					Integration:   "linear",
+					Workspace:     "test-workspace",
+					TriggerStatus: "Ready For Agent",
+					PipelineYAML: `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: review_loop
+    label: "Review Loop"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - no review loop
+    on_enter:
+      inject: "Run review loop"
+  - id: skip_review_loop
+    label: "Skip Review Loop"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - no review loop
+    on_enter:
+      inject: "Skip review loop"
+`,
+				}},
+				Integrations: &types.IntegrationsConfig{
+					Linear: []*types.LinearIntegrationConfig{{
+						Workspace: "test-workspace",
+						Token:     "test-linear-token",
+					}},
+				},
+			}
+			s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+			const clawID = "claw-linear-labels"
+			_, err := db.Exec(
+				`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:test-factory"]`, "ELA-123",
+			)
+			if err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+
+			if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+				t.Fatal("expected pipeline transition")
+			}
+
+			var stage string
+			if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+				t.Fatalf("select stage: %v", err)
+			}
+			if stage != tt.want {
+				t.Fatalf("pipeline_stage = %q, want %q", stage, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckPipelineMessageTriggersUsesManualLinearIssueInputForLabels(t *testing.T) {
+	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ELA-123","title":"Test issue","url":"https://linear.app/test/issue/ELA-123","description":"Test","labels":{"nodes":[{"name":"no review loop"}]}}}}`))
+	}))
+	t.Cleanup(linear.Close)
+
+	cfg := &types.HubConfig{
+		Token: "test-token",
+		Factories: []*types.FactoryConfig{{
+			Name:          "test-factory",
+			Template:      "base",
+			Integration:   "linear",
+			Workspace:     "test-workspace",
+			TriggerStatus: "Ready For Agent",
+			PipelineYAML: `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: review_loop
+    label: "Review Loop"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - no review loop
+    on_enter:
+      inject: "Run review loop"
+  - id: detect_android_changes
+    label: "Detect Android Changes"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - no review loop
+    on_enter:
+      inject: "Detect Android changes"
+`,
+		}},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{{
+				Workspace: "test-workspace",
+				Token:     "test-linear-token",
+			}},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+	filesJSON, err := json.Marshal(map[string]string{
+		"TRIGGER_INPUTS.json": `{"linear_issue_id":"ELA-123"}`,
+	})
+	if err != nil {
+		t.Fatalf("marshal files: %v", err)
+	}
+
+	const clawID = "claw-manual-linear-labels"
+	_, err = db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, template_files, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:test-factory","manual-trigger"]`, string(filesJSON),
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+		t.Fatal("expected pipeline transition")
+	}
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select stage: %v", err)
+	}
+	if stage != "detect_android_changes" {
+		t.Fatalf("pipeline_stage = %q, want detect_android_changes", stage)
+	}
+}
+
+func TestCheckPipelineMessageTriggersHonorsBugReviewLoopLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []map[string]interface{}
+		want   string
+	}{
+		{
+			name:   "bug defaults to skipping review loop",
+			labels: nil,
+			want:   "detect_android_changes",
+		},
+		{
+			name: "with review loop label enters review",
+			labels: []map[string]interface{}{
+				{"name": "with review loop"},
+			},
+			want: "review_loop",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ELA-123","title":"Test issue","url":"https://linear.app/test/issue/ELA-123","description":"Test","labels":{"nodes":`))
+				if tt.labels == nil {
+					_, _ = w.Write([]byte(`[]`))
+				} else {
+					_ = json.NewEncoder(w).Encode(tt.labels)
+				}
+				_, _ = w.Write([]byte(`}}}}`))
+			}))
+			t.Cleanup(linear.Close)
+
+			cfg := &types.HubConfig{
+				Token: "test-token",
+				Factories: []*types.FactoryConfig{{
+					Name:          "bug-workflow",
+					Template:      "base",
+					Integration:   "linear",
+					Workspace:     "test-workspace",
+					TriggerStatus: "Ready For Agent",
+					PipelineYAML: `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: review_loop
+    label: "Review Loop"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - with review loop
+    on_enter:
+      inject: "Run review loop"
+  - id: detect_android_changes
+    label: "Detect Android Changes"
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - with review loop
+    on_enter:
+      inject: "Detect Android changes"
+`,
+				}},
+				Integrations: &types.IntegrationsConfig{
+					Linear: []*types.LinearIntegrationConfig{{
+						Workspace: "test-workspace",
+						Token:     "test-linear-token",
+					}},
+				},
+			}
+			s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+			const clawID = "claw-bug-labels"
+			_, err := db.Exec(
+				`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:bug-workflow"]`, "ELA-123",
+			)
+			if err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+
+			if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+				t.Fatal("expected pipeline transition")
+			}
+
+			var stage string
+			if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+				t.Fatalf("select stage: %v", err)
+			}
+			if stage != tt.want {
+				t.Fatalf("pipeline_stage = %q, want %q", stage, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckPipelineMessageTriggersAvoidsLinearFetchWithoutIssueLabelCondition(t *testing.T) {
+	calls := 0
+	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(linear.Close)
+
+	cfg := &types.HubConfig{
+		Token: "test-token",
+		Factories: []*types.FactoryConfig{{
+			Name:          "test-factory",
+			Template:      "base",
+			Integration:   "linear",
+			Workspace:     "test-workspace",
+			TriggerStatus: "Ready For Agent",
+			PipelineYAML: `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: detect_android_changes
+    label: "Detect Android Changes"
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+`,
+		}},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{{
+				Workspace: "test-workspace",
+				Token:     "test-linear-token",
+			}},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+	const clawID = "claw-no-label-condition"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:test-factory"]`, "ELA-123",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if !s.checkPipelineMessageTriggers(clawID, "[REVIEW_LOOP_PASSED]") {
+		t.Fatal("expected pipeline transition")
+	}
+	if calls != 0 {
+		t.Fatalf("Linear calls = %d, want 0", calls)
 	}
 }
 

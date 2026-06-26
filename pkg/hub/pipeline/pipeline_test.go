@@ -571,6 +571,93 @@ stages:
 	}
 }
 
+func TestParseIssueLabelsTriggerCondition(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - no review loop
+    on_enter:
+      inject: "Run review"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	trigger := p.Stages[0].Triggers[0]
+	if trigger.IssueLabels == nil {
+		t.Fatal("expected issue_labels trigger condition")
+	}
+	if len(trigger.IssueLabels.ExcludeLabels) != 1 || trigger.IssueLabels.ExcludeLabels[0] != "no review loop" {
+		t.Fatalf("exclude labels = %#v, want no review loop", trigger.IssueLabels.ExcludeLabels)
+	}
+}
+
+func TestStageForMessageContainsHonorsIssueLabelsCondition(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - no review loop
+  - id: skip_review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - no review loop
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	stage := p.StageForMessageContainsWithIssueLabels("Ready [DONE]", []string{"Backend"})
+	if stage == nil || stage.ID != "review_loop" {
+		t.Fatalf("stage without excluded label = %v, want review_loop", stage)
+	}
+
+	stage = p.StageForMessageContainsWithIssueLabels("Ready [DONE]", []string{"No Review Loop"})
+	if stage == nil || stage.ID != "skip_review_loop" {
+		t.Fatalf("stage with required label = %v, want skip_review_loop", stage)
+	}
+
+	stage = p.StageForMessageContainsWithIssueLabels("Ready [DONE]", nil)
+	if stage == nil || stage.ID != "review_loop" {
+		t.Fatalf("stage without issue labels = %v, want exclude-only default review_loop", stage)
+	}
+}
+
+func TestMessageContainsHasIssueLabelsCondition(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - no review loop
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if !p.MessageContainsHasIssueLabelsCondition("Ready [DONE]") {
+		t.Fatal("expected [DONE] to need issue labels")
+	}
+	if p.MessageContainsHasIssueLabelsCondition("[REVIEW_LOOP_PASSED]") {
+		t.Fatal("expected unconditioned trigger not to need issue labels")
+	}
+	if p.MessageContainsHasIssueLabelsCondition("random message") {
+		t.Fatal("expected unrelated message not to need issue labels")
+	}
+}
+
 func TestGetJSONPath(t *testing.T) {
 	m := map[string]interface{}{
 		"status": "passed",

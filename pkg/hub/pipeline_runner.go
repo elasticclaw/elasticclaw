@@ -1437,11 +1437,54 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	if pl == nil {
 		return pipelineContext{}, nil, false
 	}
-	stage := pl.StageForMessageContains(message)
+	var stage *pipeline.Stage
+	if pl.MessageContainsHasIssueLabelsCondition(message) {
+		issueLabels, labelsAvailable := s.pipelineIssueLabels(clawID, ctx)
+		if labelsAvailable {
+			stage = pl.StageForMessageContainsWithIssueLabels(message, issueLabels)
+		} else {
+			stage = pl.StageForMessageContains(message)
+		}
+	} else {
+		stage = pl.StageForMessageContains(message)
+	}
 	if stage == nil {
 		return pipelineContext{}, nil, false
 	}
 	return ctx, stage, true
+}
+
+func (s *Server) pipelineIssueLabels(clawID string, ctx pipelineContext) ([]string, bool) {
+	if ctx.Integration() != "linear" {
+		return nil, false
+	}
+	issueID := ctx.IssueID
+	if issueID == "" {
+		if inputs := s.loadManualTriggerInputs(clawID); inputs != nil {
+			issueID = inputs["linear_issue_id"]
+		}
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, false
+	}
+	linearToken := s.resolveLinearTokenForPipeline(ctx)
+	if linearToken == "" {
+		log.Printf("[pipeline] %s: no Linear token available to evaluate issue label conditions", ctx.Name())
+		return nil, false
+	}
+	details, err := s.fetchLinearIssueDetails(linearToken, issueID)
+	if err != nil {
+		log.Printf("[pipeline] %s: failed to fetch Linear labels for %s: %v", ctx.Name(), issueID, err)
+		return nil, false
+	}
+	labels := make([]string, 0, len(details.Labels.Nodes))
+	for _, label := range details.Labels.Nodes {
+		if strings.TrimSpace(label.Name) != "" {
+			labels = append(labels, label.Name)
+		}
+	}
+	return labels, true
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {

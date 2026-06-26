@@ -1878,6 +1878,11 @@ type linearIssueDetails struct {
 	Title       string `json:"title"`
 	URL         string `json:"url"`
 	Description string `json:"description"`
+	Labels      struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
 }
 
 // fetchLinearIssueDetails looks up an issue by its Linear identifier (e.g. "CAN-61")
@@ -1902,7 +1907,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
 	queryBody := map[string]interface{}{
-		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description labels { nodes { name } } } }",
 		"variables": map[string]string{
 			"id": issueIdentifier,
 		},

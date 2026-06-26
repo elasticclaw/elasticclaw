@@ -32,6 +32,9 @@ type Stage struct {
 type Trigger struct {
 	// MessageContains matches when a claw message contains this substring.
 	MessageContains string `yaml:"message_contains"`
+	// IssueLabels, when set, additionally filters the trigger by labels on the
+	// issue that created the claw.
+	IssueLabels *IssueLabelsCondition `yaml:"issue_labels,omitempty"`
 	// PRMerged is true when the pr_merged key is present in the YAML (even with null value).
 	PRMerged bool
 	// PRClosed is true when the pr_closed key is present in the YAML (even with null value).
@@ -48,6 +51,12 @@ type Trigger struct {
 	// any of the expected values. This is a general primitive for inspecting
 	// structured pipeline outputs without gate semantics.
 	OutputMatches *OutputMatchesTrigger `yaml:"output_matches,omitempty"`
+}
+
+// IssueLabelsCondition filters a trigger by required and excluded issue labels.
+type IssueLabelsCondition struct {
+	Labels        []string `yaml:"labels,omitempty"`
+	ExcludeLabels []string `yaml:"exclude_labels,omitempty"`
 }
 
 // PRConditionsTrigger specifies compound PR state conditions that must all pass.
@@ -111,6 +120,29 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 		switch key {
 		case "message_contains":
 			t.MessageContains = val.Value
+		case "issue_labels":
+			var cond IssueLabelsCondition
+			if val.Kind == yaml.MappingNode {
+				for j := 0; j+1 < len(val.Content); j += 2 {
+					subKey := val.Content[j].Value
+					subVal := val.Content[j+1]
+					switch subKey {
+					case "labels":
+						if subVal.Kind == yaml.SequenceNode {
+							for k := 0; k < len(subVal.Content); k++ {
+								cond.Labels = append(cond.Labels, subVal.Content[k].Value)
+							}
+						}
+					case "exclude_labels":
+						if subVal.Kind == yaml.SequenceNode {
+							for k := 0; k < len(subVal.Content); k++ {
+								cond.ExcludeLabels = append(cond.ExcludeLabels, subVal.Content[k].Value)
+							}
+						}
+					}
+				}
+			}
+			t.IssueLabels = &cond
 		case "pr_merged":
 			// Presence of the key (even with null/empty/false value) means true
 			t.PRMerged = true
@@ -354,14 +386,79 @@ func (p *Pipeline) EntryStage() *Stage {
 // StageForMessageContains returns the first stage that has a message_contains
 // trigger matching the given message text. Returns nil if none match.
 func (p *Pipeline) StageForMessageContains(message string) *Stage {
+	return p.StageForMessageContainsWithIssueLabels(message, nil)
+}
+
+// StageForMessageContainsWithIssueLabels returns the first stage that has a
+// message_contains trigger matching the given message text and, when present,
+// issue_labels conditions matching the supplied issue labels. A nil issueLabels
+// slice means labels are unavailable, so required labels do not match but
+// exclude-only conditions can still represent the default route.
+func (p *Pipeline) StageForMessageContainsWithIssueLabels(message string, issueLabels []string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
-			if t.MessageContains != "" && containsFold(message, t.MessageContains) {
+			if t.MessageContains != "" && containsFold(message, t.MessageContains) && triggerIssueLabelsAllowed(t.IssueLabels, issueLabels) {
 				return &p.Stages[i]
 			}
 		}
 	}
 	return nil
+}
+
+// MessageContainsHasIssueLabelsCondition reports whether any message_contains
+// trigger matching the message also has an issue_labels condition.
+func (p *Pipeline) MessageContainsHasIssueLabelsCondition(message string) bool {
+	for i := range p.Stages {
+		for _, t := range p.Stages[i].Triggers {
+			if t.MessageContains != "" && containsFold(message, t.MessageContains) && t.IssueLabels != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func triggerIssueLabelsAllowed(cond *IssueLabelsCondition, issueLabels []string) bool {
+	if cond == nil {
+		return true
+	}
+	if issueLabels == nil {
+		for _, required := range cond.Labels {
+			if strings.TrimSpace(required) != "" {
+				return false
+			}
+		}
+		return true
+	}
+	current := labelSetFromSlice(issueLabels)
+	for _, required := range cond.Labels {
+		if strings.TrimSpace(required) == "" {
+			continue
+		}
+		if !current[strings.ToLower(strings.TrimSpace(required))] {
+			return false
+		}
+	}
+	for _, excluded := range cond.ExcludeLabels {
+		if strings.TrimSpace(excluded) == "" {
+			continue
+		}
+		if current[strings.ToLower(strings.TrimSpace(excluded))] {
+			return false
+		}
+	}
+	return true
+}
+
+func labelSetFromSlice(labels []string) map[string]bool {
+	set := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		label = strings.ToLower(strings.TrimSpace(label))
+		if label != "" {
+			set[label] = true
+		}
+	}
+	return set
 }
 
 // StageForPRMerged returns the first stage with a pr_merged trigger, or nil.
