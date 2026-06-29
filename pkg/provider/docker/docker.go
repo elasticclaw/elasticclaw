@@ -36,6 +36,8 @@ type Provider struct {
 	cfg Config
 }
 
+var dockerCommandContext = exec.CommandContext
+
 // New creates a new docker provider.
 func New(cfg Config) (*Provider, error) {
 	if cfg.Image == "" {
@@ -124,18 +126,50 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 		destDir = dest[:idx]
 	}
 
-	mkdirCmd := exec.CommandContext(ctx, "docker", "exec", containerName, "mkdir", "-p", destDir)
+	uid, gid, err := dockerContainerUser(ctx, containerName)
+	if err != nil {
+		return err
+	}
+
+	mkdirCmd := dockerCommandContext(ctx, "docker", "exec", "-u", "0", containerName, "mkdir", "-p", destDir)
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("docker mkdir -p %s: %w (out: %s)", destDir, err, string(out))
 	}
+	chownDirCmd := dockerCommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, destDir)
+	if out, err := chownDirCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker chown %s: %w (out: %s)", destDir, err, string(out))
+	}
 
-	cmd := exec.CommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)
+	cmd := dockerCommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)
 	cmd.Stdin = &buf
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker cp %s: %w (out: %s)", dest, err, string(out))
 	}
+	chownFileCmd := dockerCommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, dest)
+	if out, err := chownFileCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker chown %s: %w (out: %s)", dest, err, string(out))
+	}
 	return nil
+}
+
+func dockerContainerUser(ctx context.Context, containerName string) (string, string, error) {
+	uidCmd := dockerCommandContext(ctx, "docker", "exec", containerName, "id", "-u")
+	uidOut, err := uidCmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("docker id -u: %w (out: %s)", err, string(uidOut))
+	}
+	gidCmd := dockerCommandContext(ctx, "docker", "exec", containerName, "id", "-g")
+	gidOut, err := gidCmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("docker id -g: %w (out: %s)", err, string(gidOut))
+	}
+	uid := strings.TrimSpace(string(uidOut))
+	gid := strings.TrimSpace(string(gidOut))
+	if uid == "" || gid == "" {
+		return "", "", fmt.Errorf("docker user lookup returned empty uid/gid")
+	}
+	return uid, gid, nil
 }
 
 // Exec runs a command inside a running container.
@@ -259,7 +293,7 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 
 // dockerRun executes a docker CLI command and returns its stdout.
 func dockerRun(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := dockerCommandContext(ctx, "docker", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
