@@ -13,6 +13,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -2011,6 +2012,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	tenantID, err := s.tenantByClawToken(rp.Token)
 	if err != nil {
+		log.Printf("[claw ws] invalid token for claw %.8s: received_len=%d configured_len=%d err=%v", rp.ClawID, len(rp.Token), len(s.hubCfg.ClawToken), err)
 		conn.Close(websocket.StatusPolicyViolation, "invalid token")
 		return
 	}
@@ -4343,7 +4345,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
 	containerEnv := map[string]string{
-		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
+		"ELASTICCLAW_HUB_URL":            dockerClawHubURL(hubCfg),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
 		"ELASTICCLAW_CLAW_NAME":          clawName,
@@ -4395,22 +4397,142 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
+	homeDir, err := p.HomeDir(ctx, instance.ID)
+	if err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker home dir: %w", err)
+	}
+	workspaceDir := path.Join(homeDir, "workspace")
+	workspacePrefix := strings.TrimRight(workspaceDir, "/") + "/"
 
 	s.setBootstrapStatus(clawID, "Copying workspace files")
-	for path, content := range files {
-		dest := "/home/claw/workspace/" + path
+	for relPath, content := range files {
+		dest := path.Join(workspaceDir, relPath)
+		if dest != workspaceDir && !strings.HasPrefix(dest, workspacePrefix) {
+			_ = p.Destroy(context.Background(), instance.ID, false)
+			return fmt.Errorf("docker workspace file path escapes workspace: %s", relPath)
+		}
 		if err := p.CopyIn(ctx, instance.ID, dest, content); err != nil {
 			_ = p.Destroy(context.Background(), instance.ID, false)
-			return fmt.Errorf("docker file copy failed: %s: %w", path, err)
+			return fmt.Errorf("docker file copy failed: %s: %w", relPath, err)
 		}
 	}
-	if err := p.CopyIn(ctx, instance.ID, "/home/claw/workspace/.elasticclaw-workspace-ready", []byte("ready\n")); err != nil {
+	if err := p.CopyIn(ctx, instance.ID, path.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n")); err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
 		return fmt.Errorf("docker workspace ready marker: %w", err)
 	}
-	log.Printf("[docker] workspace files copied for claw %.8s", clawID)
+	log.Printf("[docker] workspace files copied for claw %.8s to %s", clawID, workspaceDir)
+	s.setBootstrapStatus(clawID, "Starting agent bridge")
+	if err := s.ensureDockerBridge(ctx, p, instance.ID, homeDir); err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return err
+	}
 
 	return nil
+}
+
+func dockerClawHubURL(cfg *types.HubConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	hubURL := cfg.PublicURL
+	if cfg.URL != "" {
+		hubURL = cfg.URL
+	}
+	parsed, err := url.Parse(hubURL)
+	if err != nil || parsed.Hostname() == "" {
+		return strings.TrimRight(hubURL, "/")
+	}
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "0.0.0.0", "::1":
+		port := parsed.Port()
+		parsed.Host = "host.docker.internal"
+		if port != "" {
+			parsed.Host += ":" + port
+		}
+		return strings.TrimRight(parsed.String(), "/")
+	default:
+		return strings.TrimRight(hubURL, "/")
+	}
+}
+
+const maxDockerBridgeBinaryBytes = 200 << 20
+
+func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
+	CopyIn(context.Context, string, string, []byte) error
+	Exec(context.Context, string, []string) (*types.ExecResult, error)
+}, containerID, homeDir string) error {
+	if _, err := p.Exec(ctx, containerID, []string{"sh", "-lc", "command -v pgrep >/dev/null 2>&1 && pgrep -x claw-bridge >/dev/null"}); err == nil {
+		log.Printf("[docker] claw-bridge already running in container %s", containerID)
+		return nil
+	}
+
+	bridgeURL := s.bridgeDownloadURL()
+	if bridgeURL == "" {
+		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
+	}
+	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
+		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
+	}
+	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
+	bridgePath := path.Join(homeDir, ".elasticclaw", "bin", "claw-bridge")
+	if err := p.CopyIn(ctx, containerID, bridgePath, bridgeBytes); err != nil {
+		return fmt.Errorf("docker claw-bridge copy failed: %w", err)
+	}
+	logPath := path.Join(homeDir, "claw-bridge.log")
+	startCmd := fmt.Sprintf(
+		"set -e; chmod 0755 %s; nohup %s >> %s 2>&1 </dev/null & echo started",
+		shellQuote(bridgePath),
+		shellQuote(bridgePath),
+		shellQuote(logPath),
+	)
+	if _, err := p.Exec(ctx, containerID, []string{"sh", "-lc", startCmd}); err != nil {
+		return fmt.Errorf("docker claw-bridge start failed: %w", err)
+	}
+	log.Printf("[docker] claw-bridge started in container %s", containerID)
+	return nil
+}
+
+func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, error) {
+	if bridgePath := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"); bridgePath != "" && strings.Contains(bridgeURL, "/__elasticclaw_e2e/claw-bridge-linux-amd64") {
+		data, err := os.ReadFile(bridgePath)
+		if err != nil {
+			return nil, fmt.Errorf("docker claw-bridge read local E2E binary: %w", err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("docker claw-bridge local E2E binary is empty")
+		}
+		if len(data) > maxDockerBridgeBinaryBytes {
+			return nil, fmt.Errorf("docker claw-bridge local E2E binary exceeds %d bytes", maxDockerBridgeBinaryBytes)
+		}
+		return data, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bridgeURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("docker claw-bridge download request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("docker claw-bridge download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("docker claw-bridge download failed: HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDockerBridgeBinaryBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("docker claw-bridge read: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("docker claw-bridge download returned an empty body")
+	}
+	if len(data) > maxDockerBridgeBinaryBytes {
+		return nil, fmt.Errorf("docker claw-bridge download exceeds %d bytes", maxDockerBridgeBinaryBytes)
+	}
+	return data, nil
 }
 
 func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {

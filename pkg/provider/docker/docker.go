@@ -60,6 +60,10 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		"run", "-d",
 		"--name", req.Name,
 		"--label", containerLabel + "=" + req.Name,
+		"--add-host", "host.docker.internal:host-gateway",
+	}
+	if p.cfg.Image == defaultImage {
+		args = append(args, "--entrypoint", "sh")
 	}
 	if p.cfg.Network != "" {
 		args = append(args, "--network", p.cfg.Network)
@@ -68,6 +72,9 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		args = append(args, "-e", k+"="+v)
 	}
 	args = append(args, p.cfg.Image)
+	if p.cfg.Image == defaultImage {
+		args = append(args, "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done")
+	}
 
 	out, err := dockerRun(ctx, args...)
 	if err != nil {
@@ -124,9 +131,26 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 		destDir = dest[:idx]
 	}
 
-	mkdirCmd := exec.CommandContext(ctx, "docker", "exec", containerName, "mkdir", "-p", destDir)
+	uid, gid, err := dockerContainerUser(ctx, containerName)
+	if err != nil {
+		return err
+	}
+
+	mkdirCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "mkdir", "-p", destDir)
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("docker mkdir -p %s: %w (out: %s)", destDir, err, string(out))
+	}
+	if destDir != "/" {
+		chownDirCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, destDir)
+		if out, err := chownDirCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("docker chown %s: %w (out: %s)", destDir, err, string(out))
+		}
+		if parentDir := parentPath(destDir); parentDir != "" && parentDir != "/" {
+			chownParentCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, parentDir)
+			if out, err := chownParentCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("docker chown %s: %w (out: %s)", parentDir, err, string(out))
+			}
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)
@@ -135,7 +159,42 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 	if err != nil {
 		return fmt.Errorf("docker cp %s: %w (out: %s)", dest, err, string(out))
 	}
+	chownFileCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, dest)
+	if out, err := chownFileCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker chown %s: %w (out: %s)", dest, err, string(out))
+	}
 	return nil
+}
+
+func parentPath(path string) string {
+	path = strings.TrimRight(path, "/")
+	if path == "" || path == "/" {
+		return ""
+	}
+	idx := strings.LastIndex(path, "/")
+	if idx <= 0 {
+		return "/"
+	}
+	return path[:idx]
+}
+
+func dockerContainerUser(ctx context.Context, containerName string) (string, string, error) {
+	uidCmd := exec.CommandContext(ctx, "docker", "exec", containerName, "id", "-u")
+	uidOut, err := uidCmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("docker id -u: %w (out: %s)", err, string(uidOut))
+	}
+	gidCmd := exec.CommandContext(ctx, "docker", "exec", containerName, "id", "-g")
+	gidOut, err := gidCmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("docker id -g: %w (out: %s)", err, string(gidOut))
+	}
+	uid := strings.TrimSpace(string(uidOut))
+	gid := strings.TrimSpace(string(gidOut))
+	if uid == "" || gid == "" {
+		return "", "", fmt.Errorf("docker user lookup returned empty uid/gid")
+	}
+	return uid, gid, nil
 }
 
 // Exec runs a command inside a running container.
@@ -164,6 +223,19 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 		return res, fmt.Errorf("docker exec: command exited %d: %s", exitCode, stderr.String())
 	}
 	return res, nil
+}
+
+// HomeDir returns the default user's home directory inside the running container.
+func (p *Provider) HomeDir(ctx context.Context, instanceID string) (string, error) {
+	out, err := dockerRun(ctx, "exec", instanceID, "sh", "-lc", `printf '%s' "$HOME"`)
+	if err != nil {
+		return "", fmt.Errorf("docker home dir: %w", err)
+	}
+	home := strings.TrimSpace(string(out))
+	if home == "" || !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("docker home dir returned invalid path %q", home)
+	}
+	return home, nil
 }
 
 // Connect returns a shell command to exec into the container.

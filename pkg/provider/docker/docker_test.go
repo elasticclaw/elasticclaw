@@ -29,3 +29,18 @@ func TestNewDefaultsToPinnedOpenClawImage(t *testing.T) {
 		t.Fatalf("default image = %q, want %q", got, want)
 	}
 }
+
+func TestParentPath(t *testing.T) {
+	tests := map[string]string{
+		"/home/node/.elasticclaw/bin": "/home/node/.elasticclaw",
+		"/home/node/workspace":        "/home/node",
+		"/home":                       "/",
+		"/":                           "",
+		"":                            "",
+	}
+	for input, want := range tests {
+		if got := parentPath(input); got != want {
+			t.Fatalf("parentPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	dockerProvider "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
 	replicatedProvider "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -29,6 +30,7 @@ const (
 	defaultFixture = "elasticclaw/e2e-fixtures"
 	daytonaPrefix  = "ec-e2e"
 	cmxPrefix      = "ec-e2e-cmx"
+	dockerPrefix   = "ec-e2e-docker"
 	maxRunIDLen    = 32
 )
 
@@ -38,6 +40,49 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 
 func TestReplicatedGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "replicated")
+}
+
+func TestDockerWorkflowE2E(t *testing.T) {
+	runID := e2eRunID()
+	env := newE2EEnv(t, runID, "docker")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	workspaceName := "e2e-docker-" + env.RunID
+	workflowName := "docker-" + env.RunID
+
+	hub := startHub(ctx, t, env)
+	root := writeDockerWorkspaceFixture(t, env, workspaceName, workflowName)
+
+	var agentID string
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cleanupCancel()
+		var provider, providerID string
+		if agentID != "" {
+			provider, providerID = hub.agentProvider(cleanupCtx, t, agentID)
+			_ = hub.deleteAgent(cleanupCtx, agentID)
+		}
+		if providerID != "" {
+			destroyProviderInstanceByID(cleanupCtx, t, env, provider, providerID)
+		}
+		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
+	})
+
+	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
+	runCLI(ctx, t, root, env, "workflow", "push", "--workspace", workspaceName, filepath.Join(root, ".elasticclaw", "workflows", "docker.yaml"))
+
+	var trigger struct {
+		ClawID string `json:"claw_id"`
+		Status string `json:"status"`
+	}
+	hub.api(ctx, t, http.MethodPost, "/api/workspaces/"+workspaceName+"/workflows/"+workflowName+"/trigger", map[string]any{"inputs": map[string]string{}}, &trigger)
+	if trigger.ClawID == "" {
+		t.Fatalf("manual workflow trigger returned empty claw_id: %#v", trigger)
+	}
+	agentID = trigger.ClawID
+	waitForAgentStatus(ctx, t, hub, agentID, "connected")
 }
 
 func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
@@ -139,6 +184,7 @@ type e2eEnv struct {
 	ReplicatedAPIURL    string
 	ReplicatedType      string
 	ReplicatedTTL       string
+	DockerImage         string
 	FireworksAPIKey     string
 	BridgeBinary        string
 	BridgeToken         string
@@ -154,12 +200,12 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
 		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
 		SandboxProvider:     sandboxProvider,
-		GitHubToken:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN"),
+		GitHubToken:         os.Getenv("ELASTICCLAW_E2E_GITHUB_TOKEN"),
 		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
-		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
+		GitHubAppID:         os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_ID"),
 		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
 		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
-		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		GitHubAppPrivateKey: os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
 		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
 		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
 		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
@@ -174,6 +220,11 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
 		RunID:               runID,
 	}
+	if sandboxProvider != "docker" {
+		env.GitHubToken = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN")
+		env.GitHubAppID = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID")
+		env.GitHubAppPrivateKey = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY")
+	}
 	switch sandboxProvider {
 	case "daytona":
 		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
@@ -184,6 +235,9 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		env.ReplicatedType = envOrDefault("ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE", "r1.small")
 		env.ReplicatedTTL = envOrDefault("ELASTICCLAW_E2E_REPLICATED_TTL", "1h")
 		env.ProviderPrefix = e2eProviderPrefix(cmxPrefix, runID)
+	case "docker":
+		env.DockerImage = os.Getenv("ELASTICCLAW_E2E_DOCKER_IMAGE")
+		env.ProviderPrefix = e2eProviderPrefix(dockerPrefix, runID)
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", sandboxProvider)
 	}
@@ -225,6 +279,13 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 `, env.ReplicatedToken, env.ReplicatedType, env.ReplicatedTTL)
 		if env.ReplicatedAPIURL != "" {
 			providerConfig += fmt.Sprintf("    api_url: %q\n", env.ReplicatedAPIURL)
+		}
+	case "docker":
+		providerConfig = `  docker:
+    type: docker
+`
+		if env.DockerImage != "" {
+			providerConfig += fmt.Sprintf("    image: %q\n", env.DockerImage)
 		}
 	}
 
@@ -379,6 +440,40 @@ stages:
         Do exactly what this issue asks.
         Do not create a pull request.
 `, workflowName, env.GitHubRepo, labelName, "e2e-"+env.RunID, labelName, env.RunID))
+	return root
+}
+
+func writeDockerWorkspaceFixture(t *testing.T, env e2eEnv, workspaceName, workflowName string) string {
+	t.Helper()
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, ".elasticclaw", "workspaces", workspaceName)
+	workflowDir := filepath.Join(root, ".elasticclaw", "workflows")
+	if err := os.MkdirAll(workspaceDir, 0750); err != nil {
+		t.Fatalf("mkdir docker workspace fixture: %v", err)
+	}
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		t.Fatalf("mkdir docker workflow fixture: %v", err)
+	}
+	writeFile(t, filepath.Join(workspaceDir, "elasticclaw-config.yaml"), fmt.Sprintf(`schema_version: v1
+name: %s
+provider: %s
+`, workspaceName, env.SandboxProvider))
+	writeFile(t, filepath.Join(workspaceDir, "AGENTS.md"), "You are an ElasticClaw Docker E2E agent. Reply briefly.\n")
+	writeFile(t, filepath.Join(workspaceDir, "TOOLS.md"), "Use no external tools for this smoke test.\n")
+	writeFile(t, filepath.Join(workspaceDir, "MEMORY.md"), "Docker provider workspace copy must handle /home/claw permissions.\n")
+	writeFile(t, filepath.Join(workspaceDir, "CONTEXT.md"), "This is a Docker sandbox provider smoke test.\n")
+	writeFile(t, filepath.Join(workflowDir, "docker.yaml"), fmt.Sprintf(`schema_version: v1
+name: %s
+enable_manual_trigger: true
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      inject: |
+        Start up and reply with a short confirmation that the Docker sandbox is connected.
+`, workflowName))
 	return root
 }
 
@@ -597,6 +692,8 @@ func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {
 		// Replicated CMX has no broad sweep here; recorded VM IDs and direct
 		// agent cleanup handle VMs created by this run, with CMX TTL as backup.
 		return
+	case "docker":
+		return
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", env.SandboxProvider)
 	}
@@ -609,10 +706,23 @@ func destroyProviderInstanceByID(ctx context.Context, t *testing.T, env e2eEnv, 
 		destroyDaytonaSandboxByID(ctx, t, env, providerID)
 	case "replicated":
 		destroyReplicatedVMByID(ctx, t, env, providerID)
+	case "docker":
+		destroyDockerContainerByID(ctx, t, providerID)
 	case "":
 		return
 	default:
 		t.Logf("no E2E cleanup handler for provider %q instance %q", provider, providerID)
+	}
+}
+
+func destroyDockerContainerByID(ctx context.Context, t *testing.T, containerID string) {
+	t.Helper()
+	provider, err := dockerProvider.New(dockerProvider.Config{})
+	if err != nil {
+		t.Fatalf("create Docker provider for E2E cleanup: %v", err)
+	}
+	if err := provider.Destroy(ctx, containerID, false); err != nil {
+		t.Fatalf("delete Docker E2E container %s: %v", containerID, err)
 	}
 }
 

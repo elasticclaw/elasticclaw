@@ -16,6 +16,7 @@ on:
       - 'pkg/hub/server.go'
       - 'pkg/hub/workspace*.go'
       - 'pkg/provider/daytona/**'
+      - 'pkg/provider/docker/**'
       - 'pkg/provider/replicated/**'
       - 'pkg/types/**'
       - 'test/e2e/**'
@@ -136,6 +137,11 @@ jobs:
             tracker_name: Jira
             slug: jira
             test: TestReplicatedJiraWorkflowE2E
+          - provider_name: Docker
+            provider_slug: docker
+            tracker_name: Workflow
+            slug: workflow
+            test: TestDockerWorkflowE2E
     env:
       ELASTICCLAW_E2E_BIN: ${{ github.workspace }}/bin/elasticclaw
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
