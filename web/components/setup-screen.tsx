@@ -6,15 +6,17 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Field, FieldLabel } from "@/components/ui/field"
 import { saveConfig } from "@/lib/api"
+import { useBranding } from "@/hooks/use-branding"
 
 export function SetupScreen({ onConnected }: { onConnected: () => void }) {
+  const { appName } = useBranding()
   const [hubUrl, setHubUrl] = useState("")
   const [hubToken, setHubToken] = useState("")
   const [error, setError] = useState("")
 
   const handleConnect = () => {
     if (!hubUrl.trim() || !hubToken.trim()) {
-      setError("Both ElasticClaw Server URL and token are required")
+      setError(`Both ${appName} Server URL and token are required`)
       return
     }
     saveConfig(hubUrl.trim(), hubToken.trim())
@@ -25,15 +27,15 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
     <div className="flex h-screen bg-background items-center justify-center">
       <div className="w-full max-w-md p-8 space-y-6">
         <div className="space-y-2">
-          <h1 className="text-2xl font-bold">Connect to ElasticClaw Server</h1>
+          <h1 className="text-2xl font-bold">Connect to {appName} Server</h1>
           <p className="text-sm text-muted-foreground">
-            Enter your ElasticClaw Server URL and authentication token to get started.
+            Enter your {appName} Server URL and authentication token to get started.
           </p>
         </div>
 
         <div className="space-y-4">
           <Field>
-            <FieldLabel htmlFor="hub-url">ElasticClaw Server URL</FieldLabel>
+            <FieldLabel htmlFor="hub-url">{appName} Server URL</FieldLabel>
             <Input
               id="hub-url"
               placeholder="http://your-server-host:8080"
