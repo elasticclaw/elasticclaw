@@ -4395,20 +4395,31 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
+	homeDir, err := p.HomeDir(ctx, instance.ID)
+	if err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker home dir: %w", err)
+	}
+	workspaceDir := path.Join(homeDir, "workspace")
+	workspacePrefix := strings.TrimRight(workspaceDir, "/") + "/"
 
 	s.setBootstrapStatus(clawID, "Copying workspace files")
-	for path, content := range files {
-		dest := "/home/claw/workspace/" + path
+	for relPath, content := range files {
+		dest := path.Join(workspaceDir, relPath)
+		if dest != workspaceDir && !strings.HasPrefix(dest, workspacePrefix) {
+			_ = p.Destroy(context.Background(), instance.ID, false)
+			return fmt.Errorf("docker workspace file path escapes workspace: %s", relPath)
+		}
 		if err := p.CopyIn(ctx, instance.ID, dest, content); err != nil {
 			_ = p.Destroy(context.Background(), instance.ID, false)
-			return fmt.Errorf("docker file copy failed: %s: %w", path, err)
+			return fmt.Errorf("docker file copy failed: %s: %w", relPath, err)
 		}
 	}
-	if err := p.CopyIn(ctx, instance.ID, "/home/claw/workspace/.elasticclaw-workspace-ready", []byte("ready\n")); err != nil {
+	if err := p.CopyIn(ctx, instance.ID, path.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n")); err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
 		return fmt.Errorf("docker workspace ready marker: %w", err)
 	}
-	log.Printf("[docker] workspace files copied for claw %.8s", clawID)
+	log.Printf("[docker] workspace files copied for claw %.8s to %s", clawID, workspaceDir)
 
 	return nil
 }

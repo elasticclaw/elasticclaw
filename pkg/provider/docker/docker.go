@@ -200,6 +200,19 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 	return res, nil
 }
 
+// HomeDir returns the default user's home directory inside the running container.
+func (p *Provider) HomeDir(ctx context.Context, instanceID string) (string, error) {
+	out, err := dockerRun(ctx, "exec", instanceID, "sh", "-lc", `printf '%s' "$HOME"`)
+	if err != nil {
+		return "", fmt.Errorf("docker home dir: %w", err)
+	}
+	home := strings.TrimSpace(string(out))
+	if home == "" || !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("docker home dir returned invalid path %q", home)
+	}
+	return home, nil
+}
+
 // Connect returns a shell command to exec into the container.
 func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.ConnectInfo, error) {
 	return &types.ConnectInfo{
