@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
+import { useBranding } from "@/hooks/use-branding"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -739,7 +740,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Sandbox Runtimes</h2>
-        <p className="text-sm text-muted-foreground mb-4">Configure VM providers for spawning claws.</p>
+        <p className="text-sm text-muted-foreground mb-4">Configure VM providers for spawning agents.</p>
 
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
@@ -1628,6 +1629,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
 }
 
 function GitHubSection({ settings, onSave, saving, workspace }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; workspace: string }) {
+  const { appName: brandName } = useBranding()
   const [showModal, setShowModal] = useState(false)
   const [appName, setAppName] = useState("")
   const [appId, setAppId] = useState("")
@@ -1751,8 +1753,8 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
       <h2 className="text-base font-semibold mb-1">GitHub Apps</h2>
       <div className="text-sm text-muted-foreground mb-6 space-y-1.5">
         <p>
-          Register a GitHub App so your ElasticClaw workflows can access repositories.
-          When a claw is created, it gets a scoped token that can read and write code,
+          Register a GitHub App so your {brandName} workflows can access repositories.
+          When an agent is created, it gets a scoped token that can read and write code,
           open pull requests, and check CI status — but only on repos the App is installed on.
         </p>
         <p>
@@ -2090,7 +2092,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   <h3 className="font-medium">Permissions Missing</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  This GitHub App is missing required permissions. It <strong>will not work</strong> for claws until fixed.
+                  This GitHub App is missing required permissions. It <strong>will not work</strong> for agents until fixed.
                 </p>
                 {testResult.permCheckError && (
                   <p className="text-xs text-yellow-400 bg-yellow-500/10 rounded px-2 py-1.5">{testResult.permCheckError}</p>
@@ -2346,7 +2348,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">View requires tag</label>
                 <Input value={viewTags} onChange={e => setViewTags(e.target.value)} className="h-8 text-sm font-mono" placeholder="user, team=frontend" />
-                <p className="text-xs text-muted-foreground mt-1">Claw must have a tag like <code className="bg-muted px-1 rounded">user=alice</code> for that user to see it.</p>
+                <p className="text-xs text-muted-foreground mt-1">Agent must have a tag like <code className="bg-muted px-1 rounded">user=alice</code> for that user to see it.</p>
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Interact requires tag</label>
@@ -2381,6 +2383,7 @@ interface TrackerItem {
 }
 
 function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubPublicUrl }: { settings: SettingsData; onSave: (p: object) => void; saving: boolean; selectedWorkspace: string; hubPublicUrl: string }) {
+  const { appName } = useBranding()
   const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
   const [githubOwnerHint, setGithubOwnerHint] = useState("")
   const [loading, setLoading] = useState(true)
@@ -2554,8 +2557,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     : <Github className="size-4" />
 
   const githubIssuesTokenParams = new URLSearchParams({
-    name: "ElasticClaw GitHub Issues",
-    description: "Allows ElasticClaw to read and update GitHub issues",
+    name: `${appName} GitHub Issues`,
+    description: `Allows ${appName} to read and update GitHub issues`,
     expires_in: "90",
     issues: "write",
     metadata: "read",
@@ -2567,7 +2570,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const tokenHint = (modalMode === "add" ? modalType : editType) === "linear"
     ? <>Use a Linear API key from <a href="https://linear.app/settings/account/security" target="_blank" rel="noopener noreferrer" className="underline">linear.app/settings/account/security</a>.</>
     : (modalMode === "add" ? modalType : editType) === "shortcut"
-    ? <>Use a Shortcut API token from Shortcut settings. The token lets ElasticClaw read and update stories.</>
+    ? <>Use a Shortcut API token from Shortcut settings. The token lets {appName} read and update stories.</>
     : (modalMode === "add" ? modalType : editType) === "github-issues"
     ? <>Use a <a href={githubIssuesTokenUrl} target="_blank" rel="noopener noreferrer" className="underline">fine-grained GitHub PAT</a> for issue API actions. {githubOwnerHint ? <>The link starts with <code>{githubOwnerHint}</code> as the resource owner. </> : null}Grant repository access to the repos this workspace watches.</>
     : (modalMode === "add" ? modalType : editType) === "jira"
@@ -2760,7 +2763,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                     <p className="text-sm text-muted-foreground">
                       {activeTrackerType === "github-issues"
                         ? "Connect GitHub Issues for this workspace. This is separate from the GitHub App used for repo checkout tokens."
-                        : "Connect Linear for this workspace. The API key lets ElasticClaw read issues and move them between statuses."}
+                        : `Connect Linear for this workspace. The API key lets ${appName} read issues and move them between statuses.`}
                     </p>
                     {setupTab === "token" ? (
                     <div className="mt-4 space-y-4">
@@ -2768,8 +2771,8 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                         <h4 className="text-sm font-medium">{activeTrackerType === "github-issues" ? "GitHub PAT" : "Linear API Token"}</h4>
                         <p className="text-xs text-muted-foreground mt-1">
                           {activeTrackerType === "github-issues"
-                            ? "Used by ElasticClaw to read and update issues."
-                            : "Used by ElasticClaw to read Linear issues and move them between statuses."}
+                            ? `Used by ${appName} to read and update issues.`
+                            : `Used by ${appName} to read Linear issues and move them between statuses.`}
                         </p>
                       </div>
                       <div>
@@ -2822,12 +2825,12 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                 </div>
               ) : activeTrackerType === "shortcut" ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>Connect Shortcut for this workspace. The API token lets ElasticClaw read stories and update workflow states.</p>
+                  <p>Connect Shortcut for this workspace. The API token lets {appName} read stories and update workflow states.</p>
                   <p>Create a Shortcut webhook using the Shortcut URL from the Webhooks page. If Shortcut signs the payload with a secret, paste that same secret below.</p>
                 </div>
               ) : activeTrackerType === "jira" ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>Connect Jira for this workspace. The token lets ElasticClaw read issues, add comments, and transition statuses.</p>
+                  <p>Connect Jira for this workspace. The token lets {appName} read issues, add comments, and transition statuses.</p>
                   <p>Create a Jira Automation rule that sends a web request with the Issue data automation payload, then use the payload URL below.</p>
                 </div>
               ) : (
@@ -4222,7 +4225,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
       <div>
         <h2 className="text-base font-semibold mb-1">MCP Servers</h2>
         <p className="text-sm text-muted-foreground mb-4">
-          Model Context Protocol servers add tools to your claws. Configure them here and reference them in workflows.
+          Model Context Protocol servers add tools to your agents. Configure them here and reference them in workflows.
         </p>
         <div className="flex items-center gap-2 mb-6">
           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
