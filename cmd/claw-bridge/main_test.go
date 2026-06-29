@@ -120,6 +120,52 @@ func TestWaitForWorkspaceReadyIfRequested(t *testing.T) {
 	}
 }
 
+func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	staged := filepath.Join(home, "workspace")
+	active := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(filepath.Join(staged, "scripts"), 0700); err != nil {
+		t.Fatalf("mkdir staged workspace: %v", err)
+	}
+	if err := os.MkdirAll(active, 0700); err != nil {
+		t.Fatalf("mkdir active workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "AGENTS.md"), []byte("elasticclaw instructions\n"), 0600); err != nil {
+		t.Fatalf("write staged AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "scripts", "check.sh"), []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatalf("write staged script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, ".elasticclaw-workspace-ready"), []byte("ready\n"), 0600); err != nil {
+		t.Fatalf("write ready marker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(active, "BOOTSTRAP.md"), []byte("default openclaw bootstrap\n"), 0600); err != nil {
+		t.Fatalf("write stale BOOTSTRAP.md: %v", err)
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		t.Fatalf("syncStagedWorkspaceToOpenClawWorkspace(): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(active, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read synced AGENTS.md: %v", err)
+	}
+	if string(data) != "elasticclaw instructions\n" {
+		t.Fatalf("AGENTS.md = %q", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(active, "BOOTSTRAP.md")); !os.IsNotExist(err) {
+		t.Fatalf("BOOTSTRAP.md should have been removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(active, ".elasticclaw-workspace-ready")); !os.IsNotExist(err) {
+		t.Fatalf("ready marker should not be copied, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(active, "scripts", "check.sh")); err != nil {
+		t.Fatalf("script was not copied: %v", err)
+	}
+}
+
 func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
 	tests := []struct {
 		name string

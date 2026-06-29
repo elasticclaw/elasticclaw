@@ -2478,6 +2478,77 @@ func waitForWorkspaceReadyIfRequested() error {
 	return fmt.Errorf("workspace files not ready after 300s")
 }
 
+var managedWorkspaceFiles = []string{
+	"elasticclaw-config.yaml",
+	"SOUL.md",
+	"AGENTS.md",
+	"TOOLS.md",
+	"IDENTITY.md",
+	"USER.md",
+	"MEMORY.md",
+	"BOOTSTRAP.md",
+	"HEARTBEAT.md",
+	"CONTEXT.md",
+	"SECRETS.md",
+	"TRIGGER_INPUTS.json",
+}
+
+func syncStagedWorkspaceToOpenClawWorkspace() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	stagedAbs, _ := filepath.Abs(stagedDir)
+	activeAbs, _ := filepath.Abs(activeDir)
+	if stagedAbs == activeAbs {
+		return nil
+	}
+	if _, err := os.Stat(stagedDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat staged workspace: %w", err)
+	}
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		return fmt.Errorf("create OpenClaw workspace: %w", err)
+	}
+	for _, name := range managedWorkspaceFiles {
+		if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
+			return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
+		}
+	}
+	if err := filepath.Walk(stagedDir, func(src string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(stagedDir, src)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == ".elasticclaw-workspace-ready" {
+			return nil
+		}
+		dst := filepath.Join(activeDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, info.Mode().Perm())
+	}); err != nil {
+		return fmt.Errorf("sync OpenClaw workspace: %w", err)
+	}
+	log.Printf("[bootstrap] synced workspace files to %s", activeDir)
+	return nil
+}
+
 // runBootstrap executes all VM bootstrap steps, then returns so the caller
 // can continue into the normal bridge connect loop.
 func runBootstrap() error {
@@ -2534,6 +2605,9 @@ func runBootstrap() error {
 		}
 	} else {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		return fmt.Errorf("syncStagedWorkspaceToOpenClawWorkspace: %w", err)
 	}
 
 	if err := syncOpenClawAPIKeyAuth(); err != nil {
