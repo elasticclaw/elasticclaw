@@ -16,30 +16,66 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+type jiraString string
+
+func (s *jiraString) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		*s = ""
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = jiraString(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err == nil {
+		*s = jiraString(number.String())
+		return nil
+	}
+	return fmt.Errorf("invalid Jira string value %s", string(data))
+}
+
 type jiraWebhookPayload struct {
-	WebhookEvent string    `json:"webhookEvent"`
-	Timestamp    int64     `json:"timestamp"`
-	Issue        jiraIssue `json:"issue"`
-	User         jiraUser  `json:"user"`
-	Changelog    *struct {
-		ID    string `json:"id"`
-		Items []struct {
-			Field      string `json:"field"`
-			FromString string `json:"fromString"`
-			ToString   string `json:"toString"`
-		} `json:"items"`
+	WebhookEvent string                `json:"webhookEvent"`
+	Timestamp    int64                 `json:"timestamp"`
+	Issue        jiraIssue             `json:"issue"`
+	User         jiraUser              `json:"user"`
+	Changelog    *jiraWebhookChangelog `json:"changelog,omitempty"`
+}
+
+type jiraWebhookChangelog struct {
+	ID    string              `json:"id"`
+	Items []jiraChangelogItem `json:"items"`
+}
+
+type jiraChangelogItem struct {
+	Field      string `json:"field"`
+	FromString string `json:"fromString"`
+	ToString   string `json:"toString"`
+}
+
+type jiraAutomationIssuePayload struct {
+	jiraIssue
+	Changelog *struct {
+		Histories []jiraAutomationHistory `json:"histories"`
 	} `json:"changelog,omitempty"`
 }
 
+type jiraAutomationHistory struct {
+	ID    jiraString          `json:"id"`
+	Items []jiraChangelogItem `json:"items"`
+}
+
 type jiraIssue struct {
-	ID     string `json:"id"`
-	Key    string `json:"key"`
-	Self   string `json:"self"`
+	ID     jiraString `json:"id"`
+	Key    string     `json:"key"`
+	Self   string     `json:"self"`
 	Fields struct {
-		Summary     string   `json:"summary"`
-		Description any      `json:"description"`
-		Labels      []string `json:"labels"`
-		Updated     string   `json:"updated"`
+		Summary     string     `json:"summary"`
+		Description any        `json:"description"`
+		Labels      []string   `json:"labels"`
+		Updated     jiraString `json:"updated"`
 		Status      struct {
 			Name string `json:"name"`
 		} `json:"status"`
@@ -78,8 +114,8 @@ func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload jiraWebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
+	payload, err := parseJiraWebhookPayload(body)
+	if err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
@@ -96,6 +132,51 @@ func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 
 	go s.processJiraEvent(workspaceName, payload)
 	w.WriteHeader(http.StatusOK)
+}
+
+func parseJiraWebhookPayload(body []byte) (jiraWebhookPayload, error) {
+	var payload jiraWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return payload, err
+	}
+	if payload.Issue.Key != "" {
+		return payload, nil
+	}
+
+	var issuePayload jiraAutomationIssuePayload
+	if err := json.Unmarshal(body, &issuePayload); err != nil {
+		return payload, err
+	}
+	if issuePayload.Key == "" {
+		return payload, nil
+	}
+
+	payload.WebhookEvent = "jira:issue_updated"
+	payload.Timestamp = time.Now().UnixMilli()
+	payload.Issue = issuePayload.jiraIssue
+	if issuePayload.Changelog != nil && len(issuePayload.Changelog.Histories) > 0 {
+		history := selectJiraAutomationHistory(issuePayload.Changelog.Histories)
+		payload.Changelog = &jiraWebhookChangelog{
+			ID:    string(history.ID),
+			Items: history.Items,
+		}
+	} else {
+		payload.Changelog = &jiraWebhookChangelog{
+			ID: "automation:" + firstNonEmpty(string(issuePayload.ID), issuePayload.Key) + ":" + string(issuePayload.Fields.Updated),
+		}
+	}
+	return payload, nil
+}
+
+func selectJiraAutomationHistory(histories []jiraAutomationHistory) jiraAutomationHistory {
+	for i := len(histories) - 1; i >= 0; i-- {
+		for _, item := range histories[i].Items {
+			if strings.EqualFold(item.Field, "status") {
+				return histories[i]
+			}
+		}
+	}
+	return histories[len(histories)-1]
 }
 
 func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request) bool {
