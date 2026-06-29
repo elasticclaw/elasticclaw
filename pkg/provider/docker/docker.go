@@ -133,9 +133,11 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("docker mkdir -p %s: %w (out: %s)", destDir, err, string(out))
 	}
-	chownDirCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, destDir)
-	if out, err := chownDirCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("docker chown %s: %w (out: %s)", destDir, err, string(out))
+	if destDir != "/" {
+		chownDirCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, destDir)
+		if out, err := chownDirCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("docker chown %s: %w (out: %s)", destDir, err, string(out))
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)
