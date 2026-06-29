@@ -223,6 +223,31 @@ func TestJiraWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	}
 }
 
+func TestJiraWorkflowPollStopsAfterSearchPageCap(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	jira := newMockJira(t)
+	jira.setSearchRepeatsToken(true)
+	cfg := jiraWorkflowTestConfig()
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	saveJiraWorkflowFixture(t, "workspace-a")
+	hub.SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace-a", "jira", "default", jira.URL, "", "jira-token", "")
+	jira.setIssue("EC-123", "EC", "Ready for Agent", []string{"agent"})
+
+	s.PollIntegrationsForTest()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE jira_issue_id='EC-123'`).Scan(&count); err != nil {
+		t.Fatalf("count claws: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("poll created %d claws after capped Jira search, want 0", count)
+	}
+	if got := jira.searchRequestCount(); got != 1000 {
+		t.Fatalf("Jira search request count = %d, want 1000", got)
+	}
+}
+
 func TestJiraWorkflowExcludeLabelsBlockWebhook(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -548,10 +573,11 @@ func jiraAutomationIssuePayloadWithHistories(t *testing.T, key, project, status 
 
 type mockJira struct {
 	*httptest.Server
-	mu             sync.Mutex
-	issue          map[string]interface{}
-	comments       map[string][]string
-	searchRequests []jiraSearchRequest
+	mu                sync.Mutex
+	issue             map[string]interface{}
+	comments          map[string][]string
+	searchRequests    []jiraSearchRequest
+	repeatSearchToken bool
 }
 
 type jiraSearchRequest struct {
@@ -572,6 +598,10 @@ func newMockJira(t *testing.T) *mockJira {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			m.searchRequests = append(m.searchRequests, payload)
+			if m.repeatSearchToken {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"issues": []interface{}{}, "nextPageToken": "same-token"})
+				return
+			}
 			if payload.NextPageToken == "" {
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{"issues": []interface{}{}, "nextPageToken": "next"})
 				return
@@ -599,6 +629,18 @@ func newMockJira(t *testing.T) *mockJira {
 	}))
 	t.Cleanup(m.Close)
 	return m
+}
+
+func (m *mockJira) setSearchRepeatsToken(repeat bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repeatSearchToken = repeat
+}
+
+func (m *mockJira) searchRequestCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.searchRequests)
 }
 
 func (m *mockJira) searchRequestTokens() []string {

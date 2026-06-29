@@ -18,6 +18,8 @@ import (
 
 type jiraString string
 
+const jiraSearchMaxPages = 1000
+
 func (s *jiraString) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(data, []byte("null")) {
 		*s = ""
@@ -716,7 +718,7 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 	}
 	var issues []jiraPollIssue
 	var nextPageToken string
-	for {
+	for page := 0; page < jiraSearchMaxPages; page++ {
 		requestBody := map[string]any{
 			"jql":        jql,
 			"maxResults": 100,
@@ -749,11 +751,12 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 			return nil, err
 		}
 		issues = append(issues, result.Issues...)
-		nextPageToken = strings.TrimSpace(result.NextPageToken)
+		nextPageToken = result.NextPageToken
 		if nextPageToken == "" {
 			return issues, nil
 		}
 	}
+	return nil, fmt.Errorf("jira search exceeded %d pages", jiraSearchMaxPages)
 }
 
 func (s *Server) moveJiraIssue(tracker workspaceIssueTracker, key, targetStatus string) error {
