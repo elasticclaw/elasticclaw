@@ -2069,6 +2069,14 @@ const grokCLIVersion = "0.1.0"
 
 // installOpenClaw installs the pinned OpenClaw CLI via npm.
 func installOpenClaw() error {
+	if out, err := exec.Command("openclaw", "--version").CombinedOutput(); err == nil {
+		version := strings.TrimSpace(string(out))
+		if strings.Contains(version, openClawVersion) {
+			log.Printf("[bootstrap] OpenClaw already installed: %s", version)
+			return nil
+		}
+		log.Printf("[bootstrap] OpenClaw version %s found, installing pinned %s", version, openClawVersion)
+	}
 	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
 	if err := runShell(fmt.Sprintf("sudo npm install -g openclaw@%s --ignore-scripts", openClawVersion)); err != nil {
 		return fmt.Errorf("npm install openclaw: %w", err)
