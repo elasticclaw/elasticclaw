@@ -2092,7 +2092,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   <h3 className="font-medium">Permissions Missing</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  This GitHub App is missing required permissions. It <strong>will not work</strong> for claws until fixed.
+                  This GitHub App is missing required permissions. It <strong>will not work</strong> for agents until fixed.
                 </p>
                 {testResult.permCheckError && (
                   <p className="text-xs text-yellow-400 bg-yellow-500/10 rounded px-2 py-1.5">{testResult.permCheckError}</p>
@@ -2348,7 +2348,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">View requires tag</label>
                 <Input value={viewTags} onChange={e => setViewTags(e.target.value)} className="h-8 text-sm font-mono" placeholder="user, team=frontend" />
-                <p className="text-xs text-muted-foreground mt-1">Claw must have a tag like <code className="bg-muted px-1 rounded">user=alice</code> for that user to see it.</p>
+                <p className="text-xs text-muted-foreground mt-1">Agent must have a tag like <code className="bg-muted px-1 rounded">user=alice</code> for that user to see it.</p>
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Interact requires tag</label>
