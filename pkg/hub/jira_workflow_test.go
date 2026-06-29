@@ -75,6 +75,70 @@ func TestJiraWorkflowAutomationIssuePayloadCreatesClaw(t *testing.T) {
 	waitForJiraClawCount(t, db, "EC-123", 1)
 }
 
+func TestJiraWorkflowAutomationIssuePayloadFindsStatusHistory(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	cfg := jiraWorkflowTestConfig()
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	saveJiraWorkflowFixture(t, "workspace-a")
+	hub.SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace-a", "jira", "default", "https://jira.example.test", "", "jira-token", "jira-secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraAutomationIssuePayloadWithTrailingHistory(t, "EC-123", "EC", "Backlog", "Ready for Agent", []string{"agent"})
+	req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/jira", strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ElasticClaw-Webhook-Secret", "jira-secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	waitForJiraClawCount(t, db, "EC-123", 1)
+}
+
+func TestJiraWorkflowAutomationIssuePayloadWithoutChangelogDedupes(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	cfg := jiraWorkflowTestConfig()
+	s, db := hub.NewTestServerWithConfig(t, cfg, "", "", "")
+	saveJiraWorkflowFixture(t, "workspace-a")
+	hub.SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace-a", "jira", "default", "https://jira.example.test", "", "jira-token", "jira-secret")
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	payload := jiraAutomationIssuePayloadWithoutChangelog(t, "EC-123", "EC", "Ready for Agent", []string{"agent"})
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/api/workspaces/workspace-a/webhooks/jira", strings.NewReader(string(payload)))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-ElasticClaw-Webhook-Secret", "jira-secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("status %d = %d, want 200", i, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	waitForJiraClawCount(t, db, "EC-123", 1)
+	assertJiraClawCountStable(t, db, "EC-123", 1)
+}
+
 func TestJiraGlobalWebhookCreatesClaw(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -403,23 +467,49 @@ func jiraWebhookPayload(t *testing.T, key, project, previousStatus, status strin
 
 func jiraAutomationIssuePayload(t *testing.T, key, project, previousStatus, status string, labels []string) []byte {
 	t.Helper()
+	return jiraAutomationIssuePayloadWithHistories(t, key, project, status, labels, []map[string]interface{}{{
+		"id": "20001",
+		"items": []map[string]interface{}{{
+			"field":      "status",
+			"fromString": previousStatus,
+			"toString":   status,
+		}},
+	}})
+}
+
+func jiraAutomationIssuePayloadWithTrailingHistory(t *testing.T, key, project, previousStatus, status string, labels []string) []byte {
+	t.Helper()
+	return jiraAutomationIssuePayloadWithHistories(t, key, project, status, labels, []map[string]interface{}{
+		{
+			"id": "20001",
+			"items": []map[string]interface{}{{
+				"field":      "status",
+				"fromString": previousStatus,
+				"toString":   status,
+			}},
+		},
+		{
+			"id": "20002",
+			"items": []map[string]interface{}{{
+				"field":      "description",
+				"fromString": "old",
+				"toString":   "new",
+			}},
+		},
+	})
+}
+
+func jiraAutomationIssuePayloadWithoutChangelog(t *testing.T, key, project, status string, labels []string) []byte {
+	t.Helper()
+	return jiraAutomationIssuePayloadWithHistories(t, key, project, status, labels, nil)
+}
+
+func jiraAutomationIssuePayloadWithHistories(t *testing.T, key, project, status string, labels []string, histories []map[string]interface{}) []byte {
+	t.Helper()
 	body := map[string]interface{}{
 		"self": "https://jira.example.test/rest/api/2/issue/10001",
 		"id":   10001,
 		"key":  key,
-		"changelog": map[string]interface{}{
-			"startAt":    0,
-			"maxResults": 1,
-			"total":      1,
-			"histories": []map[string]interface{}{{
-				"id": "20001",
-				"items": []map[string]interface{}{{
-					"field":      "status",
-					"fromString": previousStatus,
-					"toString":   status,
-				}},
-			}},
-		},
 		"fields": map[string]interface{}{
 			"summary":     "Test Jira issue",
 			"description": "Do the Jira task",
@@ -437,6 +527,14 @@ func jiraAutomationIssuePayload(t *testing.T, key, project, previousStatus, stat
 				"displayName": "Jira User",
 			},
 		},
+	}
+	if histories != nil {
+		body["changelog"] = map[string]interface{}{
+			"startAt":    0,
+			"maxResults": len(histories),
+			"total":      len(histories),
+			"histories":  histories,
+		}
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
