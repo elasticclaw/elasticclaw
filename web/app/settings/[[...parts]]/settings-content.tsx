@@ -2828,7 +2828,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
               ) : activeTrackerType === "jira" ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
                   <p>Connect Jira for this workspace. The token lets ElasticClaw read issues, add comments, and transition statuses.</p>
-                  <p>Create a Jira webhook for issue created and issue updated events, then use the payload URL below.</p>
+                  <p>Create a Jira Automation rule that sends a web request with the Issue data automation payload, then use the payload URL below.</p>
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
@@ -2856,7 +2856,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                         {copiedSetup === "jira-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                       </Button>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Use this URL for Jira issue created and issue updated webhooks.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Use this URL from Jira Automation's Send web request action with the Issue data automation payload.</p>
                   </div>
                 </>
               )}
