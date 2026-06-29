@@ -218,6 +218,9 @@ func TestJiraWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("poll created %d claws for the same Jira issue, want 1", count)
 	}
+	if got := jira.searchRequestTokens(); len(got) < 2 || got[0] != "" || got[1] != "next" {
+		t.Fatalf("Jira search nextPageToken requests = %#v, want first empty then next", got)
+	}
 }
 
 func TestJiraWorkflowExcludeLabelsBlockWebhook(t *testing.T) {
@@ -545,9 +548,17 @@ func jiraAutomationIssuePayloadWithHistories(t *testing.T, key, project, status 
 
 type mockJira struct {
 	*httptest.Server
-	mu       sync.Mutex
-	issue    map[string]interface{}
-	comments map[string][]string
+	mu             sync.Mutex
+	issue          map[string]interface{}
+	comments       map[string][]string
+	searchRequests []jiraSearchRequest
+}
+
+type jiraSearchRequest struct {
+	JQL           string   `json:"jql"`
+	MaxResults    int      `json:"maxResults"`
+	Fields        []string `json:"fields"`
+	NextPageToken string   `json:"nextPageToken"`
 }
 
 func newMockJira(t *testing.T) *mockJira {
@@ -555,9 +566,16 @@ func newMockJira(t *testing.T) *mockJira {
 	m := &mockJira{comments: map[string][]string{}}
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/2/search":
+		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/search/jql":
+			var payload jiraSearchRequest
+			_ = json.NewDecoder(r.Body).Decode(&payload)
 			m.mu.Lock()
 			defer m.mu.Unlock()
+			m.searchRequests = append(m.searchRequests, payload)
+			if payload.NextPageToken == "" {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"issues": []interface{}{}, "nextPageToken": "next"})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"issues": []interface{}{m.issue}})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/") && strings.HasSuffix(r.URL.Path, "/comment"):
 			var payload struct {
@@ -581,6 +599,16 @@ func newMockJira(t *testing.T) *mockJira {
 	}))
 	t.Cleanup(m.Close)
 	return m
+}
+
+func (m *mockJira) searchRequestTokens() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tokens := make([]string, 0, len(m.searchRequests))
+	for _, req := range m.searchRequests {
+		tokens = append(tokens, req.NextPageToken)
+	}
+	return tokens
 }
 
 func (m *mockJira) setIssue(key, project, status string, labels []string) {
