@@ -13,6 +13,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -2011,6 +2012,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	tenantID, err := s.tenantByClawToken(rp.Token)
 	if err != nil {
+		log.Printf("[claw ws] invalid token for claw %.8s: received_len=%d configured_len=%d err=%v", rp.ClawID, len(rp.Token), len(s.hubCfg.ClawToken), err)
 		conn.Close(websocket.StatusPolicyViolation, "invalid token")
 		return
 	}
@@ -4343,7 +4345,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
 	containerEnv := map[string]string{
-		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
+		"ELASTICCLAW_HUB_URL":            dockerClawHubURL(hubCfg),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
 		"ELASTICCLAW_CLAW_NAME":          clawName,
@@ -4429,6 +4431,31 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	return nil
 }
 
+func dockerClawHubURL(cfg *types.HubConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	hubURL := cfg.PublicURL
+	if cfg.URL != "" {
+		hubURL = cfg.URL
+	}
+	parsed, err := url.Parse(hubURL)
+	if err != nil || parsed.Hostname() == "" {
+		return strings.TrimRight(hubURL, "/")
+	}
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "0.0.0.0", "::1":
+		port := parsed.Port()
+		parsed.Host = "host.docker.internal"
+		if port != "" {
+			parsed.Host += ":" + port
+		}
+		return strings.TrimRight(parsed.String(), "/")
+	default:
+		return strings.TrimRight(hubURL, "/")
+	}
+}
+
 const maxDockerBridgeBinaryBytes = 200 << 20
 
 func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
@@ -4470,6 +4497,19 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 }
 
 func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, error) {
+	if bridgePath := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"); bridgePath != "" && strings.Contains(bridgeURL, "/__elasticclaw_e2e/claw-bridge-linux-amd64") {
+		data, err := os.ReadFile(bridgePath)
+		if err != nil {
+			return nil, fmt.Errorf("docker claw-bridge read local E2E binary: %w", err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("docker claw-bridge local E2E binary is empty")
+		}
+		if len(data) > maxDockerBridgeBinaryBytes {
+			return nil, fmt.Errorf("docker claw-bridge local E2E binary exceeds %d bytes", maxDockerBridgeBinaryBytes)
+		}
+		return data, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bridgeURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("docker claw-bridge download request: %w", err)

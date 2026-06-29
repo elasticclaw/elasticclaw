@@ -60,6 +60,10 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		"run", "-d",
 		"--name", req.Name,
 		"--label", containerLabel + "=" + req.Name,
+		"--add-host", "host.docker.internal:host-gateway",
+	}
+	if p.cfg.Image == defaultImage {
+		args = append(args, "--entrypoint", "sh")
 	}
 	if p.cfg.Network != "" {
 		args = append(args, "--network", p.cfg.Network)
@@ -68,6 +72,9 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		args = append(args, "-e", k+"="+v)
 	}
 	args = append(args, p.cfg.Image)
+	if p.cfg.Image == defaultImage {
+		args = append(args, "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done")
+	}
 
 	out, err := dockerRun(ctx, args...)
 	if err != nil {
@@ -138,6 +145,12 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 		if out, err := chownDirCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("docker chown %s: %w (out: %s)", destDir, err, string(out))
 		}
+		if parentDir := parentPath(destDir); parentDir != "" && parentDir != "/" {
+			chownParentCmd := exec.CommandContext(ctx, "docker", "exec", "-u", "0", containerName, "chown", uid+":"+gid, parentDir)
+			if out, err := chownParentCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("docker chown %s: %w (out: %s)", parentDir, err, string(out))
+			}
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "cp", "-", containerName+":"+destDir)
@@ -151,6 +164,18 @@ func (p *Provider) CopyIn(ctx context.Context, containerName, dest string, conte
 		return fmt.Errorf("docker chown %s: %w (out: %s)", dest, err, string(out))
 	}
 	return nil
+}
+
+func parentPath(path string) string {
+	path = strings.TrimRight(path, "/")
+	if path == "" || path == "/" {
+		return ""
+	}
+	idx := strings.LastIndex(path, "/")
+	if idx <= 0 {
+		return "/"
+	}
+	return path[:idx]
 }
 
 func dockerContainerUser(ctx context.Context, containerName string) (string, string, error) {
