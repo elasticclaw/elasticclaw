@@ -18,6 +18,8 @@ import (
 
 type jiraString string
 
+const jiraSearchMaxPages = 1000
+
 func (s *jiraString) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(data, []byte("null")) {
 		*s = ""
@@ -714,33 +716,47 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 			jql = "project in (" + strings.Join(quoted, ",") + ") AND " + jql
 		}
 	}
-	body, _ := json.Marshal(map[string]any{
-		"jql":        jql,
-		"maxResults": 100,
-		"fields":     []string{"summary", "description", "status", "labels", "assignee", "project", "updated"},
-	})
-	req, err := http.NewRequest(http.MethodPost, base+"/rest/api/2/search", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	var issues []jiraPollIssue
+	var nextPageToken string
+	for page := 0; page < jiraSearchMaxPages; page++ {
+		requestBody := map[string]any{
+			"jql":        jql,
+			"maxResults": 100,
+			"fields":     []string{"summary", "description", "status", "labels", "assignee", "project", "updated"},
+		}
+		if nextPageToken != "" {
+			requestBody["nextPageToken"] = nextPageToken
+		}
+		body, _ := json.Marshal(requestBody)
+		req, err := http.NewRequest(http.MethodPost, base+"/rest/api/3/search/jql", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyJiraAuth(req, tracker)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("jira API error %d: %s", resp.StatusCode, string(respBody))
+		}
+		var result struct {
+			Issues        []jiraPollIssue `json:"issues"`
+			NextPageToken string          `json:"nextPageToken"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, err
+		}
+		issues = append(issues, result.Issues...)
+		nextPageToken = result.NextPageToken
+		if nextPageToken == "" {
+			return issues, nil
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	applyJiraAuth(req, tracker)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("jira API error %d: %s", resp.StatusCode, string(respBody))
-	}
-	var result struct {
-		Issues []jiraPollIssue `json:"issues"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, err
-	}
-	return result.Issues, nil
+	return nil, fmt.Errorf("jira search exceeded %d pages", jiraSearchMaxPages)
 }
 
 func (s *Server) moveJiraIssue(tracker workspaceIssueTracker, key, targetStatus string) error {
