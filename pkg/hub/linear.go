@@ -672,11 +672,20 @@ func (s *Server) terminateClawForIssue(issueID string) {
 }
 
 func (s *Server) defaultProvider() string {
+	var singleName string
+	singleCount := 0
 	for name, p := range s.hubCfg.Providers {
 		// Only consider providers with real credentials, not Type-only stubs (e.g. noop)
 		if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
 			return name
 		}
+		if name != "noop" && p.Type != "noop" {
+			singleName = name
+			singleCount++
+		}
+	}
+	if singleCount == 1 {
+		return singleName
 	}
 	return ""
 }
