@@ -62,7 +62,7 @@ func TestDefaultProviderFallsBackToSingleConfiguredProvider(t *testing.T) {
 			want: "docker",
 		},
 		{
-			name: "single empty credentialed provider",
+			name: "single provider without credentials",
 			provider: map[string]types.ProviderConfig{
 				"daytona": {},
 			},
@@ -90,6 +90,14 @@ func TestDefaultProviderFallsBackToSingleConfiguredProvider(t *testing.T) {
 				"noop": {Type: "noop"},
 			},
 			wantEmpty: true,
+		},
+		{
+			name: "noop stub does not block single real provider fallback",
+			provider: map[string]types.ProviderConfig{
+				"noop":   {Type: "noop"},
+				"docker": {},
+			},
+			want: "docker",
 		},
 	}
 
