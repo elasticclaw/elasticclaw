@@ -2,9 +2,11 @@ package hub
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -310,7 +312,15 @@ stages:
 }
 
 func TestHandleClawDoneSignalFallbacksHonorIssueLabelFilters(t *testing.T) {
+	var mu sync.Mutex
+	var linearRequests int
+	var linearRequestBody string
 	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		linearRequests++
+		linearRequestBody = string(body)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"NEXT-257","title":"Test issue","url":"https://linear.app/test/issue/NEXT-257","description":"Test","labels":{"nodes":[{"name":"skip-review"}]}}}}`))
 	}))
@@ -370,6 +380,16 @@ stages:
 	if stage != "working" {
 		t.Fatalf("pipeline_stage = %q, want working", stage)
 	}
+	mu.Lock()
+	requests := linearRequests
+	requestBody := linearRequestBody
+	mu.Unlock()
+	if requests == 0 {
+		t.Fatal("expected Linear mock to be hit")
+	}
+	if !strings.Contains(requestBody, "labels") {
+		t.Fatalf("Linear query = %q, want labels field", requestBody)
+	}
 
 	var reviewMessages int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%Review loop started%'`, clawID).Scan(&reviewMessages); err != nil {
@@ -377,6 +397,83 @@ stages:
 	}
 	if reviewMessages != 0 {
 		t.Fatalf("expected no review loop inject, got %d", reviewMessages)
+	}
+}
+
+func TestHandleClawDoneSignalFailsClosedWhenIssueLabelsUnavailable(t *testing.T) {
+	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errors":[{"message":"permission denied"}]}`))
+	}))
+	t.Cleanup(linear.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Factories: []*types.FactoryConfig{
+			{
+				Name:          "faster_apps",
+				Template:      "elasticclaw",
+				Integration:   "linear",
+				Workspace:     "test-workspace",
+				TriggerStatus: "Ready For Agent",
+				PipelineYAML: `
+stages:
+  - id: working
+    label: Working
+    entry: true
+  - id: review_loop
+    label: Review Loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            - skip-review
+    on_enter:
+      inject: "Review loop started"
+  - id: generic_done
+    label: Generic Done
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: "Generic done started"
+`,
+			},
+		},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{
+				{
+					Workspace: "test-workspace",
+					Token:     "test-linear-token",
+				},
+			},
+		},
+	}, "", linear.URL, "")
+
+	const clawID = "claw-done-label-fetch-error"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "NEXT-257", "elasticclaw", "connected", `["factory:faster_apps"]`, "NEXT-257", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select pipeline_stage: %v", err)
+	}
+	if stage != "working" {
+		t.Fatalf("pipeline_stage = %q, want working", stage)
+	}
+
+	var injectedMessages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND (content LIKE '%Review loop started%' OR content LIKE '%Generic done started%')`, clawID).Scan(&injectedMessages); err != nil {
+		t.Fatalf("count injected messages: %v", err)
+	}
+	if injectedMessages != 0 {
+		t.Fatalf("expected no pipeline inject, got %d", injectedMessages)
 	}
 }
 

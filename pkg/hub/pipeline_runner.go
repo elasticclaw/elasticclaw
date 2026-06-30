@@ -1448,11 +1448,10 @@ func (s *Server) pipelineStageForMessageContainsInContext(clawID, message string
 	var stage *pipeline.Stage
 	if pl.MessageContainsHasIssueLabelsCondition(message) {
 		issueLabels, labelsAvailable := s.pipelineIssueLabels(clawID, ctx)
-		if labelsAvailable {
-			stage = pl.StageForMessageContainsWithIssueLabels(message, issueLabels)
-		} else {
-			stage = pl.StageForMessageContains(message)
+		if !labelsAvailable {
+			return nil, false
 		}
+		stage = pl.StageForMessageContainsWithIssueLabels(message, issueLabels)
 	} else {
 		stage = pl.StageForMessageContains(message)
 	}

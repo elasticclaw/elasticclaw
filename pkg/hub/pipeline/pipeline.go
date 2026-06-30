@@ -121,25 +121,36 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 		case "message_contains":
 			t.MessageContains = val.Value
 		case "issue_labels":
+			if val.Kind != yaml.MappingNode {
+				return fmt.Errorf("issue_labels must be a mapping")
+			}
 			var cond IssueLabelsCondition
-			if val.Kind == yaml.MappingNode {
-				for j := 0; j+1 < len(val.Content); j += 2 {
-					subKey := val.Content[j].Value
-					subVal := val.Content[j+1]
-					switch subKey {
-					case "labels":
-						if subVal.Kind == yaml.SequenceNode {
-							for k := 0; k < len(subVal.Content); k++ {
-								cond.Labels = append(cond.Labels, subVal.Content[k].Value)
-							}
-						}
-					case "exclude_labels":
-						if subVal.Kind == yaml.SequenceNode {
-							for k := 0; k < len(subVal.Content); k++ {
-								cond.ExcludeLabels = append(cond.ExcludeLabels, subVal.Content[k].Value)
-							}
-						}
+			for j := 0; j+1 < len(val.Content); j += 2 {
+				subKey := val.Content[j].Value
+				subVal := val.Content[j+1]
+				switch subKey {
+				case "labels":
+					if subVal.Kind != yaml.SequenceNode {
+						return fmt.Errorf("issue_labels.labels must be a sequence")
 					}
+					for k := 0; k < len(subVal.Content); k++ {
+						if subVal.Content[k].Kind != yaml.ScalarNode {
+							return fmt.Errorf("issue_labels.labels[%d] must be a scalar", k)
+						}
+						cond.Labels = append(cond.Labels, subVal.Content[k].Value)
+					}
+				case "exclude_labels":
+					if subVal.Kind != yaml.SequenceNode {
+						return fmt.Errorf("issue_labels.exclude_labels must be a sequence")
+					}
+					for k := 0; k < len(subVal.Content); k++ {
+						if subVal.Content[k].Kind != yaml.ScalarNode {
+							return fmt.Errorf("issue_labels.exclude_labels[%d] must be a scalar", k)
+						}
+						cond.ExcludeLabels = append(cond.ExcludeLabels, subVal.Content[k].Value)
+					}
+				default:
+					return fmt.Errorf("issue_labels.%s is not supported", subKey)
 				}
 			}
 			t.IssueLabels = &cond
@@ -395,14 +406,24 @@ func (p *Pipeline) StageForMessageContains(message string) *Stage {
 // slice means labels are unavailable, so required labels do not match but
 // exclude-only conditions can still represent the default route.
 func (p *Pipeline) StageForMessageContainsWithIssueLabels(message string, issueLabels []string) *Stage {
+	var firstGeneric *Stage
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
-			if t.MessageContains != "" && containsFold(message, t.MessageContains) && triggerIssueLabelsAllowed(t.IssueLabels, issueLabels) {
+			if t.MessageContains == "" || !containsFold(message, t.MessageContains) {
+				continue
+			}
+			if t.IssueLabels == nil {
+				if firstGeneric == nil {
+					firstGeneric = &p.Stages[i]
+				}
+				continue
+			}
+			if triggerIssueLabelsAllowed(t.IssueLabels, issueLabels) {
 				return &p.Stages[i]
 			}
 		}
 	}
-	return nil
+	return firstGeneric
 }
 
 // MessageContainsHasIssueLabelsCondition reports whether any message_contains

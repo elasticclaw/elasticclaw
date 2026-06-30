@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
@@ -595,6 +596,89 @@ stages:
 	}
 }
 
+func TestParseIssueLabelsTriggerConditionRejectsMalformedShape(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "issue_labels scalar",
+			yaml: `
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels: skip-review
+`,
+			wantErr: "issue_labels must be a mapping",
+		},
+		{
+			name: "labels scalar",
+			yaml: `
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels: skip-review
+`,
+			wantErr: "issue_labels.labels must be a sequence",
+		},
+		{
+			name: "exclude_labels mapping",
+			yaml: `
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          exclude_labels:
+            name: skip-review
+`,
+			wantErr: "issue_labels.exclude_labels must be a sequence",
+		},
+		{
+			name: "unknown key",
+			yaml: `
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          label:
+            - skip-review
+`,
+			wantErr: "issue_labels.label is not supported",
+		},
+		{
+			name: "labels map item",
+			yaml: `
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - name: skip-review
+`,
+			wantErr: "issue_labels.labels[0] must be a scalar",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := pipeline.Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("expected parse error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parse error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestStageForMessageContainsHonorsIssueLabelsCondition(t *testing.T) {
 	p, err := pipeline.Parse([]byte(`
 stages:
@@ -628,6 +712,40 @@ stages:
 	stage = p.StageForMessageContainsWithIssueLabels("Ready [DONE]", nil)
 	if stage == nil || stage.ID != "review_loop" {
 		t.Fatalf("stage without issue labels = %v, want exclude-only default review_loop", stage)
+	}
+}
+
+func TestStageForMessageContainsPrefersMatchingIssueLabelsCondition(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: generic_done
+    triggers:
+      - message_contains: "[DONE]"
+  - id: backend_review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - backend
+  - id: fallback_review_loop
+    triggers:
+      - message_contains: "[DONE]"
+        issue_labels:
+          labels:
+            - frontend
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	stage := p.StageForMessageContainsWithIssueLabels("Ready [DONE]", []string{"Backend"})
+	if stage == nil || stage.ID != "backend_review_loop" {
+		t.Fatalf("stage with matching label = %v, want backend_review_loop", stage)
+	}
+
+	stage = p.StageForMessageContainsWithIssueLabels("Ready [DONE]", []string{"docs"})
+	if stage == nil || stage.ID != "generic_done" {
+		t.Fatalf("stage without matching label = %v, want generic_done", stage)
 	}
 }
 
