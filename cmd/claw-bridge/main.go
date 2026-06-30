@@ -2500,8 +2500,14 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	}
 	stagedDir := filepath.Join(home, "workspace")
 	activeDir := filepath.Join(home, ".openclaw", "workspace")
-	stagedAbs, _ := filepath.Abs(stagedDir)
-	activeAbs, _ := filepath.Abs(activeDir)
+	stagedAbs, err := filepath.Abs(stagedDir)
+	if err != nil {
+		return fmt.Errorf("abs staged workspace: %w", err)
+	}
+	activeAbs, err := filepath.Abs(activeDir)
+	if err != nil {
+		return fmt.Errorf("abs OpenClaw workspace: %w", err)
+	}
 	if stagedAbs == activeAbs {
 		return nil
 	}
@@ -2528,6 +2534,10 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 			return err
 		}
 		if rel == "." || rel == ".elasticclaw-workspace-ready" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			log.Printf("[bootstrap] skipping workspace symlink %s", src)
 			return nil
 		}
 		dst := filepath.Join(activeDir, rel)

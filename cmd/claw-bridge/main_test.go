@@ -137,6 +137,9 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(staged, "scripts", "check.sh"), []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatalf("write staged script: %v", err)
 	}
+	if err := os.Symlink(filepath.Join(staged, "scripts"), filepath.Join(staged, "linked-scripts")); err != nil {
+		t.Fatalf("write staged symlink: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(staged, ".elasticclaw-workspace-ready"), []byte("ready\n"), 0600); err != nil {
 		t.Fatalf("write ready marker: %v", err)
 	}
@@ -163,6 +166,9 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(active, "scripts", "check.sh")); err != nil {
 		t.Fatalf("script was not copied: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(active, "linked-scripts")); !os.IsNotExist(err) {
+		t.Fatalf("symlink should not be copied, err=%v", err)
 	}
 }
 

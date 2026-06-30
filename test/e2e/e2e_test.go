@@ -662,11 +662,47 @@ func waitForAgentStatus(ctx context.Context, t *testing.T, hub *hubProcess, agen
 			return
 		}
 		if agent.Status == "error" {
+			logAgentProviderDiagnostics(ctx, t, hub, agentID)
 			t.Fatalf("agent %s entered error state", agentID)
 		}
 		time.Sleep(5 * time.Second)
 	}
+	logAgentProviderDiagnostics(ctx, t, hub, agentID)
 	t.Fatalf("timed out waiting for agent %s status %q", agentID, want)
+}
+
+func logAgentProviderDiagnostics(ctx context.Context, t *testing.T, hub *hubProcess, agentID string) {
+	t.Helper()
+	provider, providerID := hub.agentProvider(ctx, t, agentID)
+	if provider != "docker" || providerID == "" {
+		return
+	}
+	logDockerContainerDiagnostics(ctx, t, providerID)
+}
+
+func logDockerContainerDiagnostics(ctx context.Context, t *testing.T, containerID string) {
+	t.Helper()
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"docker inspect", []string{"inspect", "-f", "{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}", containerID}},
+		{"docker ps", []string{"ps", "-a", "--filter", "name=" + containerID, "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"}},
+		{"docker bridge log", []string{"exec", containerID, "sh", "-lc", "tail -n 200 \"$HOME/claw-bridge.log\" 2>/dev/null || true"}},
+		{"docker gateway log", []string{"exec", containerID, "sh", "-lc", "tail -n 120 \"$HOME/openclaw-gateway.log\" 2>/dev/null || true"}},
+		{"docker workspace files", []string{"exec", containerID, "sh", "-lc", "find \"$HOME/workspace\" \"$HOME/.openclaw/workspace\" -maxdepth 2 -type f -print 2>/dev/null | sort || true"}},
+	}
+	for _, command := range commands {
+		cmd := exec.CommandContext(ctx, "docker", command.args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("%s failed: %v\n%s", command.name, err, strings.TrimSpace(string(out)))
+			continue
+		}
+		if text := strings.TrimSpace(string(out)); text != "" {
+			t.Logf("%s:\n%s", command.name, text)
+		}
+	}
 }
 
 func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agentID string) {
