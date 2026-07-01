@@ -32,35 +32,6 @@ const (
 	maxRunIDLen    = 32
 )
 
-func TestMain(m *testing.M) {
-	stopHeartbeat := startE2EHeartbeat()
-	code := m.Run()
-	stopHeartbeat()
-	os.Exit(code)
-}
-
-func startE2EHeartbeat() func() {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_HEARTBEAT")), "0") ||
-		strings.EqualFold(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_HEARTBEAT")), "false") {
-		return func() {}
-	}
-	done := make(chan struct{})
-	go func() {
-		started := time.Now()
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				fmt.Fprintf(os.Stderr, "[e2e] still running after %s\n", time.Since(started).Round(time.Second))
-			case <-done:
-				return
-			}
-		}
-	}()
-	return func() { close(done) }
-}
-
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "daytona")
 }
