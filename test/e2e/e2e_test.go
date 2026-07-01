@@ -29,7 +29,6 @@ const (
 	defaultFixture = "elasticclaw/e2e-fixtures"
 	daytonaPrefix  = "ec-e2e"
 	cmxPrefix      = "ec-e2e-cmx"
-	dockerPrefix   = "ec-e2e-docker"
 	maxRunIDLen    = 32
 )
 
@@ -140,8 +139,6 @@ type e2eEnv struct {
 	ReplicatedAPIURL    string
 	ReplicatedType      string
 	ReplicatedTTL       string
-	DockerImage         string
-	DockerNetwork       string
 	FireworksAPIKey     string
 	BridgeBinary        string
 	BridgeToken         string
@@ -153,31 +150,29 @@ type e2eEnv struct {
 func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	t.Helper()
 	env := e2eEnv{
-		Bin:                requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
-		HubAddr:            envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
-		PublicURL:          strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
-		SandboxProvider:    sandboxProvider,
-		GitHubRepo:         envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
-		GitHubAppURL:       os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
-		GitHubInstallation: os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
-		LinearAPIKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
-		LinearTeamKey:      os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
-		LinearTriggerState: envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
-		LinearInitialState: os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
-		JiraBaseURL:        strings.TrimRight(os.Getenv("ELASTICCLAW_E2E_JIRA_BASE_URL"), "/"),
-		JiraUsername:       os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
-		JiraToken:          os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
-		JiraProjectKey:     os.Getenv("ELASTICCLAW_E2E_JIRA_PROJECT_KEY"),
-		FireworksAPIKey:    requiredEnv(t, "FIREWORKS_API_KEY"),
-		BridgeBinary:       requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
-		BridgeToken:        "bridge-" + runID,
-		Model:              envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
-		RunID:              runID,
-	}
-	if sandboxProvider != "docker" {
-		env.GitHubToken = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN")
-		env.GitHubAppID = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID")
-		env.GitHubAppPrivateKey = requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY")
+		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
+		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
+		PublicURL:           strings.TrimRight(requiredEnv(t, "ELASTICCLAW_E2E_PUBLIC_URL"), "/"),
+		SandboxProvider:     sandboxProvider,
+		GitHubToken:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_TOKEN"),
+		GitHubRepo:          envOrDefault("ELASTICCLAW_E2E_GITHUB_REPO", defaultFixture),
+		GitHubAppID:         requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_ID"),
+		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
+		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
+		GitHubAppPrivateKey: requiredEnv(t, "ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
+		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
+		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
+		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
+		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
+		JiraBaseURL:         strings.TrimRight(os.Getenv("ELASTICCLAW_E2E_JIRA_BASE_URL"), "/"),
+		JiraUsername:        os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
+		JiraToken:           os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
+		JiraProjectKey:      os.Getenv("ELASTICCLAW_E2E_JIRA_PROJECT_KEY"),
+		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
+		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
+		BridgeToken:         "bridge-" + runID,
+		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
+		RunID:               runID,
 	}
 	switch sandboxProvider {
 	case "daytona":
@@ -189,10 +184,6 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		env.ReplicatedType = envOrDefault("ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE", "r1.small")
 		env.ReplicatedTTL = envOrDefault("ELASTICCLAW_E2E_REPLICATED_TTL", "1h")
 		env.ProviderPrefix = e2eProviderPrefix(cmxPrefix, runID)
-	case "docker":
-		env.DockerImage = envOrDefault("ELASTICCLAW_E2E_DOCKER_IMAGE", "elasticclaw/claw-agent:dev")
-		env.DockerNetwork = os.Getenv("ELASTICCLAW_E2E_DOCKER_NETWORK")
-		env.ProviderPrefix = e2eProviderPrefix(dockerPrefix, runID)
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", sandboxProvider)
 	}
@@ -234,14 +225,6 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 `, env.ReplicatedToken, env.ReplicatedType, env.ReplicatedTTL)
 		if env.ReplicatedAPIURL != "" {
 			providerConfig += fmt.Sprintf("    api_url: %q\n", env.ReplicatedAPIURL)
-		}
-	case "docker":
-		providerConfig = fmt.Sprintf(`  docker:
-    type: docker
-    image: %q
-`, env.DockerImage)
-		if env.DockerNetwork != "" {
-			providerConfig += fmt.Sprintf("    network: %q\n", env.DockerNetwork)
 		}
 	}
 
@@ -614,8 +597,6 @@ func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {
 		// Replicated CMX has no broad sweep here; recorded VM IDs and direct
 		// agent cleanup handle VMs created by this run, with CMX TTL as backup.
 		return
-	case "docker":
-		cleanupDockerE2EContainers(ctx, t, env)
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", env.SandboxProvider)
 	}
@@ -628,54 +609,11 @@ func destroyProviderInstanceByID(ctx context.Context, t *testing.T, env e2eEnv, 
 		destroyDaytonaSandboxByID(ctx, t, env, providerID)
 	case "replicated":
 		destroyReplicatedVMByID(ctx, t, env, providerID)
-	case "docker":
-		destroyDockerContainerByID(ctx, t, providerID)
 	case "":
 		return
 	default:
 		t.Logf("no E2E cleanup handler for provider %q instance %q", provider, providerID)
 	}
-}
-
-func cleanupDockerE2EContainers(ctx context.Context, t *testing.T, env e2eEnv) {
-	t.Helper()
-	if env.ProviderPrefix == "" {
-		return
-	}
-	cmd := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=elasticclaw.claw")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list Docker E2E containers: %v\n%s", err, strings.TrimSpace(string(out)))
-	}
-	for _, containerID := range strings.Fields(string(out)) {
-		labelCmd := exec.CommandContext(ctx, "docker", "inspect", "-f", `{{ index .Config.Labels "elasticclaw.claw" }}`, containerID)
-		labelOut, err := labelCmd.CombinedOutput()
-		if err != nil {
-			t.Logf("inspect Docker E2E container %s: %v: %s", containerID, err, strings.TrimSpace(string(labelOut)))
-			continue
-		}
-		if !strings.HasPrefix(strings.TrimSpace(string(labelOut)), env.ProviderPrefix) {
-			continue
-		}
-		destroyDockerContainerByID(ctx, t, containerID)
-	}
-}
-
-func destroyDockerContainerByID(ctx context.Context, t *testing.T, containerID string) {
-	t.Helper()
-	if strings.TrimSpace(containerID) == "" {
-		return
-	}
-	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	output := strings.TrimSpace(string(out))
-	if strings.Contains(output, "No such container") || strings.Contains(output, "not found") {
-		return
-	}
-	t.Fatalf("delete Docker E2E container %s: %v\n%s", containerID, err, output)
 }
 
 func cleanupDaytonaE2ESandboxes(ctx context.Context, t *testing.T, env e2eEnv) {
