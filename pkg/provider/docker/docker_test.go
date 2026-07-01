@@ -3,8 +3,6 @@ package docker
 import (
 	"context"
 	"testing"
-
-	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 )
 
 func TestCopyInRejectsRelativeDestination(t *testing.T) {
@@ -19,13 +17,13 @@ func TestCopyInRejectsRelativeDestination(t *testing.T) {
 	}
 }
 
-func TestNewDefaultsToPinnedOpenClawImage(t *testing.T) {
+func TestNewDefaultsToElasticClawAgentImage(t *testing.T) {
 	provider, err := New(Config{})
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
 
-	if got, want := provider.cfg.Image, "ghcr.io/openclaw/openclaw:"+cliversion.OpenClawVersion; got != want {
+	if got, want := provider.cfg.Image, "elasticclaw/claw-agent:dev"; got != want {
 		t.Fatalf("default image = %q, want %q", got, want)
 	}
 }

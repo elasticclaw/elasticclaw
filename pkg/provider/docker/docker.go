@@ -13,18 +13,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const (
-	defaultImage   = "ghcr.io/openclaw/openclaw:" + cliversion.OpenClawVersion
+	defaultImage   = "elasticclaw/claw-agent:dev"
 	containerLabel = "elasticclaw.claw"
 )
 
 // Config holds docker provider configuration (from hub.yaml providers.docker).
 type Config struct {
-	// Image is the agent container image. Defaults to the pinned OpenClaw image.
+	// Image is the agent container image. Defaults to elasticclaw/claw-agent:dev.
 	Image string
 	// Network is the Docker network to attach agent containers to so they can
 	// reach the hub by its service name (e.g. "elasticclaw-dev").
