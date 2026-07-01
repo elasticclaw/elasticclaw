@@ -9,6 +9,7 @@ The E2E paths run against real services:
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
+Local shell -> ngrok -> ElasticClaw Server -> manual workflow -> Docker -> OpenClaw -> Fireworks Kimi
 ```
 
 Each test creates a workspace and workflow with the ElasticClaw CLI, configures
@@ -20,6 +21,9 @@ trigger state, then waits for one Daytona-backed agent to connect and reply. The
 Jira test creates a real Jira Cloud issue, labels it, transitions it into the
 trigger state, delivers a Jira-shaped webhook payload to the E2E hub, and lets
 the poller run long enough to verify duplicate prevention.
+The Docker workflow test creates only local resources, triggers a manual
+workflow, and stops at the agent `connected` status so local runs can reproduce
+Docker-to-hub tunnel failures without Depot.
 
 ## Fixture Repo
 
@@ -50,6 +54,7 @@ make e2e-jira
 make e2e-replicated-github
 make e2e-replicated-linear
 make e2e-replicated-jira
+make e2e-docker-workflow
 ```
 
 The make targets build `bin/elasticclaw` and `bin/claw-bridge-linux-amd64`,
@@ -68,6 +73,15 @@ sandbox IDs and Replicated CMX VM IDs created during the run, and the make
 cleanup path runs explicit finalizers for those IDs even when the main test
 fails. Use dedicated Daytona and Replicated API credentials for E2E.
 It assumes the required secrets below are already exported in your shell.
+
+The Docker workflow target builds `elasticclaw/claw-agent:dev` locally and uses
+the same ngrok-backed hub path as CI. It requires Docker, `FIREWORKS_API_KEY`,
+`NGROK_AUTHTOKEN`, and `NGROK_API_KEY`, but does not require GitHub, Linear,
+Jira, Daytona, Replicated, or Depot credentials. Override the local image with
+`ELASTICCLAW_E2E_DOCKER_IMAGE`; set `ELASTICCLAW_E2E_DOCKER_NETWORK` only when
+the agent should join a specific Docker network. When debugging a failed run,
+use the container name or id in the hub log with `docker logs <container>` and
+`docker inspect <container>` before rerunning cleanup.
 
 ## Depot CI Environment
 
@@ -102,6 +116,8 @@ ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
 ELASTICCLAW_E2E_REPLICATED_TTL=1h
+ELASTICCLAW_E2E_DOCKER_IMAGE=elasticclaw/claw-agent:dev
+ELASTICCLAW_E2E_DOCKER_NETWORK=
 ```
 
 The GitHub token needs access to the fixture repo with:
