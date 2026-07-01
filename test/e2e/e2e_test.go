@@ -595,18 +595,68 @@ func waitForOneAgent(ctx context.Context, t *testing.T, hub *hubProcess, name st
 func waitForAgentStatus(ctx context.Context, t *testing.T, hub *hubProcess, agentID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(12 * time.Minute)
+	var lastAgent types.Claw
 	for time.Now().Before(deadline) {
 		var agent types.Claw
 		hub.api(ctx, t, http.MethodGet, "/api/claws/"+agentID, nil, &agent)
+		lastAgent = agent
 		if string(agent.Status) == want {
 			return
 		}
 		if agent.Status == "error" {
-			t.Fatalf("agent %s entered error state", agentID)
+			t.Fatalf("agent %s entered error state\n%s", agentID, formatAgentDiagnostics(ctx, hub, agent))
 		}
 		time.Sleep(5 * time.Second)
 	}
-	t.Fatalf("timed out waiting for agent %s status %q", agentID, want)
+	t.Fatalf("timed out waiting for agent %s status %q\n%s", agentID, want, formatAgentDiagnostics(ctx, hub, lastAgent))
+}
+
+func formatAgentDiagnostics(ctx context.Context, hub *hubProcess, agent types.Claw) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "last status=%q provider=%q provider_id=%q bootstrap_status=%q\n",
+		agent.Status, agent.Provider, agent.ProviderID, agent.BootstrapStatus)
+	if strings.TrimSpace(agent.BootstrapDiagnostic) != "" {
+		fmt.Fprintf(&b, "bootstrap_diagnostic=%s\n", truncateE2E(agent.BootstrapDiagnostic, 2000))
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, hub.baseURL+"/api/messages/"+agent.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+hub.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(&b, "messages: %v\n", err)
+		return b.String()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		fmt.Fprintf(&b, "messages returned %s: %s\n", resp.Status, truncateE2E(strings.TrimSpace(string(body)), 1000))
+		return b.String()
+	}
+	var messages []types.HubMessage
+	if err := json.Unmarshal(body, &messages); err != nil {
+		fmt.Fprintf(&b, "decode messages: %v\n", err)
+		return b.String()
+	}
+	if len(messages) == 0 {
+		b.WriteString("messages: none\n")
+		return b.String()
+	}
+	start := len(messages) - 5
+	if start < 0 {
+		start = 0
+	}
+	b.WriteString("recent messages:\n")
+	for _, msg := range messages[start:] {
+		fmt.Fprintf(&b, "- %s: %s\n", msg.Role, truncateE2E(strings.TrimSpace(msg.Content), 500))
+	}
+	return b.String()
+}
+
+func truncateE2E(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }
 
 func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agentID string) {
