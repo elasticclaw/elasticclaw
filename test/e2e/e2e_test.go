@@ -207,6 +207,12 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 	configPath := filepath.Join(dir, "hub.yaml")
 	dbPath := filepath.Join(dir, "hub.db")
 	logPath := filepath.Join(dir, "hub.log")
+	if artifactDir := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_ARTIFACT_DIR")); artifactDir != "" {
+		if err := os.MkdirAll(artifactDir, 0750); err != nil {
+			t.Fatalf("create E2E artifact dir: %v", err)
+		}
+		logPath = filepath.Join(artifactDir, "hub.log")
+	}
 	baseURL := "http://" + env.HubAddr
 
 	providerConfig := ""

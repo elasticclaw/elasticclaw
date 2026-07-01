@@ -141,6 +141,7 @@ jobs:
       ELASTICCLAW_E2E_BRIDGE_BINARY: ${{ github.workspace }}/bin/claw-bridge-linux-amd64
       ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE: ${{ github.workspace }}/e2e-daytona-sandbox-ids
       ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE: ${{ github.workspace }}/e2e-replicated-vm-ids
+      ELASTICCLAW_E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts-${{ matrix.provider_slug }}-${{ matrix.slug }}
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
       ELASTICCLAW_E2E_GITHUB_REPO: ${{ secrets.ELASTICCLAW_E2E_GITHUB_REPO }}
@@ -236,7 +237,10 @@ jobs:
           exit 1
 
       - name: Run ${{ matrix.provider_name }} ${{ matrix.tracker_name }} E2E
-        run: go test -tags e2e -v ./test/e2e -run "${{ matrix.test }}" -count=1 -timeout 30m
+        run: |
+          mkdir -p "$ELASTICCLAW_E2E_ARTIFACT_DIR"
+          set -o pipefail
+          go test -tags e2e -v ./test/e2e -run "${{ matrix.test }}" -count=1 -timeout 30m 2>&1 | tee "$ELASTICCLAW_E2E_ARTIFACT_DIR/go-test.log"
 
       - name: Cleanup recorded sandboxes
         if: always()
@@ -266,3 +270,4 @@ jobs:
             ngrok-domain-id
             e2e-daytona-sandbox-ids
             e2e-replicated-vm-ids
+            e2e-artifacts-*
