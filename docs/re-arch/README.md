@@ -1,50 +1,52 @@
-# Re-arquitetura ElasticClaw — Specs de implementação
+# ElasticClaw Re-architecture — Implementation Specs
 
-Este diretório contém as specs das quatro fases do plano de melhorias de arquitetura,
-derivadas da revisão de arquitetura de 2026-07-01 (backend Go, frontend Next.js e
-integração/build analisados em varreduras independentes).
+This directory contains the specs for the four phases of the architecture
+improvement plan, derived from the 2026-07-01 architecture review (Go backend,
+Next.js frontend, and integration/build analyzed in independent sweeps).
 
-## Contexto
+## Context
 
-O ElasticClaw é um control plane self-hosted distribuído como **binário único Go**
-(CLI Cobra + servidor "hub") com a web UI Next.js embutida via `go:embed`. Essa
-decisão macro está correta e **não muda**. O plano ataca os problemas internos:
+ElasticClaw is a self-hosted control plane shipped as a **single Go binary**
+(Cobra CLI + "hub" server) with the Next.js web UI embedded via `go:embed`. That
+macro decision is right and **does not change**. This plan targets the internal
+problems:
 
-| Problema | Evidência |
+| Problem | Evidence |
 |---|---|
-| God-package | `pkg/hub` com 103 arquivos / ~54k LOC; `server.go` com 6.535 linhas |
-| Sem graceful shutdown | `http.ListenAndServe` direto; 8+ goroutines de fundo sem cancelamento |
-| Contexto não propagado | 84 usos de `context.Background()` em `pkg/hub` |
-| Contrato Go↔TS manual | Sem OpenAPI; enum de status já divergiu (TS não conhece `starting`/`deleted`) |
-| Segurança | Token em query param, CORS `*`, segredos em plaintext no hub.yaml, JWT caseiro |
-| Observabilidade | `log.Printf` sem estrutura, OTel presente mas não usado, sem métricas |
-| Frontend | `settings-content.tsx` com 4.891 linhas, zero testes, package "my-project" |
+| God package | `pkg/hub` with 103 files / ~54k LOC; `server.go` at 6,535 lines |
+| No graceful shutdown | Bare `http.ListenAndServe`; 8+ background goroutines with no cancellation |
+| Context not propagated | 84 uses of `context.Background()` in `pkg/hub` |
+| Hand-maintained Go↔TS contract | No OpenAPI; the status enum has already drifted (TS doesn't know `starting`/`deleted`) |
+| Security | Token in query params, CORS `*`, plaintext secrets in hub.yaml, hand-rolled JWT |
+| Observability | Unstructured `log.Printf`, OTel present but unused, no metrics |
+| Frontend | `settings-content.tsx` at 4,891 lines, zero tests, package named "my-project" |
 
-## Não-objetivos (valem para todas as fases)
+## Non-goals (apply to every phase)
 
-- **Não** migrar para microserviços, GraphQL ou message broker.
-- **Não** trocar SQLite como storage padrão (apenas preparar interface para Postgres opcional).
-- **Não** trocar `net/http.ServeMux` por framework pesado.
-- **Não** reescrever a UI; apenas reorganizar e testar.
-- **Não** quebrar o modelo de distribuição por binário único.
+- Do **not** migrate to microservices, GraphQL, or a message broker.
+- Do **not** replace SQLite as the default storage (only prepare the interface for optional Postgres).
+- Do **not** replace `net/http.ServeMux` with a heavyweight framework.
+- Do **not** rewrite the UI; only reorganize and test it.
+- Do **not** break the single-binary distribution model.
 
-## Fases
+## Phases
 
-| Fase | Spec | Duração | Tema |
+| Phase | Spec | Duration | Theme |
 |---|---|---|---|
-| 0 | [fase-0-estancar-riscos.md](fase-0-estancar-riscos.md) | ~1 semana | Shutdown gracioso, recovery, auth/CORS, higiene |
-| 1 | [fase-1-contrato-e-observabilidade.md](fase-1-contrato-e-observabilidade.md) | 2–3 semanas | OpenAPI + codegen, slog/OTel/métricas, migrations |
-| 2 | [fase-2-reorganizacao-do-hub.md](fase-2-reorganizacao-do-hub.md) | 3–4 semanas | Quebra do `pkg/hub` em subpacotes, concorrência |
-| 3 | [fase-3-frontend-e-endurecimento.md](fase-3-frontend-e-endurecimento.md) | 2–3 semanas | Divisão do settings, testes de UI, segredos, config |
+| 0 | [phase-0-stop-the-bleeding.md](phase-0-stop-the-bleeding.md) | ~1 week | Graceful shutdown, recovery, auth/CORS, hygiene |
+| 1 | [phase-1-contract-and-observability.md](phase-1-contract-and-observability.md) | 2–3 weeks | OpenAPI + codegen, slog/OTel/metrics, migrations |
+| 2 | [phase-2-hub-reorganization.md](phase-2-hub-reorganization.md) | 3–4 weeks | Splitting `pkg/hub` into subpackages, concurrency |
+| 3 | [phase-3-frontend-and-hardening.md](phase-3-frontend-and-hardening.md) | 2–3 weeks | Settings split, UI tests, secrets, config |
 
-As fases são sequenciais na intenção, mas cada uma é entregável de forma independente.
-A Fase 1 (contrato OpenAPI) é pré-requisito parcial da Fase 3 (tipos gerados na UI).
+The phases are sequential in intent, but each one is independently shippable.
+Phase 1 (OpenAPI contract) is a partial prerequisite of Phase 3 (generated types
+in the UI).
 
-## Regras de execução comuns
+## Common execution rules
 
-1. Cada item de spec vira um PR pequeno e revisável; nada de PR "big bang".
-2. `make test` e `make test-factory` verdes são gate de merge em todas as fases.
-3. Mudanças de comportamento observável (auth, CORS, shutdown) exigem nota no CHANGELOG
-   e, quando quebram compatibilidade, flag de transição documentada na spec.
-4. A suíte `factorytest` existente é a rede de proteção principal — qualquer refactor
-   que exigir mudá-la deve justificar o porquê no PR.
+1. Each spec item becomes a small, reviewable PR; no big-bang PRs.
+2. Green `make test` and `make test-factory` are the merge gate in every phase.
+3. Changes to observable behavior (auth, CORS, shutdown) require a CHANGELOG note
+   and, when they break compatibility, a transition flag documented in the spec.
+4. The existing `factorytest` suite is the primary safety net — any refactor that
+   requires changing it must justify why in the PR.
