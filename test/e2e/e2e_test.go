@@ -314,7 +314,7 @@ llm_keys:
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	cmd := exec.Command(env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
+	cmd := exec.Command(env.Bin, "hub", "--addr", hubListenAddr(env), "--db", dbPath, "--no-web-ui")
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
@@ -1212,6 +1212,22 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func hubListenAddr(env e2eEnv) string {
+	if env.SandboxProvider != "docker" {
+		return env.HubAddr
+	}
+	host, port, ok := strings.Cut(env.HubAddr, ":")
+	if !ok || port == "" {
+		return env.HubAddr
+	}
+	switch host {
+	case "127.0.0.1", "localhost", "0.0.0.0":
+		return "0.0.0.0:" + port
+	default:
+		return env.HubAddr
+	}
 }
 
 func e2eRunID() string {
