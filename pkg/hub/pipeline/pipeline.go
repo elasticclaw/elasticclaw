@@ -14,17 +14,31 @@ type Pipeline struct {
 
 // Stage represents a single stage in the pipeline.
 type Stage struct {
-	ID       string    `yaml:"id"`
-	Label    string    `yaml:"label"`
-	Entry    bool      `yaml:"entry"`
-	Terminal bool      `yaml:"terminal"`
-	Triggers []Trigger `yaml:"triggers"`
-	OnEnter  OnEnter   `yaml:"on_enter"`
+	ID         string     `yaml:"id"`
+	Label      string     `yaml:"label"`
+	Entry      bool       `yaml:"entry"`
+	Terminal   bool       `yaml:"terminal"`
+	Triggers   []Trigger  `yaml:"triggers"`
+	OnEnter    OnEnter    `yaml:"on_enter"`
+	SkipIf     *StageSkip `yaml:"skip_if,omitempty"`
+	SkipUnless *StageSkip `yaml:"skip_unless,omitempty"`
 	// Gate defines a deterministic review gate evaluated after the stage's
 	// on_enter actions complete. The gate inspects a named output (from a
 	// prior run action) and produces a pass/fail verdict that can drive
 	// automatic stage transitions via gate_result triggers.
 	Gate *Gate `yaml:"gate,omitempty"`
+}
+
+// StageSkip defines a pre-enter stage skip rule. When the condition evaluates
+// to true, the runner enters GoTo instead of the current stage.
+type StageSkip struct {
+	IssueLabels *IssueLabelsSkip `yaml:"issue_labels,omitempty"`
+	GoTo        string           `yaml:"go_to"`
+}
+
+// IssueLabelsSkip matches when the issue has any configured label.
+type IssueLabelsSkip struct {
+	Labels []string `yaml:"labels"`
 }
 
 // Trigger defines a condition that causes a transition into the parent stage.
@@ -338,13 +352,126 @@ func Parse(yamlBytes []byte) (*Pipeline, error) {
 	if err := yaml.Unmarshal(yamlBytes, &p); err != nil {
 		return nil, fmt.Errorf("pipeline YAML parse error: %w (hint: template expressions like {{.Issue.Identifier}} must be quoted when used as inline values, e.g. issue_id: \"{{.Issue.Identifier}}\"; literal blocks do not need quoting)", err)
 	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
 	return &p, nil
+}
+
+// Validate checks pipeline-level invariants needed by the runner.
+func (p *Pipeline) Validate() error {
+	if p == nil {
+		return nil
+	}
+	stageIDs := make(map[string]bool, len(p.Stages))
+	for _, stage := range p.Stages {
+		if strings.TrimSpace(stage.ID) != "" {
+			stageIDs[stage.ID] = true
+		}
+	}
+	skipEdges := make(map[string][]string)
+	for _, stage := range p.Stages {
+		for _, skip := range []struct {
+			name string
+			rule *StageSkip
+		}{
+			{name: "skip_if", rule: stage.SkipIf},
+			{name: "skip_unless", rule: stage.SkipUnless},
+		} {
+			if skip.rule == nil {
+				continue
+			}
+			if err := validateStageSkipRule(stage.ID, skip.name, skip.rule, stageIDs); err != nil {
+				return err
+			}
+			skipEdges[stage.ID] = append(skipEdges[stage.ID], skip.rule.GoTo)
+		}
+	}
+	if cycle := firstSkipCycle(skipEdges); len(cycle) > 0 {
+		return fmt.Errorf("pipeline skip cycle detected: %s", strings.Join(cycle, " -> "))
+	}
+	return nil
+}
+
+func validateStageSkipRule(stageID, name string, rule *StageSkip, stageIDs map[string]bool) error {
+	goTo := strings.TrimSpace(rule.GoTo)
+	if goTo == "" {
+		return fmt.Errorf("stage %q %s go_to is required", stageID, name)
+	}
+	if goTo == stageID {
+		return fmt.Errorf("stage %q %s go_to cannot point to itself", stageID, name)
+	}
+	if !stageIDs[goTo] {
+		return fmt.Errorf("stage %q %s go_to %q does not reference an existing stage", stageID, name, goTo)
+	}
+	if rule.IssueLabels == nil {
+		return fmt.Errorf("stage %q %s issue_labels is required", stageID, name)
+	}
+	if len(rule.IssueLabels.Labels) == 0 {
+		return fmt.Errorf("stage %q %s issue_labels labels cannot be empty", stageID, name)
+	}
+	for i, label := range rule.IssueLabels.Labels {
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("stage %q %s issue_labels labels[%d] cannot be blank", stageID, name, i)
+		}
+	}
+	return nil
+}
+
+func firstSkipCycle(edges map[string][]string) []string {
+	const (
+		unvisited = 0
+		visiting  = 1
+		visited   = 2
+	)
+	state := map[string]int{}
+	var stack []string
+	var visit func(string) []string
+	visit = func(stageID string) []string {
+		state[stageID] = visiting
+		stack = append(stack, stageID)
+		for _, next := range edges[stageID] {
+			switch state[next] {
+			case visiting:
+				for i, id := range stack {
+					if id == next {
+						return append(append([]string(nil), stack[i:]...), next)
+					}
+				}
+			case unvisited:
+				if cycle := visit(next); len(cycle) > 0 {
+					return cycle
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[stageID] = visited
+		return nil
+	}
+	for stageID := range edges {
+		if state[stageID] == unvisited {
+			if cycle := visit(stageID); len(cycle) > 0 {
+				return cycle
+			}
+		}
+	}
+	return nil
 }
 
 // EntryStage returns the first stage marked entry:true, or nil if none.
 func (p *Pipeline) EntryStage() *Stage {
 	for i := range p.Stages {
 		if p.Stages[i].Entry {
+			return &p.Stages[i]
+		}
+	}
+	return nil
+}
+
+// StageByID returns the stage with the given ID, or nil if none exists.
+func (p *Pipeline) StageByID(id string) *Stage {
+	for i := range p.Stages {
+		if p.Stages[i].ID == id {
 			return &p.Stages[i]
 		}
 	}

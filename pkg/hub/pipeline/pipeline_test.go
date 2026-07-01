@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
@@ -46,6 +47,131 @@ func TestParse(t *testing.T) {
 	}
 	if len(p.Stages) != 4 {
 		t.Fatalf("expected 4 stages, got %d", len(p.Stages))
+	}
+}
+
+func TestParseStageIssueLabelSkips(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+    skip_unless:
+      issue_labels:
+        labels:
+          - with review loop
+      go_to: detect_android_changes
+  - id: detect_android_changes
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	stage := p.Stages[0]
+	if stage.SkipIf == nil || stage.SkipIf.IssueLabels == nil {
+		t.Fatalf("expected skip_if issue_labels to parse: %#v", stage.SkipIf)
+	}
+	if got := stage.SkipIf.IssueLabels.Labels; len(got) != 1 || got[0] != "no review loop" {
+		t.Fatalf("skip_if labels = %#v, want [no review loop]", got)
+	}
+	if stage.SkipIf.GoTo != "detect_android_changes" {
+		t.Fatalf("skip_if go_to = %q, want detect_android_changes", stage.SkipIf.GoTo)
+	}
+	if stage.SkipUnless == nil || stage.SkipUnless.IssueLabels == nil {
+		t.Fatalf("expected skip_unless issue_labels to parse: %#v", stage.SkipUnless)
+	}
+	if got := stage.SkipUnless.IssueLabels.Labels; len(got) != 1 || got[0] != "with review loop" {
+		t.Fatalf("skip_unless labels = %#v, want [with review loop]", got)
+	}
+	if stage.SkipUnless.GoTo != "detect_android_changes" {
+		t.Fatalf("skip_unless go_to = %q, want detect_android_changes", stage.SkipUnless.GoTo)
+	}
+}
+
+func TestParseRejectsInvalidStageIssueLabelSkips(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "go_to missing",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+`,
+			want: "go_to",
+		},
+		{
+			name: "unknown go_to",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: missing
+`,
+			want: "missing",
+		},
+		{
+			name: "self go_to",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: review_loop
+`,
+			want: "itself",
+		},
+		{
+			name: "skip cycle",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: detect_android_changes
+  - id: detect_android_changes
+    skip_unless:
+      issue_labels:
+        labels: [with android changes]
+      go_to: review_loop
+`,
+			want: "cycle",
+		},
+		{
+			name: "empty labels",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: []
+      go_to: detect_android_changes
+  - id: detect_android_changes
+`,
+			want: "labels",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := pipeline.Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatalf("Parse succeeded, want error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Parse error = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }
 

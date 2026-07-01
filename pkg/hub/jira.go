@@ -480,10 +480,12 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 		clawName = strings.ReplaceAll(clawName, "{project}", payload.Issue.Fields.Project.Key)
 	}
 	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		workspaceFiles: templateFiles,
-		clawName:       clawName,
-		jiraIssueID:    issueID,
-		reason:         reason,
+		workspaceFiles:       templateFiles,
+		clawName:             clawName,
+		jiraIssueID:          issueID,
+		issueLabels:          jiraIssueLabels(payload.Issue),
+		issueLabelsAvailable: true,
+		reason:               reason,
 		triggerActor: &triggerActor{
 			ID:    firstNonEmpty(payload.User.AccountID, payload.User.Name, payload.User.Key),
 			Type:  "User",

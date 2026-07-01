@@ -477,10 +477,12 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	}
 
 	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		workspaceFiles: templateFiles,
-		clawName:       clawName,
-		linearIssueID:  issueID,
-		reason:         reason,
+		workspaceFiles:       templateFiles,
+		clawName:             clawName,
+		linearIssueID:        issueID,
+		issueLabels:          linearPayloadLabels(payload),
+		issueLabelsAvailable: true,
+		reason:               reason,
 		triggerActor: &triggerActor{
 			ID:    payload.Actor.ID,
 			Type:  payload.Actor.Type,
@@ -509,6 +511,14 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	}
 	log.Printf("[workflow:%s/%s] created claw %s for Linear issue %s", workspace.Name, workflow.Name, clawID[:8], issueID)
 	return nil
+}
+
+func linearPayloadLabels(payload linearWebhookPayload) []string {
+	labels := make([]string, 0, len(payload.Data.Labels))
+	for _, label := range payload.Data.Labels {
+		labels = append(labels, label.Name)
+	}
+	return labels
 }
 
 func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linearWebhookPayload, reason string) error {

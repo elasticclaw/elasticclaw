@@ -15,15 +15,17 @@ import (
 )
 
 type workflowCreateOptions struct {
-	inputs          map[string]string
-	workspaceFiles  map[string]string
-	clawName        string
-	githubIssueID   string
-	linearIssueID   string
-	shortcutStoryID string
-	jiraIssueID     string
-	reason          string
-	triggerActor    *triggerActor
+	inputs               map[string]string
+	workspaceFiles       map[string]string
+	clawName             string
+	githubIssueID        string
+	linearIssueID        string
+	shortcutStoryID      string
+	jiraIssueID          string
+	issueLabels          []string
+	issueLabelsAvailable bool
+	reason               string
+	triggerActor         *triggerActor
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
@@ -204,6 +206,10 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return "", false, err
 	}
 	workflowVolumesJSON, _ := json.Marshal(workflowVolumes)
+	if opts.issueLabelsAvailable {
+		labelsJSON, _ := json.Marshal(normalizeIssueLabels(opts.issueLabels))
+		templateFiles[issueLabelsTemplateFile] = string(labelsJSON)
+	}
 	s.promoteMu.Lock()
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := groupLimit > 0 && activeCount >= groupLimit
