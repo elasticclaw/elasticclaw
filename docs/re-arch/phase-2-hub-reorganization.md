@@ -1,8 +1,7 @@
 # Phase 2 — Reorganizing pkg/hub
 
-**Estimated duration:** 3–4 weeks · **Risk:** medium · **Dependencies:** Phases 0
-and 1 (shutdown, request ID, and contract tests make the refactor observable and
-safe)
+**Risk:** medium · **Dependencies:** Phases 0 and 1 (shutdown, request ID, and
+contract tests make the refactor observable and safe)
 
 Goal: split the `pkg/hub` god package (103 files, ~54k LOC, `server.go` at 6,535
 lines) into domain subpackages with explicit concurrency and data boundaries.

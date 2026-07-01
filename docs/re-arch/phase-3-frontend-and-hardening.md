@@ -1,7 +1,7 @@
 # Phase 3 — Frontend and hardening
 
-**Estimated duration:** 2–3 weeks · **Risk:** low/medium · **Dependencies:**
-Phase 1.1 (generated types) for item 3.2; other items independent
+**Risk:** low/medium · **Dependencies:** Phase 1.1 (generated types) for item
+3.2; other items independent
 
 Goal: pay down the frontend debt (god component, zero tests), close the remaining
 security items (secrets at rest, JWT), and consolidate hub configuration.

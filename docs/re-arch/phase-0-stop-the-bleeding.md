@@ -1,6 +1,6 @@
 # Phase 0 — Stop the bleeding
 
-**Estimated duration:** 1 week · **Risk:** low · **Dependencies:** none
+**Risk:** low · **Dependencies:** none
 
 Goal: remove the risks that can cause data loss, credential leakage, or production
 crashes **without** changing the architecture. Every item is localized and

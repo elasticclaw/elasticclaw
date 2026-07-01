@@ -1,6 +1,6 @@
 # Phase 1 — API contract and observability
 
-**Estimated duration:** 2–3 weeks · **Risk:** low/medium · **Dependencies:** Phase 0 (error envelope)
+**Risk:** low/medium · **Dependencies:** Phase 0 (error envelope)
 
 Goal: turn the Go↔TypeScript contract from "mirrored by hand" into one generated
 from a single source, and give the hub structured logging, traces, and metrics.

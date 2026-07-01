@@ -31,12 +31,12 @@ problems:
 
 ## Phases
 
-| Phase | Spec | Duration | Theme |
-|---|---|---|---|
-| 0 | [phase-0-stop-the-bleeding.md](phase-0-stop-the-bleeding.md) | ~1 week | Graceful shutdown, recovery, auth/CORS, hygiene |
-| 1 | [phase-1-contract-and-observability.md](phase-1-contract-and-observability.md) | 2–3 weeks | OpenAPI + codegen, slog/OTel/metrics, migrations |
-| 2 | [phase-2-hub-reorganization.md](phase-2-hub-reorganization.md) | 3–4 weeks | Splitting `pkg/hub` into subpackages, concurrency |
-| 3 | [phase-3-frontend-and-hardening.md](phase-3-frontend-and-hardening.md) | 2–3 weeks | Settings split, UI tests, secrets, config |
+| Phase | Spec | Theme |
+|---|---|---|
+| 0 | [phase-0-stop-the-bleeding.md](phase-0-stop-the-bleeding.md) | Graceful shutdown, recovery, auth/CORS, hygiene |
+| 1 | [phase-1-contract-and-observability.md](phase-1-contract-and-observability.md) | OpenAPI + codegen, slog/OTel/metrics, migrations |
+| 2 | [phase-2-hub-reorganization.md](phase-2-hub-reorganization.md) | Splitting `pkg/hub` into subpackages, concurrency |
+| 3 | [phase-3-frontend-and-hardening.md](phase-3-frontend-and-hardening.md) | Settings split, UI tests, secrets, config |
 
 The phases are sequential in intent, but each one is independently shippable.
 Phase 1 (OpenAPI contract) is a partial prerequisite of Phase 3 (generated types
