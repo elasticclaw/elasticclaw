@@ -1503,6 +1503,10 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
+	if target, ok := s.pipelineStageSkipTarget(clawID, stage, ctx); ok {
+		log.Printf("[pipeline] claw %s skipped stage %q → %q", clawID[:8], stage.ID, target.ID)
+		return s.transitionPipelineStageWithContext(clawID, *target, ctx)
+	}
 	stageActionsSucceeded := s.runOnEnter(clawID, stage, ctx)
 
 	// If this is a terminal stage, terminate the claw
@@ -1551,6 +1555,42 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		}
 	}
 	return true
+}
+
+func (s *Server) pipelineStageSkipTarget(clawID string, stage pipeline.Stage, ctx pipelineContext) (*pipeline.Stage, bool) {
+	var skip *pipeline.StageSkip
+	var skipUnless bool
+	switch {
+	case stage.SkipIf != nil:
+		skip = stage.SkipIf
+	case stage.SkipUnless != nil:
+		skip = stage.SkipUnless
+		skipUnless = true
+	default:
+		return nil, false
+	}
+	if skip.IssueLabels == nil {
+		return nil, false
+	}
+	issueLabels, labelsAvailable := s.pipelineIssueLabels(clawID, ctx)
+	conditionMatches := labelsAvailable && skip.IssueLabels.Matches(issueLabels)
+	shouldSkip := conditionMatches
+	if skipUnless {
+		shouldSkip = !conditionMatches
+	}
+	if !shouldSkip {
+		return nil, false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return nil, false
+	}
+	target := pl.StageByID(skip.GoTo)
+	if target == nil {
+		log.Printf("[pipeline] claw %s skip target %q not found for stage %q", clawID[:8], skip.GoTo, stage.ID)
+		return nil, false
+	}
+	return target, true
 }
 
 // autoTransitionAfterJudge checks the pipeline for a stage with a judge_verdict

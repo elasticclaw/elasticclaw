@@ -371,6 +371,48 @@ stages:
 	}
 }
 
+func TestWorkflowNormalizePreservesStageSkipConditions(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: linear-story
+trigger:
+  linear:
+    event: status_changed
+    workspace: Fasterway
+    states:
+      - Todo
+stages:
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	for _, want := range []string{
+		"skip_if:",
+		"issue_labels:",
+		"no review loop",
+		"go_to: detect_android_changes",
+	} {
+		if !strings.Contains(workflow.PipelineYAML, want) {
+			t.Fatalf("pipeline yaml did not contain %q: %s", want, workflow.PipelineYAML)
+		}
+	}
+}
+
 func TestWorkflowV1ShortcutTriggerValidates(t *testing.T) {
 	data := []byte(`
 schema_version: v1

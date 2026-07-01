@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1237,6 +1238,306 @@ stages:
 	}
 	if stage != "detect_android_changes" {
 		t.Fatalf("pipeline_stage = %q, want detect_android_changes", stage)
+	}
+}
+
+func TestCheckPipelineMessageTriggersSkipsStageWithSkipIfLabels(t *testing.T) {
+	linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ELA-123","title":"Test issue","url":"https://linear.app/test/issue/ELA-123","description":"Test","labels":{"nodes":[{"name":"no review loop"}]}}}}`))
+	}))
+	t.Cleanup(linear.Close)
+
+	cfg := &types.HubConfig{
+		Token: "test-token",
+		Factories: []*types.FactoryConfig{{
+			Name:          "test-factory",
+			Template:      "base",
+			Integration:   "linear",
+			Workspace:     "test-workspace",
+			TriggerStatus: "Ready For Agent",
+			PipelineYAML: `
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+    on_enter:
+      inject: "Run review loop"
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+    on_enter:
+      inject: "Detect Android changes"
+`,
+		}},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{{
+				Workspace: "test-workspace",
+				Token:     "test-linear-token",
+			}},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+	const clawID = "claw-skip-if-labels"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:test-factory"]`, "ELA-123",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+		t.Fatal("expected pipeline transition")
+	}
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select stage: %v", err)
+	}
+	if stage != "detect_android_changes" {
+		t.Fatalf("pipeline_stage = %q, want detect_android_changes", stage)
+	}
+	var reviewMessages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Run review loop%").Scan(&reviewMessages); err != nil {
+		t.Fatalf("count review messages: %v", err)
+	}
+	if reviewMessages != 0 {
+		t.Fatalf("review messages = %d, want 0", reviewMessages)
+	}
+	var detectMessages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Detect Android changes%").Scan(&detectMessages); err != nil {
+		t.Fatalf("count detect messages: %v", err)
+	}
+	if detectMessages != 1 {
+		t.Fatalf("detect messages = %d, want 1", detectMessages)
+	}
+}
+
+func TestCheckPipelineMessageTriggersSkipsStageWithSkipUnlessLabels(t *testing.T) {
+	tests := []struct {
+		name          string
+		labels        []map[string]interface{}
+		wantStage     string
+		wantReviewMsg int
+		wantDetectMsg int
+	}{
+		{
+			name:          "bug defaults to skipping review loop",
+			labels:        nil,
+			wantStage:     "detect_android_changes",
+			wantReviewMsg: 0,
+			wantDetectMsg: 1,
+		},
+		{
+			name: "with review loop label enters review",
+			labels: []map[string]interface{}{
+				{"name": "with review loop"},
+			},
+			wantStage:     "review_loop",
+			wantReviewMsg: 1,
+			wantDetectMsg: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linear := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"issue":{"identifier":"ELA-123","title":"Test issue","url":"https://linear.app/test/issue/ELA-123","description":"Test","labels":{"nodes":`))
+				if tt.labels == nil {
+					_, _ = w.Write([]byte(`[]`))
+				} else {
+					_ = json.NewEncoder(w).Encode(tt.labels)
+				}
+				_, _ = w.Write([]byte(`}}}}`))
+			}))
+			t.Cleanup(linear.Close)
+
+			cfg := &types.HubConfig{
+				Token: "test-token",
+				Factories: []*types.FactoryConfig{{
+					Name:          "bug-workflow",
+					Template:      "base",
+					Integration:   "linear",
+					Workspace:     "test-workspace",
+					TriggerStatus: "Ready For Agent",
+					PipelineYAML: `
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: "Start working"
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+    skip_unless:
+      issue_labels:
+        labels:
+          - with review loop
+      go_to: detect_android_changes
+    on_enter:
+      inject: "Run review loop"
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+    on_enter:
+      inject: "Detect Android changes"
+`,
+				}},
+				Integrations: &types.IntegrationsConfig{
+					Linear: []*types.LinearIntegrationConfig{{
+						Workspace: "test-workspace",
+						Token:     "test-linear-token",
+					}},
+				},
+			}
+			s, db := NewTestServerWithConfig(t, cfg, "", linear.URL, "")
+
+			const clawID = "claw-skip-unless-labels"
+			_, err := db.Exec(
+				`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:bug-workflow"]`, "ELA-123",
+			)
+			if err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+
+			if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+				t.Fatal("expected pipeline transition")
+			}
+
+			var stage string
+			if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+				t.Fatalf("select stage: %v", err)
+			}
+			if stage != tt.wantStage {
+				t.Fatalf("pipeline_stage = %q, want %q", stage, tt.wantStage)
+			}
+			var reviewMessages int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Run review loop%").Scan(&reviewMessages); err != nil {
+				t.Fatalf("count review messages: %v", err)
+			}
+			if reviewMessages != tt.wantReviewMsg {
+				t.Fatalf("review messages = %d, want %d", reviewMessages, tt.wantReviewMsg)
+			}
+			var detectMessages int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Detect Android changes%").Scan(&detectMessages); err != nil {
+				t.Fatalf("count detect messages: %v", err)
+			}
+			if detectMessages != tt.wantDetectMsg {
+				t.Fatalf("detect messages = %d, want %d", detectMessages, tt.wantDetectMsg)
+			}
+		})
+	}
+}
+
+func TestCheckPipelineMessageTriggersStageSkipLabelUnavailableDefaults(t *testing.T) {
+	tests := []struct {
+		name          string
+		skipMode      string
+		labelName     string
+		wantStage     string
+		wantReviewMsg int
+		wantDetectMsg int
+	}{
+		{
+			name:          "skip_if keeps original stage when labels unavailable",
+			skipMode:      "skip_if",
+			labelName:     "no review loop",
+			wantStage:     "review_loop",
+			wantReviewMsg: 1,
+			wantDetectMsg: 0,
+		},
+		{
+			name:          "skip_unless skips when labels unavailable",
+			skipMode:      "skip_unless",
+			labelName:     "with review loop",
+			wantStage:     "detect_android_changes",
+			wantReviewMsg: 0,
+			wantDetectMsg: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &types.HubConfig{
+				Token: "test-token",
+				Factories: []*types.FactoryConfig{{
+					Name:          "test-factory",
+					Template:      "base",
+					Integration:   "linear",
+					Workspace:     "test-workspace",
+					TriggerStatus: "Ready For Agent",
+					PipelineYAML: fmt.Sprintf(`
+stages:
+  - id: working
+    entry: true
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+    %s:
+      issue_labels:
+        labels:
+          - %s
+      go_to: detect_android_changes
+    on_enter:
+      inject: "Run review loop"
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+    on_enter:
+      inject: "Detect Android changes"
+`, tt.skipMode, tt.labelName),
+				}},
+			}
+			s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+
+			const clawID = "claw-skip-unavailable-labels"
+			_, err := db.Exec(
+				`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, tags, linear_issue_id, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "test-claw", "base", "connected", "working", `["factory:test-factory"]`, "ELA-123",
+			)
+			if err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+
+			if !s.checkPipelineMessageTriggers(clawID, "Implementation ready [DONE]") {
+				t.Fatal("expected pipeline transition")
+			}
+
+			var stage string
+			if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+				t.Fatalf("select stage: %v", err)
+			}
+			if stage != tt.wantStage {
+				t.Fatalf("pipeline_stage = %q, want %q", stage, tt.wantStage)
+			}
+			var reviewMessages int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Run review loop%").Scan(&reviewMessages); err != nil {
+				t.Fatalf("count review messages: %v", err)
+			}
+			if reviewMessages != tt.wantReviewMsg {
+				t.Fatalf("review messages = %d, want %d", reviewMessages, tt.wantReviewMsg)
+			}
+			var detectMessages int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, "%Detect Android changes%").Scan(&detectMessages); err != nil {
+				t.Fatalf("count detect messages: %v", err)
+			}
+			if detectMessages != tt.wantDetectMsg {
+				t.Fatalf("detect messages = %d, want %d", detectMessages, tt.wantDetectMsg)
+			}
+		})
 	}
 }
 

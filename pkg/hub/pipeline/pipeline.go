@@ -25,6 +25,10 @@ type Stage struct {
 	// prior run action) and produces a pass/fail verdict that can drive
 	// automatic stage transitions via gate_result triggers.
 	Gate *Gate `yaml:"gate,omitempty"`
+	// SkipIf and SkipUnless let a stage declare a clear entry-time skip rule
+	// without duplicating the same trigger across multiple downstream stages.
+	SkipIf     *StageSkip `yaml:"skip_if,omitempty"`
+	SkipUnless *StageSkip `yaml:"skip_unless,omitempty"`
 }
 
 // Trigger defines a condition that causes a transition into the parent stage.
@@ -57,6 +61,12 @@ type Trigger struct {
 type IssueLabelsCondition struct {
 	Labels        []string `yaml:"labels,omitempty"`
 	ExcludeLabels []string `yaml:"exclude_labels,omitempty"`
+}
+
+// StageSkip defines a conditional stage skip and the stage to enter instead.
+type StageSkip struct {
+	IssueLabels *IssueLabelsCondition `yaml:"issue_labels,omitempty"`
+	GoTo        string                `yaml:"go_to"`
 }
 
 // PRConditionsTrigger specifies compound PR state conditions that must all pass.
@@ -121,37 +131,9 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 		case "message_contains":
 			t.MessageContains = val.Value
 		case "issue_labels":
-			if val.Kind != yaml.MappingNode {
-				return fmt.Errorf("issue_labels must be a mapping")
-			}
-			var cond IssueLabelsCondition
-			for j := 0; j+1 < len(val.Content); j += 2 {
-				subKey := val.Content[j].Value
-				subVal := val.Content[j+1]
-				switch subKey {
-				case "labels":
-					if subVal.Kind != yaml.SequenceNode {
-						return fmt.Errorf("issue_labels.labels must be a sequence")
-					}
-					for k := 0; k < len(subVal.Content); k++ {
-						if subVal.Content[k].Kind != yaml.ScalarNode {
-							return fmt.Errorf("issue_labels.labels[%d] must be a scalar", k)
-						}
-						cond.Labels = append(cond.Labels, subVal.Content[k].Value)
-					}
-				case "exclude_labels":
-					if subVal.Kind != yaml.SequenceNode {
-						return fmt.Errorf("issue_labels.exclude_labels must be a sequence")
-					}
-					for k := 0; k < len(subVal.Content); k++ {
-						if subVal.Content[k].Kind != yaml.ScalarNode {
-							return fmt.Errorf("issue_labels.exclude_labels[%d] must be a scalar", k)
-						}
-						cond.ExcludeLabels = append(cond.ExcludeLabels, subVal.Content[k].Value)
-					}
-				default:
-					return fmt.Errorf("issue_labels.%s is not supported", subKey)
-				}
+			cond, err := parseIssueLabelsCondition(val)
+			if err != nil {
+				return err
 			}
 			t.IssueLabels = &cond
 		case "pr_merged":
@@ -218,6 +200,73 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler to validate stage skip conditions
+// with the same strict issue_labels contract used by triggers.
+func (s *StageSkip) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("stage skip must be a mapping")
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		val := value.Content[i+1]
+		switch key {
+		case "issue_labels":
+			cond, err := parseIssueLabelsCondition(val)
+			if err != nil {
+				return err
+			}
+			s.IssueLabels = &cond
+		case "go_to":
+			s.GoTo = val.Value
+		default:
+			return fmt.Errorf("stage skip.%s is not supported", key)
+		}
+	}
+	return nil
+}
+
+func parseIssueLabelsCondition(val *yaml.Node) (IssueLabelsCondition, error) {
+	if val.Kind != yaml.MappingNode {
+		return IssueLabelsCondition{}, fmt.Errorf("issue_labels must be a mapping")
+	}
+	var cond IssueLabelsCondition
+	for j := 0; j+1 < len(val.Content); j += 2 {
+		subKey := val.Content[j].Value
+		subVal := val.Content[j+1]
+		switch subKey {
+		case "labels":
+			labels, err := parseStringSequence("issue_labels.labels", subVal)
+			if err != nil {
+				return IssueLabelsCondition{}, err
+			}
+			cond.Labels = append(cond.Labels, labels...)
+		case "exclude_labels":
+			labels, err := parseStringSequence("issue_labels.exclude_labels", subVal)
+			if err != nil {
+				return IssueLabelsCondition{}, err
+			}
+			cond.ExcludeLabels = append(cond.ExcludeLabels, labels...)
+		default:
+			return IssueLabelsCondition{}, fmt.Errorf("issue_labels.%s is not supported", subKey)
+		}
+	}
+	return cond, nil
+}
+
+func parseStringSequence(name string, val *yaml.Node) ([]string, error) {
+	if val.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%s must be a sequence", name)
+	}
+	items := make([]string, 0, len(val.Content))
+	for i := 0; i < len(val.Content); i++ {
+		if val.Content[i].Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("%s[%d] must be a scalar", name, i)
+		}
+		items = append(items, val.Content[i].Value)
+	}
+	return items, nil
 }
 
 // MoveIssueAction specifies the target status and optional explicit issue ID
@@ -381,13 +430,106 @@ func Parse(yamlBytes []byte) (*Pipeline, error) {
 	if err := yaml.Unmarshal(yamlBytes, &p); err != nil {
 		return nil, fmt.Errorf("pipeline YAML parse error: %w (hint: template expressions like {{.Issue.Identifier}} must be quoted when used as inline values, e.g. issue_id: \"{{.Issue.Identifier}}\"; literal blocks do not need quoting)", err)
 	}
+	if err := p.validate(); err != nil {
+		return nil, fmt.Errorf("pipeline YAML parse error: %w", err)
+	}
 	return &p, nil
+}
+
+func (p *Pipeline) validate() error {
+	stageIDs := make(map[string]bool, len(p.Stages))
+	for i := range p.Stages {
+		stageID := strings.TrimSpace(p.Stages[i].ID)
+		if stageID == "" {
+			continue
+		}
+		if stageIDs[stageID] {
+			return fmt.Errorf("duplicate stage id %s", stageID)
+		}
+		stageIDs[stageID] = true
+	}
+	for i := range p.Stages {
+		stage := &p.Stages[i]
+		if stage.SkipIf != nil && stage.SkipUnless != nil {
+			return fmt.Errorf("stage %s cannot define both skip_if and skip_unless", stage.ID)
+		}
+		if err := validateStageSkip(stage, "skip_if", stage.SkipIf, stageIDs); err != nil {
+			return err
+		}
+		if err := validateStageSkip(stage, "skip_unless", stage.SkipUnless, stageIDs); err != nil {
+			return err
+		}
+	}
+	if err := p.validateSkipCycles(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStageSkip(stage *Stage, field string, skip *StageSkip, stageIDs map[string]bool) error {
+	if skip == nil {
+		return nil
+	}
+	goTo := strings.TrimSpace(skip.GoTo)
+	if goTo == "" {
+		return fmt.Errorf("stage %s %s.go_to is required", stage.ID, field)
+	}
+	if skip.IssueLabels == nil {
+		return fmt.Errorf("stage %s %s.issue_labels is required", stage.ID, field)
+	}
+	if goTo == strings.TrimSpace(stage.ID) {
+		return fmt.Errorf("stage %s %s.go_to cannot reference itself", stage.ID, field)
+	}
+	if !stageIDs[goTo] {
+		return fmt.Errorf("stage %s %s.go_to references unknown stage %s", stage.ID, field, goTo)
+	}
+	return nil
+}
+
+func (p *Pipeline) validateSkipCycles() error {
+	skipTargets := make(map[string]string, len(p.Stages))
+	for i := range p.Stages {
+		stageID := strings.TrimSpace(p.Stages[i].ID)
+		if stageID == "" {
+			continue
+		}
+		if p.Stages[i].SkipIf != nil {
+			skipTargets[stageID] = strings.TrimSpace(p.Stages[i].SkipIf.GoTo)
+		}
+		if p.Stages[i].SkipUnless != nil {
+			skipTargets[stageID] = strings.TrimSpace(p.Stages[i].SkipUnless.GoTo)
+		}
+	}
+	for start := range skipTargets {
+		seen := map[string]int{}
+		path := []string{}
+		for current := start; current != ""; current = skipTargets[current] {
+			if idx, ok := seen[current]; ok {
+				cycle := append(path[idx:], current)
+				return fmt.Errorf("stage skip cycle detected: %s", strings.Join(cycle, " -> "))
+			}
+			seen[current] = len(path)
+			path = append(path, current)
+		}
+	}
+	return nil
 }
 
 // EntryStage returns the first stage marked entry:true, or nil if none.
 func (p *Pipeline) EntryStage() *Stage {
 	for i := range p.Stages {
 		if p.Stages[i].Entry {
+			return &p.Stages[i]
+		}
+	}
+	return nil
+}
+
+// StageByID returns the stage with the given ID, or nil if none exists.
+func (p *Pipeline) StageByID(id string) *Stage {
+	id = strings.TrimSpace(id)
+	for i := range p.Stages {
+		if p.Stages[i].ID == id {
 			return &p.Stages[i]
 		}
 	}
@@ -469,6 +611,11 @@ func triggerIssueLabelsAllowed(cond *IssueLabelsCondition, issueLabels []string)
 		}
 	}
 	return true
+}
+
+// Matches reports whether the condition is satisfied by the given labels.
+func (c *IssueLabelsCondition) Matches(issueLabels []string) bool {
+	return triggerIssueLabelsAllowed(c, issueLabels)
 }
 
 func labelSetFromSlice(labels []string) map[string]bool {

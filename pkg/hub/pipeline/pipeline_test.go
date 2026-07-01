@@ -596,6 +596,153 @@ stages:
 	}
 }
 
+func TestParseStageSkipCondition(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: working
+    entry: true
+  - id: review_loop
+    triggers:
+      - message_contains: "[DONE]"
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+  - id: detect_android_changes
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	stage := p.Stages[1]
+	if stage.SkipIf == nil {
+		t.Fatal("expected skip_if condition")
+	}
+	if stage.SkipIf.GoTo != "detect_android_changes" {
+		t.Fatalf("go_to = %q, want detect_android_changes", stage.SkipIf.GoTo)
+	}
+	if stage.SkipIf.IssueLabels == nil || len(stage.SkipIf.IssueLabels.Labels) != 1 || stage.SkipIf.IssueLabels.Labels[0] != "no review loop" {
+		t.Fatalf("issue labels = %#v, want no review loop", stage.SkipIf.IssueLabels)
+	}
+}
+
+func TestParseStageSkipConditionRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "both skip modes",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      go_to: done
+    skip_unless:
+      go_to: done
+  - id: done
+`,
+			wantErr: "stage review_loop cannot define both skip_if and skip_unless",
+		},
+		{
+			name: "missing go_to",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+`,
+			wantErr: "stage review_loop skip_if.go_to is required",
+		},
+		{
+			name: "unknown target",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: missing
+`,
+			wantErr: "stage review_loop skip_if.go_to references unknown stage missing",
+		},
+		{
+			name: "self target",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: review_loop
+`,
+			wantErr: "stage review_loop skip_if.go_to cannot reference itself",
+		},
+		{
+			name: "missing issue_labels",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      go_to: done
+  - id: done
+`,
+			wantErr: "stage review_loop skip_if.issue_labels is required",
+		},
+		{
+			name: "malformed labels",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_unless:
+      issue_labels:
+        labels: with review loop
+      go_to: detect_android_changes
+  - id: detect_android_changes
+`,
+			wantErr: "issue_labels.labels must be a sequence",
+		},
+		{
+			name: "skip cycle",
+			yaml: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+  - id: detect_android_changes
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: review_loop
+`,
+			wantErr: "stage skip cycle detected: review_loop -> detect_android_changes -> review_loop",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := pipeline.Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("expected parse error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parse error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseIssueLabelsTriggerConditionRejectsMalformedShape(t *testing.T) {
 	tests := []struct {
 		name    string
