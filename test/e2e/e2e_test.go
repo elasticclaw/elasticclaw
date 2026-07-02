@@ -85,6 +85,42 @@ func TestDockerWorkflowE2E(t *testing.T) {
 	waitForAgentStatus(ctx, t, hub, agentID, "connected")
 }
 
+func TestHubListenAddrBindsDockerHubForContainerAccess(t *testing.T) {
+	tests := []struct {
+		name string
+		env  e2eEnv
+		want string
+	}{
+		{
+			name: "docker loopback",
+			env:  e2eEnv{SandboxProvider: "docker", HubAddr: "127.0.0.1:8080"},
+			want: "0.0.0.0:8080",
+		},
+		{
+			name: "docker localhost",
+			env:  e2eEnv{SandboxProvider: "docker", HubAddr: "localhost:8080"},
+			want: "0.0.0.0:8080",
+		},
+		{
+			name: "non docker unchanged",
+			env:  e2eEnv{SandboxProvider: "daytona", HubAddr: "127.0.0.1:8080"},
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "docker remote unchanged",
+			env:  e2eEnv{SandboxProvider: "docker", HubAddr: "10.0.0.5:8080"},
+			want: "10.0.0.5:8080",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hubListenAddr(tt.env); got != tt.want {
+				t.Fatalf("hubListenAddr() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
 	runID := e2eRunID()
 	env := newE2EEnv(t, runID, sandboxProvider)
@@ -314,7 +350,7 @@ llm_keys:
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	cmd := exec.Command(env.Bin, "hub", "--addr", env.HubAddr, "--db", dbPath, "--no-web-ui")
+	cmd := exec.Command(env.Bin, "hub", "--addr", hubListenAddr(env), "--db", dbPath, "--no-web-ui")
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
@@ -1176,6 +1212,22 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func hubListenAddr(env e2eEnv) string {
+	if env.SandboxProvider != "docker" {
+		return env.HubAddr
+	}
+	host, port, ok := strings.Cut(env.HubAddr, ":")
+	if !ok || port == "" {
+		return env.HubAddr
+	}
+	switch host {
+	case "127.0.0.1", "localhost", "0.0.0.0":
+		return "0.0.0.0:" + port
+	default:
+		return env.HubAddr
+	}
 }
 
 func e2eRunID() string {
