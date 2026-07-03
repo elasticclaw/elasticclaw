@@ -162,13 +162,15 @@ type JiraWorkflowTrigger struct {
 // WorkflowStage is one step in a workflow state machine. It intentionally mirrors
 // the persisted pipeline stage shape without making pkg/types depend on hub.
 type WorkflowStage struct {
-	ID       string                   `yaml:"id" json:"id"`
-	Label    string                   `yaml:"label,omitempty" json:"label,omitempty"`
-	Entry    bool                     `yaml:"entry,omitempty" json:"entry,omitempty"`
-	Terminal bool                     `yaml:"terminal,omitempty" json:"terminal,omitempty"`
-	Triggers []map[string]interface{} `yaml:"triggers,omitempty" json:"triggers,omitempty"`
-	OnEnter  map[string]interface{}   `yaml:"on_enter,omitempty" json:"onEnter,omitempty"`
-	Gate     map[string]interface{}   `yaml:"gate,omitempty" json:"gate,omitempty"`
+	ID         string                   `yaml:"id" json:"id"`
+	Label      string                   `yaml:"label,omitempty" json:"label,omitempty"`
+	Entry      bool                     `yaml:"entry,omitempty" json:"entry,omitempty"`
+	Terminal   bool                     `yaml:"terminal,omitempty" json:"terminal,omitempty"`
+	Triggers   []map[string]interface{} `yaml:"triggers,omitempty" json:"triggers,omitempty"`
+	OnEnter    map[string]interface{}   `yaml:"on_enter,omitempty" json:"onEnter,omitempty"`
+	SkipIf     map[string]interface{}   `yaml:"skip_if,omitempty" json:"skipIf,omitempty"`
+	SkipUnless map[string]interface{}   `yaml:"skip_unless,omitempty" json:"skipUnless,omitempty"`
+	Gate       map[string]interface{}   `yaml:"gate,omitempty" json:"gate,omitempty"`
 }
 
 func (w *WorkspaceConfig) Validate() error {

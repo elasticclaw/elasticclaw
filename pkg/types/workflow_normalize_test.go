@@ -113,6 +113,51 @@ stages:
 	}
 }
 
+func TestWorkflowNormalizePreservesStageIssueLabelSkips(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - elasticclaw/elasticclaw
+    labels:
+      - agent-ready
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels:
+          - no review loop
+      go_to: detect_android_changes
+    skip_unless:
+      issue_labels:
+        labels:
+          - with review loop
+      go_to: detect_android_changes
+    on_enter:
+      inject: review
+  - id: detect_android_changes
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !strings.Contains(workflow.PipelineYAML, "skip_if:") {
+		t.Fatalf("pipeline yaml did not preserve skip_if: %q", workflow.PipelineYAML)
+	}
+	if !strings.Contains(workflow.PipelineYAML, "skip_unless:") {
+		t.Fatalf("pipeline yaml did not preserve skip_unless: %q", workflow.PipelineYAML)
+	}
+	if !strings.Contains(workflow.PipelineYAML, "no review loop") || !strings.Contains(workflow.PipelineYAML, "with review loop") {
+		t.Fatalf("pipeline yaml did not preserve skip labels: %q", workflow.PipelineYAML)
+	}
+}
+
 func TestWorkflowConfigRejectsInvalidRunKind(t *testing.T) {
 	workflow := &WorkflowConfig{Name: "invalid-kind", RunKind: "typo"}
 	err := workflow.Validate()

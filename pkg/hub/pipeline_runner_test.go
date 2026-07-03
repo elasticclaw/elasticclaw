@@ -1,8 +1,10 @@
 package hub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +46,279 @@ func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
+	}
+}
+
+func TestTransitionPipelineStageSkipIfIssueLabelMatchesBeforeOnEnter(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-skip-if-label"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	pipelineYAML := `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop should not run"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`
+	pl, err := pipeline.Parse([]byte(pipelineYAML))
+	if err != nil {
+		t.Fatalf("parse pipeline: %v", err)
+	}
+	ctx := pipelineContext{
+		Workflow:             &types.WorkflowConfig{PipelineYAML: pipelineYAML},
+		IssueLabelsAvailable: true,
+		IssueLabels:          []string{"No Review Loop"},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, pl.Stages[0], ctx) {
+		t.Fatalf("stage transition returned false")
+	}
+	if got := s.getPipelineStage(clawID); got != "detect_android_changes" {
+		t.Fatalf("pipeline stage = %q, want detect_android_changes", got)
+	}
+
+	var messages []string
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? ORDER BY created_at, id`, clawID)
+	if err != nil {
+		t.Fatalf("select messages: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatalf("scan message: %v", err)
+		}
+		messages = append(messages, content)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("message rows: %v", err)
+	}
+	joined := strings.Join(messages, "\n")
+	if strings.Contains(joined, "review loop should not run") {
+		t.Fatalf("skipped stage on_enter ran unexpectedly:\n%s", joined)
+	}
+	if !strings.Contains(joined, "detect android changes") {
+		t.Fatalf("target stage on_enter did not run:\n%s", joined)
+	}
+}
+
+func TestTransitionPipelineStageIssueLabelSkipAvailabilityDefaults(t *testing.T) {
+	tests := []struct {
+		name                   string
+		pipelineYAML           string
+		issueLabels            []string
+		issueLabelsAvailable   bool
+		templateFileLabelsJSON string
+		wantStage              string
+		wantMessage            string
+		rejectMessage          string
+	}{
+		{
+			name: "skip_if does not skip without labels",
+			pipelineYAML: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop ran"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`,
+			wantStage:     "review_loop",
+			wantMessage:   "review loop ran",
+			rejectMessage: "detect android changes",
+		},
+		{
+			name: "skip_if skips with labels loaded from claw snapshot",
+			pipelineYAML: `
+stages:
+  - id: review_loop
+    skip_if:
+      issue_labels:
+        labels: [no review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop ran"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`,
+			templateFileLabelsJSON: `["no review loop"]`,
+			wantStage:              "detect_android_changes",
+			wantMessage:            "detect android changes",
+			rejectMessage:          "review loop ran",
+		},
+		{
+			name: "skip_unless skips without labels",
+			pipelineYAML: `
+stages:
+  - id: review_loop
+    skip_unless:
+      issue_labels:
+        labels: [with review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop ran"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`,
+			wantStage:     "detect_android_changes",
+			wantMessage:   "detect android changes",
+			rejectMessage: "review loop ran",
+		},
+		{
+			name: "skip_unless skips when available labels do not match",
+			pipelineYAML: `
+stages:
+  - id: review_loop
+    skip_unless:
+      issue_labels:
+        labels: [with review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop ran"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`,
+			issueLabelsAvailable: true,
+			issueLabels:          []string{"other label"},
+			wantStage:            "detect_android_changes",
+			wantMessage:          "detect android changes",
+			rejectMessage:        "review loop ran",
+		},
+		{
+			name: "skip_unless does not skip when available labels match",
+			pipelineYAML: `
+stages:
+  - id: review_loop
+    skip_unless:
+      issue_labels:
+        labels: [with review loop]
+      go_to: detect_android_changes
+    on_enter:
+      inject: "review loop ran"
+  - id: detect_android_changes
+    on_enter:
+      inject: "detect android changes"
+`,
+			issueLabelsAvailable: true,
+			issueLabels:          []string{"With Review Loop"},
+			wantStage:            "review_loop",
+			wantMessage:          "review loop ran",
+			rejectMessage:        "detect android changes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+			clawID := "claw-" + strings.ReplaceAll(tt.name, " ", "-")
+			templateFiles := "{}"
+			if tt.templateFileLabelsJSON != "" {
+				templateFiles = `{"` + issueLabelsTemplateFile + `":` + strconv.Quote(tt.templateFileLabelsJSON) + `}`
+			}
+			_, err := db.Exec(
+				`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, template_files, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "working", templateFiles,
+			)
+			if err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+			pl, err := pipeline.Parse([]byte(tt.pipelineYAML))
+			if err != nil {
+				t.Fatalf("parse pipeline: %v", err)
+			}
+			ctx := pipelineContext{
+				Workflow:             &types.WorkflowConfig{PipelineYAML: tt.pipelineYAML},
+				IssueLabelsAvailable: tt.issueLabelsAvailable,
+				IssueLabels:          tt.issueLabels,
+			}
+			if !s.transitionPipelineStageWithContext(clawID, pl.Stages[0], ctx) {
+				t.Fatalf("stage transition returned false")
+			}
+			if got := s.getPipelineStage(clawID); got != tt.wantStage {
+				t.Fatalf("pipeline stage = %q, want %s", got, tt.wantStage)
+			}
+			var content string
+			if err := db.QueryRow(`SELECT COALESCE(group_concat(content, '\n'),'') FROM messages WHERE claw_id=?`, clawID).Scan(&content); err != nil {
+				t.Fatalf("select messages: %v", err)
+			}
+			if !strings.Contains(content, tt.wantMessage) {
+				t.Fatalf("messages did not contain %q:\n%s", tt.wantMessage, content)
+			}
+			if strings.Contains(content, tt.rejectMessage) {
+				t.Fatalf("messages unexpectedly contained %q:\n%s", tt.rejectMessage, content)
+			}
+		})
+	}
+}
+
+func TestWorkflowIssueLabelsDoNotReplaceWorkspaceFile(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	workspace := &types.WorkspaceConfig{
+		SchemaVersion: "v1",
+		Name:          "workspace-with-label-file",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: workspace-with-label-file\nprovider: noop\n",
+			"ISSUE_LABELS.json":       `{"user":"workspace file"}`,
+		},
+	}
+	workflow := &types.WorkflowConfig{Name: "workflow", Provider: "noop"}
+
+	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		issueLabelsAvailable: true,
+		issueLabels:          []string{"with review loop"},
+		reason:               "test",
+	})
+	if err != nil {
+		t.Fatalf("createClawFromWorkflowWithOptions: %v", err)
+	}
+
+	var filesJSON string
+	if err := db.QueryRow(`SELECT template_files FROM claws WHERE id=?`, clawID).Scan(&filesJSON); err != nil {
+		t.Fatalf("select template files: %v", err)
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		t.Fatalf("unmarshal template files: %v", err)
+	}
+	if got := files["ISSUE_LABELS.json"]; got != `{"user":"workspace file"}` {
+		t.Fatalf("workspace ISSUE_LABELS.json = %q, want user file", got)
+	}
+	labels, ok := s.loadIssueLabelsForClaw(clawID)
+	if !ok {
+		t.Fatalf("expected issue labels metadata to be available")
+	}
+	if len(labels) != 1 || labels[0] != "with review loop" {
+		t.Fatalf("issue labels = %#v, want [with review loop]", labels)
 	}
 }
 

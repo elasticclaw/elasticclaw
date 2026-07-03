@@ -3237,6 +3237,7 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
 	var templateFiles map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err == nil && len(templateFiles) > 0 {
+		templateFiles = workspaceTemplateFiles(templateFiles)
 		for name, content := range templateFiles {
 			name := name
 			content := content
@@ -4215,6 +4216,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
+	templateFiles = workspaceTemplateFiles(templateFiles)
 
 	s.mu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)

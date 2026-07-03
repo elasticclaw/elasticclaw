@@ -203,10 +203,12 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 }
 
 type pipelineContext struct {
-	Factory   *types.FactoryConfig
-	Workspace *types.WorkspaceConfig
-	Workflow  *types.WorkflowConfig
-	IssueID   string
+	Factory              *types.FactoryConfig
+	Workspace            *types.WorkspaceConfig
+	Workflow             *types.WorkflowConfig
+	IssueID              string
+	IssueLabels          []string
+	IssueLabelsAvailable bool
 }
 
 func (ctx pipelineContext) Name() string {
@@ -1445,6 +1447,11 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
+	return s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+}
+
+func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false
@@ -1501,6 +1508,93 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 		}
 	}
 	return true
+}
+
+func (s *Server) resolvePipelineStageSkips(clawID string, stage pipeline.Stage, ctx pipelineContext) pipeline.Stage {
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return stage
+	}
+	if !ctx.IssueLabelsAvailable {
+		if labels, ok := s.loadIssueLabelsForClaw(clawID); ok {
+			ctx.IssueLabels = labels
+			ctx.IssueLabelsAvailable = true
+		}
+	}
+	current := &stage
+	visited := map[string]bool{}
+	for current != nil {
+		if visited[current.ID] {
+			log.Printf("[pipeline] claw %s: skip cycle reached at stage %q", clawID[:8], current.ID)
+			return *current
+		}
+		visited[current.ID] = true
+		targetID, skip := pipelineStageSkipTarget(*current, ctx.IssueLabels, ctx.IssueLabelsAvailable)
+		if !skip {
+			return *current
+		}
+		target := pl.StageByID(targetID)
+		if target == nil {
+			log.Printf("[pipeline] claw %s: stage %q skip target %q not found", clawID[:8], current.ID, targetID)
+			return *current
+		}
+		log.Printf("[pipeline] claw %s: skipping stage %q to %q", clawID[:8], current.ID, target.ID)
+		current = target
+	}
+	return stage
+}
+
+func pipelineStageSkipTarget(stage pipeline.Stage, issueLabels []string, labelsAvailable bool) (string, bool) {
+	if stage.SkipIf != nil {
+		if labelsAvailable && issueLabelSkipMatches(stage.SkipIf, issueLabels) {
+			return stage.SkipIf.GoTo, true
+		}
+	}
+	if stage.SkipUnless != nil {
+		if !labelsAvailable || !issueLabelSkipMatches(stage.SkipUnless, issueLabels) {
+			return stage.SkipUnless.GoTo, true
+		}
+	}
+	return "", false
+}
+
+func issueLabelSkipMatches(rule *pipeline.StageSkip, issueLabels []string) bool {
+	if rule == nil || rule.IssueLabels == nil {
+		return false
+	}
+	actual := normalizedIssueLabelSet(issueLabels)
+	for _, label := range rule.IssueLabels.Labels {
+		if actual[strings.ToLower(strings.TrimSpace(label))] {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeIssueLabels(labels []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		key := strings.ToLower(label)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, label)
+	}
+	return normalized
+}
+
+func normalizedIssueLabelSet(labels []string) map[string]bool {
+	set := make(map[string]bool, len(labels))
+	for _, label := range normalizeIssueLabels(labels) {
+		set[strings.ToLower(label)] = true
+	}
+	return set
 }
 
 // autoTransitionAfterJudge checks the pipeline for a stage with a judge_verdict
@@ -1673,7 +1767,8 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 		return false
 	}
 
-	return s.transitionPipelineStageWithContext(clawID, *entry, ctx) && strings.TrimSpace(entry.OnEnter.Inject) != ""
+	effectiveEntry := s.resolvePipelineStageSkips(clawID, *entry, ctx)
+	return s.transitionResolvedPipelineStageWithContext(clawID, effectiveEntry, ctx) && strings.TrimSpace(effectiveEntry.OnEnter.Inject) != ""
 }
 
 // stopAgentWithReason is the centralized handler for unexpected agent termination.
@@ -1974,6 +2069,28 @@ func (s *Server) clawIssueAndTags(clawID string) (string, []string) {
 	var tags []string
 	_ = json.Unmarshal([]byte(tagsJSON), &tags)
 	return issueID, tags
+}
+
+const issueLabelsTemplateFile = "__hub__/ISSUE_LABELS.json"
+
+func (s *Server) loadIssueLabelsForClaw(clawID string) ([]string, bool) {
+	var filesJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON); err != nil {
+		return nil, false
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		return nil, false
+	}
+	raw, ok := files[issueLabelsTemplateFile]
+	if !ok {
+		return nil, false
+	}
+	var labels []string
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		return nil, false
+	}
+	return labels, true
 }
 
 func workflowTags(tags []string) (string, string) {

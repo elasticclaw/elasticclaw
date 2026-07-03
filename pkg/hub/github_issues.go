@@ -563,10 +563,12 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	}
 
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		workspaceFiles: templateFiles,
-		clawName:       clawName,
-		githubIssueID:  issueID,
-		reason:         reason,
+		workspaceFiles:       templateFiles,
+		clawName:             clawName,
+		githubIssueID:        issueID,
+		issueLabels:          githubIssuePayloadLabels(payload),
+		issueLabelsAvailable: true,
+		reason:               reason,
 		triggerActor: &triggerActor{
 			Login: payload.Sender.Login,
 			Type:  payload.Sender.Type,
@@ -584,6 +586,14 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	}
 	claimOpen = false
 	return clawID, true, nil
+}
+
+func githubIssuePayloadLabels(payload githubIssuesWebhookPayload) []string {
+	labels := make([]string, 0, len(payload.Issue.Labels))
+	for _, label := range payload.Issue.Labels {
+		labels = append(labels, label.Name)
+	}
+	return labels
 }
 
 func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload githubIssuesWebhookPayload, reason string) error {
