@@ -29,6 +29,24 @@ func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
 	assertNotContains(t, script, "ghp_static_test_token", "wrapper must not contain raw GitHub tokens")
 }
 
+func TestGitHubCLIWrapperHandlesRealGhInUsrLocalBin(t *testing.T) {
+	script := buildGitHubCLIWrapperInstallScript()
+
+	assertContains(t, script, "/usr/local/bin/gh.elasticclaw-real", "wrapper preserves real gh when gh already lives in /usr/local/bin")
+	assertContains(t, script, "sudo mv /usr/local/bin/gh /usr/local/bin/gh.elasticclaw-real", "wrapper moves real gh out of wrapper path")
+	assertContains(t, script, "ElasticClaw GitHub App token refresh wrapper", "wrapper can detect an existing managed wrapper")
+	assertContains(t, script, "GitHub gh wrapper already configured", "wrapper logs when already installed")
+}
+
+func TestGitHubCLIWrapperEscapesRealGhPathForSed(t *testing.T) {
+	script := buildGitHubCLIWrapperInstallScript()
+
+	assertContains(t, script, "REAL_GH_ESCAPED=", "wrapper escapes real gh path before sed replacement")
+	assertContains(t, script, `sed 's/[&\\|]/\\&/g'`, "wrapper escapes sed replacement metacharacters")
+	assertContains(t, script, `sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g"`, "wrapper uses escaped real gh path in sed")
+	assertNotContains(t, script, `sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH|g"`, "wrapper must not use raw path in sed replacement")
+}
+
 func TestDaytonaGitHubCloneScriptUsesCleanHTTPSRemote(t *testing.T) {
 	script := buildDaytonaGitHubCloneScript([]types.GitHubRepoAccess{{Repo: "elasticclaw/private-repo"}})
 

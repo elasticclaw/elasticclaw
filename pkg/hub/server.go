@@ -5667,9 +5667,21 @@ sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 func buildGitHubCLIWrapperInstallScript() string {
 	return `if command -v gh >/dev/null 2>&1; then
   REAL_GH="$(command -v gh)"
-  if [ "$REAL_GH" != "/usr/local/bin/gh" ] && [ -x "$REAL_GH" ]; then
+  if [ "$REAL_GH" = "/usr/local/bin/gh" ]; then
+    if grep -q "ElasticClaw GitHub App token refresh wrapper" /usr/local/bin/gh 2>/dev/null; then
+      echo "GitHub gh wrapper already configured"
+      REAL_GH=""
+    elif [ -x /usr/local/bin/gh.elasticclaw-real ]; then
+      REAL_GH="/usr/local/bin/gh.elasticclaw-real"
+    else
+      sudo mv /usr/local/bin/gh /usr/local/bin/gh.elasticclaw-real
+      REAL_GH="/usr/local/bin/gh.elasticclaw-real"
+    fi
+  fi
+  if [ -n "$REAL_GH" ] && [ -x "$REAL_GH" ]; then
     sudo tee /usr/local/bin/gh > /dev/null << 'GHEOF'
 #!/bin/bash
+# ElasticClaw GitHub App token refresh wrapper.
 set +x
 REAL_GH="__ELASTICCLAW_REAL_GH__"
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
@@ -5681,7 +5693,8 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
 fi
 exec "$REAL_GH" "$@"
 GHEOF
-    sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH|g" /usr/local/bin/gh
+    REAL_GH_ESCAPED="$(printf '%s' "$REAL_GH" | sed 's/[&\\|]/\\&/g')"
+    sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g" /usr/local/bin/gh
     sudo chmod +x /usr/local/bin/gh
     echo "GitHub gh wrapper configured"
   fi
