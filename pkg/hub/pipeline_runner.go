@@ -1448,6 +1448,10 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
+	return s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+}
+
+func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false
@@ -1764,7 +1768,7 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 	}
 
 	effectiveEntry := s.resolvePipelineStageSkips(clawID, *entry, ctx)
-	return s.transitionPipelineStageWithContext(clawID, *entry, ctx) && strings.TrimSpace(effectiveEntry.OnEnter.Inject) != ""
+	return s.transitionResolvedPipelineStageWithContext(clawID, effectiveEntry, ctx) && strings.TrimSpace(effectiveEntry.OnEnter.Inject) != ""
 }
 
 // stopAgentWithReason is the centralized handler for unexpected agent termination.
@@ -2067,7 +2071,7 @@ func (s *Server) clawIssueAndTags(clawID string) (string, []string) {
 	return issueID, tags
 }
 
-const issueLabelsTemplateFile = "ISSUE_LABELS.json"
+const issueLabelsTemplateFile = "__hub__/ISSUE_LABELS.json"
 
 func (s *Server) loadIssueLabelsForClaw(clawID string) ([]string, bool) {
 	var filesJSON string

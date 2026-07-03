@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -268,6 +269,56 @@ stages:
 				t.Fatalf("messages unexpectedly contained %q:\n%s", tt.rejectMessage, content)
 			}
 		})
+	}
+}
+
+func TestWorkflowIssueLabelsDoNotReplaceWorkspaceFile(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	workspace := &types.WorkspaceConfig{
+		SchemaVersion: "v1",
+		Name:          "workspace-with-label-file",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: workspace-with-label-file\nprovider: noop\n",
+			"ISSUE_LABELS.json":       `{"user":"workspace file"}`,
+		},
+	}
+	workflow := &types.WorkflowConfig{Name: "workflow", Provider: "noop"}
+
+	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		issueLabelsAvailable: true,
+		issueLabels:          []string{"with review loop"},
+		reason:               "test",
+	})
+	if err != nil {
+		t.Fatalf("createClawFromWorkflowWithOptions: %v", err)
+	}
+
+	var filesJSON string
+	if err := db.QueryRow(`SELECT template_files FROM claws WHERE id=?`, clawID).Scan(&filesJSON); err != nil {
+		t.Fatalf("select template files: %v", err)
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		t.Fatalf("unmarshal template files: %v", err)
+	}
+	if got := files["ISSUE_LABELS.json"]; got != `{"user":"workspace file"}` {
+		t.Fatalf("workspace ISSUE_LABELS.json = %q, want user file", got)
+	}
+	labels, ok := s.loadIssueLabelsForClaw(clawID)
+	if !ok {
+		t.Fatalf("expected issue labels metadata to be available")
+	}
+	if len(labels) != 1 || labels[0] != "with review loop" {
+		t.Fatalf("issue labels = %#v, want [with review loop]", labels)
 	}
 }
 

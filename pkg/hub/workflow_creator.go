@@ -28,6 +28,19 @@ type workflowCreateOptions struct {
 	triggerActor         *triggerActor
 }
 
+const hubInternalTemplateFilePrefix = "__hub__/"
+
+func workspaceTemplateFiles(files map[string]string) map[string]string {
+	filtered := make(map[string]string, len(files))
+	for name, content := range files {
+		if strings.HasPrefix(name, hubInternalTemplateFilePrefix) {
+			continue
+		}
+		filtered[name] = content
+	}
+	return filtered
+}
+
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
 	return s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{inputs: inputs, reason: reason})
 }
@@ -289,19 +302,20 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return clawID, true, nil
 	}
 
+	providerTemplateFiles := workspaceTemplateFiles(templateFiles)
 	req := types.CreateClawRequest{
 		Name:         clawName,
 		TemplateName: workspace.Name,
 		Provider:     provider,
 		DefaultModel: defaultModel,
 		LLMKey:       llmKey,
-		Files:        templateFiles,
+		Files:        providerTemplateFiles,
 		Env:          env,
 		InstanceType: instanceType,
 		ProviderName: "ec-" + clawID[:8],
 	}
-	fileBytes := make(map[string][]byte, len(templateFiles))
-	for k, v := range templateFiles {
+	fileBytes := make(map[string][]byte, len(providerTemplateFiles))
+	for k, v := range providerTemplateFiles {
 		fileBytes[k] = []byte(v)
 	}
 
