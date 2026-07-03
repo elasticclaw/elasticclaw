@@ -260,7 +260,7 @@ func (s *Server) githubExchangeCode(ctx context.Context, clientID, clientSecret,
 
 func (s *Server) githubFetchUser(ctx context.Context, accessToken string) (*githubUser, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.ghBaseURL()+"/user", nil)
-	req.Header.Set("Authorization", "token "+accessToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -269,7 +269,7 @@ func (s *Server) githubFetchUser(ctx context.Context, accessToken string) (*gith
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch user: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("fetch user: status %s", resp.Status)
 	}
 	var u githubUser
 	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
