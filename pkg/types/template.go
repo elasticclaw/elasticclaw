@@ -473,6 +473,19 @@ type HubConfig struct {
 	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
 
+	// Server process settings. Resolved at boot by the consolidated loader in
+	// pkg/config/hub.go with precedence: flag > env (ELASTICCLAW_*) > hub.yaml > default.
+	//
+	// ListenAddr and DBPath require a restart: changes on SIGHUP reload are
+	// rejected with a log message. LogLevel and AllowedOrigins are hot-reloadable.
+	ListenAddr string `yaml:"listen_addr,omitempty"` // restart required
+	DBPath     string `yaml:"db_path,omitempty"`     // restart required
+	// LogLevel is one of debug, info, warn, error. Default: info. Hot-reloadable via SIGHUP.
+	LogLevel string `yaml:"log_level,omitempty"`
+	// AllowedOrigins restricts CORS to the listed origins. Empty (default) or
+	// a "*" entry keeps the historical allow-all behavior. Hot-reloadable via SIGHUP.
+	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
+
 	// Hub server fields
 	// PublicURL is the URL claws use to connect back to the hub from remote VMs.
 	// If not set, falls back to URL.

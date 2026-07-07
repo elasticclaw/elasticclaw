@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,195 @@ import (
 )
 
 var httpGet = http.Get
+
+// ─── Consolidated hub boot loader ─────────────────────────────────────────────
+//
+// The hub's configuration is owned by this package (Viper stays CLI-only).
+// Settings are resolved with the documented precedence:
+//
+//	flag > env (ELASTICCLAW_*) > hub.yaml > default
+//
+// Restart-required settings: listen_addr (ELASTICCLAW_ADDR / --addr) and
+// db_path (ELASTICCLAW_DB / --db). Hot-reloadable settings (applied on
+// SIGHUP via ApplyHotReload): log_level, allowed_origins, branding,
+// integrations.
+
+// Environment variable names honored by the hub loader.
+const (
+	EnvHubAddr           = "ELASTICCLAW_ADDR"
+	EnvHubDBPath         = "ELASTICCLAW_DB"
+	EnvHubLogLevel       = "ELASTICCLAW_LOG_LEVEL"
+	EnvHubAllowedOrigins = "ELASTICCLAW_ALLOWED_ORIGINS" // comma-separated
+)
+
+// Defaults applied when neither flag, env, nor hub.yaml set a value.
+const (
+	DefaultHubAddr     = ":8080"
+	DefaultHubLogLevel = "info"
+)
+
+// HubBootFlags carries the CLI flag values that participate in precedence
+// resolution. An empty string means "flag not set".
+type HubBootFlags struct {
+	Addr     string
+	DBPath   string
+	LogLevel string
+}
+
+// HubBootConfig is the fully resolved hub configuration at boot time.
+type HubBootConfig struct {
+	// Cfg is the parsed hub.yaml (never nil).
+	Cfg *types.HubConfig
+	// Addr is the resolved listen address (restart required to change).
+	Addr string
+	// DBPath is the resolved SQLite path. Empty means "use the caller's
+	// platform default" (~/.elasticclaw/hub.db or /var/lib/elasticclaw/hub.db).
+	DBPath string
+	// LogLevel is the resolved, validated log level (debug|info|warn|error).
+	LogLevel string
+	// AllowedOrigins is the resolved CORS origin allowlist (empty = allow all).
+	AllowedOrigins []string
+}
+
+// LoadHubBootConfig loads hub.yaml and resolves the process-level settings
+// with the precedence flag > env > hub.yaml > default, then validates them.
+// This is the single entry point the hub server uses at boot.
+func LoadHubBootConfig(flags HubBootFlags) (*HubBootConfig, error) {
+	cfg, err := LoadHubConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	boot := &HubBootConfig{
+		Cfg:            cfg,
+		Addr:           ResolveSetting(flags.Addr, EnvHubAddr, cfg.ListenAddr, DefaultHubAddr),
+		DBPath:         ResolveSetting(flags.DBPath, EnvHubDBPath, cfg.DBPath, ""),
+		LogLevel:       ResolveSetting(flags.LogLevel, EnvHubLogLevel, cfg.LogLevel, DefaultHubLogLevel),
+		AllowedOrigins: ResolveOrigins(cfg.AllowedOrigins),
+	}
+	if err := boot.validate(); err != nil {
+		return nil, err
+	}
+	return boot, nil
+}
+
+// ResolveSetting applies the documented precedence for a single setting:
+// flag > env > hub.yaml > default. Empty values mean "not set".
+func ResolveSetting(flagValue, envVar, yamlValue, defaultValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if v := os.Getenv(envVar); v != "" {
+		return v
+	}
+	if yamlValue != "" {
+		return yamlValue
+	}
+	return defaultValue
+}
+
+// ResolveOrigins applies env > hub.yaml precedence for allowed_origins
+// (there is no CLI flag for it). The env value is comma-separated.
+func ResolveOrigins(yamlOrigins []string) []string {
+	if v := os.Getenv(EnvHubAllowedOrigins); v != "" {
+		var origins []string
+		for _, o := range strings.Split(v, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				origins = append(origins, o)
+			}
+		}
+		return origins
+	}
+	return yamlOrigins
+}
+
+// validate performs boot-time validation of the resolved settings.
+func (b *HubBootConfig) validate() error {
+	if _, err := ParseLogLevel(b.LogLevel); err != nil {
+		return err
+	}
+	if !strings.Contains(b.Addr, ":") {
+		return fmt.Errorf("invalid listen address %q: expected host:port or :port", b.Addr)
+	}
+	return nil
+}
+
+// ParseLogLevel converts a config string into an slog.Level.
+// Empty input defaults to info.
+func ParseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("invalid log_level %q: must be one of debug, info, warn, error", s)
+	}
+}
+
+// ApplyHotReload merges a freshly loaded hub.yaml into the current in-memory
+// config, applying only the SIGHUP-safe subset: log_level, allowed_origins,
+// branding, and integrations. It returns the merged config (a shallow copy of
+// current — the input is never mutated), the names of the safe fields that
+// changed, and the names of restart-required fields whose on-disk value
+// changed and was therefore rejected.
+func ApplyHotReload(current, fresh *types.HubConfig) (merged *types.HubConfig, applied, rejected []string) {
+	cp := *current
+	merged = &cp
+
+	if fresh.LogLevel != current.LogLevel {
+		merged.LogLevel = fresh.LogLevel
+		applied = append(applied, "log_level")
+	}
+	if !slicesEqual(fresh.AllowedOrigins, current.AllowedOrigins) {
+		merged.AllowedOrigins = fresh.AllowedOrigins
+		applied = append(applied, "allowed_origins")
+	}
+	if !yamlEqual(fresh.Branding, current.Branding) {
+		merged.Branding = fresh.Branding
+		applied = append(applied, "branding")
+	}
+	if !yamlEqual(fresh.Integrations, current.Integrations) {
+		merged.Integrations = fresh.Integrations
+		applied = append(applied, "integrations")
+	}
+
+	// Restart-required fields: keep the current value and report the rejection.
+	if fresh.ListenAddr != current.ListenAddr {
+		rejected = append(rejected, "listen_addr")
+	}
+	if fresh.DBPath != current.DBPath {
+		rejected = append(rejected, "db_path")
+	}
+	return merged, applied, rejected
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlEqual compares two config subtrees by their YAML encoding. Good enough
+// for change detection on small structs; avoids hand-written DeepEqual quirks.
+func yamlEqual(a, b interface{}) bool {
+	ab, errA := yaml.Marshal(a)
+	bb, errB := yaml.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return bytes.Equal(ab, bb)
+}
 
 // LoadHubConfig loads the hub configuration from (in order):
 //  1. $ELASTICCLAW_HUB_CONFIG env var path

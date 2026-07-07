@@ -208,3 +208,239 @@ provider: replicated
 		}
 	}
 }
+
+// ─── Consolidated hub boot loader tests ───────────────────────────────────────
+
+// writeHubYAML writes a hub.yaml into a temp dir and points
+// ELASTICCLAW_HUB_CONFIG at it. Returns the path.
+func writeHubYAML(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write hub.yaml: %v", err)
+	}
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	return path
+}
+
+// TestHubBootPrecedenceMatrix covers the documented precedence:
+// flag > env (ELASTICCLAW_*) > hub.yaml > default.
+func TestHubBootPrecedenceMatrix(t *testing.T) {
+	yamlWithSettings := "listen_addr: \":7001\"\ndb_path: /yaml/hub.db\nlog_level: warn\n"
+
+	cases := []struct {
+		name      string
+		yaml      string
+		env       map[string]string
+		flags     HubBootFlags
+		wantAddr  string
+		wantDB    string
+		wantLevel string
+	}{
+		{
+			name:      "defaults when nothing is set",
+			yaml:      "",
+			wantAddr:  DefaultHubAddr,
+			wantDB:    "",
+			wantLevel: DefaultHubLogLevel,
+		},
+		{
+			name:      "yaml beats default",
+			yaml:      yamlWithSettings,
+			wantAddr:  ":7001",
+			wantDB:    "/yaml/hub.db",
+			wantLevel: "warn",
+		},
+		{
+			name: "env beats yaml",
+			yaml: yamlWithSettings,
+			env: map[string]string{
+				EnvHubAddr:     ":7002",
+				EnvHubDBPath:   "/env/hub.db",
+				EnvHubLogLevel: "error",
+			},
+			wantAddr:  ":7002",
+			wantDB:    "/env/hub.db",
+			wantLevel: "error",
+		},
+		{
+			name: "flag beats env and yaml",
+			yaml: yamlWithSettings,
+			env: map[string]string{
+				EnvHubAddr:     ":7002",
+				EnvHubDBPath:   "/env/hub.db",
+				EnvHubLogLevel: "error",
+			},
+			flags:     HubBootFlags{Addr: ":7003", DBPath: "/flag/hub.db", LogLevel: "debug"},
+			wantAddr:  ":7003",
+			wantDB:    "/flag/hub.db",
+			wantLevel: "debug",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeHubYAML(t, tc.yaml)
+			// Ensure a clean env for the vars under test.
+			for _, key := range []string{EnvHubAddr, EnvHubDBPath, EnvHubLogLevel, EnvHubAllowedOrigins} {
+				t.Setenv(key, "")
+				os.Unsetenv(key)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			boot, err := LoadHubBootConfig(tc.flags)
+			if err != nil {
+				t.Fatalf("LoadHubBootConfig: %v", err)
+			}
+			if boot.Addr != tc.wantAddr {
+				t.Errorf("Addr = %q, want %q", boot.Addr, tc.wantAddr)
+			}
+			if boot.DBPath != tc.wantDB {
+				t.Errorf("DBPath = %q, want %q", boot.DBPath, tc.wantDB)
+			}
+			if boot.LogLevel != tc.wantLevel {
+				t.Errorf("LogLevel = %q, want %q", boot.LogLevel, tc.wantLevel)
+			}
+		})
+	}
+}
+
+func TestHubBootAllowedOriginsPrecedence(t *testing.T) {
+	writeHubYAML(t, "allowed_origins:\n  - https://yaml.example.com\n")
+
+	t.Setenv(EnvHubAllowedOrigins, "")
+	os.Unsetenv(EnvHubAllowedOrigins)
+	boot, err := LoadHubBootConfig(HubBootFlags{})
+	if err != nil {
+		t.Fatalf("LoadHubBootConfig: %v", err)
+	}
+	if len(boot.AllowedOrigins) != 1 || boot.AllowedOrigins[0] != "https://yaml.example.com" {
+		t.Errorf("yaml origins = %v", boot.AllowedOrigins)
+	}
+
+	t.Setenv(EnvHubAllowedOrigins, "https://a.example.com, https://b.example.com")
+	boot, err = LoadHubBootConfig(HubBootFlags{})
+	if err != nil {
+		t.Fatalf("LoadHubBootConfig: %v", err)
+	}
+	if len(boot.AllowedOrigins) != 2 || boot.AllowedOrigins[0] != "https://a.example.com" || boot.AllowedOrigins[1] != "https://b.example.com" {
+		t.Errorf("env origins = %v, want env to beat yaml", boot.AllowedOrigins)
+	}
+}
+
+func TestHubBootValidation(t *testing.T) {
+	writeHubYAML(t, "")
+
+	if _, err := LoadHubBootConfig(HubBootFlags{LogLevel: "loud"}); err == nil {
+		t.Error("expected error for invalid log level")
+	}
+	if _, err := LoadHubBootConfig(HubBootFlags{Addr: "8080"}); err == nil {
+		t.Error("expected error for address without a colon")
+	}
+	if _, err := LoadHubBootConfig(HubBootFlags{Addr: "127.0.0.1:8080", LogLevel: "WARN"}); err != nil {
+		t.Errorf("expected valid boot config, got %v", err)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	for input, want := range map[string]string{
+		"":      "INFO",
+		"debug": "DEBUG",
+		"info":  "INFO",
+		"warn":  "WARN",
+		"error": "ERROR",
+		"WARN":  "WARN",
+	} {
+		lvl, err := ParseLogLevel(input)
+		if err != nil {
+			t.Errorf("ParseLogLevel(%q): %v", input, err)
+			continue
+		}
+		if lvl.String() != want {
+			t.Errorf("ParseLogLevel(%q) = %s, want %s", input, lvl, want)
+		}
+	}
+	if _, err := ParseLogLevel("verbose"); err == nil {
+		t.Error("expected error for invalid level")
+	}
+}
+
+func TestApplyHotReloadSafeSubset(t *testing.T) {
+	current := &types.HubConfig{
+		Token:          "boot-token",
+		ListenAddr:     ":8080",
+		DBPath:         "/var/lib/elasticclaw/hub.db",
+		LogLevel:       "info",
+		AllowedOrigins: []string{"https://old.example.com"},
+	}
+	fresh := &types.HubConfig{
+		Token:          "edited-token",
+		ListenAddr:     ":9999",           // restart required — must be rejected
+		DBPath:         "/tmp/other.db",   // restart required — must be rejected
+		LogLevel:       "debug",           // hot-reloadable
+		AllowedOrigins: []string{"https://new.example.com"}, // hot-reloadable
+		Branding:       &types.BrandingConfig{AppName: "NewBrand"},
+		Integrations:   &types.IntegrationsConfig{},
+	}
+
+	merged, applied, rejected := ApplyHotReload(current, fresh)
+
+	if merged.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want debug", merged.LogLevel)
+	}
+	if len(merged.AllowedOrigins) != 1 || merged.AllowedOrigins[0] != "https://new.example.com" {
+		t.Errorf("AllowedOrigins = %v", merged.AllowedOrigins)
+	}
+	if merged.Branding == nil || merged.Branding.AppName != "NewBrand" {
+		t.Errorf("Branding not applied: %+v", merged.Branding)
+	}
+	if merged.Integrations == nil {
+		t.Error("Integrations not applied")
+	}
+	// Restart-required fields keep the running values.
+	if merged.ListenAddr != ":8080" {
+		t.Errorf("ListenAddr = %q, want :8080 (restart required)", merged.ListenAddr)
+	}
+	if merged.DBPath != "/var/lib/elasticclaw/hub.db" {
+		t.Errorf("DBPath = %q, want running value (restart required)", merged.DBPath)
+	}
+	// Fields outside the safe subset are not touched by SIGHUP reload.
+	if merged.Token != "boot-token" {
+		t.Errorf("Token = %q, want running value", merged.Token)
+	}
+
+	wantApplied := map[string]bool{"log_level": true, "allowed_origins": true, "branding": true, "integrations": true}
+	if len(applied) != len(wantApplied) {
+		t.Errorf("applied = %v", applied)
+	}
+	for _, f := range applied {
+		if !wantApplied[f] {
+			t.Errorf("unexpected applied field %q", f)
+		}
+	}
+	wantRejected := map[string]bool{"listen_addr": true, "db_path": true}
+	if len(rejected) != len(wantRejected) {
+		t.Errorf("rejected = %v", rejected)
+	}
+	for _, f := range rejected {
+		if !wantRejected[f] {
+			t.Errorf("unexpected rejected field %q", f)
+		}
+	}
+
+	// The inputs must not be mutated.
+	if current.LogLevel != "info" {
+		t.Error("ApplyHotReload mutated the current config")
+	}
+}
+
+func TestApplyHotReloadNoChanges(t *testing.T) {
+	current := &types.HubConfig{LogLevel: "info", Branding: &types.BrandingConfig{AppName: "X"}}
+	fresh := &types.HubConfig{LogLevel: "info", Branding: &types.BrandingConfig{AppName: "X"}}
+	_, applied, rejected := ApplyHotReload(current, fresh)
+	if len(applied) != 0 || len(rejected) != 0 {
+		t.Errorf("applied = %v, rejected = %v, want none", applied, rejected)
+	}
+}
