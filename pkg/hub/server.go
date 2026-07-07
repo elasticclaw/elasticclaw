@@ -268,7 +268,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	return http.ListenAndServe(s.addr, corsMiddleware(mux, s.allowedCORSOrigins()))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -394,19 +394,59 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}))
 }
 
-// corsMiddleware adds permissive CORS headers so the web UI can connect
-// from any origin (browser same-origin restrictions apply to REST + WS).
-func corsMiddleware(next http.Handler) http.Handler {
+// corsMiddleware adds CORS headers for origins on the allowlist. The request
+// origin is echoed back only when it matches an allowed origin; otherwise no
+// Access-Control-Allow-Origin header is sent. Vary: Origin is always set so
+// caches never reuse a response across origins.
+func corsMiddleware(next http.Handler, allowedOrigins map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Add("Vary", "Origin")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if _, ok := allowedOrigins[normalizeOrigin(origin)]; ok {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			}
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// normalizeOrigin lowercases an origin and strips any trailing slash so
+// config values and browser-sent Origin headers compare consistently.
+func normalizeOrigin(origin string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(origin), "/"))
+}
+
+// allowedCORSOrigins builds the set of origins permitted by the CORS policy:
+// the origins listed in hub.yaml allowed_origins, or — when the list is empty
+// — the hub's own origin derived from url/public_url.
+func (s *Server) allowedCORSOrigins() map[string]struct{} {
+	allowed := make(map[string]struct{})
+	add := func(raw string) {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			if raw != "" {
+				log.Printf("[hub] ignoring invalid CORS origin %q", raw)
+			}
+			return
+		}
+		allowed[normalizeOrigin(u.Scheme+"://"+u.Host)] = struct{}{}
+	}
+	if len(s.hubCfg.AllowedOrigins) > 0 {
+		for _, o := range s.hubCfg.AllowedOrigins {
+			add(o)
+		}
+		return allowed
+	}
+	// Default: only the hub's own origin.
+	add(s.hubCfg.URL)
+	add(s.hubCfg.PublicURL)
+	return allowed
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────

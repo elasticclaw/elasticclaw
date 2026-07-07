@@ -510,6 +510,11 @@ type HubConfig struct {
 	// UIPassword is the password for the web UI. If not set, defaults to "admin".
 	UIPassword string `yaml:"ui_password,omitempty"`
 
+	// AllowedOrigins lists the browser origins permitted by the hub's CORS
+	// policy (e.g. "http://localhost:3000"). If empty, only the hub's own
+	// origin (derived from url/public_url) is allowed.
+	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
+
 	// Branding allows white-labeling the web UI.
 	Branding *BrandingConfig `yaml:"branding,omitempty"`
 
