@@ -124,7 +124,7 @@ func (s *Server) handleGitHubClientID(w http.ResponseWriter, r *http.Request) {
 	cfg := s.hubCfg.Auth
 	s.mu.RUnlock()
 	if cfg == nil || cfg.GitHubOAuth == nil || cfg.GitHubOAuth.ClientID == "" {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "GitHub OAuth not configured")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -144,7 +144,7 @@ func (s *Server) handleGitHubClientID(w http.ResponseWriter, r *http.Request) {
 // exchanges it with GitHub, validates allowlist, and returns a session token.
 func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
@@ -153,13 +153,13 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	s.mu.RUnlock()
 
 	if cfg == nil || cfg.GitHubOAuth == nil {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "GitHub OAuth not configured")
 		return
 	}
 	oauthCfg := cfg.GitHubOAuth
 	secret := s.webSessionSecret()
 	if secret == "" {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -168,7 +168,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 		RedirectURI string `json:"redirect_uri"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 
@@ -176,7 +176,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, body.Code, body.RedirectURI)
 	if err != nil {
 		log.Printf("[github-oauth] token exchange error: %v", err)
-		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		writeErr(w, http.StatusBadGateway, "token_exchange_failed", "token exchange failed")
 		return
 	}
 
@@ -184,7 +184,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	ghUser, err := s.githubFetchUser(r.Context(), accessToken)
 	if err != nil {
 		log.Printf("[github-oauth] fetch user error: %v", err)
-		http.Error(w, "fetch user failed", http.StatusBadGateway)
+		writeErr(w, http.StatusBadGateway, "fetch_user_failed", "fetch user failed")
 		return
 	}
 
@@ -192,19 +192,19 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	allowed, err := s.githubCheckAllowlist(r.Context(), oauthCfg, accessToken, ghUser.Login)
 	if err != nil {
 		log.Printf("[github-oauth] allowlist check error: %v", err)
-		http.Error(w, "allowlist check failed", http.StatusBadGateway)
+		writeErr(w, http.StatusBadGateway, "allowlist_check_failed", "allowlist check failed")
 		return
 	}
 	if !allowed {
 		log.Printf("[github-oauth] denied: user %s not in allowlist", ghUser.Login)
-		http.Error(w, "access denied", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "access_denied", "access denied")
 		return
 	}
 
 	// Issue signed session token
 	sessionToken, err := signGitHubSession(secret, ghUser.Login, ghUser.Name, ghUser.AvatarURL)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 

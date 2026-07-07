@@ -436,7 +436,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPatch:
 		s.patchSettings(w, r)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -583,7 +583,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view.Factories = []FactoryView{}
 	factories, err := loadExternalFactories()
 	if err != nil {
-		http.Error(w, "failed to load factories: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to load factories: "+err.Error())
 		return
 	}
 	// Sort by name for stable ordering
@@ -770,7 +770,7 @@ func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppCon
 // handleGitHubAppTest tests a GitHub App's permissions without saving it.
 func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req struct {
@@ -779,11 +779,11 @@ func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 		PrivateKeyPEM string `json:"privateKeyPem"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.AppID == 0 || req.PrivateKeyPEM == "" {
-		http.Error(w, "appId and privateKeyPem required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "appId and privateKeyPem required")
 		return
 	}
 
@@ -799,7 +799,7 @@ func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	var patch SettingsPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 
@@ -1306,11 +1306,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err := disk.Validate(); err != nil {
-				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+				writeErr(w, http.StatusBadRequest, "validation_error", "validation error: "+err.Error())
 				return
 			}
 			if err := saveExternalFactory(disk); err != nil {
-				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
+				writeErr(w, http.StatusInternalServerError, "internal_error", "failed to save factory "+fp.Name+": "+err.Error())
 				return
 			}
 
@@ -1318,7 +1318,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			// appear as a phantom duplicate in listings.
 			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
 				if err := deleteExternalFactory(fp.OriginalName); err != nil {
-					http.Error(w, "failed to delete old factory "+fp.OriginalName+": "+err.Error(), http.StatusInternalServerError)
+					writeErr(w, http.StatusInternalServerError, "internal_error", "failed to delete old factory "+fp.OriginalName+": "+err.Error())
 					return
 				}
 			}
@@ -1498,27 +1498,27 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			// Validate new entry
 			if mp.Source == "" {
-				http.Error(w, "source required for mcp "+mp.Name, http.StatusBadRequest)
+				writeErr(w, http.StatusBadRequest, "invalid_request", "source required for mcp "+mp.Name)
 				return
 			}
 			switch types.MCPSource(mp.Source) {
 			case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
 				if mp.Package == "" {
-					http.Error(w, "package required for mcp "+mp.Name+" source "+mp.Source, http.StatusBadRequest)
+					writeErr(w, http.StatusBadRequest, "invalid_request", "package required for mcp "+mp.Name+" source "+mp.Source)
 					return
 				}
 			case types.MCPSourceDocker:
 				if mp.Image == "" {
-					http.Error(w, "image required for mcp "+mp.Name+" source docker", http.StatusBadRequest)
+					writeErr(w, http.StatusBadRequest, "invalid_request", "image required for mcp "+mp.Name+" source docker")
 					return
 				}
 			case types.MCPSourceSSE:
 				if mp.URL == "" {
-					http.Error(w, "url required for mcp "+mp.Name+" source sse", http.StatusBadRequest)
+					writeErr(w, http.StatusBadRequest, "invalid_request", "url required for mcp "+mp.Name+" source sse")
 					return
 				}
 			default:
-				http.Error(w, "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+				writeErr(w, http.StatusBadRequest, "invalid_request", "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse")
 				return
 			}
 			mcp := &types.MCPServerHubConfig{
@@ -1545,7 +1545,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Save to disk before applying to in-memory config
 	if err := config.SaveHubConfig(&updatedCfg); err != nil {
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to save config: "+err.Error())
 		return
 	}
 

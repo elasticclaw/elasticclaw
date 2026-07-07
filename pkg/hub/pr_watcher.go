@@ -945,14 +945,14 @@ func githubAPIList(path, token string) ([]interface{}, error) {
 func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) < 2 {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	clawID := parts[0]
 	sub := parts[1]
 
 	if sub != "prs" && sub != "checkpoints" {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 
@@ -967,13 +967,13 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 
 		var tagsJSON string
 		if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantFromCtx(r)).Scan(&tagsJSON); err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
 		var clawTags []string
 		_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 		if !canViewClaw(accessCfg, ghLogin, clawTags) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 	}
@@ -991,7 +991,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 // handleClawPRs returns the list of PRs detected for a claw.
 func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID string) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	tenantID := tenantFromCtx(r)
@@ -999,7 +999,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	// Verify claw belongs to tenant
 	var exists int
 	if err := s.db.QueryRow(`SELECT 1 FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&exists); err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 
@@ -1008,7 +1008,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		clawID,
 	)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	defer rows.Close()

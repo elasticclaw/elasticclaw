@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -268,7 +269,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	return http.ListenAndServe(s.addr, withRecovery(corsMiddleware(mux)))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -392,6 +393,35 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		s.mu.RUnlock()
 		jsonOK(w, out)
 	}))
+}
+
+// apiError is the standard JSON error envelope for UI-facing API handlers.
+type apiError struct {
+	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
+}
+
+// writeErr writes a JSON error envelope with the given status, code, and message.
+// code is optional context for programmatic handling; msg is the human-readable text.
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiError{Error: msg, Code: code})
+}
+
+// withRecovery recovers from panics in the handler chain, logs the stack with
+// the remote address, and responds with a 500 error envelope instead of
+// crashing the goroutine.
+func withRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[panic] %s %s (remote=%s): %v\n%s", r.Method, r.URL.Path, r.RemoteAddr, err, debug.Stack())
+				writeErr(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // corsMiddleware adds permissive CORS headers so the web UI can connect
@@ -679,25 +709,25 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	s.mu.RLock()
 	disablePassword := s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth
 	s.mu.RUnlock()
 	if disablePassword {
-		http.Error(w, "password login disabled", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "password_login_disabled", "password login disabled")
 		return
 	}
 	var body struct {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if body.Password != s.resolveUIPassword() {
-		http.Error(w, "invalid password", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "invalid_password", "invalid password")
 		return
 	}
 	s.mu.RLock()
@@ -955,7 +985,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Printf("handleClaws query error: %v", err)
-		http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", fmt.Sprintf("db error: %v", err))
 		return
 	}
 	defer rows.Close()
@@ -1027,11 +1057,11 @@ func githubIssueURL(issueID string) string {
 func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenantID string) {
 	var req types.CreateClawRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.Name == "" || req.Provider == "" {
-		http.Error(w, "name and provider are required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "name and provider are required")
 		return
 	}
 
@@ -1040,7 +1070,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	provCfg, ok := s.hubCfg.Providers[req.Provider]
 	s.mu.RUnlock()
 	if !ok {
-		http.Error(w, fmt.Sprintf("provider %q is not configured on this hub", req.Provider), http.StatusUnprocessableEntity)
+		writeErr(w, http.StatusUnprocessableEntity, "provider_not_configured", fmt.Sprintf("provider %q is not configured on this hub", req.Provider))
 		return
 	}
 
@@ -1134,7 +1164,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
 	)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 
@@ -1275,16 +1305,16 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			var tagsJSON string
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
 				if err == sql.ErrNoRows {
-					http.Error(w, "not found", http.StatusNotFound)
+					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
-					http.Error(w, "db error", http.StatusInternalServerError)
+					writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 				}
 				return
 			}
 			var clawTags []string
 			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
 			}
 		}
@@ -1294,7 +1324,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			Color *string   `json:"color"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid body")
 			return
 		}
 		if body.Name != nil && strings.TrimSpace(*body.Name) != "" {
@@ -1342,16 +1372,16 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			var tagsJSON string
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
 				if err == sql.ErrNoRows {
-					http.Error(w, "not found", http.StatusNotFound)
+					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
-					http.Error(w, "db error", http.StatusInternalServerError)
+					writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 				}
 				return
 			}
 			var clawTags []string
 			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
 			}
 		}
@@ -1404,12 +1434,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
-			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "db_error", fmt.Sprintf("db error: %v", err))
 			return
 		}
 		rowsAffected, err := res.RowsAffected()
 		if err != nil || rowsAffected == 0 {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
 		if clawStatus != "error" {
@@ -1453,15 +1483,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, c.Tags) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return
 	}
 	c.TenantID = tenantID
@@ -1491,7 +1521,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, "/")
 	clawID := parts[0]
 	if clawID == "" {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	if len(parts) > 1 {
@@ -1501,7 +1531,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		case "activity":
 			s.handleMessageActivity(w, r, tenantID, clawID)
 		default:
-			http.Error(w, "not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "not found")
 		}
 		return
 	}
@@ -1520,7 +1550,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			Content string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Content == "" {
-			http.Error(w, "invalid request", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 			return
 		}
 
@@ -1530,16 +1560,16 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			var tagsJSONMsg string
 			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg); err != nil {
 				if err == sql.ErrNoRows {
-					http.Error(w, "not found", http.StatusNotFound)
+					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
-					http.Error(w, "db error", http.StatusInternalServerError)
+					writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 				}
 				return
 			}
 			var clawTagsMsg []string
 			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
-				http.Error(w, "forbidden", http.StatusForbidden)
+				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
 			}
 		}
@@ -1552,7 +1582,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
 			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
 		); err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 			return
 		}
 		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
@@ -1592,13 +1622,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		var tagsJSONMsg string
 		err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
 		if err == sql.ErrNoRows {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
 		var clawTagsMsg []string
 		_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 		if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 	}
@@ -1641,7 +1671,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	defer rows.Close()
@@ -1688,7 +1718,7 @@ func hiddenSystemMessagesSQL() string {
 
 func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	if !s.canViewMessages(w, r, tenantID, clawID) {
@@ -1699,14 +1729,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 	before := r.URL.Query().Get("before")
 	rows, err := s.queryConversationMessages(clawID, tenantID, before, limit)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 
 	if len(rows) == 0 {
 		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
 		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 			return
 		}
 		if summary == nil {
@@ -1721,14 +1751,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 	firstCreated := rows[0].CreatedAt
 	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	if !hasOlderConversation {
 		firstCursor := firstCreated.Format(time.RFC3339Nano)
 		summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
 		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 			return
 		}
 		if summary != nil {
@@ -1751,7 +1781,7 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 		}
 		summary, err := s.activitySummary(clawID, tenantID, &lower, upper, lowerCursor, upperCursor)
 		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 			return
 		}
 		if summary != nil {
@@ -1763,7 +1793,7 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 
 func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	if !s.canViewMessages(w, r, tenantID, clawID) {
@@ -1816,13 +1846,13 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	defer rows.Close()
 	msgs, err := scanHubMessages(rows)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return
 	}
 	if msgs == nil {
@@ -1970,17 +2000,17 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 	var tagsJSONMsg string
 	err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
 	if err == sql.ErrNoRows {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return false
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "db_error", "db error")
 		return false
 	}
 	var clawTagsMsg []string
 	_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return false
 	}
 	return true

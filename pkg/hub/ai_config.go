@@ -61,28 +61,28 @@ type aiConfigBackupResponse struct {
 
 func (s *Server) handleAIConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.Message == "" {
-		http.Error(w, "message required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "message required")
 		return
 	}
 
 	// Load and sanitize current hub config
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to load hub config: "+err.Error())
 		return
 	}
 	sanitized, err := sanitizeHubConfig(diskCfg)
 	if err != nil {
-		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to sanitize config: "+err.Error())
 		return
 	}
 
@@ -94,7 +94,7 @@ func (s *Server) handleAIConfig(w http.ResponseWriter, r *http.Request) {
 
 	reply, err := callLLMForConfig(sanitized, req.Message, req.History, llmKeys, defaultModel)
 	if err != nil {
-		http.Error(w, "LLM error: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "llm_error", "LLM error: "+err.Error())
 		return
 	}
 
@@ -111,59 +111,59 @@ func (s *Server) handleAIConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAIConfigApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.ProposedYAML == "" {
-		http.Error(w, "proposed_yaml required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "proposed_yaml required")
 		return
 	}
 
 	// Substitute placeholders
 	finalYAML, err := substitutePlaceholders(req.ProposedYAML, req.Secrets)
 	if err != nil {
-		http.Error(w, "invalid yaml: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_yaml", "invalid yaml: "+err.Error())
 		return
 	}
 
 	// Restore masked secrets (*** from sanitized config) from disk before parsing.
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to load hub config: "+err.Error())
 		return
 	}
 	finalYAML, err = restoreMaskedSecretsFromDisk(finalYAML, diskCfg)
 	if err != nil {
-		http.Error(w, "failed to restore masked secrets: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to restore masked secrets: "+err.Error())
 		return
 	}
 
 	// Parse and validate
 	var newCfg types.HubConfig
 	if err := yaml.Unmarshal([]byte(finalYAML), &newCfg); err != nil {
-		http.Error(w, "invalid yaml: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_yaml", "invalid yaml: "+err.Error())
 		return
 	}
 	if err := validateHubConfig(&newCfg); err != nil {
-		http.Error(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "validation_failed", "validation failed: "+err.Error())
 		return
 	}
 
 	// Backup current config
 	backupPath, err := backupHubConfig()
 	if err != nil {
-		http.Error(w, "backup failed: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "backup failed: "+err.Error())
 		return
 	}
 
 	// Save new config
 	if err := config.SaveHubConfigNoSecretMerge(&newCfg); err != nil {
-		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "save failed: "+err.Error())
 		return
 	}
 
@@ -177,56 +177,56 @@ func (s *Server) handleAIConfigApply(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRevertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.BackupPath == "" {
-		http.Error(w, "backup_path required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "backup_path required")
 		return
 	}
 
 	// Validate path to prevent traversal
 	hubYAMLPath, err := config.ActiveHubConfigPath()
 	if err != nil {
-		http.Error(w, "cannot determine hub config path: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "cannot determine hub config path: "+err.Error())
 		return
 	}
 	cleanHubYAMLPath := filepath.Clean(hubYAMLPath)
 	cleanBackupPath := filepath.Clean(req.BackupPath)
 	expectedPrefix := cleanHubYAMLPath + ".bak."
 	if !strings.HasPrefix(cleanBackupPath, expectedPrefix) {
-		http.Error(w, "invalid backup path", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid backup path")
 		return
 	}
 	suffix := strings.TrimPrefix(cleanBackupPath, expectedPrefix)
 	if !backupTimestampSuffixRe.MatchString(suffix) {
-		http.Error(w, "invalid backup path", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid backup path")
 		return
 	}
 
 	data, err := os.ReadFile(cleanBackupPath)
 	if err != nil {
-		http.Error(w, "cannot read backup: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "cannot read backup: "+err.Error())
 		return
 	}
 
 	var restoredCfg types.HubConfig
 	if err := yaml.Unmarshal(data, &restoredCfg); err != nil {
-		http.Error(w, "backup file is corrupt: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "backup file is corrupt: "+err.Error())
 		return
 	}
 	if err := validateHubConfig(&restoredCfg); err != nil {
-		http.Error(w, "backup validation failed: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "validation_failed", "backup validation failed: "+err.Error())
 		return
 	}
 
 	if err := config.SaveHubConfigNoSecretMerge(&restoredCfg); err != nil {
-		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "save failed: "+err.Error())
 		return
 	}
 
@@ -240,7 +240,7 @@ func (s *Server) handleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
@@ -288,12 +288,12 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 // By default, secrets are masked. Pass ?reveal=true to get the raw unmasked config.
 func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to load hub config: "+err.Error())
 		return
 	}
 
@@ -302,7 +302,7 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 		// Return raw config with actual secret values
 		raw, err := yaml.Marshal(diskCfg)
 		if err != nil {
-			http.Error(w, "failed to marshal config: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal_error", "failed to marshal config: "+err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -312,7 +312,7 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 
 	sanitized, err := sanitizeHubConfig(diskCfg)
 	if err != nil {
-		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to sanitize config: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -330,27 +330,27 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 //	data: {"type":"done"}
 func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
 	}
 	if req.Message == "" {
-		http.Error(w, "message required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "invalid_request", "message required")
 		return
 	}
 
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		http.Error(w, "failed to load hub config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to load hub config: "+err.Error())
 		return
 	}
 	sanitized, err := sanitizeHubConfig(diskCfg)
 	if err != nil {
-		http.Error(w, "failed to sanitize config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "failed to sanitize config: "+err.Error())
 		return
 	}
 
