@@ -45,9 +45,12 @@ function describeWsUrl(rawUrl: string): string {
     if (url.searchParams.has("token")) {
       url.searchParams.set("token", "[redacted]")
     }
+    if (url.searchParams.has("ticket")) {
+      url.searchParams.set("ticket", "[redacted]")
+    }
     return url.toString()
   } catch {
-    return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
+    return rawUrl.replace(/token=[^&]+/, "token=[redacted]").replace(/ticket=[^&]+/, "ticket=[redacted]")
   }
 }
 
@@ -306,14 +309,29 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [persistMessages])
 
-  const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(async () => {
     if (!shouldReconnectRef.current) return
     if (wsRef.current) {
       wsRef.current.onclose = null
       wsRef.current.onerror = null
       wsRef.current.close()
     }
-    const wsUrl = getHubWsUrl()
+    // getHubWsUrl requests a single-use auth ticket from the hub before opening
+    // the socket (raw tokens no longer go in the query string).
+    let wsUrl: string
+    try {
+      wsUrl = await getHubWsUrl()
+    } catch (err) {
+      console.warn("Failed to obtain WS auth ticket; retrying:", err)
+      if (!shouldReconnectRef.current) return
+      const attempt = reconnectAttemptRef.current
+      reconnectAttemptRef.current += 1
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5))
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
+      return
+    }
+    if (!shouldReconnectRef.current) return
     const safeWsUrl = describeWsUrl(wsUrl)
     let ws: WebSocket
     try {

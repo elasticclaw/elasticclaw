@@ -29,7 +29,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { ActivitySummary as ActivitySummaryMeta, Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
+import { fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -794,7 +794,6 @@ function ClawBoardCard({
           <div className="flex-1 min-h-0">
             <XTerminal
               clawId={claw.id}
-              wsUrl={getTerminalWsUrl(claw.id)}
               className="h-full w-full"
             />
           </div>
@@ -1633,7 +1632,6 @@ function ClawChatView({
               {terminalOpen && (
                 <XTerminal
                   clawId={claw.id}
-                  wsUrl={getTerminalWsUrl(claw.id)}
                   className="h-full w-full"
                 />
               )}

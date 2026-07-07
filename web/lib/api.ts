@@ -162,15 +162,31 @@ export interface UploadedAttachment {
   mimetype: string
 }
 
+// fetchAuthTicket requests a single-use, short-lived auth ticket from the hub.
+// Tickets replace the raw bearer token in query strings for endpoints where
+// the browser cannot set the Authorization header (WebSocket upgrades and
+// <img src> loads). Each ticket is redeemable exactly once.
+export async function fetchAuthTicket(): Promise<string> {
+  const data = await apiFetch<{ ticket: string }>("/api/auth/ticket", { method: "POST" })
+  if (!data?.ticket) throw new Error("hub returned an empty auth ticket")
+  return data.ticket
+}
+
 // getFileViewUrl returns the hub URL that serves the bytes of an uploaded
-// file back to the browser. Suitable for <img src>. Auth is via ?token query
-// since browsers can't set Authorization on <img>.
-export function getFileViewUrl(clawId: string, path: string): string {
-  const token = getTokenSync()
+// file back to the browser. Suitable for <img src>. Auth is via a single-use
+// ?ticket query param since browsers can't set Authorization on <img>.
+// Falls back to the deprecated ?token param when the hub predates tickets.
+export async function getFileViewUrl(clawId: string, path: string): Promise<string> {
   const hubBase = getHubUrl()
   const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/api/files/view/${clawId}`
-  const qs = new URLSearchParams({ path, token }).toString()
-  return `${base}?${qs}`
+  try {
+    const ticket = await fetchAuthTicket()
+    return `${base}?${new URLSearchParams({ path, ticket }).toString()}`
+  } catch {
+    // Deprecated fallback for hubs without POST /api/auth/ticket.
+    const token = await resolveToken()
+    return `${base}?${new URLSearchParams({ path, token }).toString()}`
+  }
 }
 
 export async function uploadFiles(clawId: string, files: File[]): Promise<UploadedAttachment[]> {
@@ -205,18 +221,32 @@ export async function killClaw(id: string): Promise<void> {
   return apiFetch<void>(`/api/claws/${id}`, { method: "DELETE" })
 }
 
-export function getHubWsUrl(): string {
-  const token = getTokenSync()
+function wsBaseUrl(): string {
   const hub = getHubUrl() || window.location.origin
-  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/api/ws?token=${encodeURIComponent(token)}`
+  return hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
 }
 
-export function getTerminalWsUrl(clawId: string): string {
-  const token = getTokenSync()
-  const hub = getHubUrl() || window.location.origin
-  const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
+// buildWsUrl authenticates a WebSocket URL with a single-use ticket. Browsers
+// can't set the Authorization header on WS upgrades, so the ticket goes in the
+// query string. Falls back to the deprecated ?token param when the hub
+// predates tickets.
+async function buildWsUrl(path: string): Promise<string> {
+  try {
+    const ticket = await fetchAuthTicket()
+    return `${wsBaseUrl()}${path}?ticket=${encodeURIComponent(ticket)}`
+  } catch {
+    // Deprecated fallback for hubs without POST /api/auth/ticket.
+    const token = await resolveToken()
+    return `${wsBaseUrl()}${path}?token=${encodeURIComponent(token)}`
+  }
+}
+
+export async function getHubWsUrl(): Promise<string> {
+  return buildWsUrl("/api/ws")
+}
+
+export async function getTerminalWsUrl(clawId: string): Promise<string> {
+  return buildWsUrl(`/api/terminal/${clawId}`)
 }
 
 export function isConfigured(): boolean {

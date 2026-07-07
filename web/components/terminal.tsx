@@ -1,19 +1,21 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+import { getTerminalWsUrl } from "@/lib/api"
 import "@xterm/xterm/css/xterm.css"
 
 interface TerminalProps {
   clawId: string
-  wsUrl: string
   className?: string
 }
 
 /**
  * XTerminal — browser-only SSH terminal component.
  * Dynamically imports xterm.js to avoid SSR issues.
+ * Requests a single-use auth ticket per connection (browsers can't set the
+ * Authorization header on WebSocket upgrades).
  */
-export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
+export function XTerminal({ clawId, className }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const stateRef = useRef<{
     ws: WebSocket | null
@@ -68,7 +70,9 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       stateRef.current.term = term
       stateRef.current.fitAddon = fitAddon
 
-      // Connect WebSocket
+      // Connect WebSocket — the URL carries a fresh single-use auth ticket
+      const wsUrl = await getTerminalWsUrl(clawId)
+      if (!mounted) return
       const ws = new WebSocket(wsUrl)
       stateRef.current.ws = ws
 
@@ -121,7 +125,7 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       term?.dispose()
       stateRef.current = { ws: null, term: null, fitAddon: null, resizeObserver: null }
     }
-  }, [wsUrl]) // reconnect if wsUrl changes
+  }, [clawId]) // reconnect if the target claw changes
 
   return (
     <div

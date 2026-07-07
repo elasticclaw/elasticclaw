@@ -1,9 +1,30 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertCircle, File as FileIcon, Loader2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { getFileViewUrl } from "@/lib/api"
+
+// Resolves the hub file-view URL for history attachments. The URL carries a
+// single-use auth ticket, so it is fetched asynchronously and must not be
+// reused across loads.
+function useFileViewUrl(source?: AttachmentChipSource): string | undefined {
+  const clawId = source?.kind === "history" ? source.clawId : undefined
+  const path = source?.kind === "history" ? source.path : undefined
+  const [url, setUrl] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (!clawId || !path) {
+      setUrl(undefined)
+      return
+    }
+    let cancelled = false
+    getFileViewUrl(clawId, path)
+      .then((u) => { if (!cancelled) setUrl(u) })
+      .catch(() => { if (!cancelled) setUrl(undefined) })
+    return () => { cancelled = true }
+  }, [clawId, path])
+  return url
+}
 
 // Source is either a Blob URL we already hold (pre-submit) or a (clawId, path)
 // pair the hub serves back from the claw (history). History renders fall back
@@ -43,11 +64,12 @@ export function AttachmentChip({
   const [broken, setBroken] = useState(false)
   const isImage = mimetype.startsWith("image/") && !broken && !!source
 
+  const historyUrl = useFileViewUrl(source)
   const imgSrc =
     source?.kind === "preview"
       ? source.url
       : source?.kind === "history"
-        ? getFileViewUrl(source.clawId, source.path)
+        ? historyUrl
         : undefined
 
   const thumbCls = size === "sm"
@@ -56,8 +78,18 @@ export function AttachmentChip({
 
   if (isImage && imgSrc) {
     const Wrap = source?.kind === "history" ? "a" : "div"
+    // The auth ticket embedded in imgSrc is single-use and already consumed by
+    // the <img> load, so opening in a new tab needs a freshly ticketed URL.
+    const openFresh = source?.kind === "history"
+      ? (e: React.MouseEvent) => {
+          e.preventDefault()
+          getFileViewUrl(source.clawId, source.path)
+            .then((u) => window.open(u, "_blank", "noreferrer"))
+            .catch(() => {})
+        }
+      : undefined
     const wrapProps = source?.kind === "history"
-      ? { href: imgSrc, target: "_blank", rel: "noreferrer", className: "relative block" }
+      ? { href: imgSrc, target: "_blank", rel: "noreferrer", className: "relative block", onClick: openFresh }
       : { className: "relative" }
     return (
       <Wrap {...wrapProps as object} title={`${name} (${sizeLabel})`}>
