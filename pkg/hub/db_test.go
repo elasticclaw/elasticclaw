@@ -3,10 +3,83 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestMigrateIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.db")
+
+	for i := 0; i < 2; i++ {
+		db, err := openDB(path)
+		if err != nil {
+			t.Fatalf("open db (boot %d): %v", i+1, err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db (boot %d): %v", i+1, err)
+		}
+	}
+}
+
+func TestMigrateFailsOnReadOnlyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hub.db")
+
+	// Create a valid database first so the file exists.
+	db, err := openDB(path)
+	if err != nil {
+		t.Fatalf("initial open db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	// Make the database unwritable: read-only file in a read-only directory
+	// (SQLite also needs the directory for the -wal/-journal files).
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("chmod file: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o755)
+		_ = os.Chmod(path, 0o644)
+	})
+
+	_, err = openDB(path)
+	if err == nil {
+		t.Fatal("expected openDB to fail on a read-only database, got nil error")
+	}
+	if !strings.Contains(err.Error(), "migrate") {
+		t.Fatalf("expected a migration error mentioning 'migrate', got: %v", err)
+	}
+}
+
+func TestExecIgnoreDuplicate(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Duplicate column errors are swallowed: the column already exists.
+	if err := execIgnoreDuplicate(db, `ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("expected duplicate column to be ignored, got: %v", err)
+	}
+
+	// Any other error surfaces with the offending statement in the message.
+	err = execIgnoreDuplicate(db, `ALTER TABLE no_such_table ADD COLUMN x TEXT`)
+	if err == nil {
+		t.Fatal("expected error for missing table, got nil")
+	}
+	if !strings.Contains(err.Error(), "no_such_table") {
+		t.Fatalf("expected error to mention the statement, got: %v", err)
+	}
+}
 
 func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 	t.Run("fresh schema", func(t *testing.T) {
