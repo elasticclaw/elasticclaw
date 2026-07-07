@@ -3326,66 +3326,23 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 				return fmt.Errorf("install gh cli: %w", err)
 			}
 
-			fetchGitHubTokenJSON := fmt.Sprintf(`export HOME=/home/daytona
-rm -f /tmp/elasticclaw-github-token.json
-curl -sf --max-time 35 %q -o /tmp/elasticclaw-github-token.json
-status=$?
-echo "curl_exit=$status"
-ls -l /tmp/elasticclaw-github-token.json 2>&1 || true
-[ $status -eq 0 ] || exit $status
-[ -s /tmp/elasticclaw-github-token.json ] || exit 1
-`, tokenURL)
-			if err := exec("fetch github bootstrap token json", 45*time.Second, fetchGitHubTokenJSON); err != nil {
-				return fmt.Errorf("fetch github bootstrap token json: %w", err)
-			}
-
-			parseGitHubToken := `export HOME=/home/daytona
-python3 - <<'PYEOF' > /tmp/elasticclaw-github-token.txt
-import json
-with open('/tmp/elasticclaw-github-token.json') as f:
-    data = json.load(f)
-print(data.get('token', ''))
-PYEOF
-status=$?
-echo "python_exit=$status"
-ls -l /tmp/elasticclaw-github-token.txt 2>&1 || true
-[ $status -eq 0 ] || exit $status
-[ -s /tmp/elasticclaw-github-token.txt ] || exit 1`
-			if err := exec("parse github bootstrap token", 20*time.Second, parseGitHubToken); err != nil {
-				return fmt.Errorf("parse github bootstrap token: %w", err)
-			}
-
-			writeGitHubTokenEnv := `export HOME=/home/daytona
-TOKEN=$(cat /tmp/elasticclaw-github-token.txt)
-[ -n "$TOKEN" ] || exit 1
-printf 'export GH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null
-sudo chmod +x /etc/profile.d/elasticclaw-github.sh
-[ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
-			if err := exec("write github token env", 20*time.Second, writeGitHubTokenEnv); err != nil {
-				return fmt.Errorf("write github token env: %w", err)
-			}
-
-			ghAuthScript := `export HOME=/home/daytona
+			configureGitHubTokenRefresh := `export HOME=/home/daytona
 set +x
+` + buildGitHubTokenProfileInstallScript() + `
+` + buildGitHubCLIWrapperInstallScript() + `
 . /etc/profile.d/elasticclaw-github.sh
 command -v gh
-[ -n "$GH_TOKEN" ]
-gh --version
-TOKEN="$(cat /tmp/elasticclaw-github-token.txt)"
-[ -n "$TOKEN" ]
-unset GH_TOKEN
-gh auth logout -h github.com || true
-printf '%s\n' "$TOKEN" | gh auth login --hostname github.com --with-token
-export GH_TOKEN="$TOKEN"`
-			log.Printf("[daytona] auth gh cli (no retries)...")
-			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghAuthScript}, 30*time.Second)
+[ -n "${GH_TOKEN:-}" ]
+gh --version`
+			log.Printf("[daytona] configure gh token refresh (no retries)...")
+			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", configureGitHubTokenRefresh}, 30*time.Second)
 			if ghAuthErr != nil {
-				return fmt.Errorf("auth gh cli: %w", ghAuthErr)
+				return fmt.Errorf("configure gh token refresh: %w", ghAuthErr)
 			}
 			if ghAuthResult.ExitCode != 0 {
-				return fmt.Errorf("auth gh cli failed (exit %d): %s", ghAuthResult.ExitCode, sanitizeBootstrapOutput(ghAuthResult.Stdout))
+				return fmt.Errorf("configure gh token refresh failed (exit %d): %s", ghAuthResult.ExitCode, sanitizeBootstrapOutput(ghAuthResult.Stdout))
 			}
-			log.Printf("[daytona] auth gh cli done")
+			log.Printf("[daytona] configure gh token refresh done")
 
 			ghStatusScript := `export HOME=/home/daytona
 set +x
@@ -3421,22 +3378,7 @@ gh auth status`
 				log.Printf("[daytona] repository[%d]: %s", i, repo.Repo)
 			}
 
-			cloneScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; [ -n \"$GH_TOKEN\" ] || exit 1; set -o pipefail; "
-			for _, repo := range repositories {
-				repoName := repoDirectoryName(repo.Repo)
-				cloneURL := "https://x-access-token:${GH_TOKEN}@github.com/" + shellQuote(repo.Repo)
-				cloneScript += fmt.Sprintf("echo %s; if [ ! -d %s ]; then git clone %s %s 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; else git -C %s pull --ff-only 2>&1 | sed \"s/${GH_TOKEN}/***REDACTED***/g\" || { echo %s; exit 1; }; echo %s; fi; ",
-					shellQuote(fmt.Sprintf("[daytona] cloning %s into %s", repo.Repo, repoName)),
-					shellQuote(repoName),
-					cloneURL,
-					shellQuote(repoName),
-					shellQuote("[daytona] clone FAILED: "+repo.Repo),
-					shellQuote("[daytona] clone OK: "+repo.Repo),
-					shellQuote(repoName),
-					shellQuote("[daytona] pull FAILED: "+repo.Repo),
-					shellQuote("[daytona] pull OK: "+repo.Repo),
-				)
-			}
+			cloneScript := buildDaytonaGitHubCloneScript(repositories)
 			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
 			if cloneErr != nil {
 				return fmt.Errorf("clone repos: %w", cloneErr)
@@ -4102,7 +4044,7 @@ func daytonaBootstrapStatusForStep(label string) string {
 		return "Preparing runtime"
 	case "configure openclaw model", "start openclaw gateway":
 		return "Configuring OpenClaw"
-	case "install git credential helper", "install gh cli", "fetch github bootstrap token json", "parse github bootstrap token", "write github token env":
+	case "install git credential helper", "install gh cli", "configure gh token refresh":
 		return "Preparing repository access"
 	case "write SOUL.md", "write AGENTS.md", "write BOOTSTRAP.md", "write CONTEXT.md":
 		return "Preparing workspace"
@@ -5699,6 +5641,89 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	return b.String()
 }
 
+func buildGitHubTokenProfileScript() string {
+	return `# ElasticClaw GitHub App token refresh for gh.
+# This intentionally resolves through the credential helper instead of storing
+# the short-lived installation token generated during bootstrap.
+if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
+  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  if [ -n "$token" ]; then
+    export GH_TOKEN="$token"
+  else
+    unset GH_TOKEN
+  fi
+  unset token
+fi
+`
+}
+
+func buildGitHubTokenProfileInstallScript() string {
+	return `sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null << 'PROFILEEOF'
+` + buildGitHubTokenProfileScript() + `PROFILEEOF
+sudo chmod +x /etc/profile.d/elasticclaw-github.sh
+[ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
+}
+
+func buildGitHubCLIWrapperInstallScript() string {
+	return `if command -v gh >/dev/null 2>&1; then
+  REAL_GH="$(command -v gh)"
+  if [ "$REAL_GH" = "/usr/local/bin/gh" ]; then
+    if grep -q "ElasticClaw GitHub App token refresh wrapper" /usr/local/bin/gh 2>/dev/null; then
+      echo "GitHub gh wrapper already configured"
+      REAL_GH=""
+    elif [ -x /usr/local/bin/gh.elasticclaw-real ]; then
+      REAL_GH="/usr/local/bin/gh.elasticclaw-real"
+    else
+      sudo mv /usr/local/bin/gh /usr/local/bin/gh.elasticclaw-real
+      REAL_GH="/usr/local/bin/gh.elasticclaw-real"
+    fi
+  fi
+  if [ -n "$REAL_GH" ] && [ -x "$REAL_GH" ]; then
+    sudo tee /usr/local/bin/gh > /dev/null << 'GHEOF'
+#!/bin/bash
+# ElasticClaw GitHub App token refresh wrapper.
+set +x
+REAL_GH="__ELASTICCLAW_REAL_GH__"
+if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
+  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  if [ -n "$token" ]; then
+    export GH_TOKEN="$token"
+  fi
+  unset token
+fi
+exec "$REAL_GH" "$@"
+GHEOF
+    REAL_GH_ESCAPED="$(printf '%s' "$REAL_GH" | sed 's/[&\\|]/\\&/g')"
+    sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g" /usr/local/bin/gh
+    sudo chmod +x /usr/local/bin/gh
+    echo "GitHub gh wrapper configured"
+  fi
+fi`
+}
+
+func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
+	var b strings.Builder
+	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
+	for _, repo := range repos {
+		repoName := repoDirectoryName(repo.Repo)
+		cloneURL := "https://github.com/" + repo.Repo + ".git"
+		fmt.Fprintf(&b, "echo %s; if [ ! -d %s ]; then git clone %s %s || { echo %s; exit 1; }; echo %s; else git -C %s remote set-url origin %s || true; git -C %s pull --ff-only || { echo %s; exit 1; }; echo %s; fi; ",
+			shellQuote(fmt.Sprintf("[daytona] cloning %s into %s", repo.Repo, repoName)),
+			shellQuote(repoName),
+			shellQuote(cloneURL),
+			shellQuote(repoName),
+			shellQuote("[daytona] clone FAILED: "+repo.Repo),
+			shellQuote("[daytona] clone OK: "+repo.Repo),
+			shellQuote(repoName),
+			shellQuote(cloneURL),
+			shellQuote(repoName),
+			shellQuote("[daytona] pull FAILED: "+repo.Repo),
+			shellQuote("[daytona] pull OK: "+repo.Repo),
+		)
+	}
+	return b.String()
+}
+
 var repoInstructionFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
 
 const repoInstructionsIndexName = "REPO_INSTRUCTIONS.md"
@@ -5875,15 +5900,13 @@ if ! command -v gh &>/dev/null; then
   ) || true
 fi
 
-# Configure gh to use the credential helper via GH_TOKEN env (set in a wrapper)
+# Configure gh to use the credential helper via GH_TOKEN env and wrapper.
 if command -v gh &>/dev/null; then
-  # Write GH_TOKEN to /etc/profile.d so it's available in ALL shells
-  if printf 'export GH_TOKEN=$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | grep ^password | cut -d= -f2)\n' | sudo tee /etc/profile.d/elasticclaw-github.sh > /dev/null; then
-    sudo chmod +x /etc/profile.d/elasticclaw-github.sh || echo "GitHub profile.d chmod failed, continuing"
-    echo "GitHub profile.d configured"
-  else
-    echo "GitHub profile.d setup failed, continuing"
-  fi
+  (
+    set +e
+%s
+%s
+  ) || echo "GitHub gh token refresh setup failed, continuing"
 fi
 echo "GitHub credential helper installed"
 
@@ -5896,7 +5919,7 @@ FAILED=0
 %s
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
-%s`, tokenURL, buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
