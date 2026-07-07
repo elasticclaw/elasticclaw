@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"log"
+	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
@@ -18,6 +22,7 @@ var (
 	hubToken      string
 	hubClawToken  string
 	hubUIPassword string
+	hubLogLevel   string
 	hubNoWebUI    bool
 )
 
@@ -38,8 +43,9 @@ The hub stores data in a SQLite database (~/.elasticclaw/hub.db by default).
 func init() {
 	rootCmd.AddCommand(hubCmd)
 
-	hubCmd.Flags().StringVar(&hubAddr, "addr", ":8080", "address to listen on")
+	hubCmd.Flags().StringVar(&hubAddr, "addr", "", "address to listen on (default: "+config.DefaultHubAddr+")")
 	hubCmd.Flags().StringVar(&hubDBPath, "db", "", "path to SQLite database (default: ~/.elasticclaw/hub.db)")
+	hubCmd.Flags().StringVar(&hubLogLevel, "log-level", "", "log level: debug, info, warn, error (default: info; hot-reloadable via SIGHUP)")
 	hubCmd.Flags().StringVar(&hubToken, "token", "", "create/update default tenant with this user token")
 	hubCmd.Flags().StringVar(&hubClawToken, "claw-token", "", "agent authentication token (required with --token)")
 	hubCmd.Flags().StringVar(&hubUIPassword, "ui-token", "", "web UI login password (default: value from hub.yaml ui_password, or 'admin')")
@@ -63,15 +69,29 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	dbPath := hubDBPath
+	// Consolidated loader: precedence flag > env (ELASTICCLAW_*) > hub.yaml > default.
+	boot, err := config.LoadHubBootConfig(config.HubBootFlags{
+		Addr:     hubAddr,
+		DBPath:   hubDBPath,
+		LogLevel: hubLogLevel,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load hub config: %w", err)
+	}
+	hubCfg := boot.Cfg
+
+	dbPath := boot.DBPath
 	if dbPath == "" {
 		dbPath = filepath.Join(dir, "hub.db")
 	}
 
-	hubCfg, err := config.LoadHubConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load hub config: %w", err)
+	// Route the standard log package through slog with a swappable level so a
+	// SIGHUP log_level change takes effect without a restart.
+	levelVar := new(slog.LevelVar)
+	if lvl, err := config.ParseLogLevel(boot.LogLevel); err == nil {
+		levelVar.Set(lvl)
 	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: levelVar})))
 
 	// Apply LLM keys from env — backward compat: if ANTHROPIC_API_KEY set and no anthropic key configured, add it
 	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
@@ -105,7 +125,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create external storage dirs: %w", err)
 	}
 
-	s, err := hub.NewServer(hubAddr, dbPath, dir, hubCfg)
+	s, err := hub.NewServer(boot.Addr, dbPath, dir, hubCfg)
 	if err != nil {
 		return fmt.Errorf("failed to start hub: %w", err)
 	}
@@ -157,7 +177,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("ElasticClaw Server\n")
-	fmt.Printf("  Address:    %s\n", hubAddr)
+	fmt.Printf("  Address:    %s\n", boot.Addr)
 	fmt.Printf("  Database:   %s\n", dbPath)
 	if hubCfg.URL != "" {
 		fmt.Printf("  URL:        %s\n", hubCfg.URL)
@@ -201,6 +221,31 @@ func runHub(cmd *cobra.Command, args []string) error {
 		}
 	}
 	fmt.Println()
+
+	// Hot reload on SIGHUP: re-read hub.yaml and apply the safe subset
+	// (log_level, allowed_origins, branding, integrations). Restart-required
+	// fields (listen_addr, db_path) are rejected inside ApplyHotReload.
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+			fresh, err := config.LoadHubConfig()
+			if err != nil {
+				log.Printf("[hub] SIGHUP reload failed: %v — keeping the running config", err)
+				continue
+			}
+			merged := s.ApplyHotReload(fresh)
+			// Re-apply precedence: a yaml edit must not override --log-level or env.
+			effective := config.ResolveSetting(hubLogLevel, config.EnvHubLogLevel, merged.LogLevel, config.DefaultHubLogLevel)
+			if lvl, err := config.ParseLogLevel(effective); err != nil {
+				log.Printf("[hub] SIGHUP reload: %v — keeping log level %s", err, levelVar.Level())
+			} else if lvl != levelVar.Level() {
+				// Bypass level filtering for this line so the change is always visible.
+				fmt.Fprintf(os.Stderr, "[hub] SIGHUP reload: log level %s -> %s\n", levelVar.Level(), lvl)
+				levelVar.Set(lvl)
+			}
+		}
+	}()
 
 	return s.Run(hub.RunOptions{NoWebUI: hubNoWebUI})
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
@@ -268,7 +269,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	return http.ListenAndServe(s.addr, s.corsMiddleware(mux))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -394,11 +395,19 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}))
 }
 
-// corsMiddleware adds permissive CORS headers so the web UI can connect
-// from any origin (browser same-origin restrictions apply to REST + WS).
-func corsMiddleware(next http.Handler) http.Handler {
+// corsMiddleware adds CORS headers so the web UI can connect. When
+// allowed_origins is empty (the default) it keeps the historical allow-all
+// behavior; otherwise only the listed origins are allowed. The list is read
+// per-request so a SIGHUP reload takes effect without a restart.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		allowOrigin := s.resolveCORSOrigin(r.Header.Get("Origin"))
+		if allowOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			if allowOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
@@ -407,6 +416,48 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// resolveCORSOrigin returns the Access-Control-Allow-Origin value for a
+// request origin: "*" when no allowlist is configured (or it contains "*"),
+// the echoed origin when it matches the allowlist, "" otherwise.
+func (s *Server) resolveCORSOrigin(requestOrigin string) string {
+	s.mu.RLock()
+	origins := config.ResolveOrigins(s.hubCfg.AllowedOrigins)
+	s.mu.RUnlock()
+	if len(origins) == 0 {
+		return "*"
+	}
+	for _, o := range origins {
+		if o == "*" {
+			return "*"
+		}
+		if requestOrigin != "" && strings.EqualFold(o, requestOrigin) {
+			return requestOrigin
+		}
+	}
+	return ""
+}
+
+// ApplyHotReload applies the SIGHUP-safe subset of a freshly loaded hub.yaml
+// (log_level, allowed_origins, branding, integrations) to the running server.
+// Restart-required fields (listen_addr, db_path) are rejected with a clear log.
+// It returns the new effective config so the caller can propagate the log level.
+func (s *Server) ApplyHotReload(fresh *types.HubConfig) *types.HubConfig {
+	s.mu.Lock()
+	merged, applied, rejected := config.ApplyHotReload(s.hubCfg, fresh)
+	s.hubCfg = merged
+	s.mu.Unlock()
+
+	for _, field := range rejected {
+		log.Printf("[hub] SIGHUP reload: %q changed on disk but requires a restart — keeping the running value", field)
+	}
+	if len(applied) > 0 {
+		log.Printf("[hub] SIGHUP reload: applied %s", strings.Join(applied, ", "))
+	} else {
+		log.Printf("[hub] SIGHUP reload: no hot-reloadable changes detected")
+	}
+	return merged
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
