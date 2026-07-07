@@ -476,9 +476,13 @@ type HubConfig struct {
 	// Hub server fields
 	// PublicURL is the URL claws use to connect back to the hub from remote VMs.
 	// If not set, falls back to URL.
-	PublicURL string                    `yaml:"public_url,omitempty"`
-	ClawToken string                    `yaml:"claw_token,omitempty"`
-	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
+	PublicURL string `yaml:"public_url,omitempty"`
+	// AllowedOrigins lists the browser origins allowed to make cross-origin
+	// requests to the hub API (CORS). Defaults to the hub's own origin (URL)
+	// if not set.
+	AllowedOrigins []string                  `yaml:"allowed_origins,omitempty"`
+	ClawToken      string                    `yaml:"claw_token,omitempty"`
+	Providers      map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
 	SSHPublicKeys []string `yaml:"ssh_public_keys,omitempty"`
 	// BridgeImage is the OCI artifact reference for the claw-bridge binary.

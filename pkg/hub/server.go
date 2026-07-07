@@ -268,7 +268,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	return http.ListenAndServe(s.addr, s.corsMiddleware(mux))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -394,11 +394,34 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}))
 }
 
-// corsMiddleware adds permissive CORS headers so the web UI can connect
-// from any origin (browser same-origin restrictions apply to REST + WS).
-func corsMiddleware(next http.Handler) http.Handler {
+// allowedOrigins returns the configured CORS allow-list, defaulting to the
+// hub's own origin (its configured URL) when unset.
+func (s *Server) allowedOrigins() []string {
+	if s.hubCfg != nil && len(s.hubCfg.AllowedOrigins) > 0 {
+		return s.hubCfg.AllowedOrigins
+	}
+	if s.hubCfg != nil && s.hubCfg.URL != "" {
+		return []string{s.hubCfg.URL}
+	}
+	return nil
+}
+
+// corsMiddleware echoes Access-Control-Allow-Origin only for origins on the
+// configured allow-list (hub.yaml: allowed_origins); requests from other
+// origins get no CORS header. Vary: Origin is always set since the response
+// depends on the request's Origin header.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Add("Vary", "Origin")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			for _, allowed := range s.allowedOrigins() {
+				if origin == allowed {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					break
+				}
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {

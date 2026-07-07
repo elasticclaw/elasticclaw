@@ -8,6 +8,11 @@ url: http://localhost:8080
 # The service name "hub" resolves inside the elasticclaw-dev Docker network.
 public_url: http://hub:8080
 
+# Browser origins allowed to call the hub API (CORS). The dev compose runs
+# the Next.js UI on localhost:3000, separate from the hub's own origin.
+allowed_origins:
+  - http://localhost:3000
+
 # Auth tokens — keep these as-is for local dev (they only secure your laptop)
 token: devtoken
 claw_token: devclawtoken
