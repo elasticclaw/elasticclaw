@@ -14,7 +14,7 @@ import {
   isConfigured,
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
-import { isTerminalAssistantMessage } from "@/lib/messages"
+import { isTerminalAssistantMessage, isTransientMessage, mergeTimelineMessages } from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
 export interface HubState {
@@ -49,10 +49,6 @@ function describeWsUrl(rawUrl: string): string {
   } catch {
     return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
   }
-}
-
-function isTransientMessage(message: Message): boolean {
-  return message.id.startsWith("activity-") || message.id.startsWith("live-") || message.id.startsWith("thinking-")
 }
 
 function formatActivityContent(activity: AgentActivity): string {
@@ -277,17 +273,7 @@ export function useHub(selectedClawId: string | null): HubState {
 
       setMessages((prev) => {
         const existing = prev[clawId] || []
-        // Merge API result with cached state:
-        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
-        // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
-        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
-        const apiIds = new Set(msgs.map((m) => m.id))
-        const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
-        const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
-          !msgs.some((r) => r.content === m.content && r.role === m.role))
-        const merged = [...msgs, ...cachedOnly, ...inflight]
-        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-        const next = { ...prev, [clawId]: merged }
+        const next = { ...prev, [clawId]: mergeTimelineMessages(existing, msgs) }
         persistMessages(next)
         return next
       })
