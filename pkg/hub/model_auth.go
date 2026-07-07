@@ -56,7 +56,7 @@ const (
 
 func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req struct {
@@ -65,7 +65,7 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Mode     string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	req.Provider = strings.TrimSpace(req.Provider)
@@ -77,11 +77,11 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		req.Profile = req.Provider + "-default"
 	}
 	if req.Provider != "codex" && req.Provider != "grok" {
-		http.Error(w, "provider must be codex or grok", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "provider must be codex or grok")
 		return
 	}
 	if req.Mode != "device" {
-		http.Error(w, "only device login is supported", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "only device login is supported")
 		return
 	}
 
@@ -107,7 +107,7 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleModelAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	id := r.PathValue("id")

@@ -191,7 +191,7 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 	if r.Method == http.MethodPost && githubLoginFromContext(r.Context()) != "" {
 		var tagsJSON string
 		if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
 		var tags []string
@@ -203,18 +203,18 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 		}
 		s.mu.RUnlock()
 		if !canModifyClaw(accessCfg, githubLoginFromContext(r.Context()), tags) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) == 4 && parts[1] == "checkpoints" && parts[3] == "restore" {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 			return
 		}
 		if err := s.restoreClawFromCheckpoint(r.Context(), tenantID, clawID, parts[2]); err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeErr(w, http.StatusConflict, "conflict", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -224,7 +224,7 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 	if r.Method == http.MethodGet {
 		rows, err := s.db.Query(`SELECT id, claw_id, status, reason, created_by, manifest_sha256, root_tree_sha256, message_tree_sha256, workspace_tree_sha256, message_count, pr_count, repo_count, error, created_at, completed_at FROM claw_checkpoints WHERE tenant_id=? AND claw_id=? ORDER BY created_at DESC`, tenantID, clawID)
 		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
 		}
 		defer rows.Close()
@@ -257,14 +257,14 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 		}
 		id, err := s.requestCheckpoint(r.Context(), clawID, reason, "user", false, checkpointRequestTimeout)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeErr(w, http.StatusConflict, "conflict", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
 		jsonOK(w, map[string]string{"id": id, "status": "creating"})
 		return
 	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }
 
 func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
