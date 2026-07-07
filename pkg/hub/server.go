@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,12 +17,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
@@ -35,6 +39,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -92,6 +97,19 @@ type Server struct {
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
+
+	// Graceful shutdown machinery.
+	// bgCtx is the root context handed to every background goroutine; bgCancel
+	// cancels it during shutdown. bg waits for all background goroutines.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bg       *errgroup.Group
+	// httpSrv is the HTTP server started by Run (nil in tests that use Handler()).
+	httpSrv *http.Server
+	// draining is set once shutdown starts; /healthz returns 503 while draining.
+	draining atomic.Bool
+	// shutdownOnce guards Shutdown so it runs at most once.
+	shutdownOnce sync.Once
 }
 
 type clawConn struct {
@@ -221,20 +239,24 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		webhookDedup:      make(map[string]time.Time),
 	}
 
-	// Start background poller to keep provider VM status fresh
-	go srv.pollProviderStatus()
-	go srv.keepAliveDaytonaSandboxes()
-	go srv.pruneAnalytics()
-	go srv.statusWatchdog()
-	go srv.checkpointScheduler()
-	srv.startPRWatcher()
+	srv.bgCtx, srv.bgCancel = context.WithCancel(context.Background())
+	srv.bg = &errgroup.Group{}
+
+	// Start background pollers; each one exits when bgCtx is cancelled and is
+	// waited on by Shutdown via the errgroup.
+	srv.bg.Go(func() error { srv.pollProviderStatus(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.keepAliveDaytonaSandboxes(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.pruneAnalytics(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.statusWatchdog(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.checkpointScheduler(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.watchPRs(srv.bgCtx); return nil })
+	srv.bg.Go(func() error { srv.pollIntegrationsLoop(srv.bgCtx); return nil })
 
 	// Start cron scheduler for workflow triggers
 	srv.cronScheduler = newCronScheduler(srv)
 	if err := srv.cronScheduler.start(); err != nil {
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
-	srv.startIntegrationPoller()
 
 	return srv, nil
 }
@@ -268,7 +290,113 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+
+	// Root context cancelled on SIGINT/SIGTERM so we can shut down gracefully.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	s.httpSrv = &http.Server{
+		Addr:              s.addr,
+		Handler:           corsMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- s.httpSrv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
+		// Listener failed before any shutdown signal (e.g. port in use).
+		return err
+	case <-ctx.Done():
+		grace := s.shutdownGrace()
+		log.Printf("[hub] shutdown signal received — draining for up to %s", grace)
+		drainCtx, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		return s.Shutdown(drainCtx)
+	}
+}
+
+// shutdownGrace returns the configured drain timeout (hub.yaml: shutdown_grace),
+// defaulting to 15s.
+func (s *Server) shutdownGrace() time.Duration {
+	if s.hubCfg != nil && s.hubCfg.ShutdownGrace != "" {
+		if d, err := time.ParseDuration(s.hubCfg.ShutdownGrace); err == nil && d > 0 {
+			return d
+		}
+		log.Printf("[hub] invalid shutdown_grace %q — using default 15s", s.hubCfg.ShutdownGrace)
+	}
+	return 15 * time.Second
+}
+
+// Shutdown gracefully stops the hub:
+//  1. mark the server as draining (/healthz starts returning 503),
+//  2. stop accepting new connections and drain in-flight HTTP requests,
+//  3. close claw WebSocket connections with a close frame ("killed" is NOT
+//     sent — the sandboxes stay alive and reconnect when the hub returns),
+//  4. cancel the root context and wait for all background goroutines,
+//  5. stop the cron scheduler and close the database.
+//
+// It is safe to call Shutdown multiple times; only the first call runs.
+func (s *Server) Shutdown(ctx context.Context) error {
+	var err error
+	s.shutdownOnce.Do(func() {
+		s.draining.Store(true)
+
+		if s.httpSrv != nil {
+			log.Printf("[hub] draining HTTP connections")
+			if shutdownErr := s.httpSrv.Shutdown(ctx); shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
+				log.Printf("[hub] HTTP drain incomplete: %v", shutdownErr)
+				err = shutdownErr
+			}
+		}
+
+		log.Printf("[hub] closing claw connections")
+		s.closeClawConnections()
+
+		log.Printf("[hub] stopping background goroutines")
+		s.bgCancel()
+		_ = s.bg.Wait()
+
+		if s.cronScheduler != nil {
+			s.cronScheduler.stop()
+		}
+
+		log.Printf("[hub] closing database")
+		if dbErr := s.db.Close(); dbErr != nil {
+			log.Printf("[hub] db close: %v", dbErr)
+			if err == nil {
+				err = dbErr
+			}
+		}
+		log.Printf("[hub] shutdown complete")
+	})
+	return err
+}
+
+// closeClawConnections sends a close frame to every connected claw bridge so
+// the bridge knows the hub is going away (as opposed to a network failure).
+// The sandbox itself is left running; bridges reconnect when the hub is back.
+func (s *Server) closeClawConnections() {
+	s.mu.RLock()
+	conns := make([]*clawConn, 0, len(s.claws))
+	for _, cc := range s.claws {
+		conns = append(conns, cc)
+	}
+	s.mu.RUnlock()
+
+	for _, cc := range conns {
+		cc.mu.RLock()
+		conn, statusConn := cc.conn, cc.statusConn
+		cc.mu.RUnlock()
+		if statusConn != nil {
+			_ = statusConn.Close(websocket.StatusGoingAway, "hub shutting down")
+		}
+		if conn != nil {
+			_ = conn.Close(websocket.StatusGoingAway, "hub shutting down")
+		}
+	}
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -359,8 +487,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/doctor", s.withWebAdminAuth(s.handleDoctor))
 	mux.HandleFunc("/api/troubleshoot/stream", s.withWebAdminAuth(s.handleTroubleshootStream))
 
-	// Health
+	// Health — returns 503 while the hub is draining so load balancers stop
+	// routing new traffic during shutdown.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if s.draining.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	if bridgePath, bridgeToken := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"), os.Getenv("ELASTICCLAW_E2E_BRIDGE_TOKEN"); bridgePath != "" && bridgeToken != "" {
@@ -4635,30 +4768,45 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 
 // ─── Provider status polling ──────────────────────────────────────────────────
 
-// pollProviderStatus runs forever, polling providers every 30s for VMs in
-// non-terminal states and updating claw status accordingly.
-func (s *Server) pollProviderStatus() {
+// pollProviderStatus polls providers for VMs in non-terminal states and
+// updates claw status accordingly. Exits when ctx is cancelled.
+func (s *Server) pollProviderStatus(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.syncReplicatedVMs()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.syncReplicatedVMs()
+		}
 	}
 }
 
-func (s *Server) keepAliveDaytonaSandboxes() {
+func (s *Server) keepAliveDaytonaSandboxes(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.petDaytonaSandboxes()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.petDaytonaSandboxes()
+		}
 	}
 }
 
 // pruneAnalytics runs a daily cleanup of factory_analytics rows older than 1 year.
-func (s *Server) pruneAnalytics() {
+func (s *Server) pruneAnalytics(ctx context.Context) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		pruneFactoryAnalytics(s.db)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pruneFactoryAnalytics(s.db)
+		}
 	}
 }
 
@@ -4715,11 +4863,16 @@ func (s *Server) petDaytonaSandboxes() {
 
 // statusWatchdog runs every 2 minutes to check claw health and request status
 // updates from the status channel. It also detects silent deaths and alerts the user.
-func (s *Server) statusWatchdog() {
+func (s *Server) statusWatchdog(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.checkClawStatus()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkClawStatus()
+		}
 	}
 }
 

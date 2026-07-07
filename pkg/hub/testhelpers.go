@@ -3,12 +3,14 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"golang.org/x/sync/errgroup"
 )
 
 // NewTestServerWithConfig creates a Server for integration testing with mock backends.
@@ -62,6 +64,13 @@ func NewTestServerWithConfig(t interface {
 		linearBaseURL:    linearBaseURL,
 		shortcutBaseURL:  shortcutBaseURL,
 	}
+	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
+	s.bg = &errgroup.Group{}
+	t.Cleanup(func() {
+		s.bgCancel()
+		_ = s.bg.Wait()
+	})
+
 	// Register routes (same as Run but without serving web UI or starting relay)
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -142,7 +151,7 @@ func (s *Server) PollPRsForTest() {
 
 // StartPRWatcherForTest starts the PR watcher background goroutine.
 func (s *Server) StartPRWatcherForTest() {
-	s.startPRWatcher()
+	s.bg.Go(func() error { s.watchPRs(s.bgCtx); return nil })
 }
 
 // PollIntegrationsForTest triggers an immediate integration poll tick (for testing without waiting for the ticker).

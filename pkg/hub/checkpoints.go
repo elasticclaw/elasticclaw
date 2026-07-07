@@ -122,11 +122,16 @@ func checkpointManifestPath(id string) string {
 	return filepath.Join(checkpointsRoot(), "manifests", id+".json")
 }
 
-func (s *Server) checkpointScheduler() {
+func (s *Server) checkpointScheduler(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.requestIdleCheckpoints()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.requestIdleCheckpoints()
+		}
 	}
 }
 

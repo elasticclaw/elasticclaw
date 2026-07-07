@@ -140,15 +140,18 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 	}
 }
 
-// startPRWatcher launches the background poller.
-func (s *Server) startPRWatcher() {
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
+// watchPRs runs the PR polling loop until ctx is cancelled.
+func (s *Server) watchPRs(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			s.pollAllPRs()
 		}
-	}()
+	}
 }
 
 type clawPR struct {

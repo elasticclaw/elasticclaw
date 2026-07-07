@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,19 +15,21 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-// startIntegrationPoller launches the background polling goroutine that queries
-// each configured integration's API every 30 seconds to detect missed webhook
-// events. It evaluates factory/workflow filters against current state and
-// creates agents when the matching trigger has not already claimed that
-// external item.
-func (s *Server) startIntegrationPoller() {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
+// pollIntegrationsLoop queries each configured integration's API every 30
+// seconds to detect missed webhook events. It evaluates factory/workflow
+// filters against current state and creates agents when the matching trigger
+// has not already claimed that external item. Exits when ctx is cancelled.
+func (s *Server) pollIntegrationsLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			s.pollTick()
 		}
-	}()
+	}
 }
 
 // pollTick queries integration platforms for recently updated items and
