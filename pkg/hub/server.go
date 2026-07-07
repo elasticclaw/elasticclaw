@@ -92,6 +92,11 @@ type Server struct {
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
+
+	// tickets holds single-use auth tickets for WS/img endpoints (see ticket.go).
+	// Lazily initialized so zero-value Servers in tests keep working.
+	ticketMu sync.Mutex
+	tickets  map[string]authTicket
 }
 
 type clawConn struct {
@@ -283,6 +288,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
+	mux.HandleFunc("/api/auth/ticket", s.handleAuthTicket)               // single-use ticket for WS/img auth (header auth inside handler)
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
@@ -415,7 +421,29 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
+			// Single-use ticket (see ticket.go) — the only supported query-string
+			// auth. Used by WS upgrades and <img src> loads that cannot set headers.
+			if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+				tenantID, githubLogin, ok := s.redeemAuthTicket(ticket)
+				if !ok {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+				if githubLogin != "" {
+					ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+				}
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+		if token == "" {
+			// Deprecated: raw token in the query string leaks into access logs and
+			// URL history. Kept for one release; removal planned for Phase 2.
 			token = r.URL.Query().Get("token")
+			if token != "" {
+				log.Printf("deprecated: token in query (path=%s remote=%s) — use Authorization header or a single-use ticket from POST /api/auth/ticket", r.URL.Path, r.RemoteAddr)
+			}
 		}
 		if token == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -459,8 +487,13 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 		}
 		queryToken := false
 		if token == "" {
+			// Deprecated: raw token in the query string leaks into access logs and
+			// URL history. Kept for one release; removal planned for Phase 2.
 			token = r.URL.Query().Get("token")
 			queryToken = token != ""
+			if queryToken {
+				log.Printf("deprecated: token in query (path=%s remote=%s) — use Authorization header", r.URL.Path, r.RemoteAddr)
+			}
 		}
 		if token == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -6092,17 +6125,38 @@ func remoteWriteFileCommand(dir, name, content string) string {
 // ─── Terminal WebSocket ───────────────────────────────────────────────────────
 
 // handleTerminal proxies a WebSocket connection to an SSH PTY on the claw's VM.
-// Route: GET /api/terminal/{clawID}?token=...
+// Route: GET /api/terminal/{clawID}?ticket=... (single-use ticket from POST /api/auth/ticket)
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
-	// Auth via token query param
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	}
-	tenantID, err := s.tenantByToken(token)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	// Auth: Authorization header, or a single-use ticket (browsers cannot set
+	// headers on WebSocket upgrades). The raw ?token= fallback is deprecated.
+	var tenantID string
+	if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != "" {
+		tid, err := s.tenantByToken(token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID = tid
+	} else if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+		tid, _, ok := s.redeemAuthTicket(ticket)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID = tid
+	} else {
+		// Deprecated: raw token in the query string leaks into access logs and
+		// URL history. Kept for one release; removal planned for Phase 2.
+		token := r.URL.Query().Get("token")
+		if token != "" {
+			log.Printf("deprecated: token in query (path=%s remote=%s) — use a single-use ticket from POST /api/auth/ticket", r.URL.Path, r.RemoteAddr)
+		}
+		tid, err := s.tenantByToken(token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID = tid
 	}
 
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/terminal/")
@@ -6115,7 +6169,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	var sshHost string
 	var sshPort int
 	var sshUser string
-	err = s.db.QueryRow(
+	err := s.db.QueryRow(
 		`SELECT ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
 	).Scan(&sshHost, &sshPort, &sshUser)
