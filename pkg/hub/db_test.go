@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 )
 
 func TestMigrateIsIdempotent(t *testing.T) {
@@ -59,28 +61,6 @@ func TestMigrateFailsOnReadOnlyDatabase(t *testing.T) {
 	}
 }
 
-func TestExecIgnoreDuplicate(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-
-	// Duplicate column errors are swallowed: the column already exists.
-	if err := execIgnoreDuplicate(db, `ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`); err != nil {
-		t.Fatalf("expected duplicate column to be ignored, got: %v", err)
-	}
-
-	// Any other error surfaces with the offending statement in the message.
-	err = execIgnoreDuplicate(db, `ALTER TABLE no_such_table ADD COLUMN x TEXT`)
-	if err == nil {
-		t.Fatal("expected error for missing table, got nil")
-	}
-	if !strings.Contains(err.Error(), "no_such_table") {
-		t.Fatalf("expected error to mention the statement, got: %v", err)
-	}
-}
-
 func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 	t.Run("fresh schema", func(t *testing.T) {
 		db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
@@ -116,7 +96,7 @@ func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 			)`); err != nil {
 			t.Fatalf("create old claws table: %v", err)
 		}
-		if err := migrate(db); err != nil {
+		if err := store.Migrate(db); err != nil {
 			t.Fatalf("migrate old claws table: %v", err)
 		}
 		insertClawUsingTriggerActorDefault(t, db, "claw-default")
