@@ -536,6 +536,11 @@ type HubConfig struct {
 	// Factories can be assigned to a group; unassigned factories use the "global" group.
 	ConcurrencyGroups []*ConcurrencyGroup `yaml:"concurrency_groups,omitempty" json:"concurrencyGroups,omitempty"`
 
+	// ShutdownGrace is how long the hub waits for in-flight HTTP requests to
+	// drain after receiving SIGINT/SIGTERM before forcing exit.
+	// Accepts a Go duration string (e.g. "15s", "1m"). Defaults to 15s.
+	ShutdownGrace string `yaml:"shutdown_grace,omitempty" json:"shutdownGrace,omitempty"`
+
 	// MaxConcurrentClaws limits the number of simultaneously running claws.
 	// DEPRECATED: Use ConcurrencyGroups instead. Kept for backward compat.
 	// When the limit is reached, new factory-created claws enter 'pending' status
