@@ -4,10 +4,36 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
 )
+
+// execIgnoreDuplicate runs stmt (expected to be an ALTER TABLE ... ADD COLUMN)
+// and ignores errors that are expected outcomes of this migration style rather
+// than real failures:
+//   - "duplicate column name": the column already exists — SQLite has no
+//     ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so re-running against an
+//     already-migrated database always hits this.
+//   - "no such table": the table itself doesn't exist yet on a brand-new
+//     database — it gets created later in this same migration by the
+//     CREATE TABLE IF NOT EXISTS block below.
+//
+// Any other error (full disk, lock, permission denied, ...) is returned so the
+// caller can abort boot instead of silently continuing with a broken schema.
+func execIgnoreDuplicate(db *sql.DB, stmt string) error {
+	_, err := db.Exec(stmt)
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "no such table") {
+		return nil
+	}
+	log.Printf("[db] migration failed: %v", err)
+	return fmt.Errorf("migrate: %w", err)
+}
 
 func openDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path+"?_time_format=sqlite&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
@@ -22,46 +48,62 @@ func openDB(path string) (*sql.DB, error) {
 
 func migrate(db *sql.DB) error {
 	// Add columns that may be missing from older databases.
-	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so ignore errors.
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN default_model TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN template_files TEXT NOT NULL DEFAULT '{}'`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_host TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN ssh_user TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_installation_id INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_repos TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_workspace TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN nix INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN docker INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN github_issue_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN shortcut_story_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN jira_issue_id TEXT NOT NULL DEFAULT ''`)
+	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so execIgnoreDuplicate
+	// swallows expected "already migrated" errors; any other error (full disk,
+	// lock, ...) aborts boot instead of being silently swallowed.
+	alterStmts := []string{
+		`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN default_model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN template_files TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE claws ADD COLUMN ssh_host TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claws ADD COLUMN ssh_user TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN github_installation_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claws ADD COLUMN github_repos TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN linear_workspace TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN nix INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claws ADD COLUMN docker INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claws ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE claws ADD COLUMN color TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN linear_issue_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN github_issue_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN shortcut_story_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN jira_issue_id TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range alterStmts {
+		if err := execIgnoreDuplicate(db, stmt); err != nil {
+			return err
+		}
+	}
 	// Migrate existing Shortcut story IDs from linear_issue_id to shortcut_story_id
 	_, _ = db.Exec(`UPDATE claws SET shortcut_story_id = linear_issue_id WHERE linear_issue_id LIKE 'sc-%' AND shortcut_story_id = ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_status TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_diagnostic TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN external_trigger_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restore_checkpoint_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`)
-	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	alterStmts = []string{
+		`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claws ADD COLUMN bootstrap_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN bootstrap_diagnostic TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN factory_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN concurrency_group TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN external_trigger_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN restore_checkpoint_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range alterStmts {
+		if err := execIgnoreDuplicate(db, stmt); err != nil {
+			return err
+		}
+	}
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -164,7 +206,9 @@ func migrate(db *sql.DB) error {
 		heartbeat_at    DATETIME NOT NULL,
 		released_at     DATETIME
 	)`)
-	_, _ = db.Exec(`ALTER TABLE volume_leases ADD COLUMN access_token TEXT NOT NULL DEFAULT ''`)
+	if err := execIgnoreDuplicate(db, `ALTER TABLE volume_leases ADD COLUMN access_token TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
 
