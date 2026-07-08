@@ -1,4 +1,4 @@
-package hub
+package checkpoints
 
 import (
 	"bytes"
@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
-	"nhooyr.io/websocket/wsjson"
 )
 
 const (
@@ -33,6 +33,11 @@ const (
 	checkpointTerminationTimeout = 90 * time.Second
 	maxCheckpointBlobBytes       = 256 << 20
 )
+
+// RequestTimeout is the default timeout for a checkpoint request; exported
+// for the hub call sites that passed checkpointRequestTimeout before the
+// extraction.
+const RequestTimeout = checkpointRequestTimeout
 
 type checkpointSummary struct {
 	ID              string     `json:"id"`
@@ -121,7 +126,7 @@ func checkpointManifestPath(id string) string {
 	return filepath.Join(checkpointsRoot(), "manifests", id+".json")
 }
 
-func (s *Server) checkpointScheduler() {
+func (s *Service) CheckpointScheduler() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -129,101 +134,90 @@ func (s *Server) checkpointScheduler() {
 	}
 }
 
-func (s *Server) requestIdleCheckpoints() {
+func (s *Service) requestIdleCheckpoints() {
 	now := time.Now()
-	s.mu.RLock()
-	items := make([]struct {
-		id string
-		cc *clawConn
-	}, 0, len(s.claws))
-	for id, cc := range s.claws {
-		items = append(items, struct {
-			id string
-			cc *clawConn
-		}{id: id, cc: cc})
-	}
-	s.mu.RUnlock()
+	items := s.deps.ConnectedClaws()
 
 	for _, item := range items {
-		item.cc.mu.RLock()
-		lastUser := item.cc.lastUserMessageAt
-		streaming := !item.cc.streamingStartedAt.IsZero() || item.cc.streamingMsgID != ""
-		inProgress := item.cc.checkpointInProgress
-		item.cc.mu.RUnlock()
+		item.Conn.RLock()
+		lastUser := item.Conn.LastUserMessageAtLocked()
+		streaming := item.Conn.StreamingLocked()
+		inProgress := item.Conn.CheckpointInProgressLocked()
+		item.Conn.RUnlock()
 		if streaming || inProgress || now.Sub(lastUser) < checkpointIdleInterval {
 			continue
 		}
-		if s.hasRecentCheckpoint(item.id, checkpointMinInterval) {
+		if s.HasRecentCheckpoint(item.ID, checkpointMinInterval) {
 			continue
 		}
 		go func(clawID string) {
-			if _, err := s.requestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
-				logf("[checkpoint] idle request for %s failed: %v", shortID(clawID), err)
+			if _, err := s.RequestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
+				logf("[checkpoint] idle request for %s failed: %v", ShortID(clawID), err)
 			}
-		}(item.id)
+		}(item.ID)
 	}
 }
 
-func (s *Server) hasRecentCheckpoint(clawID string, minAge time.Duration) bool {
+func (s *Service) HasRecentCheckpoint(clawID string, minAge time.Duration) bool {
 	var completedAt time.Time
-	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status='ready' ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
+	err := s.deps.DB.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status='ready' ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
 	return err == nil && time.Since(completedAt) < minAge
 }
 
-func (s *Server) hasRecentCheckpointReason(clawID, reason string, minAge time.Duration) bool {
+func (s *Service) hasRecentCheckpointReason(clawID, reason string, minAge time.Duration) bool {
 	var createdAt time.Time
-	err := s.db.QueryRow(`SELECT created_at FROM claw_checkpoints WHERE claw_id=? AND reason=? AND status IN ('creating','ready') ORDER BY created_at DESC LIMIT 1`, clawID, reason).Scan(&createdAt)
+	err := s.deps.DB.QueryRow(`SELECT created_at FROM claw_checkpoints WHERE claw_id=? AND reason=? AND status IN ('creating','ready') ORDER BY created_at DESC LIMIT 1`, clawID, reason).Scan(&createdAt)
 	return err == nil && time.Since(createdAt) < minAge
 }
 
-func (s *Server) requestBootstrapCheckpoint(clawID string) {
+func (s *Service) RequestBootstrapCheckpoint(clawID string) {
 	if s.hasRecentCheckpointReason(clawID, "bootstrap", time.Hour) {
 		return
 	}
-	if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
-		logf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
+	if _, err := s.RequestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
+		logf("[checkpoint] bootstrap request for %s failed: %v", ShortID(clawID), err)
 	}
 }
 
-func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, clawID string) {
-	tenantID := tenantFromCtx(r)
-	if r.Method == http.MethodPost && githubLoginFromContext(r.Context()) != "" {
+func (s *Service) HandleClawCheckpoints(w http.ResponseWriter, r *http.Request, clawID string) {
+	tenantID := s.deps.TenantFromRequest(r)
+	if r.Method == http.MethodPost && s.deps.GithubLoginFromContext(r.Context()) != "" {
 		var tagsJSON string
-		if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
-			writeErr(w, http.StatusNotFound, "not_found", "not found")
+		if err := s.deps.DB.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+			httpserver.WriteErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
 		var tags []string
 		_ = json.Unmarshal([]byte(tagsJSON), &tags)
-		s.mu.RLock()
+		s.deps.Mu.RLock()
 		var accessCfg *types.AccessConfig
-		if s.hubCfg.Auth != nil {
-			accessCfg = s.hubCfg.Auth.Access
+		if s.hubCfg().Auth != nil {
+			accessCfg = s.hubCfg().Auth.Access
 		}
-		s.mu.RUnlock()
-		if !canModifyClaw(accessCfg, githubLoginFromContext(r.Context()), tags) {
-			writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
+		s.deps.Mu.RUnlock()
+		if !s.deps.CanModifyClaw(accessCfg, s.deps.GithubLoginFromContext(r.Context()), tags) {
+			httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) == 4 && parts[1] == "checkpoints" && parts[3] == "restore" {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 			return
 		}
 		if err := s.restoreClawFromCheckpoint(r.Context(), tenantID, clawID, parts[2]); err != nil {
-			writeErr(w, http.StatusConflict, "conflict", err.Error())
+			httpserver.WriteErr(w, http.StatusConflict, "conflict", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
-		jsonOK(w, map[string]string{"status": "restoring", "checkpoint_id": parts[2]})
+		httpserver.JSONOK(w, map[string]string{"status": "restoring", "checkpoint_id": parts[2]})
 		return
 	}
 	if r.Method == http.MethodGet {
-		rows, err := s.db.Query(`SELECT id, claw_id, status, reason, created_by, manifest_sha256, root_tree_sha256, message_tree_sha256, workspace_tree_sha256, message_count, pr_count, repo_count, error, created_at, completed_at FROM claw_checkpoints WHERE tenant_id=? AND claw_id=? ORDER BY created_at DESC`, tenantID, clawID)
+		rows, err := s.deps.DB.Query(`SELECT id, claw_id, status, reason, created_by, manifest_sha256, root_tree_sha256, message_tree_sha256, workspace_tree_sha256, message_count, pr_count, repo_count, error, created_at, completed_at FROM claw_checkpoints WHERE tenant_id=? AND claw_id=? ORDER BY created_at DESC`, tenantID, clawID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal", "db error")
+			httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
 		}
 		defer rows.Close()
@@ -242,7 +236,7 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 		if out == nil {
 			out = []checkpointSummary{}
 		}
-		jsonOK(w, out)
+		httpserver.JSONOK(w, out)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -254,21 +248,21 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 		if reason == "" {
 			reason = "manual"
 		}
-		id, err := s.requestCheckpoint(r.Context(), clawID, reason, "user", false, checkpointRequestTimeout)
+		id, err := s.RequestCheckpoint(r.Context(), clawID, reason, "user", false, checkpointRequestTimeout)
 		if err != nil {
-			writeErr(w, http.StatusConflict, "conflict", err.Error())
+			httpserver.WriteErr(w, http.StatusConflict, "conflict", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
-		jsonOK(w, map[string]string{"id": id, "status": "creating"})
+		httpserver.JSONOK(w, map[string]string{"id": id, "status": "creating"})
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }
 
-func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
+func (s *Service) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
 	var status, manifestPath string
-	if err := s.db.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("checkpoint not found")
 		}
@@ -282,23 +276,18 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	}
 
 	// Preserve the current state if the bridge is still reachable.
-	s.checkpointBeforeTermination(clawID, "pre-reset")
+	s.CheckpointBeforeTermination(clawID, "pre-reset")
 
 	var provider, providerID string
-	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	if cc, ok := s.claws[clawID]; ok {
-		cc.conn.Close(1000, "restoring checkpoint")
-		delete(s.claws, clawID)
-	}
-	s.mu.Unlock()
+	s.deps.CloseClawConn(clawID, 1000, "restoring checkpoint")
 	if providerID != "" {
 		go s.terminateVM(provider, providerID)
 	}
 
-	_, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
+	_, err := s.deps.DB.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
 		checkpointID, checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
@@ -311,27 +300,27 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	return nil
 }
 
-func (s *Server) provisionStoredClaw(clawID string) {
+func (s *Service) provisionStoredClaw(clawID string) {
 	var (
 		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey string
 		nixEnabled, dockerEnabled                                                                                     int
 	)
-	err := s.db.QueryRow(
+	err := s.deps.DB.QueryRow(
 		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key FROM claws WHERE id=?`,
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey)
 	if err != nil {
-		logf("[restore] failed to load claw %s: %v", shortID(clawID), err)
+		logf("[restore] failed to load claw %s: %v", ShortID(clawID), err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
 		return
 	}
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
-	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	provCfg, ok := s.hubCfg.Providers[provider]
-	hubSecrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	clawToken := s.hubCfg().ClawToken
+	provCfg, ok := s.hubCfg().Providers[provider]
+	hubSecrets := s.hubCfg().Secrets
+	s.deps.Mu.RUnlock()
 	if !ok {
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", provider), false)
 		return
@@ -352,7 +341,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 			}
 		}
 	}
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
+	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 	fileBytes := make(map[string][]byte, len(templateFiles))
 	for k, v := range templateFiles {
 		fileBytes[k] = []byte(v)
@@ -394,23 +383,21 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		return
 	}
 	var restoreCheckpointID string
-	_ = s.db.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&restoreCheckpointID)
-	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format) VALUES(?,?,?,?,?,?,?)`,
+	_ = s.deps.DB.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&restoreCheckpointID)
+	_, _ = s.deps.DB.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format) VALUES(?,?,?,?,?,?,?)`,
 		uuid.New().String(), clawID, tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), now(), "pre")
 }
 
-func (s *Server) requestCheckpoint(ctx context.Context, clawID, reason, createdBy string, wait bool, timeout time.Duration) (string, error) {
+func (s *Service) RequestCheckpoint(ctx context.Context, clawID, reason, createdBy string, wait bool, timeout time.Duration) (string, error) {
 	tenantID, provider, providerID, err := s.clawCheckpointIdentity(clawID)
 	if err != nil {
 		return "", err
 	}
 
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
+	cc := s.deps.ClawConn(clawID)
 	if cc == nil {
 		checkpointID := uuid.New().String()
-		if err := s.insertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
+		if err := s.InsertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
 			return "", err
 		}
 		if err := s.completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, "bridge unreachable"); err != nil {
@@ -419,54 +406,52 @@ func (s *Server) requestCheckpoint(ctx context.Context, clawID, reason, createdB
 		return checkpointID, nil
 	}
 
-	cc.mu.Lock()
-	busy := !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
-	if busy || cc.checkpointInProgress {
-		if cc.pendingCheckpointID != "" {
-			stronger := strongerCheckpointReason(cc.pendingCheckpointReason, reason)
-			if stronger != cc.pendingCheckpointReason {
-				cc.pendingCheckpointReason = stronger
-				_, _ = s.db.Exec(`UPDATE claw_checkpoints SET reason=? WHERE id=?`, stronger, cc.pendingCheckpointID)
+	cc.Lock()
+	busy := cc.StreamingLocked()
+	if busy || cc.CheckpointInProgressLocked() {
+		if cc.PendingCheckpointIDLocked() != "" {
+			stronger := strongerCheckpointReason(cc.PendingCheckpointReasonLocked(), reason)
+			if stronger != cc.PendingCheckpointReasonLocked() {
+				cc.SetPendingCheckpointReasonLocked(stronger)
+				_, _ = s.deps.DB.Exec(`UPDATE claw_checkpoints SET reason=? WHERE id=?`, stronger, cc.PendingCheckpointIDLocked())
 			}
-			pendingID := cc.pendingCheckpointID
-			cc.mu.Unlock()
+			pendingID := cc.PendingCheckpointIDLocked()
+			cc.Unlock()
 			if wait {
 				return pendingID, s.waitCheckpointStatus(ctx, pendingID, timeout)
 			}
 			return pendingID, nil
 		}
 		checkpointID := uuid.New().String()
-		if err := s.insertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
-			cc.mu.Unlock()
+		if err := s.InsertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
+			cc.Unlock()
 			return "", err
 		}
-		cc.pendingCheckpointID = checkpointID
-		cc.pendingCheckpointReason = reason
-		cc.pendingCheckpointBy = createdBy
-		cc.mu.Unlock()
+		cc.SetPendingCheckpointLocked(checkpointID, reason, createdBy)
+		cc.Unlock()
 		if wait {
 			return checkpointID, s.waitCheckpointStatus(ctx, checkpointID, timeout)
 		}
 		return checkpointID, nil
 	}
 	checkpointID := uuid.New().String()
-	if err := s.insertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
-		cc.mu.Unlock()
+	if err := s.InsertCheckpoint(checkpointID, tenantID, clawID, reason, createdBy, provider, providerID); err != nil {
+		cc.Unlock()
 		return "", err
 	}
-	cc.checkpointInProgress = true
-	cc.mu.Unlock()
-	return s.dispatchCheckpoint(ctx, cc, clawID, checkpointID, reason, wait, timeout)
+	cc.SetCheckpointInProgressLocked(true)
+	cc.Unlock()
+	return s.DispatchCheckpoint(ctx, cc, clawID, checkpointID, reason, wait, timeout)
 }
 
-func (s *Server) waitCheckpointStatus(ctx context.Context, checkpointID string, timeout time.Duration) error {
+func (s *Service) waitCheckpointStatus(ctx context.Context, checkpointID string, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		var status, msg string
-		_ = s.db.QueryRow(`SELECT status, error FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&status, &msg)
+		_ = s.deps.DB.QueryRow(`SELECT status, error FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&status, &msg)
 		switch status {
 		case "ready":
 			return nil
@@ -484,25 +469,22 @@ func (s *Server) waitCheckpointStatus(ctx context.Context, checkpointID string, 
 	}
 }
 
-func (s *Server) dispatchCheckpoint(ctx context.Context, cc *clawConn, clawID, checkpointID, reason string, wait bool, timeout time.Duration) (string, error) {
+func (s *Service) DispatchCheckpoint(ctx context.Context, cc Conn, clawID, checkpointID, reason string, wait bool, timeout time.Duration) (string, error) {
 	ch := make(chan error, 1)
-	s.checkpointMu.Lock()
-	if s.checkpointWaiters == nil {
-		s.checkpointWaiters = make(map[string]chan error)
-	}
-	s.checkpointWaiters[checkpointID] = ch
-	s.checkpointMu.Unlock()
+	s.deps.CheckpointMu.Lock()
+	s.deps.CheckpointWaiters()[checkpointID] = ch
+	s.deps.CheckpointMu.Unlock()
 
-	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	clawToken := s.hubCfg().ClawToken
+	s.deps.Mu.RUnlock()
 	payload := types.CheckpointCreatePayload{
 		CheckpointID: checkpointID,
 		Reason:       reason,
 		HubURL:       s.clawHubURL(),
 		ClawToken:    clawToken,
 	}
-	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "checkpoint_create", Payload: payload}); err != nil {
+	if err := cc.WriteWS(ctx, types.WSMessage{Type: "checkpoint_create", Payload: payload}); err != nil {
 		s.finishCheckpointRequest(clawID, checkpointID)
 		_ = s.failCheckpoint(checkpointID, err.Error())
 		s.notifyCheckpointWaiter(checkpointID, err)
@@ -522,37 +504,33 @@ func (s *Server) dispatchCheckpoint(ctx context.Context, cc *clawConn, clawID, c
 	}
 }
 
-func (s *Server) drainPendingCheckpoint(clawID string) {
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
+func (s *Service) DrainPendingCheckpoint(clawID string) {
+	cc := s.deps.ClawConn(clawID)
 	if cc == nil {
 		return
 	}
-	cc.mu.Lock()
-	checkpointID := cc.pendingCheckpointID
-	reason := cc.pendingCheckpointReason
-	cc.pendingCheckpointID = ""
-	cc.pendingCheckpointReason = ""
-	cc.pendingCheckpointBy = ""
-	inProgress := cc.checkpointInProgress
+	cc.Lock()
+	checkpointID := cc.PendingCheckpointIDLocked()
+	reason := cc.PendingCheckpointReasonLocked()
+	cc.SetPendingCheckpointLocked("", "", "")
+	inProgress := cc.CheckpointInProgressLocked()
 	if reason != "" && !inProgress {
-		cc.checkpointInProgress = true
+		cc.SetCheckpointInProgressLocked(true)
 	}
-	cc.mu.Unlock()
+	cc.Unlock()
 	if checkpointID == "" || reason == "" || inProgress {
 		return
 	}
 	go func() {
-		if _, err := s.dispatchCheckpoint(context.Background(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
-			logf("[checkpoint] queued request for %s failed: %v", shortID(clawID), err)
+		if _, err := s.DispatchCheckpoint(context.Background(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
+			logf("[checkpoint] queued request for %s failed: %v", ShortID(clawID), err)
 		}
 	}()
 }
 
-func (s *Server) checkpointBeforeTermination(clawID, reason string) {
-	if _, err := s.requestCheckpoint(context.Background(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
-		logf("[checkpoint] termination checkpoint for %s failed: %v", shortID(clawID), err)
+func (s *Service) CheckpointBeforeTermination(clawID, reason string) {
+	if _, err := s.RequestCheckpoint(context.Background(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
+		logf("[checkpoint] termination checkpoint for %s failed: %v", ShortID(clawID), err)
 	}
 }
 
@@ -584,18 +562,18 @@ func strongerCheckpointReason(current, next string) string {
 	return current
 }
 
-func (s *Server) clawCheckpointIdentity(clawID string) (tenantID, provider, providerID string, err error) {
-	err = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &provider, &providerID)
+func (s *Service) clawCheckpointIdentity(clawID string) (tenantID, provider, providerID string, err error) {
+	err = s.deps.DB.QueryRow(`SELECT tenant_id, COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &provider, &providerID)
 	return tenantID, provider, providerID, err
 }
 
-func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provider, providerID string) error {
-	_, err := s.db.Exec(`INSERT INTO claw_checkpoints(id, tenant_id, claw_id, status, reason, created_by, provider, provider_id_at_create, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+func (s *Service) InsertCheckpoint(id, tenantID, clawID, reason, createdBy, provider, providerID string) error {
+	_, err := s.deps.DB.Exec(`INSERT INTO claw_checkpoints(id, tenant_id, claw_id, status, reason, created_by, provider, provider_id_at_create, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 		id, tenantID, clawID, "creating", reason, createdBy, provider, providerID, now())
 	return err
 }
 
-func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/checkpoints/"), "/")
 	if len(parts) != 2 {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -627,7 +605,7 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 				missing = append(missing, f.SHA256)
 			}
 		}
-		jsonOK(w, types.CheckpointPlanAck{Upload: missing})
+		httpserver.JSONOK(w, types.CheckpointPlanAck{Upload: missing})
 	case "complete":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -642,28 +620,28 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			_ = s.failCheckpoint(checkpointID, complete.Error)
 			s.notifyCheckpointWaiter(checkpointID, fmt.Errorf("%s", complete.Error))
 			s.finishCheckpointRequest(clawID, checkpointID)
-			s.drainPendingCheckpoint(clawID)
-			jsonOK(w, map[string]string{"status": "failed"})
+			s.DrainPendingCheckpoint(clawID)
+			httpserver.JSONOK(w, map[string]string{"status": "failed"})
 			return
 		}
 		if err := s.finalizeCheckpoint(checkpointID, tenantID, clawID, complete.RootSHA256); err != nil {
 			_ = s.failCheckpoint(checkpointID, err.Error())
 			s.notifyCheckpointWaiter(checkpointID, err)
 			s.finishCheckpointRequest(clawID, checkpointID)
-			s.drainPendingCheckpoint(clawID)
+			s.DrainPendingCheckpoint(clawID)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.notifyCheckpointWaiter(checkpointID, nil)
 		s.finishCheckpointRequest(clawID, checkpointID)
-		s.drainPendingCheckpoint(clawID)
-		jsonOK(w, map[string]string{"status": "ready"})
+		s.DrainPendingCheckpoint(clawID)
+		httpserver.JSONOK(w, map[string]string{"status": "ready"})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 
-func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -727,7 +705,7 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Request, checkpointID string) (tenantID, clawID string, ok bool) {
+func (s *Service) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Request, checkpointID string) (tenantID, clawID string, ok bool) {
 	token := r.Header.Get("X-Claw-Token")
 	if token == "" {
 		token = r.URL.Query().Get("claw_token")
@@ -737,7 +715,7 @@ func (s *Server) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return "", "", false
 	}
-	err = s.db.QueryRow(`SELECT tenant_id, claw_id FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&tenantID, &clawID)
+	err = s.deps.DB.QueryRow(`SELECT tenant_id, claw_id FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&tenantID, &clawID)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return "", "", false
@@ -753,7 +731,7 @@ func (s *Server) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Reque
 	return tenantID, clawID, true
 }
 
-func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA string) error {
+func (s *Service) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA string) error {
 	files, err := s.filesForTree(rootSHA)
 	if err != nil {
 		return err
@@ -778,12 +756,12 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, completed_at=? WHERE id=?`,
+	_, err = s.deps.DB.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, completed_at=? WHERE id=?`,
 		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs), now(), checkpointID)
 	return err
 }
 
-func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
+func (s *Service) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
 	tenantID, _, _, err := s.clawCheckpointIdentity(clawID)
 	if err != nil {
 		return err
@@ -806,12 +784,12 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, error=?, completed_at=? WHERE id=?`,
+	_, err = s.deps.DB.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, error=?, completed_at=? WHERE id=?`,
 		manifestSHA, path, msgSHA, msgCount, detail, now(), checkpointID)
 	return err
 }
 
-func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
+func (s *Service) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
 	if rootSHA == "" {
 		return nil, nil
 	}
@@ -827,8 +805,8 @@ func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
 	return files, nil
 }
 
-func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, int, time.Time, error) {
-	rows, err := s.db.Query(`SELECT id, role, content, format, created_at FROM messages WHERE claw_id=? AND tenant_id=? ORDER BY created_at ASC`, clawID, tenantID)
+func (s *Service) writeMessageCheckpointBlob(clawID, tenantID string) (string, int, time.Time, error) {
+	rows, err := s.deps.DB.Query(`SELECT id, role, content, format, created_at FROM messages WHERE claw_id=? AND tenant_id=? ORDER BY created_at ASC`, clawID, tenantID)
 	if err != nil {
 		return "", 0, time.Time{}, err
 	}
@@ -863,12 +841,12 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 	return sha, count, cutoff, os.WriteFile(path, buf.Bytes(), 0o640)
 }
 
-func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA string, msgCount int, cutoff time.Time, files []types.CheckpointFile) (*checkpointManifest, error) {
+func (s *Service) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA string, msgCount int, cutoff time.Time, files []types.CheckpointFile) (*checkpointManifest, error) {
 	var row struct {
 		TenantID, Template, Provider, ProviderID, DefaultModel, TemplateFiles, Tags, Color                             string
 		FactoryName, ConcurrencyGroup, LinearIssueID, GitHubIssueID, ShortcutStoryID, ExternalTriggerID, PipelineStage string
 	}
-	err := s.db.QueryRow(`SELECT tenant_id, template, provider, provider_id, default_model, template_files, tags, color, factory_name, concurrency_group, linear_issue_id, github_issue_id, shortcut_story_id, external_trigger_id, pipeline_stage FROM claws WHERE id=?`, clawID).Scan(
+	err := s.deps.DB.QueryRow(`SELECT tenant_id, template, provider, provider_id, default_model, template_files, tags, color, factory_name, concurrency_group, linear_issue_id, github_issue_id, shortcut_story_id, external_trigger_id, pipeline_stage FROM claws WHERE id=?`, clawID).Scan(
 		&row.TenantID, &row.Template, &row.Provider, &row.ProviderID, &row.DefaultModel, &row.TemplateFiles, &row.Tags, &row.Color,
 		&row.FactoryName, &row.ConcurrencyGroup, &row.LinearIssueID, &row.GitHubIssueID, &row.ShortcutStoryID, &row.ExternalTriggerID, &row.PipelineStage,
 	)
@@ -879,7 +857,7 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 	_ = json.Unmarshal([]byte(row.Tags), &tags)
 	reason := ""
 	var createdAt time.Time
-	_ = s.db.QueryRow(`SELECT reason, created_at FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason, &createdAt)
+	_ = s.deps.DB.QueryRow(`SELECT reason, created_at FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason, &createdAt)
 	prs := s.checkpointPRs(clawID)
 	return &checkpointManifest{
 		Schema:       1,
@@ -888,7 +866,7 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 		CreatedAt:    createdAt,
 		Reason:       reason,
 		Hub: checkpointHubManifest{
-			Version:           Version,
+			Version:           s.deps.HubVersion(),
 			Template:          row.Template,
 			TemplateFilesSHA:  shaBytes([]byte(row.TemplateFiles)),
 			DefaultModel:      row.DefaultModel,
@@ -910,8 +888,8 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 	}, nil
 }
 
-func (s *Server) checkpointPRs(clawID string) []checkpointPR {
-	rows, err := s.db.Query(`SELECT repo, pr_number, pr_url, last_ci_sha FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`, clawID)
+func (s *Service) checkpointPRs(clawID string) []checkpointPR {
+	rows, err := s.deps.DB.Query(`SELECT repo, pr_number, pr_url, last_ci_sha FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`, clawID)
 	if err != nil {
 		return nil
 	}
@@ -926,25 +904,25 @@ func (s *Server) checkpointPRs(clawID string) []checkpointPR {
 	return prs
 }
 
-func (s *Server) pendingRestoreCheckpoint(clawID string) string {
+func (s *Service) pendingRestoreCheckpoint(clawID string) string {
 	var checkpointID string
-	_ = s.db.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&checkpointID)
+	_ = s.deps.DB.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&checkpointID)
 	return checkpointID
 }
 
-func (s *Server) markRestoreApplied(clawID, checkpointID string) {
+func (s *Service) markRestoreApplied(clawID, checkpointID string) {
 	if checkpointID == "" {
 		return
 	}
-	_, _ = s.db.Exec(`UPDATE claws SET restore_checkpoint_id='', restored_from_checkpoint_id=? WHERE id=?`, checkpointID, clawID)
+	_, _ = s.deps.DB.Exec(`UPDATE claws SET restore_checkpoint_id='', restored_from_checkpoint_id=? WHERE id=?`, checkpointID, clawID)
 }
 
-func (s *Server) restoreCheckpointFiles(checkpointID string) ([]types.CheckpointFile, error) {
+func (s *Service) restoreCheckpointFiles(checkpointID string) ([]types.CheckpointFile, error) {
 	if checkpointID == "" {
 		return nil, nil
 	}
 	var rootSHA string
-	if err := s.db.QueryRow(`SELECT root_tree_sha256 FROM claw_checkpoints WHERE id=? AND status='ready'`, checkpointID).Scan(&rootSHA); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT root_tree_sha256 FROM claw_checkpoints WHERE id=? AND status='ready'`, checkpointID).Scan(&rootSHA); err != nil {
 		return nil, err
 	}
 	return s.filesForTree(rootSHA)
@@ -963,7 +941,7 @@ func restoreRemotePath(path, home, workspace string) string {
 	}
 }
 
-func (s *Server) restoreCheckpointToDaytona(ctx context.Context, clawID, instanceID string, p *daytonaProvider.Provider) error {
+func (s *Service) RestoreCheckpointToDaytona(ctx context.Context, clawID, instanceID string, p *daytonaProvider.Provider) error {
 	checkpointID := s.pendingRestoreCheckpoint(clawID)
 	if checkpointID == "" {
 		return nil
@@ -999,7 +977,7 @@ func checkpointDaytonaRestoreCommand(remote string, data []byte) string {
 ELASTICCLAW_CHECKPOINT_EOF`, checkpointShellQuote(filepath.Dir(remote)), checkpointShellQuote(remote), encoded)
 }
 
-func (s *Server) restoreCheckpointToExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider) error {
+func (s *Service) RestoreCheckpointToExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider) error {
 	checkpointID := s.pendingRestoreCheckpoint(clawID)
 	if checkpointID == "" {
 		return nil
@@ -1023,7 +1001,7 @@ func (s *Server) restoreCheckpointToExedev(ctx context.Context, clawID, vmName s
 	return nil
 }
 
-func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
+func (s *Service) RestoreCheckpointToSSH(clawID, user, host string) error {
 	checkpointID := s.pendingRestoreCheckpoint(clawID)
 	if checkpointID == "" {
 		return nil
@@ -1035,7 +1013,7 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 	}
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
-		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.identity.PrivateKey)},
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(s.deps.SSHSigner())},
 		HostKeyCallback: s.sshHostKeyCallback(host),
 		Timeout:         30 * time.Second,
 	}
@@ -1077,16 +1055,16 @@ func checkpointShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func (s *Server) failCheckpoint(checkpointID, msg string) error {
-	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=?`, msg, now(), checkpointID)
+func (s *Service) failCheckpoint(checkpointID, msg string) error {
+	_, err := s.deps.DB.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=?`, msg, now(), checkpointID)
 	return err
 }
 
-func (s *Server) notifyCheckpointWaiter(checkpointID string, err error) {
-	s.checkpointMu.Lock()
-	ch := s.checkpointWaiters[checkpointID]
-	delete(s.checkpointWaiters, checkpointID)
-	s.checkpointMu.Unlock()
+func (s *Service) notifyCheckpointWaiter(checkpointID string, err error) {
+	s.deps.CheckpointMu.Lock()
+	ch := s.deps.CheckpointWaiters()[checkpointID]
+	delete(s.deps.CheckpointWaiters(), checkpointID)
+	s.deps.CheckpointMu.Unlock()
 	if ch != nil {
 		select {
 		case ch <- err:
@@ -1095,14 +1073,12 @@ func (s *Server) notifyCheckpointWaiter(checkpointID string, err error) {
 	}
 }
 
-func (s *Server) finishCheckpointRequest(clawID, checkpointID string) {
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
+func (s *Service) finishCheckpointRequest(clawID, checkpointID string) {
+	cc := s.deps.ClawConn(clawID)
 	if cc != nil {
-		cc.mu.Lock()
-		cc.checkpointInProgress = false
-		cc.mu.Unlock()
+		cc.Lock()
+		cc.SetCheckpointInProgressLocked(false)
+		cc.Unlock()
 	}
 }
 
@@ -1119,7 +1095,7 @@ func shaBytes(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func shortID(id string) string {
+func ShortID(id string) string {
 	if len(id) < 8 {
 		return id
 	}

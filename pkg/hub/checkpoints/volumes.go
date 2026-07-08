@@ -1,4 +1,4 @@
-package hub
+package checkpoints
 
 import (
 	"archive/tar"
@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
-	"nhooyr.io/websocket/wsjson"
 )
 
 const (
@@ -29,7 +29,7 @@ const (
 	emptyVolumeArchive = "empty"
 )
 
-type workflowVolumeRuntime struct {
+type WorkflowVolumeRuntime struct {
 	types.WorkflowVolume
 	LeaseID        string `json:"lease_id,omitempty"`
 	AccessToken    string `json:"access_token,omitempty"`
@@ -80,11 +80,11 @@ func parseVolumeSource(tenantID, source string) (repo, tag string, err error) {
 	return repo, tag, nil
 }
 
-func normalizeWorkflowVolumes(tenantID string, workflow *types.WorkflowConfig) ([]workflowVolumeRuntime, error) {
+func NormalizeWorkflowVolumes(tenantID string, workflow *types.WorkflowConfig) ([]WorkflowVolumeRuntime, error) {
 	if workflow == nil || len(workflow.Volumes) == 0 {
 		return nil, nil
 	}
-	out := make([]workflowVolumeRuntime, 0, len(workflow.Volumes))
+	out := make([]WorkflowVolumeRuntime, 0, len(workflow.Volumes))
 	for _, v := range workflow.Volumes {
 		mode := strings.TrimSpace(v.Mode)
 		if mode == "" {
@@ -94,7 +94,7 @@ func normalizeWorkflowVolumes(tenantID string, workflow *types.WorkflowConfig) (
 		if err != nil {
 			return nil, fmt.Errorf("volume %q: %w", v.Name, err)
 		}
-		out = append(out, workflowVolumeRuntime{
+		out = append(out, WorkflowVolumeRuntime{
 			WorkflowVolume: types.WorkflowVolume{
 				Name:   strings.TrimSpace(v.Name),
 				Source: strings.TrimSpace(v.Source),
@@ -108,11 +108,11 @@ func normalizeWorkflowVolumes(tenantID string, workflow *types.WorkflowConfig) (
 	return out, nil
 }
 
-func (s *Server) acquireWorkflowVolumeLeases(ctx context.Context, clawID string, volumes []workflowVolumeRuntime) ([]workflowVolumeRuntime, error) {
+func (s *Service) AcquireWorkflowVolumeLeases(ctx context.Context, clawID string, volumes []WorkflowVolumeRuntime) ([]WorkflowVolumeRuntime, error) {
 	if len(volumes) == 0 {
 		return nil, nil
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := s.deps.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (s *Server) acquireWorkflowVolumeLeases(ctx context.Context, clawID string,
 
 	now := time.Now().UTC()
 	expires := now.Add(volumeLeaseTTL)
-	acquired := make([]workflowVolumeRuntime, 0, len(volumes))
+	acquired := make([]WorkflowVolumeRuntime, 0, len(volumes))
 	for _, volume := range volumes {
 		manifestDigest, err := s.resolveVolumeManifest(ctx, volume.Repo, volume.Tag)
 		if err != nil {
@@ -153,8 +153,8 @@ func (s *Server) acquireWorkflowVolumeLeases(ctx context.Context, clawID string,
 	return acquired, nil
 }
 
-func (s *Server) resolveVolumeManifest(ctx context.Context, repo, tag string) (string, error) {
-	digest, err := s.artifacts.ResolveRef(ctx, repo, tag)
+func (s *Service) resolveVolumeManifest(ctx context.Context, repo, tag string) (string, error) {
+	digest, err := s.artifacts().ResolveRef(ctx, repo, tag)
 	if err == nil {
 		return digest, nil
 	}
@@ -165,7 +165,7 @@ func (s *Server) resolveVolumeManifest(ctx context.Context, repo, tag string) (s
 	return s.createEmptyVolumeManifest(ctx, repo, tag)
 }
 
-func (s *Server) createEmptyVolumeManifest(ctx context.Context, repo, tag string) (string, error) {
+func (s *Service) createEmptyVolumeManifest(ctx context.Context, repo, tag string) (string, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -175,7 +175,7 @@ func (s *Server) createEmptyVolumeManifest(ctx context.Context, repo, tag string
 	if err := gz.Close(); err != nil {
 		return "", err
 	}
-	layerDigest, size, err := s.artifacts.PutBlob(ctx, bytes.NewReader(buf.Bytes()))
+	layerDigest, size, err := s.artifacts().PutBlob(ctx, bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		return "", err
 	}
@@ -194,64 +194,64 @@ func (s *Server) createEmptyVolumeManifest(ctx context.Context, repo, tag string
 	if err != nil {
 		return "", err
 	}
-	manifestDigest, err := s.artifacts.PutManifest(ctx, data)
+	manifestDigest, err := s.artifacts().PutManifest(ctx, data)
 	if err != nil {
 		return "", err
 	}
-	if err := s.artifacts.Tag(ctx, repo, tag, manifestDigest); err != nil {
+	if err := s.artifacts().Tag(ctx, repo, tag, manifestDigest); err != nil {
 		return "", err
 	}
 	return manifestDigest, nil
 }
 
-func (s *Server) releaseWorkflowVolumeLeases(clawID string) {
-	_, _ = s.db.Exec(`UPDATE volume_leases SET released_at=? WHERE claw_id=? AND released_at IS NULL`, time.Now().UTC(), clawID)
+func (s *Service) ReleaseWorkflowVolumeLeases(clawID string) {
+	_, _ = s.deps.DB.Exec(`UPDATE volume_leases SET released_at=? WHERE claw_id=? AND released_at IS NULL`, time.Now().UTC(), clawID)
 }
 
-func (s *Server) heartbeatWorkflowVolumeLeases(clawID string) {
+func (s *Service) HeartbeatWorkflowVolumeLeases(clawID string) {
 	now := time.Now().UTC()
-	_, _ = s.db.Exec(`UPDATE volume_leases SET heartbeat_at=?, expires_at=? WHERE claw_id=? AND released_at IS NULL`, now, now.Add(volumeLeaseTTL), clawID)
+	_, _ = s.deps.DB.Exec(`UPDATE volume_leases SET heartbeat_at=?, expires_at=? WHERE claw_id=? AND released_at IS NULL`, now, now.Add(volumeLeaseTTL), clawID)
 }
 
-func (s *Server) workflowVolumeLeaseActive(leaseID string) bool {
+func (s *Service) workflowVolumeLeaseActive(leaseID string) bool {
 	var active int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM volume_leases WHERE id=? AND released_at IS NULL AND expires_at > ?`, leaseID, time.Now().UTC()).Scan(&active)
+	err := s.deps.DB.QueryRow(`SELECT COUNT(*) FROM volume_leases WHERE id=? AND released_at IS NULL AND expires_at > ?`, leaseID, time.Now().UTC()).Scan(&active)
 	return err == nil && active > 0
 }
 
-func (s *Server) workflowVolumesForClaw(clawID string) ([]workflowVolumeRuntime, error) {
+func (s *Service) workflowVolumesForClaw(clawID string) ([]WorkflowVolumeRuntime, error) {
 	var raw string
-	if err := s.db.QueryRow(`SELECT COALESCE(workflow_volumes,'[]') FROM claws WHERE id=?`, clawID).Scan(&raw); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT COALESCE(workflow_volumes,'[]') FROM claws WHERE id=?`, clawID).Scan(&raw); err != nil {
 		return nil, err
 	}
-	var volumes []workflowVolumeRuntime
+	var volumes []WorkflowVolumeRuntime
 	if err := json.Unmarshal([]byte(raw), &volumes); err != nil {
 		return nil, err
 	}
 	return volumes, nil
 }
 
-func (s *Server) storeWorkflowVolumes(clawID string, volumes []workflowVolumeRuntime) error {
+func (s *Service) StoreWorkflowVolumes(clawID string, volumes []WorkflowVolumeRuntime) error {
 	data, err := json.Marshal(volumes)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claws SET workflow_volumes=? WHERE id=?`, string(data), clawID)
+	_, err = s.deps.DB.Exec(`UPDATE claws SET workflow_volumes=? WHERE id=?`, string(data), clawID)
 	return err
 }
 
-func (s *Server) attachWorkflowVolumes(ctx context.Context, cc *clawConn, clawID string) error {
+func (s *Service) AttachWorkflowVolumes(ctx context.Context, cc Conn, clawID string) error {
 	volumes, err := s.workflowVolumesForClaw(clawID)
 	if err != nil || len(volumes) == 0 {
 		return err
 	}
 	if volumes[0].LeaseID == "" {
-		volumes, err = s.acquireWorkflowVolumeLeases(ctx, clawID, volumes)
+		volumes, err = s.AcquireWorkflowVolumeLeases(ctx, clawID, volumes)
 		if err != nil {
 			return err
 		}
-		if err := s.storeWorkflowVolumes(clawID, volumes); err != nil {
-			s.releaseWorkflowVolumeLeases(clawID)
+		if err := s.StoreWorkflowVolumes(clawID, volumes); err != nil {
+			s.ReleaseWorkflowVolumeLeases(clawID)
 			return err
 		}
 	}
@@ -263,32 +263,29 @@ func (s *Server) attachWorkflowVolumes(ctx context.Context, cc *clawConn, clawID
 	return nil
 }
 
-func (s *Server) dispatchVolumeAttach(ctx context.Context, cc *clawConn, volume workflowVolumeRuntime) error {
+func (s *Service) dispatchVolumeAttach(ctx context.Context, cc Conn, volume WorkflowVolumeRuntime) error {
 	reqID := uuid.New().String()
 	ch := make(chan types.VolumeAttachAck, 1)
-	s.fileAckMu.Lock()
-	if s.volumeAttachWaiters == nil {
-		s.volumeAttachWaiters = make(map[string]chan types.VolumeAttachAck)
-	}
-	s.volumeAttachWaiters[reqID] = ch
-	s.fileAckMu.Unlock()
+	s.deps.FileAckMu.Lock()
+	s.deps.VolumeAttachWaiters()[reqID] = ch
+	s.deps.FileAckMu.Unlock()
 	defer func() {
-		s.fileAckMu.Lock()
-		delete(s.volumeAttachWaiters, reqID)
-		s.fileAckMu.Unlock()
+		s.deps.FileAckMu.Lock()
+		delete(s.deps.VolumeAttachWaiters(), reqID)
+		s.deps.FileAckMu.Unlock()
 	}()
 	payload := types.VolumeAttachPayload{
 		RequestID:  reqID,
 		LeaseID:    volume.LeaseID,
-		ClawID:     cc.id,
+		ClawID:     cc.ID(),
 		LeaseToken: volume.AccessToken,
 		Name:       volume.Name,
 		Mode:       volume.Mode,
 		Mount:      volume.Mount,
 		HubURL:     s.clawHubURL(),
-		ClawToken:  s.hubCfg.ClawToken,
+		ClawToken:  s.hubCfg().ClawToken,
 	}
-	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "volume_attach", Payload: payload}); err != nil {
+	if err := cc.WriteWS(ctx, types.WSMessage{Type: "volume_attach", Payload: payload}); err != nil {
 		return err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, volumeAttachWait)
@@ -304,7 +301,7 @@ func (s *Server) dispatchVolumeAttach(ctx context.Context, cc *clawConn, volume 
 	}
 }
 
-func (s *Server) syncWorkflowVolumes(clawID string) {
+func (s *Service) SyncWorkflowVolumes(clawID string) {
 	volumes, err := s.workflowVolumesForClaw(clawID)
 	if err != nil || len(volumes) == 0 {
 		return
@@ -316,15 +313,13 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 			break
 		}
 	}
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
+	cc := s.deps.ClawConn(clawID)
 	if cc == nil {
 		if hasActiveWritableLease {
 			logf("[volume] sync %s skipped: claw disconnected with writable volume lease; keeping lease until expiry", clawID)
 			return
 		}
-		s.releaseWorkflowVolumeLeases(clawID)
+		s.ReleaseWorkflowVolumeLeases(clawID)
 		return
 	}
 	syncFailed := false
@@ -344,35 +339,32 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 		logf("[volume] sync %s incomplete; keeping writable volume leases until expiry", clawID)
 		return
 	}
-	s.releaseWorkflowVolumeLeases(clawID)
+	s.ReleaseWorkflowVolumeLeases(clawID)
 }
 
-func (s *Server) dispatchVolumeSync(ctx context.Context, cc *clawConn, volume workflowVolumeRuntime) error {
+func (s *Service) dispatchVolumeSync(ctx context.Context, cc Conn, volume WorkflowVolumeRuntime) error {
 	reqID := uuid.New().String()
 	ch := make(chan types.VolumeSyncAck, 1)
-	s.fileAckMu.Lock()
-	if s.volumeSyncWaiters == nil {
-		s.volumeSyncWaiters = make(map[string]chan types.VolumeSyncAck)
-	}
-	s.volumeSyncWaiters[reqID] = ch
-	s.fileAckMu.Unlock()
+	s.deps.FileAckMu.Lock()
+	s.deps.VolumeSyncWaiters()[reqID] = ch
+	s.deps.FileAckMu.Unlock()
 	defer func() {
-		s.fileAckMu.Lock()
-		delete(s.volumeSyncWaiters, reqID)
-		s.fileAckMu.Unlock()
+		s.deps.FileAckMu.Lock()
+		delete(s.deps.VolumeSyncWaiters(), reqID)
+		s.deps.FileAckMu.Unlock()
 	}()
 	payload := types.VolumeSyncPayload{
 		RequestID:  reqID,
 		LeaseID:    volume.LeaseID,
-		ClawID:     cc.id,
+		ClawID:     cc.ID(),
 		LeaseToken: volume.AccessToken,
 		Name:       volume.Name,
 		Mode:       volume.Mode,
 		Mount:      volume.Mount,
 		HubURL:     s.clawHubURL(),
-		ClawToken:  s.hubCfg.ClawToken,
+		ClawToken:  s.hubCfg().ClawToken,
 	}
-	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "volume_sync", Payload: payload}); err != nil {
+	if err := cc.WriteWS(ctx, types.WSMessage{Type: "volume_sync", Payload: payload}); err != nil {
 		return err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, volumeSyncWait)
@@ -388,7 +380,7 @@ func (s *Server) dispatchVolumeSync(ctx context.Context, cc *clawConn, volume wo
 	}
 }
 
-func (s *Server) handleVolumeArchive(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	leaseID := strings.TrimSpace(r.PathValue("lease"))
 	if leaseID == "" {
 		http.Error(w, "lease required", http.StatusBadRequest)
@@ -413,13 +405,13 @@ func (s *Server) handleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
+func (s *Service) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	manifestDigest, err := s.volumeLeaseManifest(r.Context(), leaseID, clawID, accessToken)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	data, err := s.artifacts.GetManifest(r.Context(), manifestDigest)
+	data, err := s.artifacts().GetManifest(r.Context(), manifestDigest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -429,7 +421,7 @@ func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := s.artifacts.GetBlob(r.Context(), manifest.Layer.Digest)
+	body, err := s.artifacts().GetBlob(r.Context(), manifest.Layer.Digest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -439,9 +431,9 @@ func (s *Server) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, 
 	_, _ = io.Copy(w, body)
 }
 
-func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
+func (s *Service) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	var repo, tag, mode, attachedDigest string
-	if err := s.db.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
 		http.Error(w, "active lease not found", http.StatusNotFound)
 		return
 	}
@@ -449,7 +441,7 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "volume is read-only", http.StatusForbidden)
 		return
 	}
-	currentDigest, err := s.artifacts.ResolveRef(r.Context(), repo, tag)
+	currentDigest, err := s.artifacts().ResolveRef(r.Context(), repo, tag)
 	if err != nil {
 		http.Error(w, "resolve volume ref: "+err.Error(), http.StatusConflict)
 		return
@@ -458,7 +450,7 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "volume changed since lease was acquired", http.StatusConflict)
 		return
 	}
-	layerDigest, size, err := s.artifacts.PutBlob(r.Context(), r.Body)
+	layerDigest, size, err := s.artifacts().PutBlob(r.Context(), r.Body)
 	if err != nil {
 		http.Error(w, "store volume layer: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -474,38 +466,38 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		},
 	}
 	data, _ := json.Marshal(manifest)
-	manifestDigest, err := s.artifacts.PutManifest(r.Context(), data)
+	manifestDigest, err := s.artifacts().PutManifest(r.Context(), data)
 	if err != nil {
 		http.Error(w, "store volume manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.artifacts.Tag(r.Context(), repo, tag, manifestDigest); err != nil {
+	if err := s.artifacts().Tag(r.Context(), repo, tag, manifestDigest); err != nil {
 		http.Error(w, "tag volume: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=? AND claw_id=? AND access_token=?`, manifestDigest, time.Now().UTC(), leaseID, clawID, accessToken); err != nil {
+	if _, err := s.deps.DB.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=? AND claw_id=? AND access_token=?`, manifestDigest, time.Now().UTC(), leaseID, clawID, accessToken); err != nil {
 		logfCtx(r.Context(), "[volume] lease %s: failed to update manifest_digest after successful tag: %v", leaseID, err)
 	}
-	jsonOK(w, map[string]string{"manifest_digest": manifestDigest})
+	httpserver.JSONOK(w, map[string]string{"manifest_digest": manifestDigest})
 }
 
-func (s *Server) volumeLeaseManifest(ctx context.Context, leaseID, clawID, accessToken string) (string, error) {
+func (s *Service) volumeLeaseManifest(ctx context.Context, leaseID, clawID, accessToken string) (string, error) {
 	var digest string
-	err := s.db.QueryRowContext(ctx, `SELECT manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&digest)
+	err := s.deps.DB.QueryRowContext(ctx, `SELECT manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&digest)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("active lease not found")
 	}
 	return digest, err
 }
 
-func (s *Server) authenticateClawToken(w http.ResponseWriter, r *http.Request) bool {
+func (s *Service) authenticateClawToken(w http.ResponseWriter, r *http.Request) bool {
 	token := r.Header.Get("X-Claw-Token")
 	if token == "" {
 		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	s.mu.RLock()
-	want := s.hubCfg.ClawToken
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	want := s.hubCfg().ClawToken
+	s.deps.Mu.RUnlock()
 	if token == "" || want == "" || token != want {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false

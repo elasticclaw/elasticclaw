@@ -1,4 +1,4 @@
-package hub
+package checkpoints
 
 import (
 	"encoding/json"
@@ -27,8 +27,8 @@ func hubDataDir() string {
 	return filepath.Join(home, ".elasticclaw")
 }
 
-// hubConfigDir returns the directory containing hub.yaml.
-func hubConfigDir() string {
+// HubConfigDir returns the directory containing hub.yaml.
+func HubConfigDir() string {
 	if env := os.Getenv("ELASTICCLAW_HUB_CONFIG"); env != "" {
 		return filepath.Dir(env)
 	}
@@ -44,23 +44,23 @@ func hubConfigDir() string {
 
 // factoriesDir returns the path to the external factories directory.
 func factoriesDir() string {
-	return filepath.Join(hubConfigDir(), "factories")
+	return filepath.Join(HubConfigDir(), "factories")
 }
 
-// templatesDir returns the path to the external templates directory.
-func templatesDir() string {
-	return filepath.Join(hubConfigDir(), "templates")
+// TemplatesDir returns the path to the external templates directory.
+func TemplatesDir() string {
+	return filepath.Join(HubConfigDir(), "templates")
 }
 
-// workspacesDir returns the path to the external workspaces directory.
-func workspacesDir() string {
-	return filepath.Join(hubConfigDir(), "workspaces")
+// WorkspacesDir returns the path to the external workspaces directory.
+func WorkspacesDir() string {
+	return filepath.Join(HubConfigDir(), "workspaces")
 }
 
 // EnsureExternalDirs creates the factories/ and templates/ directories
 // alongside hub.yaml if they don't exist.
 func EnsureExternalDirs() error {
-	for _, dir := range []string{factoriesDir(), templatesDir(), workspacesDir()} {
+	for _, dir := range []string{factoriesDir(), TemplatesDir(), WorkspacesDir()} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -70,17 +70,17 @@ func EnsureExternalDirs() error {
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
-// loadExternalTemplate reads a template from the external templates directory.
-func loadExternalTemplate(name string) (map[string]string, error) {
-	if err := validateName(name); err != nil {
+// LoadExternalTemplate reads a template from the external templates directory.
+func LoadExternalTemplate(name string) (map[string]string, error) {
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(templatesDir(), name)
+	dir := filepath.Join(TemplatesDir(), name)
 	return config.ReadTemplateFiles(dir)
 }
 
-// validateName rejects names that could cause path traversal.
-func validateName(name string) error {
+// ValidateName rejects names that could cause path traversal.
+func ValidateName(name string) error {
 	if name == "" {
 		return fmt.Errorf("name is empty")
 	}
@@ -93,14 +93,14 @@ func validateName(name string) error {
 	return nil
 }
 
-// saveExternalTemplate writes a template to the external templates directory.
+// SaveExternalTemplate writes a template to the external templates directory.
 // Any files present on disk but absent from the new files map are removed
 // so that deletions are persisted across pushes.
-func saveExternalTemplate(name string, files map[string]string) error {
-	if err := validateName(name); err != nil {
+func SaveExternalTemplate(name string, files map[string]string) error {
+	if err := ValidateName(name); err != nil {
 		return err
 	}
-	dir := filepath.Join(templatesDir(), name)
+	dir := filepath.Join(TemplatesDir(), name)
 	// Remove and recreate the directory so stale files from previous pushes
 	// are not re-read by ReadTemplateFiles (which walks the memory/ subtree).
 	if err := os.RemoveAll(dir); err != nil {
@@ -121,18 +121,18 @@ func saveExternalTemplate(name string, files map[string]string) error {
 	return nil
 }
 
-// deleteExternalTemplate removes a template from the external directory.
-func deleteExternalTemplate(name string) error {
-	if err := validateName(name); err != nil {
+// DeleteExternalTemplate removes a template from the external directory.
+func DeleteExternalTemplate(name string) error {
+	if err := ValidateName(name); err != nil {
 		return err
 	}
-	dir := filepath.Join(templatesDir(), name)
+	dir := filepath.Join(TemplatesDir(), name)
 	return os.RemoveAll(dir)
 }
 
-// listExternalTemplates returns all template names from the external directory.
-func listExternalTemplates() ([]string, error) {
-	entries, err := os.ReadDir(templatesDir())
+// ListExternalTemplates returns all template names from the external directory.
+func ListExternalTemplates() ([]string, error) {
+	entries, err := os.ReadDir(TemplatesDir())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -150,9 +150,9 @@ func listExternalTemplates() ([]string, error) {
 
 // ── Factories ────────────────────────────────────────────────────────────────
 
-// loadExternalFactories scans the factories directory and returns all
+// LoadExternalFactories scans the factories directory and returns all
 // FactoryConfigs with PipelineYAML loaded from disk.
-func loadExternalFactories() ([]*types.FactoryConfig, error) {
+func LoadExternalFactories() ([]*types.FactoryConfig, error) {
 	dir := factoriesDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -167,7 +167,7 @@ func loadExternalFactories() ([]*types.FactoryConfig, error) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		f, err := loadExternalFactory(e.Name())
+		f, err := LoadExternalFactory(e.Name())
 		if err != nil {
 			// Log but don't fail — one bad factory shouldn't break the rest
 			fmt.Fprintf(os.Stderr, "[hub] skip factory %q: %v\n", e.Name(), err)
@@ -178,19 +178,19 @@ func loadExternalFactories() ([]*types.FactoryConfig, error) {
 	return factories, nil
 }
 
-// resolveFactories returns the merged view of in-memory and external-storage
+// ResolveFactories returns the merged view of in-memory and external-storage
 // factories. External takes precedence. Used by polling and webhook handlers
 // so they always see the latest factories regardless of whether they were
 // loaded from hub.yaml or pushed via CLI/API.
-func (s *Server) resolveFactories() []*types.FactoryConfig {
-	external, err := loadExternalFactories()
+func (s *Service) ResolveFactories() []*types.FactoryConfig {
+	external, err := LoadExternalFactories()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[hub] loadExternalFactories: %v\n", err)
 	}
 
-	s.mu.RLock()
-	mem := s.hubCfg.Factories
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	mem := s.hubCfg().Factories
+	s.deps.Mu.RUnlock()
 
 	merged := make(map[string]*types.FactoryConfig, len(mem)+len(external))
 	for _, f := range mem {
@@ -213,9 +213,9 @@ func (s *Server) resolveFactories() []*types.FactoryConfig {
 	return result
 }
 
-// loadExternalFactory reads a single factory from disk.
-func loadExternalFactory(name string) (*types.FactoryConfig, error) {
-	if err := validateName(name); err != nil {
+// LoadExternalFactory reads a single factory from disk.
+func LoadExternalFactory(name string) (*types.FactoryConfig, error) {
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(factoriesDir(), name)
@@ -240,15 +240,15 @@ func loadExternalFactory(name string) (*types.FactoryConfig, error) {
 	return &f, nil
 }
 
-// saveExternalFactory writes a factory to the external directory.
-func saveExternalFactory(f *types.FactoryConfig) error {
+// SaveExternalFactory writes a factory to the external directory.
+func SaveExternalFactory(f *types.FactoryConfig) error {
 	if f == nil || f.Name == "" {
 		return fmt.Errorf("factory name required")
 	}
 	if err := f.Validate(); err != nil {
 		return err
 	}
-	if err := validateName(f.Name); err != nil {
+	if err := ValidateName(f.Name); err != nil {
 		return err
 	}
 
@@ -281,9 +281,9 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 	return nil
 }
 
-// deleteExternalFactory removes a factory directory.
-func deleteExternalFactory(name string) error {
-	if err := validateName(name); err != nil {
+// DeleteExternalFactory removes a factory directory.
+func DeleteExternalFactory(name string) error {
+	if err := ValidateName(name); err != nil {
 		return err
 	}
 	dir := filepath.Join(factoriesDir(), name)
@@ -292,8 +292,8 @@ func deleteExternalFactory(name string) error {
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
-func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
-	entries, err := os.ReadDir(workspacesDir())
+func LoadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
+	entries, err := os.ReadDir(WorkspacesDir())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -306,7 +306,7 @@ func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		workspace, err := loadExternalWorkspace(e.Name())
+		workspace, err := LoadExternalWorkspace(e.Name())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[hub] skip workspace %q: %v\n", e.Name(), err)
 			continue
@@ -316,11 +316,11 @@ func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
 	return workspaces, nil
 }
 
-func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
-	if err := validateName(name); err != nil {
+func LoadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(workspacesDir(), name)
+	dir := filepath.Join(WorkspacesDir(), name)
 	workspace, err := loadExternalWorkspaceConfig(name)
 	if err != nil {
 		return nil, err
@@ -362,7 +362,7 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 }
 
 func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
-	dir := filepath.Join(workspacesDir(), name)
+	dir := filepath.Join(WorkspacesDir(), name)
 	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -380,8 +380,8 @@ func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 	return workspace, nil
 }
 
-func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
-	workspaces, err := loadExternalWorkspaces()
+func LoadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
+	workspaces, err := LoadExternalWorkspaces()
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceC
 	return matched, nil
 }
 
-func filterWorkflowWorkspacesByName(workspaces []*types.WorkspaceConfig, workspaceName string) []*types.WorkspaceConfig {
+func FilterWorkflowWorkspacesByName(workspaces []*types.WorkspaceConfig, workspaceName string) []*types.WorkspaceConfig {
 	workspaceName = strings.TrimSpace(workspaceName)
 	if workspaceName == "" {
 		return workspaces
@@ -418,18 +418,18 @@ func filterWorkflowWorkspacesByName(workspaces []*types.WorkspaceConfig, workspa
 	return filtered
 }
 
-func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
+func SaveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 	if workspace == nil || workspace.Name == "" {
 		return fmt.Errorf("workspace name required")
 	}
-	if err := validateName(workspace.Name); err != nil {
+	if err := ValidateName(workspace.Name); err != nil {
 		return err
 	}
 	if err := workspace.Validate(); err != nil {
 		return err
 	}
 
-	dir := filepath.Join(workspacesDir(), workspace.Name)
+	dir := filepath.Join(WorkspacesDir(), workspace.Name)
 	workflowDir := filepath.Join(dir, "workflows")
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
@@ -481,14 +481,14 @@ func removeWorkspaceAuthoredFiles(dir string) error {
 	return nil
 }
 
-func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConfig) error {
-	if err := validateName(workspaceName); err != nil {
+func SaveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConfig) error {
+	if err := ValidateName(workspaceName); err != nil {
 		return err
 	}
 	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
 		return err
 	}
-	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	workflowDir := filepath.Join(WorkspacesDir(), workspaceName, "workflows")
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
 	}
@@ -496,7 +496,7 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		if workflow == nil {
 			continue
 		}
-		if err := validateName(workflow.Name); err != nil {
+		if err := ValidateName(workflow.Name); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
 		}
 		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
@@ -616,11 +616,11 @@ func appendYAMLMapEntry(root *yaml.Node, key string, value interface{}) error {
 	return nil
 }
 
-func deleteExternalWorkspace(name string) error {
-	if err := validateName(name); err != nil {
+func DeleteExternalWorkspace(name string) error {
+	if err := ValidateName(name); err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(workspacesDir(), name))
+	return os.RemoveAll(filepath.Join(WorkspacesDir(), name))
 }
 
 // ── Migration ────────────────────────────────────────────────────────────────
@@ -643,8 +643,8 @@ func MarkMigratedV2() error {
 
 // MigrateLegacyTemplates migrates templates from the SQLite hub_templates table
 // to the external templates/ directory, then drops the legacy table.
-func (s *Server) MigrateLegacyTemplates() error {
-	rows, err := s.db.Query(`SELECT name, files FROM hub_templates`)
+func (s *Service) MigrateLegacyTemplates() error {
+	rows, err := s.deps.DB.Query(`SELECT name, files FROM hub_templates`)
 	if err != nil {
 		return fmt.Errorf("query hub_templates: %w", err)
 	}
@@ -663,7 +663,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: parse files JSON: %v", name, err))
 			continue
 		}
-		if err := saveExternalTemplate(name, files); err != nil {
+		if err := SaveExternalTemplate(name, files); err != nil {
 			migrationErrs = append(migrationErrs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
@@ -679,7 +679,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 
 	// Drop legacy table so future runs never see it
 	if migrated > 0 {
-		if _, err := s.db.Exec(`DROP TABLE IF EXISTS hub_templates`); err != nil {
+		if _, err := s.deps.DB.Exec(`DROP TABLE IF EXISTS hub_templates`); err != nil {
 			return fmt.Errorf("drop hub_templates: %w", err)
 		}
 		logf("[hub] dropped legacy hub_templates table")
@@ -696,7 +696,7 @@ func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
 		if f == nil {
 			continue
 		}
-		if err := saveExternalFactory(f); err != nil {
+		if err := SaveExternalFactory(f); err != nil {
 			fmt.Fprintf(os.Stderr, "[hub] migrate factory %q: %v\n", f.Name, err)
 			continue
 		}
