@@ -51,6 +51,7 @@ type WorkflowView struct {
 	SecretRefs           map[string]string      `json:"secretRefs,omitempty"`
 	Volumes              []types.WorkflowVolume `json:"volumes,omitempty"`
 	Inputs               []types.FactoryInput   `json:"inputs,omitempty"`
+	RawConfig            string                 `json:"rawConfig,omitempty"`
 }
 
 func (s *Server) handleWorkspacesList(w http.ResponseWriter, _ *http.Request) {
@@ -501,6 +502,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		SecretRefs:           cloneStringMap(workflow.SecretRefs),
 		Volumes:              append([]types.WorkflowVolume(nil), workflow.Volumes...),
 		Inputs:               append([]types.FactoryInput(nil), workflow.Inputs...),
+		RawConfig:            workflow.RawConfig,
 	}
 }
 
