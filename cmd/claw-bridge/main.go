@@ -2309,6 +2309,47 @@ func repoDirectoryName(repo string) string {
 	return strings.TrimSuffix(name, ".git")
 }
 
+func dockerGitHubCredentialHelperScript(tokenEndpoint string) string {
+	return fmt.Sprintf(`set -euo pipefail
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required to clone configured repositories" >&2
+  exit 1
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required to refresh GitHub credentials" >&2
+  exit 1
+fi
+if ! command -v sed >/dev/null 2>&1; then
+  echo "sed is required to parse GitHub credential responses" >&2
+  exit 1
+fi
+tmp_helper="$(mktemp)"
+cat > "$tmp_helper" << 'CREDEOF'
+#!/bin/sh
+set -eu
+claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
+if [ -z "$claw_token" ]; then
+  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
+  exit 1
+fi
+response="$(curl -sf --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
+token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$token" ]; then
+  echo "GitHub token response did not include token" >&2
+  exit 1
+fi
+printf 'protocol=https\n'
+printf 'host=github.com\n'
+printf 'username=x-access-token\n'
+printf 'password=%%s\n' "$token"
+CREDEOF
+sudo install -m 0755 "$tmp_helper" /usr/local/bin/elasticclaw-git-credentials
+rm -f "$tmp_helper"
+git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
+`, shellQuote(tokenEndpoint))
+}
+
 func installDockerGitHubCredentialHelper() error {
 	repos, err := configuredGitHubRepos()
 	if err != nil {
@@ -2323,30 +2364,32 @@ func installDockerGitHubCredentialHelper() error {
 	if hubURL == "" || clawID == "" || clawToken == "" {
 		return fmt.Errorf("GitHub repositories configured but hub URL, claw ID, or claw token is missing")
 	}
-	tokenURL := hubURL + "/api/github/token/" + url.PathEscape(clawID) + "?claw_token=" + url.QueryEscape(clawToken)
-	script := fmt.Sprintf(`set -euo pipefail
-if ! command -v git >/dev/null 2>&1; then
-  echo "git is required to clone configured repositories" >&2
-  exit 1
-fi
-sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
-#!/bin/sh
-response="$(curl -sf --max-time 35 %s)"
-token="$(printf '%%s' "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")"
-printf 'protocol=https\n'
-printf 'host=github.com\n'
-printf 'username=x-access-token\n'
-printf 'password=%%s\n' "$token"
-CREDEOF
-sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
-git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
-git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
-`, shellQuote(tokenURL))
+	script := dockerGitHubCredentialHelperScript(hubURL + "/api/github/token/" + url.PathEscape(clawID))
 	if err := runShell(script); err != nil {
 		return fmt.Errorf("install GitHub credential helper: %w", err)
 	}
 	log.Printf("[bootstrap] GitHub credential helper installed for %d configured repositories", len(repos))
 	return nil
+}
+
+func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("export GIT_TERMINAL_PROMPT=0\n")
+	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
+	b.WriteString("git config --global --get credential.helper >/dev/null\n")
+	for _, repo := range repos {
+		dir := repoDirectoryName(repo.Repo)
+		cloneURL := "https://github.com/" + repo.Repo + ".git"
+		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
+		fmt.Fprintf(&b, "if [ ! -d %s ]; then git clone %s %s; else git -C %s remote set-url origin %s || true; git -C %s fetch origin; branch=\"$(git -C %s symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"; if [ -z \"$branch\" ]; then branch=\"$(git -C %s rev-parse --abbrev-ref HEAD)\"; fi; git -C %s reset --hard \"origin/$branch\"; fi\n",
+			shellQuote(dir), shellQuote(cloneURL), shellQuote(dir), shellQuote(dir), shellQuote(cloneURL), shellQuote(dir), shellQuote(dir), shellQuote(dir), shellQuote(dir))
+		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
+	}
+	return b.String()
 }
 
 func cloneConfiguredGitHubRepos() error {
@@ -2365,20 +2408,7 @@ func cloneConfiguredGitHubRepos() error {
 	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}
-	var b strings.Builder
-	b.WriteString("set -euo pipefail\n")
-	b.WriteString("export GIT_TERMINAL_PROMPT=0\n")
-	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
-	b.WriteString("git config --global --get credential.helper >/dev/null\n")
-	for _, repo := range repos {
-		dir := repoDirectoryName(repo.Repo)
-		cloneURL := "https://github.com/" + repo.Repo + ".git"
-		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
-		fmt.Fprintf(&b, "if [ ! -d %s ]; then git clone %s %s; else git -C %s remote set-url origin %s || true; git -C %s pull --ff-only; fi\n",
-			shellQuote(dir), shellQuote(cloneURL), shellQuote(dir), shellQuote(dir), shellQuote(cloneURL), shellQuote(dir))
-		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
-	}
-	if err := runShell(b.String()); err != nil {
+	if err := runShell(dockerGitHubCloneScript(workspaceDir, repos)); err != nil {
 		return fmt.Errorf("clone configured repositories: %w", err)
 	}
 	log.Printf("[bootstrap] cloned or updated %d configured repositories", len(repos))

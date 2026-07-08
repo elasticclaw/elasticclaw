@@ -197,6 +197,37 @@ func TestConfiguredGitHubReposParsesDockerBootstrapEnv(t *testing.T) {
 	}
 }
 
+func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T) {
+	script := dockerGitHubCredentialHelperScript("https://factory.example/api/github/token/claw-1")
+
+	if strings.Contains(script, "secret-claw-token") {
+		t.Fatalf("helper script persisted claw token:\n%s", script)
+	}
+	if strings.Contains(script, "python3") {
+		t.Fatalf("helper script should not depend on python3:\n%s", script)
+	}
+	if !strings.Contains(script, `ELASTICCLAW_CLAW_TOKEN`) {
+		t.Fatalf("helper script should read claw token from runtime environment:\n%s", script)
+	}
+	if !strings.Contains(script, `--data-urlencode "claw_token=$claw_token"`) {
+		t.Fatalf("helper script should URL-encode claw token at runtime:\n%s", script)
+	}
+}
+
+func TestDockerGitHubCloneScriptResetsDivergedRepos(t *testing.T) {
+	script := dockerGitHubCloneScript("/home/node/.openclaw/workspace", []bootstrapRepoAccess{{
+		Repo:        "elasticclaw/elasticclaw",
+		Permissions: "write",
+	}})
+
+	if strings.Contains(script, "pull --ff-only") {
+		t.Fatalf("clone script should not use pull --ff-only:\n%s", script)
+	}
+	if !strings.Contains(script, "fetch origin") || !strings.Contains(script, `reset --hard "origin/$branch"`) {
+		t.Fatalf("clone script should fetch and hard reset existing repos:\n%s", script)
+	}
+}
+
 func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
 	tests := []struct {
 		name string
