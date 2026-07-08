@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/install"
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
 	"github.com/spf13/cobra"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -102,12 +103,19 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	clawToken := randomHex32()
 
+	// Master key for encrypting secrets at rest in hub.yaml (AES-256-GCM).
+	masterKey, err := secrets.NewMasterKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate secrets master key: %w", err)
+	}
+
 	params := install.Params{
 		Domain:     installDomain,
 		Version:    version,
 		Token:      token,
 		ClawToken:  clawToken,
 		UIPassword: uiToken,
+		MasterKey:  masterKey,
 	}
 
 	// ── Preflight: DNS check (skipped with --skip-caddy) ─────────────────────
@@ -153,6 +161,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		script string
 	}{
 		{"Installing hub binary", installBinaryScript},
+		{"Writing secrets master key", install.ScriptWriteMasterKeyEnv(masterKey, useSudo)},
 		{"Writing hub config", install.ScriptWriteConfig(params, useSudo)},
 		{"Installing systemd service", install.ScriptInstallSystemd(useSudo)},
 	}

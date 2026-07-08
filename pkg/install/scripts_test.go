@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/install"
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
 )
 
 var testParams = install.Params{
@@ -51,6 +52,40 @@ func TestHubConfig_DoesNotContainOtherTokens(t *testing.T) {
 	}
 }
 
+func TestHubConfig_EncryptsSecretsWithMasterKey(t *testing.T) {
+	masterKey, err := secrets.NewMasterKey()
+	if err != nil {
+		t.Fatalf("NewMasterKey: %v", err)
+	}
+	p := testParams
+	p.MasterKey = masterKey
+
+	cfg := install.HubConfig(p)
+	assertContains(t, cfg, "hub.example.com", "domain stays plaintext")
+	assertContains(t, cfg, secrets.EnvelopePrefix, "encryption envelope present")
+	for _, secret := range []string{"test-hub-token", "test-claw-token", "test-ui-password"} {
+		if strings.Contains(cfg, secret) {
+			t.Errorf("hub.yaml leaks plaintext secret %q:\n%s", secret, cfg)
+		}
+	}
+}
+
+func TestMasterKeyEnvFile(t *testing.T) {
+	content := install.MasterKeyEnvFile("dGVzdA==")
+	if content != "ELASTICCLAW_MASTER_KEY=dGVzdA==\n" {
+		t.Fatalf("MasterKeyEnvFile = %q", content)
+	}
+}
+
+func TestScriptWriteMasterKeyEnv(t *testing.T) {
+	s := install.ScriptWriteMasterKeyEnv("dGVzdA==", true)
+	assertContains(t, s, "umask 077", "restrict env file permissions")
+	assertContains(t, s, "ELASTICCLAW_MASTER_KEY=dGVzdA==", "master key embedded")
+	assertContains(t, s, "/etc/elasticclaw/master.env", "env file path")
+	assertContains(t, s, "chmod 600", "tighten env file mode")
+	assertContains(t, s, "sudo ", "sudo prefix")
+}
+
 // ── SystemdUnit ───────────────────────────────────────────────────────────────
 
 func TestSystemdUnit(t *testing.T) {
@@ -60,6 +95,7 @@ func TestSystemdUnit(t *testing.T) {
 	assertContains(t, unit, "[Install]", "Install section")
 	assertContains(t, unit, "/usr/local/bin/elasticclaw hub", "ExecStart command")
 	assertContains(t, unit, "Restart=always", "Restart policy")
+	assertContains(t, unit, "EnvironmentFile=-/etc/elasticclaw/master.env", "master key environment file")
 }
 
 // ── Caddyfile ─────────────────────────────────────────────────────────────────
@@ -156,6 +192,7 @@ func TestScripts_Shellcheck(t *testing.T) {
 	scripts := map[string]string{
 		"install_binary":  install.ScriptInstallBinary("v0.0.3", true),
 		"write_config":    install.ScriptWriteConfig(testParams, true),
+		"write_masterkey": install.ScriptWriteMasterKeyEnv("dGVzdA==", true),
 		"install_systemd": install.ScriptInstallSystemd(true),
 		"install_caddy":   install.ScriptInstallCaddy(true),
 		"write_caddyfile": install.ScriptWriteCaddyfile("hub.example.com", true),

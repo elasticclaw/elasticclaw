@@ -3,7 +3,11 @@
 // All functions are side-effect free and easily testable.
 package install
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
+)
 
 // Params holds all inputs needed to generate install scripts.
 type Params struct {
@@ -12,6 +16,10 @@ type Params struct {
 	Token      string
 	ClawToken  string
 	UIPassword string
+	// MasterKey is the base64-encoded 32-byte secrets master key. When set,
+	// sensitive values in the generated hub.yaml are written as enc:v1:
+	// AES-256-GCM envelopes instead of plaintext.
+	MasterKey string
 }
 
 // HubBinaryURL returns the GitHub releases download URL for the hub binary.
@@ -23,14 +31,58 @@ func HubBinaryURL(version string) string {
 }
 
 // HubConfig returns the hub.yaml config file content.
+// When p.MasterKey is set, token, claw_token, and ui_password are stored
+// encrypted so a fresh install's hub.yaml contains no cleartext secret.
 func HubConfig(p Params) string {
+	token, clawToken, uiPassword := p.Token, p.ClawToken, p.UIPassword
+	if p.MasterKey != "" {
+		if key, err := secrets.ParseMasterKey(p.MasterKey); err == nil {
+			token = encryptOrPlaintext(key, token)
+			clawToken = encryptOrPlaintext(key, clawToken)
+			uiPassword = encryptOrPlaintext(key, uiPassword)
+		}
+	}
 	return fmt.Sprintf(`url: https://%s
 public_url: https://%s
 token: %s
 claw_token: %s
 ui_password: %s
 address: :8080
-`, p.Domain, p.Domain, p.Token, p.ClawToken, p.UIPassword)
+`, p.Domain, p.Domain, token, clawToken, uiPassword)
+}
+
+// encryptOrPlaintext encrypts v, falling back to the plaintext value if
+// encryption fails (the hub then migrates it transparently on the next save).
+func encryptOrPlaintext(key []byte, v string) string {
+	enc, err := secrets.Encrypt(key, v)
+	if err != nil {
+		return v
+	}
+	return enc
+}
+
+// MasterKeyEnvFilePath is where the installer writes the systemd
+// EnvironmentFile that carries the secrets master key.
+const MasterKeyEnvFilePath = "/etc/elasticclaw/master.env"
+
+// MasterKeyEnvFile returns the systemd EnvironmentFile content carrying the
+// secrets master key.
+func MasterKeyEnvFile(masterKey string) string {
+	return fmt.Sprintf("%s=%s\n", secrets.MasterKeyEnvVar, masterKey)
+}
+
+// ScriptWriteMasterKeyEnv returns the shell script that writes the master key
+// EnvironmentFile (0600) referenced by the systemd unit. The file is always
+// overwritten together with hub.yaml so the key on disk matches the envelopes
+// in the freshly written config.
+func ScriptWriteMasterKeyEnv(masterKey string, useSudo bool) string {
+	sudo := sudoPrefix(useSudo)
+	return fmt.Sprintf(`umask 077
+cat > /tmp/master.env << 'KEYEOF'
+%sKEYEOF
+%s mkdir -p /etc/elasticclaw
+%s mv /tmp/master.env %q
+%s chmod 600 %q`, MasterKeyEnvFile(masterKey), sudo, sudo, MasterKeyEnvFilePath, sudo, MasterKeyEnvFilePath)
 }
 
 // SystemdUnit returns the systemd unit file for the hub service.
@@ -42,6 +94,7 @@ After=network.target
 [Service]
 Type=simple
 Environment=HOME=/root
+EnvironmentFile=-/etc/elasticclaw/master.env
 ExecStart=/usr/local/bin/elasticclaw hub
 Restart=always
 RestartSec=5
