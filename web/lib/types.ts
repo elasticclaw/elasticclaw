@@ -1,3 +1,32 @@
+import type { components } from "./gen/api"
+
+// ─── Generated wire types (single source: api/openapi.yaml) ─────────────────
+// Raw API types are derived from the generated OpenAPI contract. Regenerate
+// with `make gen`. Presentation types (Claw, Message, ...) stay hand-written
+// and are produced from the wire types by lib/mappers.ts.
+
+/** Wire status enum as emitted by the hub (API + WebSocket). */
+export type ApiClawStatus = components["schemas"]["ClawStatus"]
+
+export type ApiClaw = components["schemas"]["Claw"]
+export type ApiMessage = components["schemas"]["Message"]
+export type CreateClawRequest = components["schemas"]["CreateClawRequest"]
+
+export type TaskRunAnalyticsSummary = components["schemas"]["TaskRunAnalyticsSummary"]
+export type TaskRunSummary = components["schemas"]["TaskRunSummary"]
+export type TaskRunsResponse = components["schemas"]["TaskRunsResponse"]
+export type TaskRunAttempt = components["schemas"]["TaskRunAttempt"]
+export type TaskRunEvent = components["schemas"]["TaskRunEvent"]
+export type TaskRunPR = components["schemas"]["TaskRunPR"]
+export type TaskRunFilterOptions = components["schemas"]["TaskRunFilterOptions"]
+
+// ─── Presentation types ──────────────────────────────────────────────────────
+
+/**
+ * UI status of a claw. Narrower than ApiClawStatus: pending/provisioning/
+ * starting all render as "provisioning" (spinner) and deleted claws are
+ * filtered out of the list. See mapApiStatus in lib/mappers.ts.
+ */
 export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "error"
 
 export interface Claw {
@@ -59,44 +88,6 @@ export interface AgentActivity {
   error?: string
 }
 
-// Raw API types
-export interface ApiClaw {
-  id: string
-  name: string
-  template: string
-  status: "connected" | "offline" | "provisioning" | "starting" | "error" | "idle"
-  last_seen: string
-  created_at: string
-  tenant_id: string
-  context_usage?: number
-  tags?: string[]
-  color?: string
-  ssh_host?: string
-  ssh_port?: number
-  ssh_user?: string
-  bootstrap_status?: string
-  github_issue_id?: string
-  github_issue_url?: string
-}
-
-export interface ApiMessage {
-  id: string
-  claw_id: string
-  tenant_id: string
-  role: "user" | "claw" | "hub" | "activity" | "activity_summary"
-  content: string
-  format?: string
-  created_at: string
-}
-
-export interface CreateClawRequest {
-  name: string
-  template: string
-  provider: string
-  default_model?: string
-  files?: string[]
-}
-
 export interface TaskRunAnalyticsFilters {
   status?: string
   ownerType?: string
@@ -116,140 +107,6 @@ export interface TaskRunAnalyticsFilters {
   to?: string
   limit?: number
   cursor?: string
-}
-
-export interface TaskRunAnalyticsSummary {
-  totalRuns: number
-  byStatus: Record<string, number>
-  warningBreakdown: Record<string, number>
-  failureBreakdown: Record<string, number>
-  humanInteractions: number
-  prCounts: {
-    total: number
-    open: number
-    merged: number
-    closed: number
-  }
-}
-
-export interface TaskRunSummary {
-  runId: string
-  initialAttemptId: string
-  currentAttemptId: string
-  status: string
-  phase: string
-  attemptCount: number
-  ownerType: string
-  workspaceName: string
-  workflowName: string
-  factoryName: string
-  ownerId: string
-  ownerDisplayName: string
-  runKind: string
-  integration: string
-  integrationWorkspace: string
-  issueId: string | null
-  clawId: string
-  model: string | null
-  llmKey: string
-  repo: string | null
-  primaryPrUrl: string | null
-  prCount: number
-  openPrCount: number
-  mergedPrCount: number
-  closedPrCount: number
-  warningTypes: string[]
-  failureType: string | null
-  humanInteractionCount: number
-  startedAt: number
-  queuedAt: number
-  provisionStartedAt: number
-  agentStartedAt: number
-  prOpenedAt: number
-  mergedAt: number
-  finishedAt: number
-  timeoutAt: number
-  lastEventAt: number
-  materializedAt: number
-  updatedAt: number
-  analyticsEnabled: boolean
-  requiresPr: boolean
-  excludedReason: string | null
-}
-
-export interface TaskRunsResponse {
-  runs: TaskRunSummary[]
-  nextCursor?: string
-  limit: number
-}
-
-export interface TaskRunAttempt {
-  id: string
-  attemptId: string
-  attemptNumber: number
-  triggerId: string
-  clawId: string
-  status: string
-  failureType: string | null
-  startedAt: number
-  finishedAt: number
-  createdAt: number
-  updatedAt: number
-}
-
-export interface TaskRunEvent {
-  id: string
-  attemptId: string
-  eventKey: string
-  source: string
-  sourceEventId: string
-  sourceDeliveryId: string
-  eventType: string
-  eventTime: number
-  observedAt: number
-  actorType: string
-  actorId: string
-  actorLogin: string
-  actorDisplayName: string
-  interactionRole: string
-  targetType: string
-  targetId: string
-  targetUrl: string
-  warningType: string
-  failureType: string
-  detail: Record<string, unknown>
-  createdAt: number
-}
-
-export interface TaskRunPR {
-  id: string
-  repo: string
-  prNumber: number
-  url: string
-  headSha: string
-  headBranch: string
-  lastAgentHeadSha: string
-  baseBranch: string
-  state: string
-  merged: boolean
-  openedAt: number
-  closedAt: number
-  mergedAt: number
-  mergedByLogin: string
-  createdAt: number
-  updatedAt: number
-}
-
-export interface TaskRunFilterOptions {
-  workspaces: string[]
-  workflows: string[]
-  factories: string[]
-  integrations: string[]
-  repos: string[]
-  models: string[]
-  statuses: string[]
-  warningTypes: string[]
-  failureTypes: string[]
 }
 
 export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "unknown"

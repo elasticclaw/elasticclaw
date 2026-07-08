@@ -13,7 +13,7 @@ import {
   resolveToken,
   isConfigured,
 } from "@/lib/api"
-import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
+import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime, isDeletedClaw } from "@/lib/mappers"
 import { isTerminalAssistantMessage } from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
@@ -219,7 +219,9 @@ export function useHub(selectedClawId: string | null): HubState {
   const mergeClaws = useCallback((apiClaws: ApiClaw[]) => {
     setClaws((prev) => {
       const prevMap = new Map(prev.map((c) => [c.id, c]))
-      const mapped: Claw[] = apiClaws.map((ac) => {
+      // Deleted claws never render — the API filters them from list
+      // responses, but a stale cache or WS race could still surface one.
+      const mapped: Claw[] = apiClaws.filter((ac) => !isDeletedClaw(ac)).map((ac) => {
         const existing = prevMap.get(ac.id)
         return mapApiClaw(ac, {
           unreadCount: existing?.unreadCount ?? 0,
@@ -593,7 +595,7 @@ export function useHub(selectedClawId: string | null): HubState {
   const createClaw = useCallback(async (req: { name: string; template: string }) => {
     const apiClaw = await apiCreateClaw({
       name: req.name,
-      template: req.template,
+      template_name: req.template,
       provider: "replicated",
     })
     const claw = mapApiClaw(apiClaw, { pinned: false, unreadCount: 0, isStreaming: false })

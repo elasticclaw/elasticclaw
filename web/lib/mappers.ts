@@ -1,4 +1,28 @@
-import type { ApiClaw, ApiMessage, Claw, Message, ClawStatus } from "./types"
+import type { ApiClaw, ApiClawStatus, ApiMessage, Claw, Message, ClawStatus } from "./types"
+import { assertNever } from "./utils"
+
+/**
+ * Every wire status the hub can emit, kept in sync with the generated enum:
+ * the two type assertions below fail to compile if the list and the generated
+ * ClawStatus union ever diverge.
+ */
+export const API_CLAW_STATUSES = [
+  "pending",
+  "provisioning",
+  "starting",
+  "connected",
+  "idle",
+  "offline",
+  "error",
+  "deleted",
+] as const satisfies readonly ApiClawStatus[]
+
+// Compile-time check: API_CLAW_STATUSES covers the full generated enum
+// (the type argument must be `never`, i.e. no status may be missing).
+type AssertEmpty<T extends never> = T
+type _MissingApiClawStatus = AssertEmpty<
+  Exclude<ApiClawStatus, (typeof API_CLAW_STATUSES)[number]>
+>
 
 export const CLAW_COLORS = [
   "slate", "red", "orange", "amber", "lime", "green", "emerald", "teal",
@@ -74,20 +98,38 @@ export function computeUptime(apiClaw: ApiClaw): number {
   }
 }
 
-export function mapApiStatus(status: ApiClaw["status"]): ClawStatus {
+/**
+ * Map a wire status to its UI presentation. Exhaustive over the generated
+ * enum: adding a status to api/openapi.yaml breaks this build until the
+ * presentation is defined here.
+ */
+export function mapApiStatus(status: ApiClawStatus): ClawStatus {
   switch (status) {
     case "connected":
       return "connected"
     case "idle":
       return "idle"
+    case "pending":
     case "provisioning":
     case "starting":
+      // Pre-connection states all render as provisioning (spinner).
       return "provisioning"
     case "error":
       return "error"
-    default:
+    case "offline":
       return "offline"
+    case "deleted":
+      // Deleted claws are filtered out of lists (see isDeletedClaw); if one
+      // slips through a stale payload, render it as offline.
+      return "offline"
+    default:
+      return assertNever(status)
   }
+}
+
+/** Deleted claws must be filtered out of the UI, never rendered. */
+export function isDeletedClaw(apiClaw: Pick<ApiClaw, "status">): boolean {
+  return apiClaw.status === "deleted"
 }
 
 export function mapApiClaw(
