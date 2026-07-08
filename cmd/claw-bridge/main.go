@@ -2357,8 +2357,14 @@ helper_check="$("$helper_path" 2>&1)" || {
   printf '%%s\n' "$helper_check" >&2
   exit 1
 }
-printf '%%s\n' "$helper_check" | grep -Fx 'username=x-access-token' >/dev/null
-printf '%%s\n' "$helper_check" | grep -E '^password=.' >/dev/null
+printf '%%s\n' "$helper_check" | grep -Fx 'username=x-access-token' >/dev/null || {
+  echo "GitHub credential helper did not output 'username=x-access-token'" >&2
+  exit 1
+}
+printf '%%s\n' "$helper_check" | grep -E '^password=.' >/dev/null || {
+  echo "GitHub credential helper did not output a password" >&2
+  exit 1
+}
 credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git credential fill 2>&1)" || {
   echo "git credential fill failed after helper registration:" >&2
   git config --global --get-all credential.helper >&2 || true
