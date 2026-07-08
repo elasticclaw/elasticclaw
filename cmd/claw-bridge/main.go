@@ -2323,8 +2323,10 @@ if ! command -v sed >/dev/null 2>&1; then
   echo "sed is required to parse GitHub credential responses" >&2
   exit 1
 fi
-tmp_helper="$(mktemp)"
-cat > "$tmp_helper" << 'CREDEOF'
+helper_dir="${HOME}/.elasticclaw/bin"
+helper_path="${helper_dir}/elasticclaw-git-credentials"
+mkdir -p "$helper_dir"
+cat > "$helper_path" << 'CREDEOF'
 #!/bin/sh
 set -eu
 claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
@@ -2343,10 +2345,9 @@ printf 'host=github.com\n'
 printf 'username=x-access-token\n'
 printf 'password=%%s\n' "$token"
 CREDEOF
-sudo install -m 0755 "$tmp_helper" /usr/local/bin/elasticclaw-git-credentials
-rm -f "$tmp_helper"
-git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
-git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
+chmod 0700 "$helper_path"
+git config --global credential.helper "$helper_path"
+git config --global --get-all credential.helper | grep -Fx "$helper_path" >/dev/null
 `, shellQuote(tokenEndpoint))
 }
 

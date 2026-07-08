@@ -206,8 +206,17 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	if strings.Contains(script, "python3") {
 		t.Fatalf("helper script should not depend on python3:\n%s", script)
 	}
+	if strings.Contains(script, "sudo ") {
+		t.Fatalf("helper script should not require sudo:\n%s", script)
+	}
+	if strings.Contains(script, "/usr/local/bin/elasticclaw-git-credentials") {
+		t.Fatalf("helper script should install under the user's home directory:\n%s", script)
+	}
 	if !strings.Contains(script, `ELASTICCLAW_CLAW_TOKEN`) {
 		t.Fatalf("helper script should read claw token from runtime environment:\n%s", script)
+	}
+	if !strings.Contains(script, `${HOME}/.elasticclaw/bin`) {
+		t.Fatalf("helper script should install under HOME:\n%s", script)
 	}
 	if !strings.Contains(script, `--data-urlencode "claw_token=$claw_token"`) {
 		t.Fatalf("helper script should URL-encode claw token at runtime:\n%s", script)
