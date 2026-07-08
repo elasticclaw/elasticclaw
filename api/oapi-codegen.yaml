@@ -1,0 +1,9 @@
+# Configuration for oapi-codegen (Go side of the contract).
+# Regenerate with `make gen`.
+package: apigen
+output: api/gen/api.gen.go
+generate:
+  models: true
+  std-http-server: true
+output-options:
+  skip-prune: false

@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: gen gen-check build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -11,6 +11,19 @@ LDFLAGS := -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=$(VERSION
 
 tidy:
 	go mod tidy
+
+# ─── API contract codegen ─────────────────────────────────────────────────────
+# api/openapi.yaml is the single source of the Go<->TypeScript contract.
+# `make gen` regenerates both sides; `make gen-check` fails when the generated
+# artifacts are stale (run it in CI / before pushing contract changes).
+
+gen: ## Regenerate Go and TypeScript API types from api/openapi.yaml
+	go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+	cd web && npm run gen
+
+gen-check: gen ## Fail if generated API artifacts are out of date
+	@git diff --exit-code -- api/gen web/lib/gen || \
+		(echo "❌ generated API artifacts are stale — run 'make gen' and commit the result" && exit 1)
 
 # Fast build — Go only, no npm. Uses existing internal/webui/out/ (or placeholder).
 build: build-dev

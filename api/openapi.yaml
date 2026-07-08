@@ -1,0 +1,2290 @@
+openapi: 3.0.3
+info:
+  title: ElasticClaw Hub API
+  description: |
+    Spec-first contract for the ElasticClaw hub HTTP API.
+
+    This file is the single source of truth for the Go <-> TypeScript contract.
+    Generated artifacts (do not edit by hand):
+      - Go types and server interface: `api/gen/` (oapi-codegen)
+      - TypeScript types: `web/lib/gen/api.d.ts` (openapi-typescript)
+
+    Regenerate with `make gen`; CI-style verification with `make gen-check`.
+
+    Batch 1 scope (UI endpoints): /api/claws*, /api/messages*, /api/auth/*,
+    /api/settings*, /api/analytics/*, /api/templates*. Integration webhooks and
+    internal claw<->hub endpoints are specced in later batches.
+  version: 0.1.0
+
+servers:
+  - url: /
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Web UI authentication
+  - name: claws
+    description: Claw lifecycle
+  - name: messages
+    description: Claw conversation messages
+  - name: settings
+    description: Hub settings (admin)
+  - name: templates
+    description: Hub-stored templates
+  - name: analytics
+    description: Factory and task-run analytics
+
+paths:
+  # ─── Auth ────────────────────────────────────────────────────────────────
+  /api/auth/login:
+    post:
+      operationId: webLogin
+      tags: [auth]
+      security: []
+      summary: Password login for the web UI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebLoginRequest"
+      responses:
+        "200":
+          description: Login accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebLoginResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/auth/logout:
+    post:
+      operationId: webLogout
+      tags: [auth]
+      security: []
+      summary: Logout (stateless acknowledgement)
+      responses:
+        "200":
+          description: Logout acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /api/auth/me:
+    get:
+      operationId: webMe
+      tags: [auth]
+      summary: Current authenticated user
+      responses:
+        "200":
+          description: Current user info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMe"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/auth/config:
+    get:
+      operationId: authConfig
+      tags: [auth]
+      security: []
+      summary: Public auth configuration (no auth required)
+      responses:
+        "200":
+          description: Enabled auth methods
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthConfig"
+
+  /api/auth/github/client-id:
+    get:
+      operationId: githubClientId
+      tags: [auth]
+      security: []
+      summary: GitHub OAuth client id (public)
+      responses:
+        "200":
+          description: OAuth client id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitHubClientIDResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/auth/github/exchange:
+    post:
+      operationId: githubOAuthExchange
+      tags: [auth]
+      security: []
+      summary: Exchange a GitHub OAuth code for a hub session token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GitHubOAuthExchangeRequest"
+      responses:
+        "200":
+          description: Signed session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitHubOAuthExchangeResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502":
+          description: Upstream GitHub error
+          content:
+            text/plain:
+              schema: { type: string }
+
+  # ─── Claws ───────────────────────────────────────────────────────────────
+  /api/claws:
+    get:
+      operationId: listClaws
+      tags: [claws]
+      summary: List claws for the tenant (deleted claws are excluded)
+      responses:
+        "200":
+          description: Claw list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Claw"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createClaw
+      tags: [claws]
+      summary: Create (provision) a new claw
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateClawRequest"
+      responses:
+        "202":
+          description: Claw accepted for provisioning
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Claw"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: Provider not configured
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /api/claws/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ClawID"
+    get:
+      operationId: getClaw
+      tags: [claws]
+      summary: Get a single claw
+      responses:
+        "200":
+          description: Claw
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Claw"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: patchClaw
+      tags: [claws]
+      summary: Update claw name, tags or color
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClawPatch"
+      responses:
+        "204":
+          description: Updated
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: killClaw
+      tags: [claws]
+      summary: Kill a claw (soft delete + provider teardown)
+      responses:
+        "204":
+          description: Deleted
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/claws/{id}/prs:
+    parameters:
+      - $ref: "#/components/parameters/ClawID"
+    get:
+      operationId: listClawPRs
+      tags: [claws]
+      summary: List pull requests detected for a claw
+      responses:
+        "200":
+          description: PR list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ClawPR"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── Messages ────────────────────────────────────────────────────────────
+  /api/messages/{clawId}:
+    parameters:
+      - $ref: "#/components/parameters/MessageClawID"
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: List conversation messages (default last 100, ascending)
+      parameters:
+        - name: before
+          in: query
+          description: Return messages created before this timestamp
+          schema: { type: string }
+        - name: after
+          in: query
+          description: Return messages created after this timestamp
+          schema: { type: string }
+      responses:
+        "200":
+          description: Messages in ascending order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: sendMessage
+      tags: [messages]
+      summary: Send a user message to a claw
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "200":
+          description: Stored message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/messages/{clawId}/timeline:
+    parameters:
+      - $ref: "#/components/parameters/MessageClawID"
+    get:
+      operationId: listMessageTimeline
+      tags: [messages]
+      summary: Paginated conversation timeline (no activity records)
+      parameters:
+        - name: before
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Messages in ascending order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/messages/{clawId}/activity:
+    parameters:
+      - $ref: "#/components/parameters/MessageClawID"
+    get:
+      operationId: listMessageActivity
+      tags: [messages]
+      summary: Activity records for a claw
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string }
+        - name: to
+          in: query
+          schema: { type: string }
+        - name: before
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+      responses:
+        "200":
+          description: Activity messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ─── Settings ────────────────────────────────────────────────────────────
+  /api/settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Redacted hub settings view (admin)
+      responses:
+        "200":
+          description: Settings view
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsView"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: patchSettings
+      tags: [settings]
+      summary: Patch hub settings (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsPatch"
+      responses:
+        "200":
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings/status:
+    get:
+      operationId: getSettingsStatus
+      tags: [settings]
+      summary: Minimal onboarding status flags
+      responses:
+        "200":
+          description: Settings status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsStatus"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings/github/test:
+    post:
+      operationId: testGitHubApp
+      tags: [settings]
+      summary: Validate a GitHub App credential and report permissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GitHubAppTestRequest"
+      responses:
+        "200":
+          description: Permission check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitHubAppView"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings/model-auth/login:
+    post:
+      operationId: startModelAuthLogin
+      tags: [settings]
+      summary: Start a device-login job for a model provider CLI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAuthLoginRequest"
+      responses:
+        "200":
+          description: Login job started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAuthLoginJob"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings/model-auth/login/{id}:
+    get:
+      operationId: getModelAuthLoginStatus
+      tags: [settings]
+      summary: Poll a device-login job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Login job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAuthLoginJob"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/settings/ai-config:
+    post:
+      operationId: aiConfigChat
+      tags: [settings]
+      summary: Ask the config assistant (non-streaming)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIConfigRequest"
+      responses:
+        "200":
+          description: Assistant reply
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIConfigResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/settings/ai-config/apply:
+    post:
+      operationId: aiConfigApply
+      tags: [settings]
+      summary: Apply a proposed hub.yaml
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIConfigApplyRequest"
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIConfigApplyResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/settings/ai-config/revert:
+    post:
+      operationId: aiConfigRevert
+      tags: [settings]
+      summary: Revert hub.yaml to a backup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIConfigRevertRequest"
+      responses:
+        "200":
+          description: Reverted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/settings/ai-config/backup:
+    get:
+      operationId: aiConfigBackup
+      tags: [settings]
+      summary: Latest hub.yaml backup metadata
+      responses:
+        "200":
+          description: Backup info (empty fields when no backup exists)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIConfigBackupResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings/ai-config/current-config:
+    get:
+      operationId: aiConfigCurrentConfig
+      tags: [settings]
+      summary: Current hub.yaml (sanitized unless reveal=true)
+      parameters:
+        - name: reveal
+          in: query
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "200":
+          description: YAML config as plain text
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/settings/ai-config/stream:
+    post:
+      operationId: aiConfigStream
+      tags: [settings]
+      summary: Ask the config assistant (SSE stream)
+      description: |
+        Server-Sent Events stream. Event payloads (JSON per `data:` line):
+        {"type":"token","content":"..."}, {"type":"proposed_yaml","yaml":"..."},
+        {"type":"placeholders","items":[...]}, {"type":"done"}.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIConfigRequest"
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ─── Templates ───────────────────────────────────────────────────────────
+  /api/templates:
+    get:
+      operationId: listTemplates
+      tags: [templates]
+      summary: List hub-stored templates
+      responses:
+        "200":
+          description: Template list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TemplateListEntry"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: pushTemplate
+      tags: [templates]
+      summary: Push (create or update) a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplatePushRequest"
+      responses:
+        "200":
+          description: Template stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplatePushResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/templates/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTemplate
+      tags: [templates]
+      summary: Get a template with its files
+      responses:
+        "200":
+          description: Template detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateDetail"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteTemplate
+      tags: [templates]
+      summary: Delete a template
+      responses:
+        "204":
+          description: Deleted
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Analytics ───────────────────────────────────────────────────────────
+  /api/analytics/factories:
+    get:
+      operationId: listFactoriesAnalytics
+      tags: [analytics]
+      summary: Aggregated analytics for every factory
+      parameters:
+        - name: days
+          in: query
+          description: Time range in days (1-365, default 30)
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Per-factory summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FactoryAnalyticsSummary"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/analytics/summary:
+    get:
+      operationId: getTaskRunAnalyticsSummary
+      tags: [analytics]
+      summary: Task-run analytics KPI summary
+      parameters:
+        - $ref: "#/components/parameters/AnalyticsFilterStatus"
+        - $ref: "#/components/parameters/AnalyticsFilterOwnerType"
+        - $ref: "#/components/parameters/AnalyticsFilterWorkspace"
+        - $ref: "#/components/parameters/AnalyticsFilterWorkflow"
+        - $ref: "#/components/parameters/AnalyticsFilterFactory"
+        - $ref: "#/components/parameters/AnalyticsFilterIntegration"
+        - $ref: "#/components/parameters/AnalyticsFilterRepo"
+        - $ref: "#/components/parameters/AnalyticsFilterModel"
+        - $ref: "#/components/parameters/AnalyticsFilterWarningType"
+        - $ref: "#/components/parameters/AnalyticsFilterFailureType"
+        - $ref: "#/components/parameters/AnalyticsFilterHumanTouched"
+        - $ref: "#/components/parameters/AnalyticsFilterMergedPrs"
+        - $ref: "#/components/parameters/AnalyticsFilterAnalyticsEnabled"
+        - $ref: "#/components/parameters/AnalyticsFilterRequiresPr"
+        - $ref: "#/components/parameters/AnalyticsFilterFrom"
+        - $ref: "#/components/parameters/AnalyticsFilterTo"
+      responses:
+        "200":
+          description: KPI summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunAnalyticsSummary"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/analytics/filter-options:
+    get:
+      operationId: getTaskRunAnalyticsFilterOptions
+      tags: [analytics]
+      summary: Distinct values for analytics filters
+      responses:
+        "200":
+          description: Filter options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunFilterOptions"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/analytics/runs:
+    get:
+      operationId: listTaskRuns
+      tags: [analytics]
+      summary: Paginated task runs
+      parameters:
+        - $ref: "#/components/parameters/AnalyticsFilterStatus"
+        - $ref: "#/components/parameters/AnalyticsFilterOwnerType"
+        - $ref: "#/components/parameters/AnalyticsFilterWorkspace"
+        - $ref: "#/components/parameters/AnalyticsFilterWorkflow"
+        - $ref: "#/components/parameters/AnalyticsFilterFactory"
+        - $ref: "#/components/parameters/AnalyticsFilterIntegration"
+        - $ref: "#/components/parameters/AnalyticsFilterRepo"
+        - $ref: "#/components/parameters/AnalyticsFilterModel"
+        - $ref: "#/components/parameters/AnalyticsFilterWarningType"
+        - $ref: "#/components/parameters/AnalyticsFilterFailureType"
+        - $ref: "#/components/parameters/AnalyticsFilterHumanTouched"
+        - $ref: "#/components/parameters/AnalyticsFilterMergedPrs"
+        - $ref: "#/components/parameters/AnalyticsFilterAnalyticsEnabled"
+        - $ref: "#/components/parameters/AnalyticsFilterRequiresPr"
+        - $ref: "#/components/parameters/AnalyticsFilterFrom"
+        - $ref: "#/components/parameters/AnalyticsFilterTo"
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Task runs page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/analytics/runs/{runId}:
+    parameters:
+      - $ref: "#/components/parameters/RunID"
+    get:
+      operationId: getTaskRun
+      tags: [analytics]
+      summary: Single task run
+      responses:
+        "200":
+          description: Task run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunDetailResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/analytics/runs/{runId}/attempts:
+    parameters:
+      - $ref: "#/components/parameters/RunID"
+    get:
+      operationId: listTaskRunAttempts
+      tags: [analytics]
+      summary: Attempts of a task run
+      responses:
+        "200":
+          description: Attempts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunAttemptsResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/analytics/runs/{runId}/events:
+    parameters:
+      - $ref: "#/components/parameters/RunID"
+    get:
+      operationId: listTaskRunEvents
+      tags: [analytics]
+      summary: Events of a task run
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunEventsResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/analytics/runs/{runId}/prs:
+    parameters:
+      - $ref: "#/components/parameters/RunID"
+    get:
+      operationId: listTaskRunPRs
+      tags: [analytics]
+      summary: Pull requests of a task run
+      responses:
+        "200":
+          description: PRs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRunPRsResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Hub API token or GitHub OAuth session token.
+
+  parameters:
+    ClawID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    MessageClawID:
+      name: clawId
+      in: path
+      required: true
+      schema: { type: string }
+    RunID:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string }
+    AnalyticsFilterStatus:
+      name: status
+      in: query
+      schema: { type: string }
+    AnalyticsFilterOwnerType:
+      name: ownerType
+      in: query
+      schema: { type: string }
+    AnalyticsFilterWorkspace:
+      name: workspace
+      in: query
+      schema: { type: string }
+    AnalyticsFilterWorkflow:
+      name: workflow
+      in: query
+      schema: { type: string }
+    AnalyticsFilterFactory:
+      name: factory
+      in: query
+      schema: { type: string }
+    AnalyticsFilterIntegration:
+      name: integration
+      in: query
+      schema: { type: string }
+    AnalyticsFilterRepo:
+      name: repo
+      in: query
+      schema: { type: string }
+    AnalyticsFilterModel:
+      name: model
+      in: query
+      schema: { type: string }
+    AnalyticsFilterWarningType:
+      name: warningType
+      in: query
+      schema: { type: string }
+    AnalyticsFilterFailureType:
+      name: failureType
+      in: query
+      schema: { type: string }
+    AnalyticsFilterHumanTouched:
+      name: humanTouched
+      in: query
+      schema: { type: boolean }
+    AnalyticsFilterMergedPrs:
+      name: mergedPrs
+      in: query
+      schema: { type: boolean }
+    AnalyticsFilterAnalyticsEnabled:
+      name: analyticsEnabled
+      in: query
+      schema: { type: boolean }
+    AnalyticsFilterRequiresPr:
+      name: requiresPr
+      in: query
+      schema: { type: boolean }
+    AnalyticsFilterFrom:
+      name: from
+      in: query
+      schema: { type: string }
+    AnalyticsFilterTo:
+      name: to
+      in: query
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        text/plain:
+          schema: { type: string }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        text/plain:
+          schema: { type: string }
+    Forbidden:
+      description: Not allowed
+      content:
+        text/plain:
+          schema: { type: string }
+    NotFound:
+      description: Not found
+      content:
+        text/plain:
+          schema: { type: string }
+    InternalError:
+      description: Internal server error
+      content:
+        text/plain:
+          schema: { type: string }
+
+  schemas:
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+
+    SuccessResponse:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean }
+
+    # ─── Auth ────────────────────────────────────────────────────────────
+    WebLoginRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string }
+
+    WebLoginResponse:
+      type: object
+      required: [ok, hubToken]
+      properties:
+        ok: { type: boolean }
+        hubToken:
+          type: string
+          description: Hub API token the browser uses for all subsequent calls.
+
+    AuthMe:
+      type: object
+      required: [auth_method, is_admin]
+      properties:
+        auth_method:
+          type: string
+          enum: [password, github]
+        is_admin: { type: boolean }
+        login: { type: string }
+        name: { type: string }
+        avatar_url: { type: string }
+
+    AuthConfig:
+      type: object
+      required: [github_oauth_enabled, password_auth_enabled]
+      properties:
+        github_oauth_enabled: { type: boolean }
+        password_auth_enabled: { type: boolean }
+
+    GitHubClientIDResponse:
+      type: object
+      required: [client_id]
+      properties:
+        client_id: { type: string }
+
+    GitHubOAuthExchangeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+        redirect_uri: { type: string }
+
+    GitHubOAuthExchangeResponse:
+      type: object
+      required: [github_token]
+      properties:
+        github_token:
+          type: string
+          description: Signed hub session token for the authenticated GitHub user.
+
+    # ─── Claws ───────────────────────────────────────────────────────────
+    ClawStatus:
+      type: string
+      description: |
+        Lifecycle status of a claw as reported over the API and WebSocket.
+        `deleted` only appears in WebSocket status pushes — list/detail
+        endpoints filter deleted claws out.
+      enum:
+        - pending
+        - provisioning
+        - starting
+        - connected
+        - idle
+        - offline
+        - error
+        - deleted
+
+    Claw:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - template
+        - status
+        - last_seen
+        - created_at
+        - context_usage
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        template: { type: string }
+        provider: { type: string }
+        provider_id: { type: string }
+        status:
+          $ref: "#/components/schemas/ClawStatus"
+        last_seen:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        context_usage:
+          type: integer
+          description: Context window usage percentage (0-100).
+        bootstrap_status: { type: string }
+        bootstrap_diagnostic: { type: string }
+        github_issue_id: { type: string }
+        github_issue_url: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        color: { type: string }
+        ssh_host: { type: string }
+        ssh_port: { type: integer }
+        ssh_user: { type: string }
+
+    CreateClawRequest:
+      type: object
+      required: [name, provider]
+      properties:
+        name: { type: string }
+        template_name: { type: string }
+        provider: { type: string }
+        instance_type: { type: string }
+        image: { type: string }
+        ttl: { type: string }
+        default_model: { type: string }
+        llm_key: { type: string }
+        snapshot: { type: string }
+        files:
+          type: object
+          additionalProperties: { type: string }
+        env:
+          type: object
+          additionalProperties: { type: string }
+        secret_refs:
+          type: object
+          additionalProperties: { type: string }
+        nix: { type: boolean }
+        flake: { type: string }
+        docker: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+        color: { type: string }
+        # CLI-only nested config blocks; typed loosely in batch 1.
+        resources:
+          type: object
+          additionalProperties: true
+        github:
+          type: object
+          additionalProperties: true
+        linear:
+          type: object
+          additionalProperties: true
+        mcps:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    ClawPatch:
+      type: object
+      properties:
+        name: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        color: { type: string }
+
+    ClawPR:
+      type: object
+      required: [id, repo, prNumber, url, createdAt]
+      properties:
+        id: { type: string }
+        repo: { type: string }
+        prNumber: { type: integer }
+        url: { type: string }
+        createdAt: { type: string }
+
+    # ─── Messages ────────────────────────────────────────────────────────
+    MessageRole:
+      type: string
+      enum: [user, claw, system, hub, activity, activity_summary]
+
+    Message:
+      type: object
+      required: [id, claw_id, tenant_id, role, content, created_at]
+      properties:
+        id: { type: string }
+        claw_id: { type: string }
+        tenant_id: { type: string }
+        role:
+          $ref: "#/components/schemas/MessageRole"
+        content: { type: string }
+        format:
+          type: string
+          description: |
+            "pre" preserves whitespace; "activity:<json>" and
+            "activity_summary:<json>" carry structured activity payloads.
+        created_at:
+          type: string
+          format: date-time
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+
+    # ─── Settings ────────────────────────────────────────────────────────
+    SettingsStatus:
+      type: object
+      required: [hasProvider, hasLLMKey, hasGitHub]
+      properties:
+        hasProvider: { type: boolean }
+        hasLLMKey: { type: boolean }
+        hasGitHub: { type: boolean }
+
+    LLMKeyView:
+      type: object
+      required: [name, provider, keySet, default]
+      properties:
+        name: { type: string }
+        provider: { type: string }
+        keySet: { type: boolean }
+        default: { type: boolean }
+        defaultModel: { type: string }
+        authProfile: { type: string }
+
+    LLMModelOption:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+
+    ModelAuthProfileView:
+      type: object
+      required: [name, provider, mode, authenticated]
+      properties:
+        name: { type: string }
+        provider: { type: string }
+        mode: { type: string }
+        authenticated: { type: boolean }
+        updatedAt: { type: string }
+
+    ProviderView:
+      type: object
+      required: [type, enabled]
+      properties:
+        type: { type: string }
+        enabled: { type: boolean }
+        apiUrl: { type: string }
+        apiKeySet: { type: boolean }
+        defaultSnapshot: { type: string }
+        tokenSet: { type: boolean }
+        defaultTtl: { type: string }
+        defaultInstanceType: { type: string }
+        sshKeySet: { type: boolean }
+        sshPublicKey: { type: string }
+        defaultCpu: { type: integer }
+        defaultMemory: { type: string }
+        defaultDisk: { type: string }
+        image: { type: string }
+        network: { type: string }
+        awsRegion: { type: string }
+        awsProfile: { type: string }
+        imageIdentifier: { type: string }
+        imageVersion: { type: string }
+        executionRoleArn: { type: string }
+        ingressNetworkConnectors:
+          type: array
+          items: { type: string }
+        egressNetworkConnectors:
+          type: array
+          items: { type: string }
+        idleMaxDurationSeconds: { type: integer }
+        suspendedDurationSeconds: { type: integer }
+        autoResume: { type: boolean }
+        maximumDurationSeconds: { type: integer }
+        bridgePort: { type: integer }
+        authTokenExpirationMinutes: { type: integer }
+
+    GitHubAppPermission:
+      type: object
+      required: [name, granted, needed, ok]
+      properties:
+        name: { type: string }
+        granted:
+          type: string
+          description: '"read", "write", or "" when not granted.'
+        needed:
+          type: string
+          description: '"read" or "write".'
+        ok: { type: boolean }
+
+    GitHubAppView:
+      type: object
+      required: [appId, keySet]
+      properties:
+        appId:
+          type: integer
+          format: int64
+        url: { type: string }
+        keySet: { type: boolean }
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitHubAppPermission"
+        permCheckOk: { type: boolean }
+        permCheckError: { type: string }
+
+    GitHubAppTestRequest:
+      type: object
+      required: [appId, privateKeyPem]
+      properties:
+        appId:
+          type: integer
+          format: int64
+        url: { type: string }
+        privateKeyPem: { type: string }
+
+    IntegrationsView:
+      type: object
+      required: [linear, shortcut, githubIssues]
+      properties:
+        linear:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinearIntegrationView"
+        shortcut:
+          type: array
+          items:
+            $ref: "#/components/schemas/ShortcutIntegrationView"
+        githubIssues:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitHubIssuesIntegrationView"
+
+    LinearIntegrationView:
+      type: object
+      required: [workspace, tokenSet, webhookSecretSet]
+      properties:
+        workspace: { type: string }
+        tokenSet: { type: boolean }
+        webhookSecretSet: { type: boolean }
+
+    ShortcutIntegrationView:
+      type: object
+      required: [workspace, tokenSet]
+      properties:
+        workspace: { type: string }
+        tokenSet: { type: boolean }
+
+    GitHubIssuesIntegrationView:
+      type: object
+      required: [workspace, tokenSet, webhookSecretSet]
+      properties:
+        workspace: { type: string }
+        tokenSet: { type: boolean }
+        webhookSecretSet: { type: boolean }
+
+    FactoryView:
+      type: object
+      required:
+        - name
+        - integration
+        - workspace
+        - team
+        - triggerStatus
+        - doneStatus
+        - terminateOnLeave
+        - template
+        - namePattern
+        - webhookSecretSet
+        - tags
+        - color
+        - enabled
+      properties:
+        name: { type: string }
+        integration: { type: string }
+        workspace: { type: string }
+        team: { type: string }
+        triggerStatus: { type: string }
+        doneStatus: { type: string }
+        terminateOnLeave: { type: boolean }
+        template: { type: string }
+        namePattern: { type: string }
+        webhookSecretSet: { type: boolean }
+        webhookSecretRef: { type: string }
+        pipelineYAML: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        color: { type: string }
+        labels:
+          type: array
+          items: { type: string }
+        exclude_labels:
+          type: array
+          items: { type: string }
+        assigned_to: { type: string }
+        enabled: { type: boolean }
+        concurrencyGroup: { type: string }
+        enable_manual_trigger: { type: boolean }
+        secret_refs:
+          type: object
+          additionalProperties: { type: string }
+        externalTrigger:
+          type: object
+          additionalProperties: true
+
+    MCPView:
+      type: object
+      required: [name, source, enabled]
+      properties:
+        name: { type: string }
+        source: { type: string }
+        package: { type: string }
+        image: { type: string }
+        url: { type: string }
+        enabled: { type: boolean }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        secrets:
+          type: array
+          items: { type: string }
+          description: Env var names only — never values.
+        command:
+          type: array
+          items: { type: string }
+
+    AuthView:
+      type: object
+      required: [disablePasswordAuth]
+      properties:
+        githubOAuth:
+          $ref: "#/components/schemas/GitHubOAuthView"
+        access:
+          $ref: "#/components/schemas/AccessView"
+        disablePasswordAuth: { type: boolean }
+
+    GitHubOAuthView:
+      type: object
+      required: [clientId, clientSecretSet, allowedUsers, allowedOrgs, allowedTeams]
+      properties:
+        clientId: { type: string }
+        clientSecretSet: { type: boolean }
+        allowedUsers:
+          type: array
+          items: { type: string }
+        allowedOrgs:
+          type: array
+          items: { type: string }
+        allowedTeams:
+          type: array
+          items: { type: string }
+
+    AccessView:
+      type: object
+      required: [admins, viewRequiresTags, interactRequiresTags]
+      properties:
+        admins:
+          type: array
+          items: { type: string }
+        viewRequiresTags:
+          type: array
+          items: { type: string }
+        interactRequiresTags:
+          type: array
+          items: { type: string }
+
+    ConcurrencyGroupView:
+      type: object
+      required: [name, limit]
+      properties:
+        name: { type: string }
+        limit: { type: integer }
+
+    SettingsView:
+      type: object
+      required:
+        - llmKeys
+        - providers
+        - github
+        - sshPublicKeys
+        - integrations
+        - factories
+        - secrets
+        - concurrencyGroups
+        - maxConcurrentClaws
+      properties:
+        llmKeys:
+          type: array
+          items:
+            $ref: "#/components/schemas/LLMKeyView"
+        modelOptions:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/LLMModelOption"
+        modelAuthProfiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelAuthProfileView"
+        providers:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ProviderView"
+        github:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitHubAppView"
+        sshPublicKeys:
+          type: array
+          items: { type: string }
+        integrations:
+          $ref: "#/components/schemas/IntegrationsView"
+        factories:
+          type: array
+          items:
+            $ref: "#/components/schemas/FactoryView"
+        secrets:
+          type: array
+          items: { type: string }
+          description: Secret names only — never values.
+        mcpServers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MCPView"
+        auth:
+          $ref: "#/components/schemas/AuthView"
+        concurrencyGroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConcurrencyGroupView"
+        maxConcurrentClaws:
+          type: integer
+          description: "DEPRECATED: use concurrencyGroups instead. 0 = unlimited."
+
+    LLMKeyPatch:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        newName: { type: string }
+        provider: { type: string }
+        apiKey: { type: string }
+        default: { type: boolean }
+        delete: { type: boolean }
+        defaultModel: { type: string }
+        authProfile: { type: string }
+
+    ModelAuthProfilePatch:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        provider: { type: string }
+        mode: { type: string }
+        delete: { type: boolean }
+
+    ProviderPatch:
+      type: object
+      properties:
+        apiUrl: { type: string }
+        apiKey: { type: string }
+        defaultSnapshot: { type: string }
+        token: { type: string }
+        defaultTtl: { type: string }
+        defaultInstanceType: { type: string }
+        defaultCpu: { type: integer }
+        defaultMemory: { type: string }
+        defaultDisk: { type: string }
+        image: { type: string }
+        network: { type: string }
+        awsRegion: { type: string }
+        awsProfile: { type: string }
+        imageIdentifier: { type: string }
+        imageVersion: { type: string }
+        executionRoleArn: { type: string }
+        ingressNetworkConnectors:
+          type: array
+          items: { type: string }
+        egressNetworkConnectors:
+          type: array
+          items: { type: string }
+        idleMaxDurationSeconds: { type: integer }
+        suspendedDurationSeconds: { type: integer }
+        autoResume: { type: boolean }
+        maximumDurationSeconds: { type: integer }
+        bridgePort: { type: integer }
+        authTokenExpirationMinutes: { type: integer }
+        delete: { type: boolean }
+
+    GitHubAppPatch:
+      type: object
+      required: [appId]
+      properties:
+        appId:
+          type: integer
+          format: int64
+        url: { type: string }
+        privateKeyPem: { type: string }
+
+    LinearIntegrationPatch:
+      type: object
+      required: [workspace]
+      properties:
+        workspace: { type: string }
+        originalWorkspace: { type: string }
+        token: { type: string }
+        webhookSecret: { type: string }
+
+    ShortcutIntegrationPatch:
+      type: object
+      required: [workspace]
+      properties:
+        workspace: { type: string }
+        originalWorkspace: { type: string }
+        token: { type: string }
+        delete: { type: boolean }
+
+    GitHubIssuesIntegrationPatch:
+      type: object
+      required: [workspace]
+      properties:
+        workspace: { type: string }
+        originalWorkspace: { type: string }
+        token: { type: string }
+        webhookSecret: { type: string }
+        delete: { type: boolean }
+
+    IntegrationsPatch:
+      type: object
+      properties:
+        linear:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinearIntegrationPatch"
+        shortcut:
+          type: array
+          items:
+            $ref: "#/components/schemas/ShortcutIntegrationPatch"
+        githubIssues:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitHubIssuesIntegrationPatch"
+
+    FactoryPatch:
+      type: object
+      required: [name, integration, workspace, triggerStatus, terminateOnLeave, template]
+      properties:
+        name: { type: string }
+        originalName: { type: string }
+        integration: { type: string }
+        workspace: { type: string }
+        team: { type: string }
+        triggerStatus: { type: string }
+        doneStatus: { type: string }
+        terminateOnLeave: { type: boolean }
+        template: { type: string }
+        namePattern: { type: string }
+        webhookSecret: { type: string }
+        webhookSecretRef: { type: string }
+        pipelineYAML: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        color: { type: string }
+        labels:
+          type: array
+          items: { type: string }
+        exclude_labels:
+          type: array
+          items: { type: string }
+        assigned_to: { type: string }
+        enabled: { type: boolean }
+        concurrencyGroup: { type: string }
+        enable_manual_trigger: { type: boolean }
+        secret_refs:
+          type: object
+          additionalProperties: { type: string }
+        inputs:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        repos:
+          type: array
+          items: { type: string }
+        trigger:
+          type: object
+          additionalProperties: true
+        externalTrigger:
+          type: object
+          additionalProperties: true
+
+    MCPPatch:
+      type: object
+      required: [name, source]
+      properties:
+        name: { type: string }
+        source: { type: string }
+        package: { type: string }
+        image: { type: string }
+        url: { type: string }
+        enabled: { type: boolean }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+          description: Maps env var name to hub secret ref name.
+        command:
+          type: array
+          items: { type: string }
+        delete: { type: boolean }
+
+    GitHubOAuthPatch:
+      type: object
+      properties:
+        clientId: { type: string }
+        clientSecret: { type: string }
+        allowedUsers:
+          type: array
+          items: { type: string }
+        allowedOrgs:
+          type: array
+          items: { type: string }
+        allowedTeams:
+          type: array
+          items: { type: string }
+
+    AccessPatch:
+      type: object
+      required: [admins, viewRequiresTags, interactRequiresTags]
+      properties:
+        admins:
+          type: array
+          items: { type: string }
+        viewRequiresTags:
+          type: array
+          items: { type: string }
+        interactRequiresTags:
+          type: array
+          items: { type: string }
+
+    AuthPatch:
+      type: object
+      properties:
+        githubOAuth:
+          $ref: "#/components/schemas/GitHubOAuthPatch"
+        access:
+          $ref: "#/components/schemas/AccessPatch"
+        removeGithubOAuth: { type: boolean }
+        disablePasswordAuth: { type: boolean }
+
+    ConcurrencyGroupPatch:
+      type: object
+      required: [name, limit]
+      properties:
+        name: { type: string }
+        limit: { type: integer }
+        delete: { type: boolean }
+
+    SettingsPatch:
+      type: object
+      properties:
+        llmKeys:
+          type: array
+          items:
+            $ref: "#/components/schemas/LLMKeyPatch"
+        modelAuthProfiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelAuthProfilePatch"
+        providers:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ProviderPatch"
+        github:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitHubAppPatch"
+        uiPassword: { type: string }
+        sshPublicKeys:
+          type: array
+          items: { type: string }
+        integrations:
+          $ref: "#/components/schemas/IntegrationsPatch"
+        factories:
+          type: array
+          items:
+            $ref: "#/components/schemas/FactoryPatch"
+        mcpServers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MCPPatch"
+        auth:
+          $ref: "#/components/schemas/AuthPatch"
+        concurrencyGroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConcurrencyGroupPatch"
+        maxConcurrentClaws:
+          type: integer
+          description: "DEPRECATED: use concurrencyGroups instead."
+
+    ModelAuthLoginRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [codex, grok]
+        profile: { type: string }
+        mode:
+          type: string
+          enum: [device]
+
+    ModelAuthLoginJob:
+      type: object
+      required: [id, provider, profile, status, startedAt, updatedAt]
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        profile: { type: string }
+        status:
+          type: string
+          enum: [running, complete, error]
+        url: { type: string }
+        code: { type: string }
+        output: { type: string }
+        error: { type: string }
+        startedAt: { type: string }
+        updatedAt: { type: string }
+
+    AIChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string }
+        content: { type: string }
+
+    AIConfigRequest:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIChatMessage"
+
+    AIConfigResponse:
+      type: object
+      required: [reply]
+      properties:
+        reply: { type: string }
+        proposed_yaml: { type: string }
+        placeholders:
+          type: array
+          items: { type: string }
+
+    AIConfigApplyRequest:
+      type: object
+      required: [proposed_yaml]
+      properties:
+        proposed_yaml: { type: string }
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+
+    AIConfigApplyResponse:
+      type: object
+      required: [success, backup_path]
+      properties:
+        success: { type: boolean }
+        backup_path: { type: string }
+
+    AIConfigRevertRequest:
+      type: object
+      required: [backup_path]
+      properties:
+        backup_path: { type: string }
+
+    AIConfigBackupResponse:
+      type: object
+      required: [backup_path]
+      properties:
+        backup_path: { type: string }
+        backup_time: { type: string }
+
+    # ─── Templates ───────────────────────────────────────────────────────
+    TemplateListEntry:
+      type: object
+      required: [name, updatedAt]
+      properties:
+        name: { type: string }
+        updatedAt: { type: string }
+
+    TemplatePushRequest:
+      type: object
+      required: [name, files]
+      properties:
+        name: { type: string }
+        files:
+          type: object
+          additionalProperties: { type: string }
+          description: Must include elasticclaw-config.yaml.
+
+    TemplatePushResponse:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+
+    TemplateDetail:
+      type: object
+      required: [name, files]
+      properties:
+        name: { type: string }
+        files:
+          type: object
+          additionalProperties: { type: string }
+
+    # ─── Analytics ───────────────────────────────────────────────────────
+    FactoryAnalyticsEvent:
+      type: object
+      required: [id, factoryName, issueId, clawId, action, detail, result, createdAt]
+      properties:
+        id: { type: string }
+        factoryName: { type: string }
+        issueId: { type: string }
+        clawId: { type: string }
+        action: { type: string }
+        detail: { type: string }
+        result: { type: string }
+        createdAt: { type: string }
+
+    FactoryAnalyticsSummary:
+      type: object
+      required:
+        - factoryName
+        - totalTriggers
+        - successfulCreations
+        - failedCreations
+        - terminations
+        - prOpened
+        - prMerged
+        - prClosed
+        - doneSignals
+        - errors
+        - successRate
+        - prMergeRate
+        - byTriggerStatus
+        - recentEvents
+      properties:
+        factoryName: { type: string }
+        totalTriggers: { type: integer }
+        successfulCreations: { type: integer }
+        failedCreations: { type: integer }
+        terminations: { type: integer }
+        prOpened: { type: integer }
+        prMerged: { type: integer }
+        prClosed: { type: integer }
+        doneSignals: { type: integer }
+        errors: { type: integer }
+        successRate: { type: number }
+        prMergeRate: { type: number }
+        byTriggerStatus:
+          type: object
+          additionalProperties: { type: integer }
+        recentEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/FactoryAnalyticsEvent"
+        computeError: { type: string }
+
+    TaskRunAnalyticsSummary:
+      type: object
+      required:
+        - totalRuns
+        - byStatus
+        - warningBreakdown
+        - failureBreakdown
+        - humanInteractions
+        - prCounts
+      properties:
+        totalRuns: { type: integer }
+        byStatus:
+          type: object
+          additionalProperties: { type: integer }
+        warningBreakdown:
+          type: object
+          additionalProperties: { type: integer }
+        failureBreakdown:
+          type: object
+          additionalProperties: { type: integer }
+        humanInteractions: { type: integer }
+        prCounts:
+          $ref: "#/components/schemas/TaskRunPRCounts"
+        appliedFilters:
+          type: object
+          additionalProperties: true
+
+    TaskRunPRCounts:
+      type: object
+      required: [total, open, merged, closed]
+      properties:
+        total: { type: integer }
+        open: { type: integer }
+        merged: { type: integer }
+        closed: { type: integer }
+
+    TaskRunSummary:
+      type: object
+      required:
+        - runId
+        - initialAttemptId
+        - currentAttemptId
+        - status
+        - phase
+        - attemptCount
+        - ownerType
+        - workspaceName
+        - workflowName
+        - factoryName
+        - ownerId
+        - ownerDisplayName
+        - runKind
+        - integration
+        - integrationWorkspace
+        - issueId
+        - clawId
+        - model
+        - llmKey
+        - repo
+        - primaryPrUrl
+        - prCount
+        - openPrCount
+        - mergedPrCount
+        - closedPrCount
+        - warningTypes
+        - failureType
+        - humanInteractionCount
+        - startedAt
+        - queuedAt
+        - provisionStartedAt
+        - agentStartedAt
+        - prOpenedAt
+        - mergedAt
+        - finishedAt
+        - timeoutAt
+        - lastEventAt
+        - materializedAt
+        - updatedAt
+        - analyticsEnabled
+        - requiresPr
+        - excludedReason
+      properties:
+        runId: { type: string }
+        initialAttemptId: { type: string }
+        currentAttemptId: { type: string }
+        status: { type: string }
+        phase: { type: string }
+        attemptCount: { type: integer }
+        ownerType: { type: string }
+        workspaceName: { type: string }
+        workflowName: { type: string }
+        factoryName: { type: string }
+        ownerId: { type: string }
+        ownerDisplayName: { type: string }
+        runKind: { type: string }
+        integration: { type: string }
+        integrationWorkspace: { type: string }
+        issueId: { type: string }
+        clawId: { type: string }
+        model: { type: string }
+        llmKey: { type: string }
+        repo: { type: string }
+        primaryPrUrl: { type: string }
+        prCount: { type: integer }
+        openPrCount: { type: integer }
+        mergedPrCount: { type: integer }
+        closedPrCount: { type: integer }
+        warningTypes:
+          type: array
+          items: { type: string }
+        failureType: { type: string }
+        humanInteractionCount: { type: integer }
+        startedAt: { type: integer, format: int64 }
+        queuedAt: { type: integer, format: int64 }
+        provisionStartedAt: { type: integer, format: int64 }
+        agentStartedAt: { type: integer, format: int64 }
+        prOpenedAt: { type: integer, format: int64 }
+        mergedAt: { type: integer, format: int64 }
+        finishedAt: { type: integer, format: int64 }
+        timeoutAt: { type: integer, format: int64 }
+        lastEventAt: { type: integer, format: int64 }
+        materializedAt: { type: integer, format: int64 }
+        updatedAt: { type: integer, format: int64 }
+        analyticsEnabled: { type: boolean }
+        requiresPr: { type: boolean }
+        excludedReason: { type: string }
+
+    TaskRunsResponse:
+      type: object
+      required: [runs, limit]
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRunSummary"
+        nextCursor: { type: string }
+        limit: { type: integer }
+
+    TaskRunDetailResponse:
+      type: object
+      required: [run]
+      properties:
+        run:
+          $ref: "#/components/schemas/TaskRunSummary"
+
+    TaskRunAttempt:
+      type: object
+      required:
+        - id
+        - attemptId
+        - attemptNumber
+        - triggerId
+        - clawId
+        - status
+        - failureType
+        - startedAt
+        - finishedAt
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: string }
+        attemptId: { type: string }
+        attemptNumber: { type: integer }
+        triggerId: { type: string }
+        clawId: { type: string }
+        status: { type: string }
+        failureType: { type: string }
+        startedAt: { type: integer, format: int64 }
+        finishedAt: { type: integer, format: int64 }
+        createdAt: { type: integer, format: int64 }
+        updatedAt: { type: integer, format: int64 }
+
+    TaskRunAttemptsResponse:
+      type: object
+      required: [attempts]
+      properties:
+        attempts:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRunAttempt"
+
+    TaskRunEvent:
+      type: object
+      required:
+        - id
+        - attemptId
+        - eventKey
+        - source
+        - sourceEventId
+        - sourceDeliveryId
+        - eventType
+        - eventTime
+        - observedAt
+        - actorType
+        - actorId
+        - actorLogin
+        - actorDisplayName
+        - interactionRole
+        - targetType
+        - targetId
+        - targetUrl
+        - warningType
+        - failureType
+        - detail
+        - createdAt
+      properties:
+        id: { type: string }
+        attemptId: { type: string }
+        eventKey: { type: string }
+        source: { type: string }
+        sourceEventId: { type: string }
+        sourceDeliveryId: { type: string }
+        eventType: { type: string }
+        eventTime: { type: integer, format: int64 }
+        observedAt: { type: integer, format: int64 }
+        actorType: { type: string }
+        actorId: { type: string }
+        actorLogin: { type: string }
+        actorDisplayName: { type: string }
+        interactionRole: { type: string }
+        targetType: { type: string }
+        targetId: { type: string }
+        targetUrl: { type: string }
+        warningType: { type: string }
+        failureType: { type: string }
+        detail:
+          type: object
+          additionalProperties: true
+        createdAt: { type: integer, format: int64 }
+
+    TaskRunEventsResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRunEvent"
+
+    TaskRunPR:
+      type: object
+      required:
+        - id
+        - repo
+        - prNumber
+        - url
+        - headSha
+        - headBranch
+        - lastAgentHeadSha
+        - baseBranch
+        - state
+        - merged
+        - openedAt
+        - closedAt
+        - mergedAt
+        - mergedByLogin
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: string }
+        repo: { type: string }
+        prNumber: { type: integer }
+        url: { type: string }
+        headSha: { type: string }
+        headBranch: { type: string }
+        lastAgentHeadSha: { type: string }
+        baseBranch: { type: string }
+        state: { type: string }
+        merged: { type: boolean }
+        openedAt: { type: integer, format: int64 }
+        closedAt: { type: integer, format: int64 }
+        mergedAt: { type: integer, format: int64 }
+        mergedByLogin: { type: string }
+        createdAt: { type: integer, format: int64 }
+        updatedAt: { type: integer, format: int64 }
+
+    TaskRunPRsResponse:
+      type: object
+      required: [prs]
+      properties:
+        prs:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRunPR"
+
+    TaskRunFilterOptions:
+      type: object
+      required:
+        - workspaces
+        - workflows
+        - factories
+        - integrations
+        - repos
+        - models
+        - statuses
+        - warningTypes
+        - failureTypes
+      properties:
+        workspaces:
+          type: array
+          items: { type: string }
+        workflows:
+          type: array
+          items: { type: string }
+        factories:
+          type: array
+          items: { type: string }
+        integrations:
+          type: array
+          items: { type: string }
+        repos:
+          type: array
+          items: { type: string }
+        models:
+          type: array
+          items: { type: string }
+        statuses:
+          type: array
+          items: { type: string }
+        warningTypes:
+          type: array
+          items: { type: string }
+        failureTypes:
+          type: array
+          items: { type: string }
