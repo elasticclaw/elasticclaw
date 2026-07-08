@@ -6,46 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/integrations"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
 )
 
-var prURLRegex = regexp.MustCompile(`https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)`)
-
-// extractPRs finds GitHub PR URLs in a message body.
-func extractPRs(content string) []struct {
-	repo   string
-	number int
-	url    string
-} {
-	var results []struct {
-		repo   string
-		number int
-		url    string
-	}
-	seen := map[string]bool{}
-	for _, m := range prURLRegex.FindAllStringSubmatch(content, -1) {
-		url := m[0]
-		if seen[url] {
-			continue
-		}
-		seen[url] = true
-		num, _ := strconv.Atoi(m[2])
-		results = append(results, struct {
-			repo   string
-			number int
-			url    string
-		}{m[1], num, url})
-	}
-	return results
-}
+// extractPRs moved to pkg/hub/integrations as ExtractPRs.
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
@@ -134,8 +105,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
 func (s *Server) scanMessageForPRs(clawID, content string) {
-	for _, pr := range extractPRs(content) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+	for _, pr := range integrations.ExtractPRs(content) {
+		s.storePRMention(clawID, pr.Repo, pr.Number, pr.URL)
 	}
 }
 

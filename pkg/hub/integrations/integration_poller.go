@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"bytes"
@@ -13,41 +13,41 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-// startIntegrationPoller launches the background polling goroutine that queries
+// StartIntegrationPoller launches the background polling goroutine that queries
 // each configured integration's API every 30 seconds to detect missed webhook
 // events. It evaluates factory/workflow filters against current state and
 // creates agents when the matching trigger has not already claimed that
 // external item.
-func (s *Server) startIntegrationPoller() {
+func (s *Service) StartIntegrationPoller() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			s.pollTick()
+			s.PollTick()
 		}
 	}()
 }
 
-// pollTick queries integration platforms for recently updated items and
+// PollTick queries integration platforms for recently updated items and
 // processes any trigger transitions that webhooks may have missed.
-func (s *Server) pollTick() {
+func (s *Service) PollTick() {
 	now := time.Now().UTC()
 	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
 
 	factories := s.resolveFactories()
-	linearWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("linear")
+	linearWorkflowWorkspaces, err := s.deps.LoadExternalWorkflowsByIntegration("linear")
 	if err != nil {
 		logf("[poll] tick: failed to load linear workflows: %v", err)
 	}
-	shortcutWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("shortcut")
+	shortcutWorkflowWorkspaces, err := s.deps.LoadExternalWorkflowsByIntegration("shortcut")
 	if err != nil {
 		logf("[poll] tick: failed to load shortcut workflows: %v", err)
 	}
-	githubIssueWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("github-issues")
+	githubIssueWorkflowWorkspaces, err := s.deps.LoadExternalWorkflowsByIntegration("github-issues")
 	if err != nil {
 		logf("[poll] tick: failed to load github-issues workflows: %v", err)
 	}
-	jiraWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("jira")
+	jiraWorkflowWorkspaces, err := s.deps.LoadExternalWorkflowsByIntegration("jira")
 	if err != nil {
 		logf("[poll] tick: failed to load jira workflows: %v", err)
 	}
@@ -56,9 +56,9 @@ func (s *Server) pollTick() {
 		return
 	}
 
-	s.mu.RLock()
-	integrations := s.hubCfg.Integrations
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	integrations := s.hubCfg().Integrations
+	s.deps.Mu.RUnlock()
 
 	// === LINEAR ===
 	if integrations != nil && len(integrations.Linear) > 0 {
@@ -101,7 +101,7 @@ func (s *Server) pollTick() {
 
 // ── LINEAR POLLER ───────────────────────────────────────────────────────────
 
-func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*types.LinearIntegrationConfig, since string) {
+func (s *Service) pollLinear(factories []*types.FactoryConfig, linearCfgs []*types.LinearIntegrationConfig, since string) {
 	// Group factories by workspace (team key) for efficient batching
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
@@ -151,7 +151,7 @@ type linearWorkflowPollTarget struct {
 	workflow  *types.WorkflowConfig
 }
 
-func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Service) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) {
 	tokenTargets := map[string][]linearWorkflowPollTarget{}
 	for _, workspace := range workspaces {
 		if workspace == nil {
@@ -164,7 +164,7 @@ func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since 
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+			token := s.ResolveLinearTokenForWorkflow(workspace.Name, workflow)
 			if token == "" {
 				logf("[poll-linear] workflow %s/%s: no Linear token configured — skipping", workspace.Name, workflow.Name)
 				continue
@@ -207,8 +207,8 @@ type linearPollIssue struct {
 	} `json:"assignee"`
 }
 
-func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, error) {
-	base := s.linearBaseURL
+func (s *Service) queryLinearIssues(token, since string) ([]linearPollIssue, error) {
+	base := s.deps.LinearBaseURL()
 	if base == "" {
 		base = "https://api.linear.app"
 	}
@@ -304,7 +304,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 	return issues, nil
 }
 
-func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types.FactoryConfig, workspace string) {
+func (s *Service) processLinearPollItem(issue linearPollIssue, factories []*types.FactoryConfig, workspace string) {
 	entityID := issue.Identifier
 	currentStatus := issue.State.Name
 
@@ -342,7 +342,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 		// Build synthetic webhook payload and create claw
 		payload := s.buildLinearPollPayload(issue)
 		if err := s.createClawForIssue(factory, payload, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[poll-linear] failed to create claw for %s: %v", entityID, err)
@@ -351,7 +351,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 			logf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
 			s.logFactoryEvent(factory.Name, entityID, issue.Title, "", currentStatus, "claw_created", "", "poll")
 			var clawID string
-			_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, entityID, factory.Name).Scan(&clawID)
+			_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, entityID, factory.Name).Scan(&clawID)
 			if clawID != "" {
 				s.trackFactoryCreationSuccess(factory.Name, entityID, clawID)
 			}
@@ -359,7 +359,7 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 	}
 }
 
-func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []linearWorkflowPollTarget) {
+func (s *Service) processLinearWorkflowPollItem(issue linearPollIssue, targets []linearWorkflowPollTarget) {
 	entityID := issue.Identifier
 	currentStatus := issue.State.Name
 	currentLabels := make(map[string]bool)
@@ -398,8 +398,8 @@ func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []
 	}
 }
 
-func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayload {
-	var payload linearWebhookPayload
+func (s *Service) buildLinearPollPayload(issue linearPollIssue) LinearWebhookPayload {
+	var payload LinearWebhookPayload
 	payload.Action = "update"
 	payload.Type = "Issue"
 	payload.Data.ID = issue.ID
@@ -426,7 +426,7 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 
 // ── SHORTCUT POLLER ─────────────────────────────────────────────────────────
 
-func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*types.ShortcutIntegrationConfig, since string) {
+func (s *Service) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*types.ShortcutIntegrationConfig, since string) {
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "shortcut" {
@@ -463,7 +463,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 
 		// Pre-fetch workflow states once per workspace so the poller loop does
 		// not repeat the full /workflows API call for every story.
-		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), sc.Token)
+		stateNameMap := buildShortcutStateMap(s.ResolveShortcutBaseURL(), sc.Token)
 		if len(stateNameMap) == 0 {
 			logf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
 			continue
@@ -493,12 +493,12 @@ type shortcutWorkflowPollTarget struct {
 	token     string
 }
 
-func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory, error) {
+func (s *Service) queryShortcutStories(token, since string) ([]shortcutPollStory, error) {
 	body := map[string]interface{}{
 		"updated_at_start": since,
 	}
 	jsonBody, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", s.resolveShortcutBaseURL()+"/api/v3/stories/search", bytes.NewReader(jsonBody))
+	req, _ := http.NewRequest("POST", s.ResolveShortcutBaseURL()+"/api/v3/stories/search", bytes.NewReader(jsonBody))
 	req.Header.Set("Shortcut-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -520,7 +520,7 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 	return stories, nil
 }
 
-func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Service) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) {
 	tokenTargets := map[string][]shortcutWorkflowPollTarget{}
 	for _, workspace := range workspaces {
 		if workspace == nil {
@@ -547,7 +547,7 @@ func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, sinc
 			logf("[poll-shortcut] workflow query failed: %v", err)
 			continue
 		}
-		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+		stateNameMap := buildShortcutStateMap(s.ResolveShortcutBaseURL(), token)
 		if len(stateNameMap) == 0 {
 			logf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
 			continue
@@ -558,7 +558,7 @@ func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, sinc
 	}
 }
 
-func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
+func (s *Service) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
 	storyID := fmt.Sprintf("sc-%d", story.ID)
 	currentStateName := stateNameMap[story.WorkflowStateID]
 	if currentStateName == "" {
@@ -583,7 +583,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 	}
 	if needsAssignee && len(story.OwnerIDs) > 0 {
 		// Fetch first owner's name for assignee matching
-		data, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
+		data, err := shortcutAPI(s.ResolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
 		if err == nil {
 			if name, ok := data["mention_name"].(string); ok && name != "" {
 				currentAssignee = name
@@ -612,7 +612,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			continue
 		}
 
-		action := shortcutAction{
+		action := ShortcutAction{
 			ID:          story.ID,
 			EntityType:  "story",
 			Action:      "update",
@@ -621,7 +621,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			Description: story.Description,
 		}
 		if err := s.createClawForShortcutStory(factory, action, storyID, token, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
@@ -632,7 +632,7 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 	}
 }
 
-func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, targets []shortcutWorkflowPollTarget, token string, stateNameMap map[int64]string) {
+func (s *Service) processShortcutWorkflowPollItem(story shortcutPollStory, targets []shortcutWorkflowPollTarget, token string, stateNameMap map[int64]string) {
 	storyID := fmt.Sprintf("sc-%d", story.ID)
 	currentStateName := stateNameMap[story.WorkflowStateID]
 	if currentStateName == "" {
@@ -651,7 +651,7 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 		}
 	}
 	if needsAssignee && len(story.OwnerIDs) > 0 {
-		data, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
+		data, err := shortcutAPI(s.ResolveShortcutBaseURL(), fmt.Sprintf("members/%s", story.OwnerIDs[0]), token)
 		if err == nil {
 			if name, ok := data["mention_name"].(string); ok && name != "" {
 				currentAssignee = name
@@ -660,7 +660,7 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 			}
 		}
 	}
-	action := shortcutAction{
+	action := ShortcutAction{
 		ID:          story.ID,
 		EntityType:  "story",
 		Action:      "update",
@@ -692,7 +692,7 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 
 // ── GITHUB ISSUES POLLER ────────────────────────────────────────────────────
 
-func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs []*types.GitHubIssuesIntegrationConfig, since string) {
+func (s *Service) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs []*types.GitHubIssuesIntegrationConfig, since string) {
 	// Discover repos to poll from factory configs
 	repoFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
@@ -723,7 +723,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		// Resolve token from first matching factory's workspace
 		token := ""
 		for _, f := range repoFactories {
-			token = s.resolveGitHubIssuesTokenForFactory(f)
+			token = s.ResolveGitHubIssuesTokenForFactory(f)
 			if token != "" {
 				break
 			}
@@ -732,7 +732,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 			continue
 		}
 
-		base := s.githubBaseURL
+		base := s.deps.GithubBaseURL()
 		if base == "" {
 			base = "https://api.github.com"
 		}
@@ -755,7 +755,7 @@ type githubIssueWorkflowPollTarget struct {
 	token     string
 }
 
-func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Service) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) {
 	type repoTokenKey struct {
 		repo  string
 		token string
@@ -772,12 +772,12 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+			token := s.ResolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
 			if token == "" {
 				logf("[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
-			for _, repo := range githubIssuesWorkflowTriggerRepos(workflow) {
+			for _, repo := range GitHubIssuesWorkflowTriggerRepos(workflow) {
 				if repo == "" {
 					continue
 				}
@@ -795,7 +795,7 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 		}
 	}
 
-	base := s.githubBaseURL
+	base := s.deps.GithubBaseURL()
 	if base == "" {
 		base = "https://api.github.com"
 	}
@@ -822,7 +822,7 @@ func githubIssuesPollingRepos(factory *types.FactoryConfig) []string {
 	return factory.Repos
 }
 
-type githubIssuesPollItem struct {
+type GitHubIssuesPollItem struct {
 	Number    int    `json:"number"`
 	Title     string `json:"title"`
 	Body      string `json:"body"`
@@ -856,13 +856,13 @@ type githubIssueEvent struct {
 	} `json:"issue,omitempty"`
 }
 
-func (s *Server) queryGitHubIssues(repo, token, since, base string) ([]githubIssuesPollItem, error) {
-	items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues?since=%s&state=all&sort=updated&direction=desc", repo, since), token)
+func (s *Service) queryGitHubIssues(repo, token, since, base string) ([]GitHubIssuesPollItem, error) {
+	items, err := s.deps.GithubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues?since=%s&state=all&sort=updated&direction=desc", repo, since), token)
 	if err != nil {
 		return nil, err
 	}
 
-	var issues []githubIssuesPollItem
+	var issues []GitHubIssuesPollItem
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -872,7 +872,7 @@ func (s *Server) queryGitHubIssues(repo, token, since, base string) ([]githubIss
 		if _, isPR := m["pull_request"]; isPR {
 			continue
 		}
-		var issue githubIssuesPollItem
+		var issue GitHubIssuesPollItem
 		b, _ := json.Marshal(m)
 		_ = json.Unmarshal(b, &issue)
 		issues = append(issues, issue)
@@ -880,8 +880,8 @@ func (s *Server) queryGitHubIssues(repo, token, since, base string) ([]githubIss
 	return issues, nil
 }
 
-func (s *Server) queryGitHubIssueEvents(repo, token, base string, issueNumber int) ([]githubIssueEvent, error) {
-	items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues/%d/events", repo, issueNumber), token)
+func (s *Service) queryGitHubIssueEvents(repo, token, base string, issueNumber int) ([]githubIssueEvent, error) {
+	items, err := s.deps.GithubAPIListWithBase(base, fmt.Sprintf("repos/%s/issues/%d/events", repo, issueNumber), token)
 	if err != nil {
 		return nil, err
 	}
@@ -900,7 +900,7 @@ func (s *Server) queryGitHubIssueEvents(repo, token, base string, issueNumber in
 	return events, nil
 }
 
-func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factories []*types.FactoryConfig, repo, token, base string) {
+func (s *Service) processGitHubIssuesPollItem(issue GitHubIssuesPollItem, factories []*types.FactoryConfig, repo, token, base string) {
 	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
 	currentStatus := issue.State
 
@@ -991,7 +991,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 
 		payload := s.buildGitHubIssuesPollPayload(issue, repo)
 		if err := s.createClawForGitHubIssue(factory, payload, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
@@ -1002,7 +1002,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 	}
 }
 
-func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, targets []githubIssueWorkflowPollTarget, repo, token, base string) {
+func (s *Service) processGitHubIssueWorkflowPollItem(issue GitHubIssuesPollItem, targets []githubIssueWorkflowPollTarget, repo, token, base string) {
 	issueID := fmt.Sprintf("%s/%d", repo, issue.Number)
 	currentStatus := issue.State
 	issueLabels := githubIssuesPollLabels(issue)
@@ -1029,8 +1029,8 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 		if !ok {
 			continue
 		}
-		if _, _, err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+		if _, _, err := s.CreateClawForGitHubIssueWorkflow(workspace, workflow, payload, "poll"); err != nil {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
@@ -1038,7 +1038,7 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 	}
 }
 
-func githubIssuesPollLabels(issue githubIssuesPollItem) map[string]bool {
+func githubIssuesPollLabels(issue GitHubIssuesPollItem) map[string]bool {
 	labels := map[string]bool{}
 	for _, label := range issue.Labels {
 		labels[strings.ToLower(label.Name)] = true
@@ -1046,8 +1046,8 @@ func githubIssuesPollLabels(issue githubIssuesPollItem) map[string]bool {
 	return labels
 }
 
-func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo string, workflow *types.WorkflowConfig, currentStatus string, issueLabels map[string]bool, assignee string, events []githubIssueEvent) (githubIssuesWebhookPayload, bool) {
-	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, githubIssuesWorkflowPollAction(workflow))
+func buildGitHubIssuesWorkflowPollPayload(issue GitHubIssuesPollItem, repo string, workflow *types.WorkflowConfig, currentStatus string, issueLabels map[string]bool, assignee string, events []githubIssueEvent) (GitHubIssuesWebhookPayload, bool) {
+	payload := BuildGitHubIssuesPollPayloadForAction(issue, repo, githubIssuesWorkflowPollAction(workflow))
 	if payload.Action == "" {
 		return payload, false
 	}
@@ -1071,7 +1071,7 @@ func buildGitHubIssuesWorkflowPollPayload(issue githubIssuesPollItem, repo strin
 		}
 	}
 	if workflow.Trigger != nil {
-		if !githubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
+		if !GitHubIssuesWorkflowTriggerMatches(workflow.Trigger, payload, currentStatus, issueLabels) {
 			return payload, false
 		}
 		return payload, true
@@ -1187,12 +1187,12 @@ func githubIssuesWorkflowPollLabeler(workflow *types.WorkflowConfig, labelName s
 	return "", false
 }
 
-func (s *Server) buildGitHubIssuesPollPayload(issue githubIssuesPollItem, repo string) githubIssuesWebhookPayload {
-	return buildGitHubIssuesPollPayloadForAction(issue, repo, "opened")
+func (s *Service) buildGitHubIssuesPollPayload(issue GitHubIssuesPollItem, repo string) GitHubIssuesWebhookPayload {
+	return BuildGitHubIssuesPollPayloadForAction(issue, repo, "opened")
 }
 
-func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, action string) githubIssuesWebhookPayload {
-	var payload githubIssuesWebhookPayload
+func BuildGitHubIssuesPollPayloadForAction(issue GitHubIssuesPollItem, repo, action string) GitHubIssuesWebhookPayload {
+	var payload GitHubIssuesWebhookPayload
 	payload.Action = action
 	payload.Issue.Number = issue.Number
 	payload.Issue.Title = issue.Title
@@ -1218,7 +1218,7 @@ func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, act
 
 // ── JIRA POLLER ─────────────────────────────────────────────────────────────
 
-func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.JiraIntegrationConfig, since time.Time) {
+func (s *Service) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.JiraIntegrationConfig, since time.Time) {
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "jira" {
@@ -1241,7 +1241,7 @@ func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.Ji
 			continue
 		}
 		projects := jiraFactoryProjects(factories)
-		tracker := workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}
+		tracker := WorkspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}
 		issues, err := s.queryJiraIssues(tracker, since, projects)
 		if err != nil {
 			logf("[poll-jira] query failed for workspace %q: %v", ji.Workspace, err)
@@ -1256,10 +1256,10 @@ func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.Ji
 type jiraWorkflowPollTarget struct {
 	workspace *types.WorkspaceConfig
 	workflow  *types.WorkflowConfig
-	tracker   workspaceIssueTracker
+	tracker   WorkspaceIssueTracker
 }
 
-func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since time.Time) {
+func (s *Service) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since time.Time) {
 	type trackerKey struct {
 		baseURL  string
 		username string
@@ -1277,7 +1277,7 @@ func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since ti
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+			tracker, ok := s.ResolveJiraTrackerForWorkflow(workspace.Name, workflow)
 			if !ok || tracker.Token == "" || tracker.BaseURL == "" {
 				logf("[poll-jira] workflow %s/%s: no Jira tracker configured — skipping", workspace.Name, workflow.Name)
 				continue
@@ -1341,7 +1341,7 @@ func jiraWorkflowProjects(targets []jiraWorkflowPollTarget) []string {
 	return projects
 }
 
-func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.FactoryConfig, tracker workspaceIssueTracker) {
+func (s *Service) processJiraPollItem(issue jiraPollIssue, factories []*types.FactoryConfig, tracker WorkspaceIssueTracker) {
 	payload := jiraPollPayload(issue)
 	labels := jiraIssueLabels(issue)
 	assignee := jiraIssueAssignee(issue)
@@ -1359,7 +1359,7 @@ func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.Fac
 			continue
 		}
 		if err := s.createClawForJiraIssue(factory, payload, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[poll-jira] failed to create claw for %s: %v", issue.Key, err)
@@ -1368,7 +1368,7 @@ func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.Fac
 	_ = tracker
 }
 
-func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jiraWorkflowPollTarget) {
+func (s *Service) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jiraWorkflowPollTarget) {
 	payload := jiraPollPayload(issue)
 	labels := jiraIssueLabels(issue)
 	assignee := jiraIssueAssignee(issue)
@@ -1391,7 +1391,7 @@ func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jira
 			continue
 		}
 		if err := s.createClawForJiraWorkflow(workspace, workflow, payload, "poll"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[workflow:%s/%s] failed to create claw for Jira issue %s via poll: %v", workspace.Name, workflow.Name, issue.Key, err)
@@ -1409,7 +1409,7 @@ func jiraPollPayload(issue jiraPollIssue) jiraWebhookPayload {
 
 // ── GITHUB PRs POLLER ─────────────────────────────────────────────────────────
 
-func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
+func (s *Service) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 	repoFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "github" {
@@ -1439,7 +1439,7 @@ func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 			continue
 		}
 
-		base := s.githubBaseURL
+		base := s.deps.GithubBaseURL()
 		if base == "" {
 			base = "https://api.github.com"
 		}
@@ -1473,8 +1473,8 @@ type githubPRPollItem struct {
 	} `json:"base"`
 }
 
-func (s *Server) queryGitHubPRs(repo, token, since, base string) ([]githubPRPollItem, error) {
-	items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/pulls?state=open&since=%s&sort=updated&direction=desc", repo, since), token)
+func (s *Service) queryGitHubPRs(repo, token, since, base string) ([]githubPRPollItem, error) {
+	items, err := s.deps.GithubAPIListWithBase(base, fmt.Sprintf("repos/%s/pulls?state=open&since=%s&sort=updated&direction=desc", repo, since), token)
 	if err != nil {
 		return nil, err
 	}
@@ -1493,12 +1493,12 @@ func (s *Server) queryGitHubPRs(repo, token, since, base string) ([]githubPRPoll
 	return prs, nil
 }
 
-func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types.FactoryConfig, repo, base string) {
+func (s *Service) processGitHubPRPollItem(pr githubPRPollItem, factories []*types.FactoryConfig, repo, base string) {
 	prID := fmt.Sprintf("%s#%d", repo, pr.Number)
 
 	// If a non-deleted claw already exists for this PR, skip
 	var existingID string
-	_ = s.db.QueryRow(
+	_ = s.deps.DB.QueryRow(
 		`SELECT c.id FROM claws c JOIN claw_prs cp ON cp.claw_id = c.id
 		 WHERE cp.pr_url=? AND c.status NOT IN ('deleted') LIMIT 1`,
 		pr.HTMLURL).Scan(&existingID)
@@ -1541,8 +1541,8 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 	}
 }
 
-func (s *Server) buildGitHubPRPollPayload(pr githubPRPollItem, repo string) githubPRPayload {
-	var payload githubPRPayload
+func (s *Service) buildGitHubPRPollPayload(pr githubPRPollItem, repo string) GitHubPRPayload {
+	var payload GitHubPRPayload
 	payload.Action = "opened"
 	payload.Number = pr.Number
 	payload.PullRequest.HTMLURL = pr.HTMLURL
@@ -1557,7 +1557,7 @@ func (s *Server) buildGitHubPRPollPayload(pr githubPRPollItem, repo string) gith
 
 // ── SHARED HELPERS ────────────────────────────────────────────────────────────
 
-func (s *Server) factoryMatchesWorkspace(factory *types.FactoryConfig, workspace, teamKey, integration string) bool {
+func (s *Service) factoryMatchesWorkspace(factory *types.FactoryConfig, workspace, teamKey, integration string) bool {
 	if factory.Workspace != "" && !strings.EqualFold(factory.Workspace, workspace) {
 		return false
 	}
@@ -1570,11 +1570,11 @@ func (s *Server) factoryMatchesWorkspace(factory *types.FactoryConfig, workspace
 	return true
 }
 
-func (s *Server) labelsMatch(currentLabels []string, requiredLabels []string, excludedLabels []string) bool {
+func (s *Service) labelsMatch(currentLabels []string, requiredLabels []string, excludedLabels []string) bool {
 	return labelsAllowed(currentLabels, requiredLabels, excludedLabels)
 }
 
-func (s *Server) assigneeMatches(currentAssignee, filter string) bool {
+func (s *Service) assigneeMatches(currentAssignee, filter string) bool {
 	filter = strings.ToLower(strings.TrimSpace(filter))
 	if filter == "" {
 		return true

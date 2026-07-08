@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"bytes"
@@ -22,11 +22,11 @@ import (
 
 type shortcutWebhookPayload struct {
 	ID        string           `json:"id"`
-	Actions   []shortcutAction `json:"actions"`
+	Actions   []ShortcutAction `json:"actions"`
 	ChangedAt string           `json:"changed_at"`
 }
 
-type shortcutAction struct {
+type ShortcutAction struct {
 	ID          int64                     `json:"id"`
 	EntityType  string                    `json:"entity_type"` // "story"
 	Action      string                    `json:"action"`      // "update", "create"
@@ -51,15 +51,15 @@ type shortcutChange struct {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 // validateShortcutSignature checks HMAC-SHA256 against factory webhook secrets.
-func (s *Server) validateShortcutSignature(workspaceName string, body []byte, sig string) bool {
+func (s *Service) validateShortcutSignature(workspaceName string, body []byte, sig string) bool {
 	// Strip sha256= prefix if present
 	sig = strings.TrimPrefix(sig, "sha256=")
-	s.mu.RLock()
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	secrets := s.hubCfg().Secrets
+	s.deps.Mu.RUnlock()
 	factories := s.resolveFactories()
 	hasSecrets := false
-	for _, secret := range workspaceIssueTrackerWebhookSecrets(workspaceName, "shortcut") {
+	for _, secret := range s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "shortcut") {
 		hasSecrets = true
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
@@ -94,16 +94,16 @@ func (s *Server) validateShortcutSignature(workspaceName string, body []byte, si
 	return !hasSecrets
 }
 
-func (s *Server) validateShortcutWebhook() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Service) validateShortcutWebhook() bool {
+	s.deps.Mu.RLock()
+	defer s.deps.Mu.RUnlock()
 
-	if s.hubCfg.Integrations == nil {
+	if s.hubCfg().Integrations == nil {
 		return false
 	}
 
 	// Validate that at least one Shortcut integration with a token is configured
-	for _, sc := range s.hubCfg.Integrations.Shortcut {
+	for _, sc := range s.hubCfg().Integrations.Shortcut {
 		if sc.Token != "" {
 			return true
 		}
@@ -112,7 +112,7 @@ func (s *Server) validateShortcutWebhook() bool {
 	return false
 }
 
-func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -148,9 +148,9 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebhookPayload) {
-	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("shortcut")
-	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
+func (s *Service) processShortcutEvent(workspaceName string, payload shortcutWebhookPayload) {
+	workflowWorkspaces, _ := s.deps.LoadExternalWorkflowsByIntegration("shortcut")
+	workflowWorkspaces = s.deps.FilterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
 	_ = s.processShortcutWorkflowEvent(workflowWorkspaces, payload)
 
 	factories := s.resolveFactories()
@@ -186,7 +186,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 				continue
 			}
 
-			token := s.resolveShortcutToken(factory.Workspace)
+			token := s.ResolveShortcutToken(factory.Workspace)
 			if token == "" {
 				continue
 			}
@@ -240,7 +240,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 
 			stateMap, ok := stateNameCache[token]
 			if !ok {
-				stateMap = buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+				stateMap = buildShortcutStateMap(s.ResolveShortcutBaseURL(), token)
 				if len(stateMap) > 0 {
 					stateNameCache[token] = stateMap
 				} else {
@@ -255,7 +255,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
 				logf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
 				if err := s.createClawForShortcutStory(factory, action, storyID, token, "shortcut webhook"); err != nil {
-					if isFactoryTriggerAlreadyClaimed(err) {
+					if IsFactoryTriggerAlreadyClaimed(err) {
 						continue
 					}
 					logf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
@@ -263,7 +263,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 					s.trackFactoryCreationFailure(factory.Name, storyID, err.Error())
 				} else {
 					var clawID string
-					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, storyID, factory.Name).Scan(&clawID)
+					_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, storyID, factory.Name).Scan(&clawID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_created", clawID, "")
 					if clawID != "" {
 						s.trackFactoryCreationSuccess(factory.Name, storyID, clawID)
@@ -274,7 +274,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 			// Issue leaving trigger status → terminate claw
 			if factory.TerminateOnLeave && !strings.EqualFold(newStateName, factory.TriggerStatus) {
 				var activeClaw string
-				_ = s.db.QueryRow(
+				_ = s.deps.DB.QueryRow(
 					`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`,
 					storyID,
 				).Scan(&activeClaw)
@@ -291,7 +291,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 	}
 }
 
-func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfig, payload shortcutWebhookPayload) bool {
+func (s *Service) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfig, payload shortcutWebhookPayload) bool {
 	if len(workspaces) == 0 {
 		return false
 	}
@@ -333,7 +333,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 
 				stateMap, ok := stateNameCache[token]
 				if !ok {
-					stateMap = buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
+					stateMap = buildShortcutStateMap(s.ResolveShortcutBaseURL(), token)
 					if len(stateMap) > 0 {
 						stateNameCache[token] = stateMap
 					} else {
@@ -364,7 +364,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 
 				if workflow.TerminateOnLeave && !strings.EqualFold(newStateName, workflow.TriggerStatus) {
 					var activeClaw string
-					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&activeClaw)
+					_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&activeClaw)
 					if activeClaw != "" {
 						matched = true
 						logf("[workflow:%s/%s] Shortcut story %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus, activeClaw[:8])
@@ -379,7 +379,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 				matched = true
 				logf("[workflow:%s/%s] Shortcut story %s entered %q — creating claw", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus)
 				if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "shortcut webhook"); err != nil {
-					if isFactoryTriggerAlreadyClaimed(err) {
+					if IsFactoryTriggerAlreadyClaimed(err) {
 						continue
 					}
 					logf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
@@ -408,12 +408,12 @@ func shortcutAssigneeFilterMatches(filter string, data *shortcutStoryFilterData)
 	}
 }
 
-func (s *Server) loadShortcutStoryFilterData(token string, storyID int64) *shortcutStoryFilterData {
+func (s *Service) loadShortcutStoryFilterData(token string, storyID int64) *shortcutStoryFilterData {
 	data := &shortcutStoryFilterData{
 		labels:    map[string]bool{},
 		assignees: map[string]bool{},
 	}
-	story, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%d", storyID), token)
+	story, err := shortcutAPI(s.ResolveShortcutBaseURL(), fmt.Sprintf("stories/%d", storyID), token)
 	if err != nil {
 		data.loadErr = err
 		return data
@@ -451,7 +451,7 @@ func (s *Server) loadShortcutStoryFilterData(token string, storyID int64) *short
 	data.hasOwner = len(ownerIDs) > 0
 
 	for _, ownerID := range ownerIDs {
-		member, err := shortcutAPI(s.resolveShortcutBaseURL(), "members/"+ownerID, token)
+		member, err := shortcutAPI(s.ResolveShortcutBaseURL(), "members/"+ownerID, token)
 		if err != nil {
 			continue
 		}
@@ -489,11 +489,11 @@ func collectShortcutAssigneeIdentifiers(set map[string]bool, member map[string]i
 	}
 }
 
-// resolveShortcutToken finds the API token for the given workspace label.
-func (s *Server) resolveShortcutToken(workspace string) string {
-	s.mu.RLock()
-	cfg := s.hubCfg
-	s.mu.RUnlock()
+// ResolveShortcutToken finds the API token for the given workspace label.
+func (s *Service) ResolveShortcutToken(workspace string) string {
+	s.deps.Mu.RLock()
+	cfg := s.hubCfg()
+	s.deps.Mu.RUnlock()
 	if cfg.Integrations == nil {
 		return ""
 	}
@@ -530,8 +530,8 @@ func buildShortcutStateMap(baseURL, token string) map[int64]string {
 }
 
 // createClawForShortcutStory provisions a claw for a Shortcut story.
-func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action shortcutAction, storyID, token string, reason string) error {
-	triggerKey := factoryTriggerKey("shortcut", storyID)
+func (s *Service) createClawForShortcutStory(factory *types.FactoryConfig, action ShortcutAction, storyID, token string, reason string) error {
+	triggerKey := FactoryTriggerKey("shortcut", storyID)
 
 	claimed, err := s.claimFactoryTrigger(factory.Name, "shortcut", triggerKey, reason, map[string]string{
 		"story_id": storyID,
@@ -544,7 +544,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		if reason != "poll" {
 			logf("[factory:%s] Shortcut story %s already has an active trigger claim — treating as idempotent success", factory.Name, storyID)
 		}
-		return errFactoryTriggerAlreadyClaimed
+		return ErrFactoryTriggerAlreadyClaimed
 	}
 	claimOpen := true
 	defer func() {
@@ -555,7 +555,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	// Verify we can read the story before spending money on a sandbox.
 	// Non-negotiable: if the story is unreadable, we can't do any work.
-	if _, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%s", storyID), token); err != nil {
+	if _, err := shortcutAPI(s.ResolveShortcutBaseURL(), fmt.Sprintf("stories/%s", storyID), token); err != nil {
 		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
 	}
 	logf("[factory:%s] verified story %s is readable", factory.Name, storyID)
@@ -579,7 +579,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	// Inject BOOTSTRAP.md and CONTEXT.md
-	ctx := buildShortcutContext(action, storyID)
+	ctx := BuildShortcutContext(action, storyID)
 	templateFiles["BOOTSTRAP.md"] = ctx
 	templateFiles["CONTEXT.md"] = ctx
 
@@ -589,20 +589,20 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	var tenantID string
-	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
 	// Find provider: factory override > template config > hub default
-	provider, err := resolveProvider(factory, tmplCfg, s.defaultProvider())
+	provider, err := s.deps.ResolveProvider(factory, tmplCfg, s.DefaultProvider())
 	if err != nil {
 		return err
 	}
 
-	s.mu.RLock()
-	provCfg, _ := s.hubCfg.Providers[provider]
-	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	provCfg, _ := s.hubCfg().Providers[provider]
+	clawToken := s.hubCfg().ClawToken
+	s.deps.Mu.RUnlock()
 
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
@@ -616,7 +616,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
 		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
-			val, envName, ok := s.resolveSecretRef(ref, factory)
+			val, envName, ok := s.ResolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
 				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
@@ -629,7 +629,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// Resolve and inject template-level secret_refs
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -641,7 +641,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// Resolve and inject factory-level secret_refs (factory overrides template)
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -649,7 +649,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			}
 		}
 	}
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
+	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields (from elasticclaw-config.yaml if present).
 	// Factory-level overrides (color, tags) take precedence over template config.
@@ -681,22 +681,22 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	// Resolve default model: template > llm_key lookup > hub default
 	if defaultModel == "" && llmKey != "" {
-		s.mu.RLock()
-		for _, k := range s.hubCfg.LLMKeys {
+		s.deps.Mu.RLock()
+		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.mu.RUnlock()
+		s.deps.Mu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
-		s.mu.RUnlock()
+		s.deps.Mu.RLock()
+		defaultModel = s.hubCfg().DefaultModel
+		s.deps.Mu.RUnlock()
 	}
 
-	tags := mergeTags(factory.Template, factory.Tags, nil)
+	tags := s.deps.MergeTags(factory.Template, factory.Tags, nil)
 	hasfactory := false
 	for _, t := range tags {
 		if t == "factory:"+factory.Name {
@@ -720,13 +720,13 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
 	// race where concurrent factory webhooks both read active < max and both
 	// insert as provisioning, exceeding the limit.
-	s.promoteMu.Lock()
+	s.deps.PromoteMu.Lock()
 
-	s.mu.RLock()
-	groupName, groupLimit := s.resolveGroupLimit(factory)
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	groupName, groupLimit := s.ResolveGroupLimit(factory)
+	s.deps.Mu.RUnlock()
 
-	activeCount := s.countActiveClawsInGroup(groupName)
+	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
@@ -742,7 +742,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		initialStatus = "pending"
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.deps.DB.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, shortcut_story_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
@@ -751,15 +751,15 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	// Release promoteMu immediately after INSERT so we don't hold it across
 	// the potentially slow async provisioning below.
-	s.promoteMu.Unlock()
+	s.deps.PromoteMu.Unlock()
 
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		_, _ = s.deps.DB.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.deps.CronFinishRunByClawID != nil {
+			s.deps.CronFinishRunByClawID(clawID, "failed", err.Error())
 		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
@@ -775,7 +775,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	// a queued claw hasn't actually started working yet)
 	if !isPending && factory.WorkingStatus != "" {
 		if token != "" {
-			if err := moveShortcutStory(s.resolveShortcutBaseURL(), token, storyID, factory.WorkingStatus); err != nil {
+			if err := MoveShortcutStory(s.ResolveShortcutBaseURL(), token, storyID, factory.WorkingStatus); err != nil {
 				logf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
 			} else {
 				logf("[factory] moved story %s to working status '%s'", storyID, factory.WorkingStatus)
@@ -796,7 +796,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	go func() {
 		var currentStatus string
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		_ = s.deps.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
 			return
 		}
@@ -826,15 +826,15 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	return nil
 }
 
-func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, action shortcutAction, storyID, reason string) error {
+func (s *Service) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, action ShortcutAction, storyID, reason string) error {
 	var existing string
-	_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&existing)
+	_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&existing)
 	if existing != "" {
 		logf("[workflow:%s/%s] Shortcut story %s already has active claw %s", workspace.Name, workflow.Name, storyID, existing[:8])
 		return nil
 	}
 
-	triggerKey := factoryTriggerKey("shortcut", storyID)
+	triggerKey := FactoryTriggerKey("shortcut", storyID)
 	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
 	claimed, err := s.claimFactoryTrigger(triggerOwner, "shortcut", triggerKey, reason, map[string]string{
 		"story_id":  storyID,
@@ -856,27 +856,27 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 		}
 	}()
 
-	templateFiles := cloneStringMap(workspace.Files)
-	templateFiles["CONTEXT.md"] = buildShortcutContext(action, storyID)
+	templateFiles := s.deps.CloneStringMap(workspace.Files)
+	templateFiles["CONTEXT.md"] = BuildShortcutContext(action, storyID)
 
 	clawName := storyID
 	if workflow.NamePattern != "" {
 		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", storyID)
 	}
 
-	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		workspaceFiles:  templateFiles,
-		clawName:        clawName,
-		shortcutStoryID: storyID,
-		reason:          reason,
+	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, WorkflowCreateOptions{
+		WorkspaceFiles:  templateFiles,
+		ClawName:        clawName,
+		ShortcutStoryID: storyID,
+		Reason:          reason,
 	})
 	if err != nil {
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		_, _ = s.deps.DB.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.deps.CronFinishRunByClawID != nil {
+			s.deps.CronFinishRunByClawID(clawID, "failed", err.Error())
 		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
@@ -884,7 +884,7 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 	return nil
 }
 
-func buildShortcutContext(action shortcutAction, storyID string) string {
+func BuildShortcutContext(action ShortcutAction, storyID string) string {
 	var b strings.Builder
 	b.WriteString("# Issue Context\n\n")
 	b.WriteString("This agent was automatically created by a factory to work on a Shortcut story.\n\n")
@@ -903,15 +903,15 @@ func buildShortcutContext(action shortcutAction, storyID string) string {
 	b.WriteString("2. Explore the codebase\n")
 	b.WriteString("3. Implement the feature/fix described above\n")
 	b.WriteString("4. Follow the PR Completion Policy below\n")
-	appendDefaultFactoryPRPolicy(&b)
+	AppendDefaultFactoryPRPolicy(&b)
 	return b.String()
 }
 
-// resolveShortcutBaseURL returns the base URL for Shortcut API calls.
+// ResolveShortcutBaseURL returns the base URL for Shortcut API calls.
 // Uses the server's override if set (for testing), otherwise the production endpoint.
-func (s *Server) resolveShortcutBaseURL() string {
-	if s.shortcutBaseURL != "" {
-		return s.shortcutBaseURL
+func (s *Service) ResolveShortcutBaseURL() string {
+	if s.deps.ShortcutBaseURL() != "" {
+		return s.deps.ShortcutBaseURL()
 	}
 	return "https://api.app.shortcut.com"
 }
@@ -934,8 +934,8 @@ func shortcutAPI(baseURL, path, token string) (map[string]interface{}, error) {
 	return result, nil
 }
 
-// moveShortcutStory updates a story's workflow state.
-func moveShortcutStory(baseURL, token, storyIDStr, stateName string) error {
+// MoveShortcutStory updates a story's workflow state.
+func MoveShortcutStory(baseURL, token, storyIDStr, stateName string) error {
 	// First find the state ID by name
 	resp, err := shortcutAPIList(baseURL, "workflows", token)
 	if err != nil {
@@ -986,8 +986,8 @@ func moveShortcutStory(baseURL, token, storyIDStr, stateName string) error {
 	return nil
 }
 
-// commentShortcutIssue adds a comment to a Shortcut story.
-func commentShortcutIssue(baseURL, token, storyIDStr, body string) error {
+// CommentShortcutIssue adds a comment to a Shortcut story.
+func CommentShortcutIssue(baseURL, token, storyIDStr, body string) error {
 	// Parse story ID (sc-123 → 123)
 	numStr := strings.TrimPrefix(storyIDStr, "sc-")
 	storyNum, err := strconv.ParseInt(numStr, 10, 64)

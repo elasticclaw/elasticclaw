@@ -3,21 +3,10 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 )
-
-var errFactoryTriggerAlreadyClaimed = errors.New("factory trigger already claimed")
-
-func isFactoryTriggerAlreadyClaimed(err error) bool {
-	return errors.Is(err, errFactoryTriggerAlreadyClaimed)
-}
-
-func factoryTriggerKey(integration, externalID string) string {
-	return integration + ":" + externalID
-}
 
 func activeTriggerStatus(status string) bool {
 	switch status {

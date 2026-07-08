@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/settings"
 	"io"
 	"net/http"
 	"os"
@@ -18,9 +19,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// externalWebhookPayload is a generic payload for external triggers.
+// ExternalWebhookPayload is a generic payload for external triggers.
 // It supports GitHub release events and generic webhooks.
-type externalWebhookPayload struct {
+type ExternalWebhookPayload struct {
 	// Common fields
 	EventType string `json:"event_type,omitempty"` // e.g., "released", "published"
 	Action    string `json:"action,omitempty"`     // e.g., "released", "created"
@@ -60,9 +61,9 @@ type externalWebhookPayload struct {
 	Payload map[string]interface{} `json:"payload,omitempty"`
 }
 
-// handleExternalWebhook processes incoming external webhook events.
+// HandleExternalWebhook processes incoming external webhook events.
 // This endpoint accepts generic webhooks and GitHub release events.
-func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -88,7 +89,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the payload based on event type
-	var payload externalWebhookPayload
+	var payload ExternalWebhookPayload
 
 	switch event {
 	case "release":
@@ -172,12 +173,12 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) validateExternalSignatureForFactory(factory *types.FactoryConfig, body []byte, sig string) bool {
+func (s *Service) validateExternalSignatureForFactory(factory *types.FactoryConfig, body []byte, sig string) bool {
 	sig = strings.TrimPrefix(sig, "sha256=")
 
-	s.mu.RLock()
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	secrets := s.hubCfg().Secrets
+	s.deps.Mu.RUnlock()
 
 	secret := factory.WebhookSecret
 	if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
@@ -196,7 +197,7 @@ func (s *Server) validateExternalSignatureForFactory(factory *types.FactoryConfi
 }
 
 // processExternalEvent finds matching factories and creates claws for external events.
-func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig string) {
+func (s *Service) processExternalEvent(payload ExternalWebhookPayload, body []byte, sig string) {
 	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		return
@@ -289,7 +290,7 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 	}
 }
 
-func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, payload externalWebhookPayload, triggerKey, repoFullName, eventType string) {
+func (s *Service) processExternalFactoryTrigger(factory *types.FactoryConfig, payload ExternalWebhookPayload, triggerKey, repoFullName, eventType string) {
 	// Atomically claim the trigger via factory_triggers (prevents concurrent duplicate creation).
 	claimed, err := s.claimFactoryTrigger(factory.Name, "external", triggerKey, "webhook", map[string]string{
 		"repository": repoFullName,
@@ -327,9 +328,9 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 	}
 
 	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		_, _ = s.deps.DB.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.deps.CronFinishRunByClawID != nil {
+			s.deps.CronFinishRunByClawID(clawID, "failed", err.Error())
 		}
 		logf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
 			factory.Name, triggerKey, err)
@@ -383,7 +384,7 @@ func matchGlob(pattern, s string) bool {
 
 // createClawForExternalEvent provisions a new claw for an external event.
 // The caller must have already claimed the factory trigger atomically.
-func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payload externalWebhookPayload, triggerID string) (string, error) {
+func (s *Service) createClawForExternalEvent(factory *types.FactoryConfig, payload ExternalWebhookPayload, triggerID string) (string, error) {
 	repoFullName := payload.Repository.FullName
 	eventType := payload.EventType
 	if eventType == "" {
@@ -405,7 +406,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	}
 
 	// Build context for the external event
-	ctxContent := buildExternalEventContext(payload, factory)
+	ctxContent := BuildExternalEventContext(payload, factory)
 	templateFiles["CONTEXT.md"] = ctxContent
 
 	// Store trigger inputs as JSON
@@ -438,26 +439,26 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 
 	// Find tenant
 	var tenantID string
-	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
 		return "", fmt.Errorf("no tenant: %w", err)
 	}
 
 	// Read all hub config values under lock to avoid data races
-	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	secrets := s.hubCfg.Secrets
-	providers := s.hubCfg.Providers
-	llmKeys := s.hubCfg.LLMKeys
-	defaultModelHub := s.hubCfg.DefaultModel
-	integrations := s.hubCfg.Integrations
+	s.deps.Mu.RLock()
+	clawToken := s.hubCfg().ClawToken
+	secrets := s.hubCfg().Secrets
+	providers := s.hubCfg().Providers
+	llmKeys := s.hubCfg().LLMKeys
+	defaultModelHub := s.hubCfg().DefaultModel
+	integrations := s.hubCfg().Integrations
 
-	// Resolve provider (must be done under lock as it accesses s.hubCfg.Providers)
+	// Resolve provider (must be done under lock as it accesses s.hubCfg().Providers)
 	provider := factory.Provider
 	if provider == "" && tmplCfg != nil && tmplCfg.Provider != "" {
 		provider = tmplCfg.Provider
 	}
 	if provider == "" {
-		// Inline defaultProvider logic to avoid calling method outside lock
+		// Inline DefaultProvider logic to avoid calling method outside lock
 		for name, p := range providers {
 			if p.Token != "" || p.APIKey != "" || p.AccessToken != "" {
 				provider = name
@@ -465,7 +466,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			}
 		}
 	}
-	s.mu.RUnlock()
+	s.deps.Mu.RUnlock()
 
 	if provider == "" {
 		return "", fmt.Errorf("no provider configured")
@@ -520,7 +521,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			}
 		}
 	}
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
+	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields
 	var (
@@ -564,7 +565,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	}
 
 	// Build tags
-	tags := mergeTags(factory.Template, factory.Tags, nil)
+	tags := s.deps.MergeTags(factory.Template, factory.Tags, nil)
 	hasFactory := false
 	for _, t := range tags {
 		if t == "factory:"+factory.Name {
@@ -592,13 +593,13 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	createdAt := now()
 
 	// Check concurrency limit
-	s.promoteMu.Lock()
+	s.deps.PromoteMu.Lock()
 
-	s.mu.RLock()
-	groupName, groupLimit := s.resolveGroupLimit(factory)
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	groupName, groupLimit := s.ResolveGroupLimit(factory)
+	s.deps.Mu.RUnlock()
 
-	activeCount := s.countActiveClawsInGroup(groupName)
+	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
@@ -611,14 +612,14 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		initialStatus = "pending"
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.deps.DB.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, external_trigger_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, triggerID, initialStatus, createdAt, factory.Name, groupName,
 	)
 
-	s.promoteMu.Unlock()
+	s.deps.PromoteMu.Unlock()
 
 	if err != nil {
 		return "", fmt.Errorf("db insert: %w", err)
@@ -639,7 +640,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	provCfg, _ := providers[provider]
 	go func() {
 		var currentStatus string
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		_ = s.deps.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
@@ -675,7 +676,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+				_, _ = s.deps.DB.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
@@ -689,8 +690,8 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	return clawID, nil
 }
 
-// buildExternalEventContext builds the CONTEXT.md content for an external event.
-func buildExternalEventContext(payload externalWebhookPayload, factory *types.FactoryConfig) string {
+// BuildExternalEventContext builds the CONTEXT.md content for an external event.
+func BuildExternalEventContext(payload ExternalWebhookPayload, factory *types.FactoryConfig) string {
 	var b strings.Builder
 	b.WriteString("# External Event Context\n\n")
 	b.WriteString("This agent was automatically created by a factory in response to an external event.\n\n")
@@ -745,7 +746,7 @@ func buildExternalEventContext(payload externalWebhookPayload, factory *types.Fa
 	b.WriteString("2. Explore the codebase and identify what needs to be updated\n")
 	b.WriteString("3. Implement the necessary changes to handle this external event\n")
 	b.WriteString("4. Follow the PR Completion Policy below\n")
-	appendDefaultFactoryPRPolicy(&b)
+	AppendDefaultFactoryPRPolicy(&b)
 
 	return b.String()
 }
@@ -776,7 +777,7 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 	case "anthropic":
 		return "anthropic/claude-sonnet-4-6"
 	case "fireworks":
-		return defaultFireworksModel
+		return settings.DefaultFireworksModel
 	case "openai":
 		return "openai/gpt-5.5"
 	case "codex":

@@ -32,12 +32,8 @@ type workspaceIssueTrackers struct {
 	Jira         map[string]workspaceIssueTracker `yaml:"jira,omitempty"`
 }
 
-type workspaceIssueTracker struct {
-	BaseURL       string `yaml:"base_url,omitempty" json:"baseUrl,omitempty"`
-	Username      string `yaml:"username,omitempty" json:"username,omitempty"`
-	Token         string `yaml:"token,omitempty" json:"token,omitempty"`
-	WebhookSecret string `yaml:"webhook_secret,omitempty" json:"webhookSecret,omitempty"`
-}
+// workspaceIssueTracker moved to pkg/hub/integrations (aliased in
+// integrations_bridge.go).
 
 type workspaceIssueTrackerView struct {
 	Type             string `json:"type"`

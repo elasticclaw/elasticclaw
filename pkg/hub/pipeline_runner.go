@@ -202,54 +202,9 @@ func parsePipelineForFactory(factory *types.FactoryConfig) *pipeline.Pipeline {
 	return p
 }
 
-type pipelineContext struct {
-	Factory              *types.FactoryConfig
-	Workspace            *types.WorkspaceConfig
-	Workflow             *types.WorkflowConfig
-	IssueID              string
-	IssueLabels          []string
-	IssueLabelsAvailable bool
-}
-
-func (ctx pipelineContext) Name() string {
-	if ctx.Workflow != nil && ctx.Workspace != nil {
-		return "workflow:" + ctx.Workspace.Name + "/" + ctx.Workflow.Name
-	}
-	if ctx.Factory != nil {
-		return "factory:" + ctx.Factory.Name
-	}
-	return "pipeline"
-}
-
-func (ctx pipelineContext) Integration() string {
-	if ctx.Workflow != nil {
-		return ctx.Workflow.Integration
-	}
-	if ctx.Factory != nil {
-		return ctx.Factory.Integration
-	}
-	return ""
-}
-
-func (ctx pipelineContext) TrackerName() string {
-	if ctx.Workflow != nil {
-		return ctx.Workflow.Workspace
-	}
-	if ctx.Factory != nil {
-		return ctx.Factory.Workspace
-	}
-	return ""
-}
-
-func (ctx pipelineContext) PipelineYAML() string {
-	if ctx.Workflow != nil {
-		return ctx.Workflow.PipelineYAML
-	}
-	if ctx.Factory != nil {
-		return ctx.Factory.PipelineYAML
-	}
-	return ""
-}
+// pipelineContext moved to pkg/hub/pipeline as pipeline.Context (phase-2 hub
+// reorganization); the alias keeps existing call sites unchanged.
+type pipelineContext = pipeline.Context
 
 func parsePipelineForContext(ctx pipelineContext) *pipeline.Pipeline {
 	pipelineYAML := ctx.PipelineYAML()

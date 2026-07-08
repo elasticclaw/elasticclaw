@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 )
 
 func TestLogfComponentExtraction(t *testing.T) {
 	var buf bytes.Buffer
-	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "[claw] instance %s started", "abc")
+	logger.Msgf(slog.New(slog.NewJSONHandler(&buf, nil)), "[claw] instance %s started", "abc")
 	var entry map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
 		t.Fatalf("log line is not JSON: %q", buf.String())
@@ -23,7 +25,7 @@ func TestLogfComponentExtraction(t *testing.T) {
 
 	buf.Reset()
 	entry = map[string]any{}
-	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "no tag here %d", 7)
+	logger.Msgf(slog.New(slog.NewJSONHandler(&buf, nil)), "no tag here %d", 7)
 	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
 		t.Fatalf("log line is not JSON: %q", buf.String())
 	}

@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"context"
@@ -7,10 +7,9 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 )
 
-// logf is the printf-style bridge used by the mechanical log.Printf → slog
-// migration for call sites with no context available (boot code, background
-// goroutines). The message text is preserved verbatim, except that a leading
-// "[component] " tag is lifted into a component attribute.
+// logf is the printf-style slog bridge, identical to the one in pkg/hub, so
+// the log lines produced by the extracted integration code keep the exact
+// same format and component attribution.
 func logf(format string, args ...any) {
 	logger.Msgf(slog.Default(), format, args...)
 }

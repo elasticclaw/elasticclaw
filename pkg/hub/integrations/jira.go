@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"bytes"
@@ -98,7 +98,7 @@ type jiraUser struct {
 
 type jiraPollIssue = jiraIssue
 
-func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -180,8 +180,8 @@ func selectJiraAutomationHistory(histories []jiraAutomationHistory) jiraAutomati
 	return histories[len(histories)-1]
 }
 
-func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request) bool {
-	secrets := workspaceIssueTrackerWebhookSecrets(workspaceName, "jira")
+func (s *Service) validateJiraWebhookSecret(workspaceName string, r *http.Request) bool {
+	secrets := s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "jira")
 	if workspaceName == "" {
 		secrets = append(secrets, s.globalJiraWebhookSecrets()...)
 	}
@@ -200,11 +200,11 @@ func (s *Server) validateJiraWebhookSecret(workspaceName string, r *http.Request
 	return false
 }
 
-func (s *Server) globalJiraWebhookSecrets() []string {
-	s.mu.RLock()
-	integrations := s.hubCfg.Integrations
-	secretRefs := s.hubCfg.Secrets
-	s.mu.RUnlock()
+func (s *Service) globalJiraWebhookSecrets() []string {
+	s.deps.Mu.RLock()
+	integrations := s.hubCfg().Integrations
+	secretRefs := s.hubCfg().Secrets
+	s.deps.Mu.RUnlock()
 
 	var secrets []string
 	if integrations != nil {
@@ -228,12 +228,12 @@ func (s *Server) globalJiraWebhookSecrets() []string {
 		}
 	}
 
-	workspaces, err := loadExternalWorkflowsByIntegration("jira")
+	workspaces, err := s.deps.LoadExternalWorkflowsByIntegration("jira")
 	if err != nil {
 		return secrets
 	}
 	for _, workspace := range workspaces {
-		secrets = append(secrets, workspaceIssueTrackerWebhookSecrets(workspace.Name, "jira")...)
+		secrets = append(secrets, s.deps.WorkspaceIssueTrackerWebhookSecrets(workspace.Name, "jira")...)
 		for _, secretRef := range workspace.WebhookSecrets {
 			if secretRef == "" || secretRefs == nil {
 				continue
@@ -267,13 +267,13 @@ func jiraWebhookDedupKey(payload jiraWebhookPayload) string {
 	return ""
 }
 
-func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPayload) {
-	workspaces, err := loadExternalWorkflowsByIntegration("jira")
+func (s *Service) processJiraEvent(workspaceName string, payload jiraWebhookPayload) {
+	workspaces, err := s.deps.LoadExternalWorkflowsByIntegration("jira")
 	if err != nil {
 		logf("[jira-webhook] failed to load workflows: %v", err)
 		return
 	}
-	workspaces = filterWorkflowWorkspacesByName(workspaces, workspaceName)
+	workspaces = s.deps.FilterWorkflowWorkspacesByName(workspaces, workspaceName)
 	_ = s.processJiraWorkflowEvent(workspaces, payload, "jira webhook")
 
 	factories := s.resolveFactories()
@@ -301,7 +301,7 @@ func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPaylo
 			continue
 		}
 		if err := s.createClawForJiraIssue(factory, payload, "jira webhook"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[factory:%s] failed to create claw for Jira issue %s: %v", factory.Name, payload.Issue.Key, err)
@@ -322,14 +322,14 @@ func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPaylo
 			continue
 		}
 		var activeClaw string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
+		_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
 		if activeClaw != "" {
 			s.terminateClawForIssue(payload.Issue.Key)
 		}
 	}
 }
 
-func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, payload jiraWebhookPayload, reason string) bool {
+func (s *Service) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, payload jiraWebhookPayload, reason string) bool {
 	currentStatus, previousStatus := jiraWebhookStatuses(payload)
 	labels := jiraIssueLabels(payload.Issue)
 	assignee := jiraIssueAssignee(payload.Issue)
@@ -356,7 +356,7 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 			}
 			matched = true
 			if err := s.createClawForJiraWorkflow(workspace, workflow, payload, reason); err != nil {
-				if isFactoryTriggerAlreadyClaimed(err) {
+				if IsFactoryTriggerAlreadyClaimed(err) {
 					continue
 				}
 				logf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
@@ -376,7 +376,7 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 				continue
 			}
 			var activeClaw string
-			_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
+			_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE jira_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, payload.Issue.Key).Scan(&activeClaw)
 			if activeClaw != "" {
 				matched = true
 				s.terminateClawForIssue(payload.Issue.Key)
@@ -442,15 +442,15 @@ func jiraWorkflowMatchesProject(workflow *types.WorkflowConfig, project string) 
 	return jiraProjectMatches(project, projects)
 }
 
-func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload jiraWebhookPayload, reason string) error {
+func (s *Service) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload jiraWebhookPayload, reason string) error {
 	issueID := payload.Issue.Key
 	var existing string
-	_ = s.db.QueryRow(`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
+	_ = s.deps.DB.QueryRow(`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
 		return nil
 	}
 
-	triggerKey := factoryTriggerKey("jira", issueID)
+	triggerKey := FactoryTriggerKey("jira", issueID)
 	triggerOwner := fmt.Sprintf("workflow:%s/%s", workspace.Name, workflow.Name)
 	claimed, err := s.claimFactoryTrigger(triggerOwner, "jira", triggerKey, reason, map[string]string{
 		"issue_id":  issueID,
@@ -462,7 +462,7 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 		return fmt.Errorf("claim workflow trigger: %w", err)
 	}
 	if !claimed {
-		return errFactoryTriggerAlreadyClaimed
+		return ErrFactoryTriggerAlreadyClaimed
 	}
 	claimOpen := true
 	defer func() {
@@ -471,21 +471,21 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 		}
 	}()
 
-	templateFiles := cloneStringMap(workspace.Files)
+	templateFiles := s.deps.CloneStringMap(workspace.Files)
 	templateFiles["CONTEXT.md"] = s.buildJiraContext(payload)
 	clawName := issueID
 	if workflow.NamePattern != "" {
 		clawName = strings.ReplaceAll(workflow.NamePattern, "{issue_id}", issueID)
 		clawName = strings.ReplaceAll(clawName, "{project}", payload.Issue.Fields.Project.Key)
 	}
-	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		workspaceFiles:       templateFiles,
-		clawName:             clawName,
-		jiraIssueID:          issueID,
-		issueLabels:          jiraIssueLabels(payload.Issue),
-		issueLabelsAvailable: true,
-		reason:               reason,
-		triggerActor: &triggerActor{
+	clawID, isPending, err := s.createClawFromWorkflowWithOptions(workspace, workflow, WorkflowCreateOptions{
+		WorkspaceFiles:       templateFiles,
+		ClawName:             clawName,
+		JiraIssueID:          issueID,
+		IssueLabels:          jiraIssueLabels(payload.Issue),
+		IssueLabelsAvailable: true,
+		Reason:               reason,
+		TriggerActor: &TriggerActor{
 			ID:    firstNonEmpty(payload.User.AccountID, payload.User.Name, payload.User.Key),
 			Type:  "User",
 			Name:  payload.User.DisplayName,
@@ -496,13 +496,13 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "jira", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.deps.DB.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false
 	if !isPending && workflow.WorkingStatus != "" {
-		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow); ok {
-			if err := s.moveJiraIssue(tracker, issueID, workflow.WorkingStatus); err != nil {
+		if tracker, ok := s.ResolveJiraTrackerForWorkflow(workspace.Name, workflow); ok {
+			if err := s.MoveJiraIssue(tracker, issueID, workflow.WorkingStatus); err != nil {
 				logf("[workflow:%s/%s] failed to move Jira issue %s to %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
 			}
 		}
@@ -510,9 +510,9 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 	return nil
 }
 
-func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload jiraWebhookPayload, reason string) error {
+func (s *Service) createClawForJiraIssue(factory *types.FactoryConfig, payload jiraWebhookPayload, reason string) error {
 	issueID := payload.Issue.Key
-	triggerKey := factoryTriggerKey("jira", issueID)
+	triggerKey := FactoryTriggerKey("jira", issueID)
 	claimed, err := s.claimFactoryTrigger(factory.Name, "jira", triggerKey, reason, map[string]string{
 		"issue_id": issueID,
 		"source":   reason,
@@ -521,7 +521,7 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 		return fmt.Errorf("claim factory trigger: %w", err)
 	}
 	if !claimed {
-		return errFactoryTriggerAlreadyClaimed
+		return ErrFactoryTriggerAlreadyClaimed
 	}
 	claimOpen := true
 	defer func() {
@@ -529,7 +529,7 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 			s.failFactoryTrigger(factory.Name, "jira", triggerKey)
 		}
 	}()
-	if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+	if tracker, ok := s.ResolveJiraTrackerForFactory(factory); ok {
 		if _, err := s.fetchJiraIssue(tracker, issueID); err != nil {
 			return fmt.Errorf("cannot read Jira issue %s: %w", issueID, err)
 		}
@@ -544,13 +544,13 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 		return err
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "jira", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.deps.DB.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
 	if !isPending && factory.WorkingStatus != "" {
-		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
-			if err := s.moveJiraIssue(tracker, issueID, factory.WorkingStatus); err != nil {
+		if tracker, ok := s.ResolveJiraTrackerForFactory(factory); ok {
+			if err := s.MoveJiraIssue(tracker, issueID, factory.WorkingStatus); err != nil {
 				logf("[factory:%s] failed to move Jira issue %s to %q: %v", factory.Name, issueID, factory.WorkingStatus, err)
 			}
 		}
@@ -558,7 +558,7 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 	return nil
 }
 
-func (s *Server) buildJiraContext(payload jiraWebhookPayload) string {
+func (s *Service) buildJiraContext(payload jiraWebhookPayload) string {
 	issue := payload.Issue
 	url := s.jiraBrowseURL(issue)
 	var b strings.Builder
@@ -583,7 +583,7 @@ func (s *Server) buildJiraContext(payload jiraWebhookPayload) string {
 	return b.String()
 }
 
-func (s *Server) jiraBrowseURL(issue jiraIssue) string {
+func (s *Service) jiraBrowseURL(issue jiraIssue) string {
 	if issue.Key == "" {
 		return ""
 	}
@@ -592,7 +592,7 @@ func (s *Server) jiraBrowseURL(issue jiraIssue) string {
 		base = tracker.BaseURL
 	}
 	if base == "" {
-		base = s.jiraBaseURL
+		base = s.deps.JiraBaseURL()
 	}
 	if base == "" && issue.Self != "" {
 		if u, err := url.Parse(issue.Self); err == nil {
@@ -617,63 +617,63 @@ func jiraDescriptionText(v any) string {
 	}
 }
 
-func (s *Server) resolveJiraTrackerForWorkflow(workspaceName string, workflow *types.WorkflowConfig) (workspaceIssueTracker, bool) {
+func (s *Service) ResolveJiraTrackerForWorkflow(workspaceName string, workflow *types.WorkflowConfig) (WorkspaceIssueTracker, bool) {
 	if workflow == nil {
-		return workspaceIssueTracker{}, false
+		return WorkspaceIssueTracker{}, false
 	}
-	return findWorkspaceIssueTracker(workspaceName, "jira", workflow.Workspace)
+	return s.deps.FindWorkspaceIssueTracker(workspaceName, "jira", workflow.Workspace)
 }
 
-func (s *Server) resolveJiraTrackerForFactory(factory *types.FactoryConfig) (workspaceIssueTracker, bool) {
+func (s *Service) ResolveJiraTrackerForFactory(factory *types.FactoryConfig) (WorkspaceIssueTracker, bool) {
 	if factory == nil {
-		return workspaceIssueTracker{}, false
+		return WorkspaceIssueTracker{}, false
 	}
-	if s.hubCfg.Integrations != nil {
-		for _, ji := range s.hubCfg.Integrations.Jira {
+	if s.hubCfg().Integrations != nil {
+		for _, ji := range s.hubCfg().Integrations.Jira {
 			if factory.Workspace == "" || strings.EqualFold(ji.Workspace, factory.Workspace) {
-				return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+				return WorkspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
 			}
 		}
 	}
-	return workspaceIssueTracker{}, false
+	return WorkspaceIssueTracker{}, false
 }
 
-func (s *Server) resolveJiraTrackerByIssue(issue jiraIssue) (workspaceIssueTracker, bool) {
-	if s.hubCfg.Integrations == nil {
-		return workspaceIssueTracker{}, false
+func (s *Service) resolveJiraTrackerByIssue(issue jiraIssue) (WorkspaceIssueTracker, bool) {
+	if s.hubCfg().Integrations == nil {
+		return WorkspaceIssueTracker{}, false
 	}
 	if issue.Self != "" {
 		if u, err := url.Parse(issue.Self); err == nil {
 			issueHost := strings.ToLower(u.Host)
-			for _, ji := range s.hubCfg.Integrations.Jira {
+			for _, ji := range s.hubCfg().Integrations.Jira {
 				if ji.BaseURL == "" {
 					continue
 				}
 				if bu, err := url.Parse(ji.BaseURL); err == nil && strings.ToLower(bu.Host) == issueHost {
-					return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+					return WorkspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
 				}
 			}
 		}
 	}
-	for _, ji := range s.hubCfg.Integrations.Jira {
+	for _, ji := range s.hubCfg().Integrations.Jira {
 		if ji.BaseURL != "" {
-			return workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
+			return WorkspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}, true
 		}
 	}
-	return workspaceIssueTracker{}, false
+	return WorkspaceIssueTracker{}, false
 }
 
-func (s *Server) jiraBaseForTracker(tracker workspaceIssueTracker) string {
+func (s *Service) jiraBaseForTracker(tracker WorkspaceIssueTracker) string {
 	if tracker.BaseURL != "" {
 		return strings.TrimRight(tracker.BaseURL, "/")
 	}
-	if s.jiraBaseURL != "" {
-		return strings.TrimRight(s.jiraBaseURL, "/")
+	if s.deps.JiraBaseURL() != "" {
+		return strings.TrimRight(s.deps.JiraBaseURL(), "/")
 	}
 	return ""
 }
 
-func (s *Server) fetchJiraIssue(tracker workspaceIssueTracker, key string) (jiraIssue, error) {
+func (s *Service) fetchJiraIssue(tracker WorkspaceIssueTracker, key string) (jiraIssue, error) {
 	var issue jiraIssue
 	base := s.jiraBaseForTracker(tracker)
 	if base == "" {
@@ -699,7 +699,7 @@ func (s *Server) fetchJiraIssue(tracker workspaceIssueTracker, key string) (jira
 	return issue, nil
 }
 
-func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time, projects []string) ([]jiraPollIssue, error) {
+func (s *Service) queryJiraIssues(tracker WorkspaceIssueTracker, since time.Time, projects []string) ([]jiraPollIssue, error) {
 	base := s.jiraBaseForTracker(tracker)
 	if base == "" {
 		return nil, fmt.Errorf("missing Jira base URL")
@@ -760,7 +760,7 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 	return nil, fmt.Errorf("jira search exceeded %d pages", jiraSearchMaxPages)
 }
 
-func (s *Server) moveJiraIssue(tracker workspaceIssueTracker, key, targetStatus string) error {
+func (s *Service) MoveJiraIssue(tracker WorkspaceIssueTracker, key, targetStatus string) error {
 	base := s.jiraBaseForTracker(tracker)
 	if base == "" {
 		return fmt.Errorf("missing Jira base URL")
@@ -820,7 +820,7 @@ func (s *Server) moveJiraIssue(tracker workspaceIssueTracker, key, targetStatus 
 	return nil
 }
 
-func (s *Server) commentJiraIssue(tracker workspaceIssueTracker, key, text string) error {
+func (s *Service) CommentJiraIssue(tracker WorkspaceIssueTracker, key, text string) error {
 	base := s.jiraBaseForTracker(tracker)
 	if base == "" {
 		return fmt.Errorf("missing Jira base URL")
@@ -844,7 +844,7 @@ func (s *Server) commentJiraIssue(tracker workspaceIssueTracker, key, text strin
 	return nil
 }
 
-func applyJiraAuth(req *http.Request, tracker workspaceIssueTracker) {
+func applyJiraAuth(req *http.Request, tracker WorkspaceIssueTracker) {
 	if tracker.Token == "" {
 		return
 	}

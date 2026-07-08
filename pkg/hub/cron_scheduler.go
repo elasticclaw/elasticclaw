@@ -266,9 +266,9 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 		sw.workspace,
 		sw.workflow,
 		workflowCreateOptions{
-			inputs:   inputs,
-			reason:   fmt.Sprintf("cron run %s at %s", runID, now.Format(time.RFC3339)),
-			clawName: fmt.Sprintf("%s-%s", sw.workflow.Name, now.Format("20060102-150405")),
+			Inputs:   inputs,
+			Reason:   fmt.Sprintf("cron run %s at %s", runID, now.Format(time.RFC3339)),
+			ClawName: fmt.Sprintf("%s-%s", sw.workflow.Name, now.Format("20060102-150405")),
 		},
 	)
 	if err != nil {

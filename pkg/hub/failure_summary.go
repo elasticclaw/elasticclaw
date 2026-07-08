@@ -32,8 +32,6 @@ var (
 	httpStatusRE      = regexp.MustCompile(`(?i)\b(?:HTTP|status|github API error|Linear API error|github API [A-Z]+ [^:]+:)\s+([1-5][0-9]{2})\b`)
 )
 
-type agentFailureKind string
-
 const (
 	agentFailureUnknown            agentFailureKind = "unknown"
 	agentFailureTrackerRead        agentFailureKind = "tracker_read"
@@ -59,15 +57,6 @@ const (
 	agentFailureSandboxTerminated  agentFailureKind = "sandbox_terminated"
 	agentFailureTrackerAPI         agentFailureKind = "tracker_api"
 )
-
-type agentFailureMessage struct {
-	Kind        agentFailureKind
-	StatusCode  int
-	Title       string
-	UserMessage string
-	NextStep    string
-	SafeDetail  string
-}
 
 type agentFailureRule struct {
 	kind    agentFailureKind

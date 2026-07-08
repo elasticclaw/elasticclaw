@@ -1,4 +1,4 @@
-package hub
+package integrations
 
 import (
 	"bytes"
@@ -18,8 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// githubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
-type githubPRPayload struct {
+// GitHubPRPayload holds the relevant fields from a GitHub pull_request webhook event.
+type GitHubPRPayload struct {
 	Action string `json:"action"` // "opened", "synchronize", "reopened", "closed"
 	Number int    `json:"number"`
 	Sender struct {
@@ -45,8 +45,8 @@ type githubPRPayload struct {
 	} `json:"repository"`
 }
 
-// handleGitHubWebhook processes incoming GitHub webhook events.
-func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+// HandleGitHubWebhook processes incoming GitHub webhook events.
+func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -74,7 +74,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch event {
 	case "issues":
-		var payload githubIssuesWebhookPayload
+		var payload GitHubIssuesWebhookPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse issues payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
@@ -84,7 +84,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Issue.User.Login)
 		go s.processGitHubIssueEvent(payload)
 	case "pull_request":
-		var payload githubPRPayload
+		var payload GitHubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
@@ -142,16 +142,16 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 // validateGitHubSignature verifies the HMAC-SHA256 signature from GitHub against all
 // configured GitHub factory webhook secrets. Returns true if any matches.
-func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
+func (s *Service) validateGitHubSignature(body []byte, sig string) bool {
 	// Strip sha256= prefix
 	sig = strings.TrimPrefix(sig, "sha256=")
 	if sig == "" {
 		return false
 	}
 
-	s.mu.RLock()
-	secrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	secrets := s.hubCfg().Secrets
+	s.deps.Mu.RUnlock()
 
 	factories := s.resolveFactories()
 	for _, factory := range factories {
@@ -179,7 +179,7 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 }
 
 // processGitHubPREvent finds matching factories and creates claws for a PR event.
-func (s *Server) processGitHubPREvent(payload githubPRPayload) {
+func (s *Service) processGitHubPREvent(payload GitHubPRPayload) {
 	factories := s.resolveFactories()
 
 	repoFullName := payload.Repository.FullName
@@ -236,17 +236,14 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			case "synchronize", "reopened", "review_requested":
 				// Skip synchronize events triggered by the claw itself pushing commits.
 				// Only skip if the sender is our own GitHub App bot, not other bots (e.g. dependabot).
-				if payload.Action == "synchronize" && s.isOwnAppBot(payload.Sender.Login) {
+				if payload.Action == "synchronize" && s.IsOwnAppBot(payload.Sender.Login) {
 					logf("[factory:%s] github PR #%d synchronize from own app bot %q — skipping", factory.Name, payload.Number, payload.Sender.Login)
 					continue
 				}
 				// Only inject if the claw is connected and ready — otherwise the
 				// claw hasn't started yet and the update is redundant (claw gets
 				// full context from BOOTSTRAP on startup).
-				s.mu.RLock()
-				cc, connected := s.claws[existingClawID]
-				ready := connected && cc.gatewayReady
-				s.mu.RUnlock()
+				ready := s.deps.ClawGatewayReady(existingClawID)
 				if !ready {
 					logf("[factory:%s] github PR #%d action=%s — claw %s not ready yet, skipping inject", factory.Name, payload.Number, payload.Action, existingClawID[:8])
 				} else {
@@ -320,7 +317,7 @@ type githubPRReviewPayload struct {
 	} `json:"repository"`
 }
 
-func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewCommentPayload) {
+func (s *Service) processGitHubPRReviewCommentEvent(payload githubPRReviewCommentPayload) {
 	if payload.Action != "created" {
 		return
 	}
@@ -333,16 +330,10 @@ func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewComment
 		logf("[github-webhook] review_comment on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
 		return
 	}
-	pr := clawPR{
-		clawID:   clawID,
-		repo:     payload.Repository.FullName,
-		prNumber: payload.PullRequest.Number,
-		prURL:    prURL,
-	}
-	s.forwardHumanReviewComment(pr, payload.Comment.ID, payload.Comment.User.Login, payload.Comment.Body, payload.Comment.HTMLURL, payload.Comment.Path, payload.Comment.Line)
+	s.deps.ForwardHumanReviewComment(clawID, payload.Repository.FullName, payload.PullRequest.Number, prURL, payload.Comment.ID, payload.Comment.User.Login, payload.Comment.Body, payload.Comment.HTMLURL, payload.Comment.Path, payload.Comment.Line)
 }
 
-func (s *Server) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
+func (s *Service) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
 	if payload.Action != "submitted" || !strings.EqualFold(payload.Review.State, "changes_requested") {
 		return
 	}
@@ -355,13 +346,7 @@ func (s *Server) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
 		logf("[github-webhook] review on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
 		return
 	}
-	pr := clawPR{
-		clawID:   clawID,
-		repo:     payload.Repository.FullName,
-		prNumber: payload.PullRequest.Number,
-		prURL:    prURL,
-	}
-	s.forwardHumanRequestedChangesReview(pr, payload.Review.ID, payload.Review.User.Login, payload.Review.Body, payload.Review.HTMLURL)
+	s.deps.ForwardHumanRequestedChangesReview(clawID, payload.Repository.FullName, payload.PullRequest.Number, prURL, payload.Review.ID, payload.Review.User.Login, payload.Review.Body, payload.Review.HTMLURL)
 }
 
 // githubIssueCommentPayload holds fields from an issue_comment webhook event.
@@ -394,7 +379,7 @@ type githubIssueCommentPayload struct {
 
 // processGitHubIssueComment handles issue_comment events on plain issues (not PRs).
 // If a claw exists for the issue, it injects the comment.
-func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
+func (s *Service) processGitHubIssueComment(payload githubIssueCommentPayload) {
 	if payload.Action != "created" {
 		return
 	}
@@ -421,7 +406,7 @@ func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
 // processGitHubIssueCommentEvent handles issue_comment events on PRs.
 // If a claw exists for the PR, it injects the comment. If not, it tries to create a claw
 // (useful when a PR was opened before the webhook was configured or the opened event was missed).
-func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayload) {
+func (s *Service) processGitHubIssueCommentEvent(payload githubIssueCommentPayload) {
 	if payload.Action != "created" {
 		return // only care about new comments
 	}
@@ -468,16 +453,16 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		if token == "" {
 			continue
 		}
-		ghBase := s.githubBaseURL
+		ghBase := s.deps.GithubBaseURL()
 		if ghBase == "" {
 			ghBase = "https://api.github.com"
 		}
-		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
+		data, err := s.deps.GithubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
 		if err != nil {
 			logf("[github-webhook] issue_comment: failed to fetch PR %s#%d: %v", repoFullName, prNumber, err)
 			continue
 		}
-		var prPayload githubPRPayload
+		var prPayload GitHubPRPayload
 		prPayload.Action = "comment_triggered"
 		prPayload.Number = prNumber
 		prPayload.Repository.FullName = repoFullName
@@ -533,7 +518,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	}
 }
 
-func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
+func (s *Service) processGitHubIssueEvent(payload GitHubIssuesWebhookPayload) {
 	if payload.Issue.Number == 0 {
 		return
 	}
@@ -567,7 +552,7 @@ func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
 		}
 		logf("[factory:%s] github issue %s (action=%s) — creating claw", factory.Name, issueID, payload.Action)
 		if err := s.createClawForGitHubIssue(factory, payload, "github-issue webhook"); err != nil {
-			if isFactoryTriggerAlreadyClaimed(err) {
+			if IsFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
 			logf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
@@ -578,7 +563,7 @@ func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
 	}
 }
 
-func (s *Server) githubFactoryPRLabels(factory *types.FactoryConfig, repo string, prNumber int) ([]string, bool) {
+func (s *Service) githubFactoryPRLabels(factory *types.FactoryConfig, repo string, prNumber int) ([]string, bool) {
 	if len(factory.Labels) == 0 && len(factory.ExcludeLabels) == 0 {
 		return nil, true
 	}
@@ -590,19 +575,19 @@ func (s *Server) githubFactoryPRLabels(factory *types.FactoryConfig, repo string
 	return labels, true
 }
 
-func (s *Server) fetchGitHubIssueLabelsForFactory(factory *types.FactoryConfig, repo string, issueNumber int) ([]string, error) {
+func (s *Service) fetchGitHubIssueLabelsForFactory(factory *types.FactoryConfig, repo string, issueNumber int) ([]string, error) {
 	token := s.resolveGitHubTokenForRepo(repo)
 	if token == "" {
-		token = s.resolveGitHubIssuesTokenForFactory(factory)
+		token = s.ResolveGitHubIssuesTokenForFactory(factory)
 	}
 	if token == "" {
 		return nil, fmt.Errorf("no GitHub token available")
 	}
-	base := s.githubBaseURL
+	base := s.deps.GithubBaseURL()
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	data, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
+	data, err := s.deps.GithubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
 	if err != nil {
 		return nil, err
 	}
@@ -646,16 +631,16 @@ func githubRepoMatches(fullName string, repos []string) bool {
 }
 
 // createClawForGitHubPR provisions a new claw for a GitHub PR event.
-// isOwnAppBot returns true if the given GitHub login is the bot account for one of
+// IsOwnAppBot returns true if the given GitHub login is the bot account for one of
 // the hub's configured GitHub Apps. App bots have the login "<app-slug>[bot]".
 // The app slug is derived from the App URL field (e.g. "https://github.com/apps/my-app" → "my-app").
-func (s *Server) isOwnAppBot(login string) bool {
+func (s *Service) IsOwnAppBot(login string) bool {
 	if !strings.HasSuffix(login, "[bot]") {
 		return false
 	}
-	s.mu.RLock()
-	apps := s.hubCfg.GitHubApps
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	apps := s.hubCfg().GitHubApps
+	s.deps.Mu.RUnlock()
 	for _, app := range apps {
 		if app.URL == "" {
 			continue
@@ -671,9 +656,9 @@ func (s *Server) isOwnAppBot(login string) bool {
 }
 
 // findClawForGitHubPR returns the claw ID that is already tracking this PR URL, or "".
-func (s *Server) findClawForGitHubPR(prURL string) string {
+func (s *Service) findClawForGitHubPR(prURL string) string {
 	var clawID string
-	_ = s.db.QueryRow(
+	_ = s.deps.DB.QueryRow(
 		`SELECT cp.claw_id FROM claw_prs cp
 		 JOIN claws cl ON cl.id = cp.claw_id
 		 WHERE cp.pr_url = ? AND cl.status NOT IN ('deleted','error','offline')
@@ -683,14 +668,14 @@ func (s *Server) findClawForGitHubPR(prURL string) string {
 	return clawID
 }
 
-func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload, reason string) error {
+func (s *Service) createClawForGitHubPR(factory *types.FactoryConfig, pr GitHubPRPayload, reason string) error {
 	repoFullName := pr.Repository.FullName
 	prNumber := pr.Number
 	prURL := pr.PullRequest.HTMLURL
 
 	// Enforce 1:1 — check if a claw already exists for this PR URL.
 	var existingID string
-	_ = s.db.QueryRow(
+	_ = s.deps.DB.QueryRow(
 		`SELECT c.id FROM claws c
 		 JOIN claw_prs cp ON cp.claw_id = c.id
 		 WHERE cp.pr_url=? AND c.status NOT IN ('error','deleted') LIMIT 1`,
@@ -718,7 +703,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// BOOTSTRAP.md is read by OpenClaw on every session start (AGENTS.md convention),
 	// which causes the claw to re-read it as a checklist on every reconnect.
 	// CONTEXT.md is a one-time reference the pipeline inject can point to.
-	prCtx := buildGitHubPRContext(pr)
+	prCtx := BuildGitHubPRContext(pr)
 	templateFiles["CONTEXT.md"] = prCtx
 	// Keep BOOTSTRAP.md from the template if it exists (it won't for most github factories)
 	// but don't overwrite it with PR context.
@@ -736,7 +721,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Find tenant
 	var tenantID string
-	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
 		return fmt.Errorf("no tenant: %w", err)
 	}
 
@@ -746,7 +731,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		provider = tmplCfg.Provider
 	}
 	if provider == "" {
-		provider = s.defaultProvider()
+		provider = s.DefaultProvider()
 	}
 	if provider == "" {
 		return fmt.Errorf("no provider configured")
@@ -755,14 +740,14 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// Build env vars
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg().ClawToken,
 	}
 
 	// Resolve and inject template-requested secrets (typed refs + legacy)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
 		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
-			val, envName, ok := s.resolveSecretRef(ref, factory)
+			val, envName, ok := s.ResolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
 				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
@@ -775,7 +760,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// Resolve and inject template-level secret_refs
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -787,7 +772,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// Resolve and inject factory-level secret_refs (factory overrides template)
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -795,7 +780,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			}
 		}
 	}
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
+	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve template config fields
 	var (
@@ -826,23 +811,23 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {
-		s.mu.RLock()
-		for _, k := range s.hubCfg.LLMKeys {
+		s.deps.Mu.RLock()
+		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.mu.RUnlock()
+		s.deps.Mu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
-		s.mu.RUnlock()
+		s.deps.Mu.RLock()
+		defaultModel = s.hubCfg().DefaultModel
+		s.deps.Mu.RUnlock()
 	}
 
 	// Build tags — include template:<name>, factory:<name>, and github_pr:<url>
-	tags := mergeTags(factory.Template, factory.Tags, nil)
+	tags := s.deps.MergeTags(factory.Template, factory.Tags, nil)
 	hasfactory := false
 	for _, t := range tags {
 		if t == "factory:"+factory.Name {
@@ -872,13 +857,13 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU
 	// race where concurrent factory webhooks both read active < max and both
 	// insert as provisioning, exceeding the limit.
-	s.promoteMu.Lock()
+	s.deps.PromoteMu.Lock()
 
-	s.mu.RLock()
-	groupName, groupLimit := s.resolveGroupLimit(factory)
-	s.mu.RUnlock()
+	s.deps.Mu.RLock()
+	groupName, groupLimit := s.ResolveGroupLimit(factory)
+	s.deps.Mu.RUnlock()
 
-	activeCount := s.countActiveClawsInGroup(groupName)
+	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
@@ -890,7 +875,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		initialStatus = "pending"
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.deps.DB.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
@@ -899,7 +884,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Release promoteMu immediately after INSERT so we don't hold it across
 	// the potentially slow async provisioning below.
-	s.promoteMu.Unlock()
+	s.deps.PromoteMu.Unlock()
 
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
@@ -924,10 +909,10 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}
 
 	// Provision asynchronously
-	provCfg, _ := s.hubCfg.Providers[provider]
+	provCfg, _ := s.hubCfg().Providers[provider]
 	go func() {
 		var currentStatus string
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		_ = s.deps.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
@@ -962,7 +947,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+				_, _ = s.deps.DB.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
@@ -976,8 +961,8 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	return nil
 }
 
-// buildGitHubPRContext builds the BOOTSTRAP.md context for a GitHub PR assignment.
-func buildGitHubPRContext(pr githubPRPayload) string {
+// BuildGitHubPRContext builds the BOOTSTRAP.md context for a GitHub PR assignment.
+func BuildGitHubPRContext(pr GitHubPRPayload) string {
 	var b strings.Builder
 	b.WriteString("## GitHub PR Assignment\n\n")
 	b.WriteString(fmt.Sprintf("PR: %s\n", pr.PullRequest.HTMLURL))
@@ -997,11 +982,11 @@ To check out this PR:
 	return b.String()
 }
 
-// mergePRForClaw finds the tracked PR for a claw and merges it via the GitHub API.
-func (s *Server) mergePRForClaw(clawID string) {
+// MergePRForClaw finds the tracked PR for a claw and merges it via the GitHub API.
+func (s *Service) MergePRForClaw(clawID string) {
 	var prURL, repo string
 	var prNumber int
-	err := s.db.QueryRow(
+	err := s.deps.DB.QueryRow(
 		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`,
 		clawID,
 	).Scan(&prURL, &repo, &prNumber)

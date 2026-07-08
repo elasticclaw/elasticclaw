@@ -13,19 +13,8 @@ import (
 	"github.com/google/uuid"
 )
 
-type workflowCreateOptions struct {
-	inputs               map[string]string
-	workspaceFiles       map[string]string
-	clawName             string
-	githubIssueID        string
-	linearIssueID        string
-	shortcutStoryID      string
-	jiraIssueID          string
-	issueLabels          []string
-	issueLabelsAvailable bool
-	reason               string
-	triggerActor         *triggerActor
-}
+// workflowCreateOptions moved to pkg/hub/integrations (aliased in
+// integrations_bridge.go).
 
 const hubInternalTemplateFilePrefix = "__hub__/"
 
@@ -41,13 +30,13 @@ func workspaceTemplateFiles(files map[string]string) map[string]string {
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
-	return s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{inputs: inputs, reason: reason})
+	return s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{Inputs: inputs, Reason: reason})
 }
 
 func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, opts workflowCreateOptions) (string, bool, error) {
 	templateFiles := cloneStringMap(workspace.Files)
-	if opts.workspaceFiles != nil {
-		templateFiles = cloneStringMap(opts.workspaceFiles)
+	if opts.WorkspaceFiles != nil {
+		templateFiles = cloneStringMap(opts.WorkspaceFiles)
 	}
 
 	var tmplCfg *types.TemplateConfig
@@ -60,23 +49,23 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 	}
 
-	if opts.inputs != nil {
-		templateFiles["CONTEXT.md"] = buildWorkflowManualTriggerContext(workflow, opts.inputs, templateFiles["CONTEXT.md"])
-		inputsJSON, _ := json.Marshal(opts.inputs)
+	if opts.Inputs != nil {
+		templateFiles["CONTEXT.md"] = buildWorkflowManualTriggerContext(workflow, opts.Inputs, templateFiles["CONTEXT.md"])
+		inputsJSON, _ := json.Marshal(opts.Inputs)
 		templateFiles["TRIGGER_INPUTS.json"] = string(inputsJSON)
 	}
 
 	clawName := workflow.Name
-	if opts.clawName != "" {
-		clawName = opts.clawName
+	if opts.ClawName != "" {
+		clawName = opts.ClawName
 	} else if workflow.NamePattern != "" {
 		clawName = workflow.NamePattern
-		for k, v := range opts.inputs {
+		for k, v := range opts.Inputs {
 			clawName = strings.ReplaceAll(clawName, "{"+k+"}", v)
 		}
 	}
-	if clawName == workflow.Name && opts.inputs != nil && len(workflow.Inputs) > 0 {
-		if firstVal := opts.inputs[workflow.Inputs[0].Name]; firstVal != "" {
+	if clawName == workflow.Name && opts.Inputs != nil && len(workflow.Inputs) > 0 {
+		if firstVal := opts.Inputs[workflow.Inputs[0].Name]; firstVal != "" {
 			clawName = firstVal
 		}
 	}
@@ -206,7 +195,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
-	if opts.inputs != nil {
+	if opts.Inputs != nil {
 		tags = append(tags, "manual-trigger")
 	}
 	tagsJSON, _ := json.Marshal(tags)
@@ -218,8 +207,8 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return "", false, err
 	}
 	workflowVolumesJSON, _ := json.Marshal(workflowVolumes)
-	if opts.issueLabelsAvailable {
-		labelsJSON, _ := json.Marshal(normalizeIssueLabels(opts.issueLabels))
+	if opts.IssueLabelsAvailable {
+		labelsJSON, _ := json.Marshal(normalizeIssueLabels(opts.IssueLabels))
 		templateFiles[issueLabelsTemplateFile] = string(labelsJSON)
 	}
 	s.promoteMu.Lock()
@@ -244,20 +233,20 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return "", false, fmt.Errorf("db insert: %w", err)
 	}
 
-	if opts.githubIssueID != "" {
-		_, _ = s.db.Exec(`UPDATE claws SET github_issue_id=? WHERE id=?`, opts.githubIssueID, clawID)
+	if opts.GitHubIssueID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET github_issue_id=? WHERE id=?`, opts.GitHubIssueID, clawID)
 	}
-	if opts.linearIssueID != "" {
-		_, _ = s.db.Exec(`UPDATE claws SET linear_issue_id=? WHERE id=?`, opts.linearIssueID, clawID)
+	if opts.LinearIssueID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET linear_issue_id=? WHERE id=?`, opts.LinearIssueID, clawID)
 	}
-	if opts.shortcutStoryID != "" {
-		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.shortcutStoryID, clawID)
+	if opts.ShortcutStoryID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET shortcut_story_id=? WHERE id=?`, opts.ShortcutStoryID, clawID)
 	}
-	if opts.jiraIssueID != "" {
-		_, _ = s.db.Exec(`UPDATE claws SET jira_issue_id=? WHERE id=?`, opts.jiraIssueID, clawID)
+	if opts.JiraIssueID != "" {
+		_, _ = s.db.Exec(`UPDATE claws SET jira_issue_id=? WHERE id=?`, opts.JiraIssueID, clawID)
 	}
-	if opts.triggerActor != nil {
-		actorJSON, err := json.Marshal(opts.triggerActor)
+	if opts.TriggerActor != nil {
+		actorJSON, err := json.Marshal(opts.TriggerActor)
 		if err != nil {
 			logf("[workflow] failed to marshal trigger actor for claw %s: %v", shortID(clawID), err)
 		} else if _, err := s.db.Exec(`UPDATE claws SET trigger_actor_json=? WHERE id=?`, string(actorJSON), clawID); err != nil {
@@ -274,7 +263,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		WorkspaceName:    workspace.Name,
 		WorkflowName:     workflow.Name,
 		Integration:      workflow.Integration,
-		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID, opts.jiraIssueID),
+		IssueID:          firstNonEmpty(opts.GitHubIssueID, opts.LinearIssueID, opts.ShortcutStoryID, opts.JiraIssueID),
 		Model:            defaultModel,
 		LLMKey:           llmKey,
 		Source:           taskRunSourceWorkflow,
@@ -291,7 +280,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 
-	logf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
+	logf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.Reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},

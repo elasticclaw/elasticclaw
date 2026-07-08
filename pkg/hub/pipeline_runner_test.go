@@ -294,9 +294,9 @@ func TestWorkflowIssueLabelsDoNotReplaceWorkspaceFile(t *testing.T) {
 	workflow := &types.WorkflowConfig{Name: "workflow", Provider: "noop"}
 
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
-		issueLabelsAvailable: true,
-		issueLabels:          []string{"with review loop"},
-		reason:               "test",
+		IssueLabelsAvailable: true,
+		IssueLabels:          []string{"with review loop"},
+		Reason:               "test",
 	})
 	if err != nil {
 		t.Fatalf("createClawFromWorkflowWithOptions: %v", err)

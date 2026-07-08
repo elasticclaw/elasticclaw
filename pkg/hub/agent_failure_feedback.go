@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,27 +10,6 @@ import (
 )
 
 var issueTrackerHTTPClient = &http.Client{Timeout: 30 * time.Second}
-
-type triggerActor struct {
-	ID    string `json:"id,omitempty"`
-	Login string `json:"login,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Email string `json:"email,omitempty"`
-	URL   string `json:"url,omitempty"`
-	Type  string `json:"type,omitempty"`
-}
-
-type agentFailureFeedback struct {
-	Integration      string
-	IssueID          string
-	GitHubRepo       string
-	GitHubIssueNum   int
-	LinearIdentifier string
-	TriggerActor     triggerActor
-	AgentStatusError string
-	Failure          agentFailureMessage
-	ClawID           string
-}
 
 type linearGraphQLError struct {
 	Message string `json:"message"`
@@ -147,33 +125,6 @@ func canAssignFailureFeedback(feedback agentFailureFeedback) bool {
 	default:
 		return false
 	}
-}
-
-func commentGitHubIssueWithBase(base, token, repo string, issueNumber int, body string) error {
-	if base == "" {
-		base = "https://api.github.com"
-	}
-	commentBody := map[string]interface{}{"body": body}
-	b, _ := json.Marshal(commentBody)
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/repos/%s/issues/%d/comments", base, repo, issueNumber), bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := issueTrackerHTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("github API error %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
 }
 
 func assignGitHubIssueWithBase(base, token, repo string, issueNumber int, login string) error {
