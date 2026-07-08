@@ -3,7 +3,6 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
-	"log"
 	"strings"
 )
 
@@ -13,7 +12,7 @@ func (s *Server) loadManualTriggerInputs(clawID string) map[string]string {
 	var filesJSON, tagsJSON string
 	if err := s.db.QueryRow(`SELECT template_files, tags FROM claws WHERE id=?`, clawID).Scan(&filesJSON, &tagsJSON); err != nil {
 		if err != sql.ErrNoRows {
-			log.Printf("[manual-trigger] failed to load claw %s: %v", clawID[:8], err)
+			logf("[manual-trigger] failed to load claw %s: %v", clawID[:8], err)
 		}
 		return nil
 	}
@@ -35,7 +34,7 @@ func (s *Server) loadManualTriggerInputs(clawID string) map[string]string {
 
 	var files map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
-		log.Printf("[manual-trigger] failed to parse template_files for claw %s: %v", clawID[:8], err)
+		logf("[manual-trigger] failed to parse template_files for claw %s: %v", clawID[:8], err)
 		return nil
 	}
 
@@ -48,7 +47,7 @@ func (s *Server) loadManualTriggerInputs(clawID string) map[string]string {
 
 	var inputs map[string]string
 	if err := json.Unmarshal([]byte(inputsJSON), &inputs); err != nil {
-		log.Printf("[manual-trigger] failed to parse TRIGGER_INPUTS.json for claw %s: %v", clawID[:8], err)
+		logf("[manual-trigger] failed to parse TRIGGER_INPUTS.json for claw %s: %v", clawID[:8], err)
 		return nil
 	}
 	if len(inputs) == 0 {

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -71,7 +70,7 @@ func (cs *cronScheduler) start() error {
 	}
 
 	cs.cron.Start()
-	log.Println("[cron] scheduler started")
+	logf("[cron] scheduler started")
 	return nil
 }
 
@@ -83,7 +82,7 @@ func (cs *cronScheduler) stop() {
 	if cs.cron != nil {
 		ctx := cs.cron.Stop()
 		<-ctx.Done()
-		log.Println("[cron] scheduler stopped")
+		logf("[cron] scheduler stopped")
 	}
 }
 
@@ -120,7 +119,7 @@ func (cs *cronScheduler) reloadWorkflows() error {
 			cs.cron.Remove(entryID)
 			delete(cs.entries, key)
 			delete(cs.workflows, key)
-			log.Printf("[cron] removed schedule for %s", key)
+			logf("[cron] removed schedule for %s", key)
 		}
 	}
 
@@ -143,7 +142,7 @@ func (cs *cronScheduler) reloadWorkflows() error {
 			var err error
 			loc, err = time.LoadLocation(sw.trigger.Timezone)
 			if err != nil {
-				log.Printf("[cron] invalid timezone %q for %s, using UTC: %v", sw.trigger.Timezone, key, err)
+				logf("[cron] invalid timezone %q for %s, using UTC: %v", sw.trigger.Timezone, key, err)
 				loc = time.UTC
 			}
 		}
@@ -152,7 +151,7 @@ func (cs *cronScheduler) reloadWorkflows() error {
 		// We use a wrapper approach: create schedule parser with timezone
 		schedule, err := parseCronSchedule(sw.trigger.Schedule, loc)
 		if err != nil {
-			log.Printf("[cron] invalid schedule %q for %s: %v", sw.trigger.Schedule, key, err)
+			logf("[cron] invalid schedule %q for %s: %v", sw.trigger.Schedule, key, err)
 			continue
 		}
 
@@ -163,7 +162,7 @@ func (cs *cronScheduler) reloadWorkflows() error {
 
 		cs.entries[key] = entryID
 		cs.workflows[key] = sw
-		log.Printf("[cron] scheduled %s with %q (timezone: %s)", key, sw.trigger.Schedule, sw.trigger.Timezone)
+		logf("[cron] scheduled %s with %q (timezone: %s)", key, sw.trigger.Schedule, sw.trigger.Timezone)
 	}
 
 	return nil
@@ -223,20 +222,20 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 		switch sw.trigger.OverlapPolicy {
 		case "skip", "":
 			cs.runningMu.Unlock()
-			log.Printf("[cron] skipping %s (%d run(s) still active)", key, activeRuns)
+			logf("[cron] skipping %s (%d run(s) still active)", key, activeRuns)
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) still active", activeRuns))
 			return workflowRunSkipped, nil
 		case "queue":
 			// Queue is not implemented in v1; treat as skip
 			cs.runningMu.Unlock()
-			log.Printf("[cron] skipping %s (queue not implemented, %d run(s) active)", key, activeRuns)
+			logf("[cron] skipping %s (queue not implemented, %d run(s) active)", key, activeRuns)
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", fmt.Sprintf("%d run(s) active, queue not implemented", activeRuns))
 			return workflowRunSkipped, nil
 		case "parallel":
 			// Allow parallel execution
 		default:
 			cs.runningMu.Unlock()
-			log.Printf("[cron] unknown overlap policy %q for %s, skipping", sw.trigger.OverlapPolicy, key)
+			logf("[cron] unknown overlap policy %q for %s, skipping", sw.trigger.OverlapPolicy, key)
 			cs.recordRun(uuid.New().String(), sw, "skipped", "", "unknown overlap policy")
 			return workflowRunSkipped, nil
 		}
@@ -273,7 +272,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 		},
 	)
 	if err != nil {
-		log.Printf("[cron] failed to create claw for %s: %v", key, err)
+		logf("[cron] failed to create claw for %s: %v", key, err)
 		cs.failRun(runID, fmt.Sprintf("failed to create claw: %v", err))
 		// No claw was created, so decrement the running counter immediately
 		cs.runningMu.Lock()
@@ -293,7 +292,7 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 	cs.clawWorkflow[clawID] = key
 	cs.clawWorkflowMu.Unlock()
 
-	log.Printf("[cron] started run %s for %s (claw %s)", runID, key, clawID)
+	logf("[cron] started run %s for %s (claw %s)", runID, key, clawID)
 	return workflowRunStarted, nil
 }
 
@@ -310,7 +309,7 @@ func (cs *cronScheduler) recordRun(runID string, sw *scheduledWorkflow, status, 
 		runID, tenantID, sw.workflow.Name, sw.workspace.Name, "cron", status, clawID, context, now, now,
 	)
 	if err != nil {
-		log.Printf("[cron] failed to record run for %s: %v", sw.key, err)
+		logf("[cron] failed to record run for %s: %v", sw.key, err)
 	}
 }
 
@@ -321,7 +320,7 @@ func (cs *cronScheduler) updateRun(runID, clawID, status string) {
 		clawID, status, runID,
 	)
 	if err != nil {
-		log.Printf("[cron] failed to update run %s: %v", runID, err)
+		logf("[cron] failed to update run %s: %v", runID, err)
 	}
 }
 
@@ -333,7 +332,7 @@ func (cs *cronScheduler) finishRun(runID, result string) {
 		"completed", result, now, runID,
 	)
 	if err != nil {
-		log.Printf("[cron] failed to finish run %s: %v", runID, err)
+		logf("[cron] failed to finish run %s: %v", runID, err)
 	}
 }
 
@@ -345,7 +344,7 @@ func (cs *cronScheduler) failRun(runID, result string) {
 		"failed", result, now, runID,
 	)
 	if err != nil {
-		log.Printf("[cron] failed to mark run %s as failed: %v", runID, err)
+		logf("[cron] failed to mark run %s as failed: %v", runID, err)
 	}
 }
 
@@ -361,7 +360,7 @@ func (cs *cronScheduler) finishRunByClawID(clawID, status, result string) {
 		status, result, now, clawID,
 	)
 	if err != nil {
-		log.Printf("[cron] failed to finish run for claw %s: %v", clawID, err)
+		logf("[cron] failed to finish run for claw %s: %v", clawID, err)
 	}
 
 	// Decrement the running counter for this workflow so overlap policy

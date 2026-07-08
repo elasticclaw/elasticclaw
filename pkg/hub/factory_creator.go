@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -59,7 +58,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		var parseErr error
 		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
 		if parseErr != nil {
-			log.Printf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
+			logf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
 			tmplCfg = nil
 		}
 	}
@@ -149,13 +148,13 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	// Resolve and inject template-requested secrets (deprecated list format)
 	resolvedSecrets := make(map[string]string)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
+		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			}
 		}
 	}
@@ -167,9 +166,9 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -181,9 +180,9 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -332,7 +331,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
+		logf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
 	}
 
 	// Insert claw record
@@ -393,13 +392,13 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {
 		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
-			log.Printf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+			logf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
 		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
+	logf("[factory] created claw %s (%s) for factory %s (status=%s, reason=%s)", clawName, clawID[:8], factory.Name, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
@@ -415,7 +414,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
-			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
 		ctx := context.Background()
@@ -454,7 +453,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
 		if provErr != nil {
-			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			logf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()

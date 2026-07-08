@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -56,7 +55,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		var err error
 		tmplCfg, err = config.ParseTemplateConfig([]byte(cfgContent))
 		if err != nil {
-			log.Printf("[workflow:%s/%s] warning: could not parse workspace elasticclaw-config.yaml: %v", workspace.Name, workflow.Name, err)
+			logf("[workflow:%s/%s] warning: could not parse workspace elasticclaw-config.yaml: %v", workspace.Name, workflow.Name, err)
 			tmplCfg = nil
 		}
 	}
@@ -260,9 +259,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if opts.triggerActor != nil {
 		actorJSON, err := json.Marshal(opts.triggerActor)
 		if err != nil {
-			log.Printf("[workflow] failed to marshal trigger actor for claw %s: %v", shortID(clawID), err)
+			logf("[workflow] failed to marshal trigger actor for claw %s: %v", shortID(clawID), err)
 		} else if _, err := s.db.Exec(`UPDATE claws SET trigger_actor_json=? WHERE id=?`, string(actorJSON), clawID); err != nil {
-			log.Printf("[workflow] failed to persist trigger actor for claw %s: %v", shortID(clawID), err)
+			logf("[workflow] failed to persist trigger actor for claw %s: %v", shortID(clawID), err)
 		}
 	}
 
@@ -286,13 +285,13 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {
 		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
-			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
+			logf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
 		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 
-	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
+	logf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
@@ -349,7 +348,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
 		if provErr != nil {
-			log.Printf("[workflow] provision failed for %s: %v", clawID, provErr)
+			logf("[workflow] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow provision failed: %v", provErr), false)
 		}
 	}()
