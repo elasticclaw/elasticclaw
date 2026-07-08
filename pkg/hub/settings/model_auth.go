@@ -1,4 +1,4 @@
-package hub
+package settings
 
 import (
 	"context"
@@ -16,11 +16,12 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
 
-type modelAuthLoginJob struct {
+type ModelAuthLoginJob struct {
 	ID        string `json:"id"`
 	Provider  string `json:"provider"`
 	Profile   string `json:"profile"`
@@ -49,14 +50,14 @@ var (
 const (
 	codexAuthIssuer   = "https://auth.openai.com"
 	codexAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	grokAuthIssuer    = "https://auth.x.ai"
-	grokAuthClientID  = "b1a00492-073a-47ea-816f-4c329264a828"
+	GrokAuthIssuer    = "https://auth.x.ai"
+	GrokAuthClientID  = "b1a00492-073a-47ea-816f-4c329264a828"
 	grokAuthScope     = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write"
 )
 
-func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req struct {
@@ -65,7 +66,7 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Mode     string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	req.Provider = strings.TrimSpace(req.Provider)
@@ -77,15 +78,15 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		req.Profile = req.Provider + "-default"
 	}
 	if req.Provider != "codex" && req.Provider != "grok" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "provider must be codex or grok")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "provider must be codex or grok")
 		return
 	}
 	if req.Mode != "device" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "only device login is supported")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "only device login is supported")
 		return
 	}
 
-	job := &modelAuthLoginJob{
+	job := &ModelAuthLoginJob{
 		ID:        uuid.NewString(),
 		Provider:  req.Provider,
 		Profile:   req.Profile,
@@ -94,35 +95,32 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	s.modelAuthJobsMu.Lock()
-	if s.modelAuthJobs == nil {
-		s.modelAuthJobs = map[string]*modelAuthLoginJob{}
-	}
-	s.modelAuthJobs[job.ID] = job
+	s.modelAuthJobs()[job.ID] = job
 	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 
 	go s.runModelAuthLoginJob(job)
-	jsonOK(w, snapshot)
+	httpserver.JSONOK(w, snapshot)
 }
 
-func (s *Server) handleModelAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleModelAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	id := r.PathValue("id")
 	s.modelAuthJobsMu.Lock()
-	job := s.modelAuthJobs[id]
+	job := s.modelAuthJobs()[id]
 	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 	if job == nil {
 		http.NotFound(w, r)
 		return
 	}
-	jsonOK(w, snapshot)
+	httpserver.JSONOK(w, snapshot)
 }
 
-func snapshotModelAuthLoginJob(job *modelAuthLoginJob) *modelAuthLoginJob {
+func snapshotModelAuthLoginJob(job *ModelAuthLoginJob) *ModelAuthLoginJob {
 	if job == nil {
 		return nil
 	}
@@ -130,7 +128,7 @@ func snapshotModelAuthLoginJob(job *modelAuthLoginJob) *modelAuthLoginJob {
 	return &snapshot
 }
 
-func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
+func (s *Service) runModelAuthLoginJob(job *ModelAuthLoginJob) {
 	authDir, err := os.MkdirTemp("", "elasticclaw-model-auth-*")
 	if err != nil {
 		s.finishModelAuthJob(job, "error", "", err)
@@ -157,7 +155,7 @@ func (s *Server) runModelAuthLoginJob(job *modelAuthLoginJob) {
 	s.finishModelAuthJob(job, "complete", bundle, nil)
 }
 
-func (s *Server) runModelAuthDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+func (s *Service) runModelAuthDeviceLogin(ctx context.Context, job *ModelAuthLoginJob, authDir string) error {
 	switch job.Provider {
 	case "codex":
 		return s.runCodexDeviceLogin(ctx, job, authDir)
@@ -168,7 +166,7 @@ func (s *Server) runModelAuthDeviceLogin(ctx context.Context, job *modelAuthLogi
 	}
 }
 
-func (s *Server) setModelAuthDevicePrompt(job *modelAuthLoginJob, authURL, code string) {
+func (s *Service) setModelAuthDevicePrompt(job *ModelAuthLoginJob, authURL, code string) {
 	s.modelAuthJobsMu.Lock()
 	defer s.modelAuthJobsMu.Unlock()
 	job.URL = authURL
@@ -190,7 +188,7 @@ type codexDeviceTokenResponse struct {
 	CodeVerifier      string `json:"code_verifier"`
 }
 
-type oauthTokenResponse struct {
+type OAuthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	IDToken      string `json:"id_token"`
@@ -200,7 +198,7 @@ type oauthTokenResponse struct {
 	Description  string `json:"error_description"`
 }
 
-func (s *Server) runCodexDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+func (s *Service) runCodexDeviceLogin(ctx context.Context, job *ModelAuthLoginJob, authDir string) error {
 	client := http.DefaultClient
 	var uc codexUserCodeResponse
 	if err := postJSON(ctx, client, codexAuthIssuer+"/api/accounts/deviceauth/usercode", map[string]string{
@@ -226,7 +224,7 @@ func (s *Server) runCodexDeviceLogin(ctx context.Context, job *modelAuthLoginJob
 		return fmt.Errorf("Codex device token response missing authorization code or verifier")
 	}
 
-	var token oauthTokenResponse
+	var token OAuthTokenResponse
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code.AuthorizationCode)
@@ -239,7 +237,7 @@ func (s *Server) runCodexDeviceLogin(ctx context.Context, job *modelAuthLoginJob
 	if token.IDToken == "" || token.AccessToken == "" || token.RefreshToken == "" {
 		return fmt.Errorf("Codex token response missing id, access, or refresh token")
 	}
-	return writeCodexAuthFiles(authDir, token)
+	return WriteCodexAuthFiles(authDir, token)
 }
 
 func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration, out *codexDeviceTokenResponse) error {
@@ -285,13 +283,13 @@ type grokDeviceCodeResponse struct {
 	Description             string `json:"error_description"`
 }
 
-func (s *Server) runGrokDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {
+func (s *Service) runGrokDeviceLogin(ctx context.Context, job *ModelAuthLoginJob, authDir string) error {
 	client := http.DefaultClient
 	var dc grokDeviceCodeResponse
 	form := url.Values{}
-	form.Set("client_id", grokAuthClientID)
+	form.Set("client_id", GrokAuthClientID)
 	form.Set("scope", grokAuthScope)
-	if err := postForm(ctx, client, grokAuthIssuer+"/oauth2/device/code", form, &dc); err != nil {
+	if err := postForm(ctx, client, GrokAuthIssuer+"/oauth2/device/code", form, &dc); err != nil {
 		return fmt.Errorf("request Grok device code: %w", err)
 	}
 	if dc.DeviceCode == "" || dc.UserCode == "" {
@@ -303,7 +301,7 @@ func (s *Server) runGrokDeviceLogin(ctx context.Context, job *modelAuthLoginJob,
 	}
 	s.setModelAuthDevicePrompt(job, authURL, dc.UserCode)
 
-	var token oauthTokenResponse
+	var token OAuthTokenResponse
 	if err := pollGrokDeviceToken(ctx, client, dc.DeviceCode, time.Duration(dc.Interval)*time.Second, &token); err != nil {
 		return err
 	}
@@ -313,7 +311,7 @@ func (s *Server) runGrokDeviceLogin(ctx context.Context, job *modelAuthLoginJob,
 	return writeGrokAuthFiles(ctx, client, authDir, token)
 }
 
-func pollGrokDeviceToken(ctx context.Context, client *http.Client, deviceCode string, interval time.Duration, out *oauthTokenResponse) error {
+func pollGrokDeviceToken(ctx context.Context, client *http.Client, deviceCode string, interval time.Duration, out *OAuthTokenResponse) error {
 	deadline := time.NewTimer(30 * time.Minute)
 	defer deadline.Stop()
 	if interval <= 0 {
@@ -323,9 +321,9 @@ func pollGrokDeviceToken(ctx context.Context, client *http.Client, deviceCode st
 		form := url.Values{}
 		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 		form.Set("device_code", deviceCode)
-		form.Set("client_id", grokAuthClientID)
-		var token oauthTokenResponse
-		status, body, err := postFormStatus(ctx, client, grokAuthIssuer+"/oauth2/token", form, &token)
+		form.Set("client_id", GrokAuthClientID)
+		var token OAuthTokenResponse
+		status, body, err := postFormStatus(ctx, client, GrokAuthIssuer+"/oauth2/token", form, &token)
 		if err != nil {
 			return fmt.Errorf("poll Grok device token: %w", err)
 		}
@@ -349,7 +347,7 @@ func pollGrokDeviceToken(ctx context.Context, client *http.Client, deviceCode st
 	}
 }
 
-func writeCodexAuthFiles(root string, token oauthTokenResponse) error {
+func WriteCodexAuthFiles(root string, token OAuthTokenResponse) error {
 	authPath := filepath.Join(root, ".codex", "auth.json")
 	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
 		return err
@@ -368,15 +366,15 @@ func writeCodexAuthFiles(root string, token oauthTokenResponse) error {
 	return writePrettyJSON(authPath, auth, 0600)
 }
 
-func writeGrokAuthFiles(ctx context.Context, client *http.Client, root string, token oauthTokenResponse) error {
+func writeGrokAuthFiles(ctx context.Context, client *http.Client, root string, token OAuthTokenResponse) error {
 	userInfo, err := getGrokUserInfo(ctx, client, token.AccessToken)
 	if err != nil {
 		return err
 	}
-	return writeGrokAuthFilesFromUserInfo(root, token, userInfo, time.Now().UTC())
+	return WriteGrokAuthFilesFromUserInfo(root, token, userInfo, time.Now().UTC())
 }
 
-func writeGrokAuthFilesFromUserInfo(root string, token oauthTokenResponse, userInfo map[string]any, now time.Time) error {
+func WriteGrokAuthFilesFromUserInfo(root string, token OAuthTokenResponse, userInfo map[string]any, now time.Time) error {
 	expiresAt := now.UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
 	if token.ExpiresIn <= 0 {
 		expiresAt = now.UTC().Add(6 * time.Hour)
@@ -399,18 +397,18 @@ func writeGrokAuthFilesFromUserInfo(root string, token oauthTokenResponse, userI
 		"coding_data_retention_opt_out": false,
 		"refresh_token":                 token.RefreshToken,
 		"expires_at":                    expiresAt.Format(time.RFC3339Nano),
-		"oidc_issuer":                   grokAuthIssuer,
-		"oidc_client_id":                grokAuthClientID,
+		"oidc_issuer":                   GrokAuthIssuer,
+		"oidc_client_id":                GrokAuthClientID,
 	}
 	authPath := filepath.Join(root, ".grok", "auth.json")
 	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
 		return err
 	}
-	return writePrettyJSON(authPath, map[string]any{grokAuthIssuer + "::" + grokAuthClientID: entry}, 0600)
+	return writePrettyJSON(authPath, map[string]any{GrokAuthIssuer + "::" + GrokAuthClientID: entry}, 0600)
 }
 
 func getGrokUserInfo(ctx context.Context, client *http.Client, accessToken string) (map[string]any, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, grokAuthIssuer+"/oauth2/userinfo", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, GrokAuthIssuer+"/oauth2/userinfo", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -571,13 +569,13 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, done chan<- struct{}) {
+func (s *Service) CaptureModelAuthOutput(job *ModelAuthLoginJob, r io.Reader, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 	buf := make([]byte, 4096)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			s.appendModelAuthOutput(job, string(buf[:n]))
+			s.AppendModelAuthOutput(job, string(buf[:n]))
 		}
 		if err != nil {
 			return
@@ -585,7 +583,7 @@ func (s *Server) captureModelAuthOutput(job *modelAuthLoginJob, r io.Reader, don
 	}
 }
 
-func (s *Server) appendModelAuthOutput(job *modelAuthLoginJob, raw string) {
+func (s *Service) AppendModelAuthOutput(job *ModelAuthLoginJob, raw string) {
 	chunk := normalizeModelAuthOutput(raw)
 	s.modelAuthJobsMu.Lock()
 	defer s.modelAuthJobsMu.Unlock()
@@ -602,7 +600,7 @@ func (s *Server) appendModelAuthOutput(job *modelAuthLoginJob, raw string) {
 	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 }
 
-func updateModelAuthURL(job *modelAuthLoginJob, url string) {
+func updateModelAuthURL(job *ModelAuthLoginJob, url string) {
 	url = strings.TrimRight(url, ".,)")
 	if len(url) > len(job.URL) {
 		job.URL = url
@@ -672,7 +670,7 @@ func normalizeModelAuthOutput(line string) string {
 	return b.String()
 }
 
-func (s *Server) finishModelAuthJob(job *modelAuthLoginJob, status, _ string, err error) {
+func (s *Service) finishModelAuthJob(job *ModelAuthLoginJob, status, _ string, err error) {
 	s.modelAuthJobsMu.Lock()
 	defer s.modelAuthJobsMu.Unlock()
 	job.Status = status
@@ -731,11 +729,11 @@ func encodeCLIAuthBundle(root string) (string, error) {
 	return base64.StdEncoding.EncodeToString(data), nil
 }
 
-func (s *Server) saveModelAuthProfile(provider, name, mode, authState string) error {
+func (s *Service) saveModelAuthProfile(provider, name, mode, authState string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	updatedCfg := *s.hubCfg
+	updatedCfg := *s.hubCfg()
 	profiles := make([]*types.ModelAuthProfileConfig, len(updatedCfg.ModelAuthProfiles))
 	for i, profile := range updatedCfg.ModelAuthProfiles {
 		if profile == nil {
@@ -763,15 +761,15 @@ func (s *Server) saveModelAuthProfile(provider, name, mode, authState string) er
 	if err := config.SaveHubConfig(&updatedCfg); err != nil {
 		return err
 	}
-	s.hubCfg = &updatedCfg
+	s.setHubCfg(&updatedCfg)
 	return nil
 }
 
-func buildModelAuthEnv(cfg *types.HubConfig, selectedKeyName string) string {
+func BuildModelAuthEnv(cfg *types.HubConfig, selectedKeyName string) string {
 	if cfg == nil {
 		return ""
 	}
-	key := resolveActiveKey(cfg.LLMKeys, selectedKeyName)
+	key := ResolveActiveKey(cfg.LLMKeys, selectedKeyName)
 	if key == nil || key.AuthProfile == "" {
 		return ""
 	}
@@ -787,7 +785,7 @@ func buildModelAuthEnv(cfg *types.HubConfig, selectedKeyName string) string {
 	return ""
 }
 
-func buildModelAuthRestoreShell(modelAuthEnv string) string {
+func BuildModelAuthRestoreShell(modelAuthEnv string) string {
 	if strings.TrimSpace(modelAuthEnv) == "" {
 		return ""
 	}

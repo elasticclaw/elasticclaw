@@ -11,14 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/settings"
 )
 
-const defaultFireworksModel = "fireworks/accounts/fireworks/models/kimi-k2p7"
-
-type LLMModelOption struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
+// defaultFireworksModel aliases the constant that moved to pkg/hub/settings
+// so the two packages cannot drift.
+const defaultFireworksModel = settings.DefaultFireworksModel
 
 var fallbackFireworksModelOptions = []LLMModelOption{
 	{ID: defaultFireworksModel, Name: "Kimi K2.7"},

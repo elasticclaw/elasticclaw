@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -433,40 +432,6 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 		return "ollama/qwen2.5-coder:1.5b"
 	default:
 		return defaultModel
-	}
-}
-
-func stripProviderPrefix(model string) string {
-	parts := strings.SplitN(model, "/", 2)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return model
-}
-
-type openAICompatibleProvider struct {
-	Name    string
-	BaseURL string
-}
-
-func openAICompatibleConfig(provider string) openAICompatibleProvider {
-	switch provider {
-	case "fireworks":
-		return openAICompatibleProvider{Name: "Fireworks", BaseURL: "https://api.fireworks.ai/inference/v1"}
-	case "groq":
-		return openAICompatibleProvider{Name: "Groq", BaseURL: "https://api.groq.com/openai/v1"}
-	case "grok":
-		return openAICompatibleProvider{Name: "Grok", BaseURL: "https://api.x.ai/v1"}
-	case "deepseek":
-		return openAICompatibleProvider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
-	case "ollama":
-		baseURL := os.Getenv("OLLAMA_BASE_URL")
-		if baseURL == "" {
-			baseURL = "http://ollama:11434"
-		}
-		return openAICompatibleProvider{Name: "Ollama", BaseURL: strings.TrimRight(baseURL, "/") + "/v1"}
-	default:
-		return openAICompatibleProvider{Name: "OpenAI", BaseURL: "https://api.openai.com/v1"}
 	}
 }
 

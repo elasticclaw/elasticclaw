@@ -1,4 +1,4 @@
-package hub
+package settings
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -57,8 +58,8 @@ var (
 	doctorMu         sync.RWMutex
 )
 
-// handleDoctor handles GET /api/doctor.
-func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+// HandleDoctor handles GET /api/doctor.
+func (s *Service) HandleDoctor(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -72,7 +73,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	if !refresh && cached != nil && time.Since(cached.at) < 5*time.Minute {
 		resp := cached.report
 		resp.CachedAt = &cached.at
-		jsonOK(w, resp)
+		httpserver.JSONOK(w, resp)
 		return
 	}
 
@@ -80,15 +81,15 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	doctorMu.Lock()
 	lastDoctorReport = &doctorCache{report: report, at: time.Now()}
 	doctorMu.Unlock()
-	jsonOK(w, report)
+	httpserver.JSONOK(w, report)
 }
 
 // runDoctorChecks runs all diagnostic checks and returns the report.
-func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
+func (s *Service) runDoctorChecks(ctx context.Context) DoctorResponse {
 	var checks []DoctorCheck
 
 	s.mu.RLock()
-	hubCfg := s.hubCfg
+	hubCfg := s.hubCfg()
 	s.mu.RUnlock()
 
 	// Load disk config for secrets, integrations, etc.
@@ -98,8 +99,8 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	}
 
 	// --- Models / LLM Keys ---
-	checks = append(checks, s.checkLLMKeys(hubCfg)...)
-	checks = append(checks, s.checkDefaultModel(hubCfg)...)
+	checks = append(checks, s.CheckLLMKeys(hubCfg)...)
+	checks = append(checks, s.CheckDefaultModel(hubCfg)...)
 
 	// --- Sandboxes / Providers ---
 	checks = append(checks, s.checkProviders(hubCfg)...)
@@ -148,7 +149,7 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 
 // ==================== LLM KEY CHECKS ====================
 
-func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) CheckLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if len(cfg.LLMKeys) == 0 {
@@ -191,7 +192,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 				},
 			})
 		}
-		if !llmKeyHasRequiredAPIKey(key) {
+		if !LLMKeyHasRequiredAPIKey(key) {
 			allKeysValid = false
 			checks = append(checks, DoctorCheck{
 				Category:    "models",
@@ -242,7 +243,7 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 	return checks
 }
 
-func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) CheckDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if cfg.DefaultModel == "" {
@@ -260,7 +261,7 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 
 		if defaultKey != nil {
 			// Delegate to the same resolution logic used at runtime to avoid false positives
-			resolved := resolveDefaultModelForKey(cfg, defaultKey)
+			resolved := s.resolveDefaultModelForKey(cfg, defaultKey)
 			if resolved != "" {
 				checks = append(checks, DoctorCheck{
 					Category:    "models",
@@ -284,7 +285,7 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 				})
 			}
 		} else {
-			// No LLM keys at all — this is already flagged by checkLLMKeys as critical
+			// No LLM keys at all — this is already flagged by CheckLLMKeys as critical
 			checks = append(checks, DoctorCheck{
 				Category:    "models",
 				Severity:    "info",
@@ -327,7 +328,7 @@ func (s *Server) checkDefaultModel(cfg *types.HubConfig) []DoctorCheck {
 
 // ==================== PROVIDER CHECKS ====================
 
-func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if len(cfg.Providers) == 0 {
@@ -436,10 +437,10 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 
 // ==================== FACTORY CHECKS ====================
 
-func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
-	factories, _ := loadExternalFactories()
+	factories, _ := s.loadExternalFactories()
 	if len(factories) == 0 {
 		checks = append(checks, DoctorCheck{
 			Category:    "factories",
@@ -456,7 +457,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	templateNamesValid := true
 
 	// External templates first
-	externalNames, err := listExternalTemplates()
+	externalNames, err := s.listExternalTemplates()
 	if err == nil {
 		for _, name := range externalNames {
 			templateNames[name] = true
@@ -664,7 +665,7 @@ func (s *Server) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 
 // ==================== TEMPLATE CHECKS ====================
 
-func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	// Build set of secret names
@@ -674,7 +675,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 	}
 
 	// Check external templates for common issues
-	externalNames, err := listExternalTemplates()
+	externalNames, err := s.listExternalTemplates()
 	if err != nil && !os.IsNotExist(err) {
 		checks = append(checks, DoctorCheck{
 			Category:    "templates",
@@ -685,7 +686,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 		})
 	} else {
 		for _, name := range externalNames {
-			_, err := loadExternalTemplate(name)
+			_, err := s.loadExternalTemplate(name)
 			if err != nil {
 				checks = append(checks, DoctorCheck{
 					Category:    "templates",
@@ -697,7 +698,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 				continue
 			}
 			// Check for elasticclaw-config.yaml directly (not via ReadTemplateFiles allow-list)
-			configPath := filepath.Join(templatesDir(), name, "elasticclaw-config.yaml")
+			configPath := filepath.Join(s.templatesDir(), name, "elasticclaw-config.yaml")
 			if _, err := os.Stat(configPath); os.IsNotExist(err) {
 				checks = append(checks, DoctorCheck{
 					Category:    "templates",
@@ -770,7 +771,7 @@ func (s *Server) checkTemplates(cfg *types.HubConfig, diskCfg *types.HubConfig) 
 
 // ==================== INTEGRATION CHECKS ====================
 
-func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if cfg.Integrations == nil {
@@ -779,7 +780,7 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 
 	// Build set of factory workspaces for cross-reference
 	factoryWorkspaces := make(map[string]map[string]bool) // integration -> workspace -> exists
-	factories, _ := loadExternalFactories()
+	factories, _ := s.loadExternalFactories()
 	for _, f := range factories {
 		if f == nil || !isFactoryEnabled(f) {
 			continue
@@ -1003,7 +1004,7 @@ func (s *Server) checkIntegrations(cfg *types.HubConfig, diskCfg *types.HubConfi
 
 // ==================== GITHUB APP CHECKS ====================
 
-func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if len(cfg.GitHubApps) == 0 {
@@ -1065,7 +1066,7 @@ func (s *Server) checkGitHubApps(cfg *types.HubConfig) []DoctorCheck {
 
 // ==================== MCP SERVER CHECKS ====================
 
-func (s *Server) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	if len(cfg.MCPServers) == 0 {
@@ -1125,7 +1126,7 @@ func (s *Server) checkMCPServers(cfg *types.HubConfig, diskCfg *types.HubConfig)
 
 // ==================== AUTH CHECKS ====================
 
-func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
 	// Check for lockout risk
@@ -1200,10 +1201,10 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 
 // ==================== HUB SETTINGS CHECKS ====================
 
-func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
+func (s *Service) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck
 
-	factories, _ := loadExternalFactories()
+	factories, _ := s.loadExternalFactories()
 	factoryCount := len(factories)
 	if cfg.MaxConcurrentClaws == 1 && factoryCount > 1 {
 		checks = append(checks, DoctorCheck{

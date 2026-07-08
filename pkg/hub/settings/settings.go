@@ -1,4 +1,4 @@
-package hub
+package settings
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -384,14 +385,14 @@ type GitHubAppPatch struct {
 	PrivateKeyPEM string `json:"privateKeyPem,omitempty"` // full PEM, stored on server only
 }
 
-func (s *Server) handleSettingsStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleSettingsStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	hasProvider := hasConfiguredProvider(s.hubCfg.Providers)
-	hasLLMKey := len(s.hubCfg.LLMKeys) > 0
-	hasGitHub := len(s.hubCfg.GitHubApps) > 0
+	hasProvider := hasConfiguredProvider(s.hubCfg().Providers)
+	hasLLMKey := len(s.hubCfg().LLMKeys) > 0
+	hasGitHub := len(s.hubCfg().GitHubApps) > 0
 	s.mu.RUnlock()
 
-	jsonOK(w, SettingsStatus{
+	httpserver.JSONOK(w, SettingsStatus{
 		HasProvider: hasProvider,
 		HasLLMKey:   hasLLMKey,
 		HasGitHub:   hasGitHub,
@@ -428,18 +429,18 @@ func hasConfiguredProvider(providers map[string]types.ProviderConfig) bool {
 	return false
 }
 
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.getSettings(w, r)
+		s.GetSettings(w, r)
 	case http.MethodPatch:
 		s.patchSettings(w, r)
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
-func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+func (s *Service) GetSettings(w http.ResponseWriter, r *http.Request) {
 	view := SettingsView{
 		Providers: make(map[string]ProviderView),
 		GitHub:    []GitHubAppView{},
@@ -449,21 +450,21 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	var fireworksAPIKey string
 	// LLM keys — mask actual key values
 	view.LLMKeys = []LLMKeyView{}
-	for _, k := range s.hubCfg.LLMKeys {
+	for _, k := range s.hubCfg().LLMKeys {
 		if k.Provider == "fireworks" && k.APIKey != "" && fireworksAPIKey == "" {
 			fireworksAPIKey = k.APIKey
 		}
 		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
 			Name:         k.Name,
 			Provider:     k.Provider,
-			KeySet:       llmKeyHasRequiredAPIKey(k),
+			KeySet:       LLMKeyHasRequiredAPIKey(k),
 			Default:      k.Default,
 			DefaultModel: k.DefaultModel,
 			AuthProfile:  k.AuthProfile,
 		})
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
-	for _, profile := range s.hubCfg.ModelAuthProfiles {
+	for _, profile := range s.hubCfg().ModelAuthProfiles {
 		if profile == nil {
 			continue
 		}
@@ -477,7 +478,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Providers
-	for name, p := range s.hubCfg.Providers {
+	for name, p := range s.hubCfg().Providers {
 		pv := ProviderView{Type: name, Enabled: true}
 		switch name {
 		case "daytona":
@@ -519,35 +520,35 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SSH public keys
-	view.SSHPublicKeys = s.hubCfg.SSHPublicKeys
+	view.SSHPublicKeys = s.hubCfg().SSHPublicKeys
 	if view.SSHPublicKeys == nil {
 		view.SSHPublicKeys = []string{}
 	}
 
 	// GitHub Apps — copy configs under lock, check permissions after releasing lock
-	ghAppCfgs := make([]*types.GitHubAppConfig, len(s.hubCfg.GitHubApps))
-	for i, app := range s.hubCfg.GitHubApps {
+	ghAppCfgs := make([]*types.GitHubAppConfig, len(s.hubCfg().GitHubApps))
+	for i, app := range s.hubCfg().GitHubApps {
 		copy := *app
 		ghAppCfgs[i] = &copy
 	}
 
 	// Integrations
 	view.Integrations = &IntegrationsView{Linear: []LinearIntegrationView{}, Shortcut: []ShortcutIntegrationView{}, GitHubIssues: []GitHubIssuesIntegrationView{}}
-	if s.hubCfg.Integrations != nil {
-		for _, sc := range s.hubCfg.Integrations.Shortcut {
+	if s.hubCfg().Integrations != nil {
+		for _, sc := range s.hubCfg().Integrations.Shortcut {
 			view.Integrations.Shortcut = append(view.Integrations.Shortcut, ShortcutIntegrationView{
 				Workspace: sc.Workspace,
 				TokenSet:  sc.Token != "",
 			})
 		}
-		for _, li := range s.hubCfg.Integrations.Linear {
+		for _, li := range s.hubCfg().Integrations.Linear {
 			view.Integrations.Linear = append(view.Integrations.Linear, LinearIntegrationView{
 				Workspace:        li.Workspace,
 				TokenSet:         li.Token != "",
 				WebhookSecretSet: li.WebhookSecret != "",
 			})
 		}
-		for _, gi := range s.hubCfg.Integrations.GitHubIssues {
+		for _, gi := range s.hubCfg().Integrations.GitHubIssues {
 			view.Integrations.GitHubIssues = append(view.Integrations.GitHubIssues, GitHubIssuesIntegrationView{
 				Workspace:        gi.Workspace,
 				TokenSet:         gi.Token != "",
@@ -557,12 +558,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Concurrency limit
-	view.MaxConcurrentClaws = s.hubCfg.MaxConcurrentClaws
+	view.MaxConcurrentClaws = s.hubCfg().MaxConcurrentClaws
 
 	// Concurrency groups — ensure "global" always exists
 	view.ConcurrencyGroups = []ConcurrencyGroupView{}
 	hasGlobal := false
-	for _, g := range s.hubCfg.ConcurrencyGroups {
+	for _, g := range s.hubCfg().ConcurrencyGroups {
 		view.ConcurrencyGroups = append(view.ConcurrencyGroups, ConcurrencyGroupView{
 			Name:  g.Name,
 			Limit: g.Limit,
@@ -574,15 +575,15 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	if !hasGlobal {
 		view.ConcurrencyGroups = append(view.ConcurrencyGroups, ConcurrencyGroupView{
 			Name:  "global",
-			Limit: s.hubCfg.MaxConcurrentClaws,
+			Limit: s.hubCfg().MaxConcurrentClaws,
 		})
 	}
 
 	// Factories — load only from external storage (single source of truth)
 	view.Factories = []FactoryView{}
-	factories, err := loadExternalFactories()
+	factories, err := s.loadExternalFactories()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to load factories: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to load factories: "+err.Error())
 		return
 	}
 	// Sort by name for stable ordering
@@ -628,12 +629,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// Auth config — copy under lock before RUnlock
 	var authView *AuthView
-	if s.hubCfg.Auth != nil {
+	if s.hubCfg().Auth != nil {
 		authView = &AuthView{
-			DisablePasswordAuth: s.hubCfg.Auth.DisablePasswordAuth,
+			DisablePasswordAuth: s.hubCfg().Auth.DisablePasswordAuth,
 		}
-		if s.hubCfg.Auth.GitHubOAuth != nil {
-			gh := s.hubCfg.Auth.GitHubOAuth
+		if s.hubCfg().Auth.GitHubOAuth != nil {
+			gh := s.hubCfg().Auth.GitHubOAuth
 			authView.GitHubOAuth = &GitHubOAuthView{
 				ClientID:        gh.ClientID,
 				ClientSecretSet: gh.ClientSecret != "",
@@ -642,8 +643,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 				AllowedTeams:    append([]string(nil), gh.AllowedTeams...),
 			}
 		}
-		if s.hubCfg.Auth.Access != nil {
-			acc := s.hubCfg.Auth.Access
+		if s.hubCfg().Auth.Access != nil {
+			acc := s.hubCfg().Auth.Access
 			authView.Access = &AccessView{
 				Admins:               append([]string(nil), acc.Admins...),
 				ViewRequiresTags:     append([]string(nil), acc.ViewRequiresTags...),
@@ -708,12 +709,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonOK(w, view)
+	httpserver.JSONOK(w, view)
 }
 
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
 // a live permission check if the private key is set.
-func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
+func (s *Service) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
 	view := GitHubAppView{
 		AppID:  app.AppID,
 		URL:    app.URL,
@@ -724,7 +725,7 @@ func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppCon
 		return view
 	}
 
-	provider, err := NewGitHubTokenProvider(app)
+	provider, err := s.newGitHubPermissionsChecker(app)
 	if err != nil {
 		view.PermCheckError = fmt.Sprintf("invalid key: %v", err)
 		return view
@@ -766,10 +767,10 @@ func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppCon
 	return view
 }
 
-// handleGitHubAppTest tests a GitHub App's permissions without saving it.
-func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
+// HandleGitHubAppTest tests a GitHub App's permissions without saving it.
+func (s *Service) HandleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req struct {
@@ -778,11 +779,11 @@ func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 		PrivateKeyPEM string `json:"privateKeyPem"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.AppID == 0 || req.PrivateKeyPEM == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "appId and privateKeyPem required")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "appId and privateKeyPem required")
 		return
 	}
 
@@ -792,13 +793,13 @@ func (s *Server) handleGitHubAppTest(w http.ResponseWriter, r *http.Request) {
 		PrivateKeyPEM: req.PrivateKeyPEM,
 	}
 	view := s.buildGitHubAppView(r.Context(), app)
-	jsonOK(w, view)
+	httpserver.JSONOK(w, view)
 }
 
-func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
+func (s *Service) patchSettings(w http.ResponseWriter, r *http.Request) {
 	var patch SettingsPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 
@@ -806,7 +807,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
-	updatedCfg := *s.hubCfg
+	updatedCfg := *s.hubCfg()
 
 	// LLM keys — upsert/delete by name
 	if len(patch.LLMKeys) > 0 {
@@ -955,9 +956,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			case "exedev":
 				// Auto-generate SSH key if not already present
 				if existing.SSHKeyPath == "" {
-					_, privPath, err := GenerateExedevKey(filepath.Join(hubConfigDir(), "keys"))
+					_, privPath, err := s.generateSSHKey(filepath.Join(s.hubConfigDir(), "keys"))
 					if err != nil {
-						logfCtx(r.Context(), "failed to generate exedev key: %v", err)
+						s.logfCtx(r.Context(), "failed to generate exedev key: %v", err)
 					} else {
 						existing.SSHKeyPath = privPath
 					}
@@ -1035,7 +1036,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				app.PrivateKeyPEM = ga.PrivateKeyPEM
 			} else {
 				// Preserve existing key if not provided
-				for _, existing := range s.hubCfg.GitHubApps {
+				for _, existing := range s.hubCfg().GitHubApps {
 					if existing.AppID == ga.AppID {
 						app.PrivateKeyPEM = existing.PrivateKeyPEM
 						break
@@ -1214,7 +1215,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				if fp.OriginalName != "" {
 					matchName = fp.OriginalName
 				}
-				if old, err := loadExternalFactory(matchName); err == nil && old.WebhookSecret != "" {
+				if old, err := s.loadExternalFactory(matchName); err == nil && old.WebhookSecret != "" {
 					webhookSecret = old.WebhookSecret
 				}
 			}
@@ -1225,7 +1226,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				baseName = fp.OriginalName
 			}
 			var disk *types.FactoryConfig
-			if d, err := loadExternalFactory(baseName); err == nil {
+			if d, err := s.loadExternalFactory(baseName); err == nil {
 				disk = d
 				if fp.OriginalName != "" && fp.OriginalName != fp.Name {
 					disk.Name = fp.Name // apply the new name
@@ -1305,19 +1306,19 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err := disk.Validate(); err != nil {
-				writeErr(w, http.StatusBadRequest, "bad_request", "validation error: "+err.Error())
+				httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "validation error: "+err.Error())
 				return
 			}
-			if err := saveExternalFactory(disk); err != nil {
-				writeErr(w, http.StatusInternalServerError, "internal", "failed to save factory "+fp.Name+": "+err.Error())
+			if err := s.saveExternalFactory(disk); err != nil {
+				httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to save factory "+fp.Name+": "+err.Error())
 				return
 			}
 
 			// If this was a rename, delete the old factory directory so it doesn't
 			// appear as a phantom duplicate in listings.
 			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
-				if err := deleteExternalFactory(fp.OriginalName); err != nil {
-					writeErr(w, http.StatusInternalServerError, "internal", "failed to delete old factory "+fp.OriginalName+": "+err.Error())
+				if err := s.deleteExternalFactory(fp.OriginalName); err != nil {
+					httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to delete old factory "+fp.OriginalName+": "+err.Error())
 					return
 				}
 			}
@@ -1430,7 +1431,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 		var mcps []*types.MCPServerHubConfig
 		// Keep existing entries not mentioned in patch; update or delete those that are
-		for _, existing := range s.hubCfg.MCPServers {
+		for _, existing := range s.hubCfg().MCPServers {
 			mp, inPatch := patchByName[existing.Name]
 			if !inPatch {
 				// Not in patch — preserve unchanged
@@ -1486,7 +1487,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			// Check if this name already exists (already handled above)
 			found := false
-			for _, existing := range s.hubCfg.MCPServers {
+			for _, existing := range s.hubCfg().MCPServers {
 				if existing.Name == mp.Name {
 					found = true
 					break
@@ -1497,27 +1498,27 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			// Validate new entry
 			if mp.Source == "" {
-				writeErr(w, http.StatusBadRequest, "bad_request", "source required for mcp "+mp.Name)
+				httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "source required for mcp "+mp.Name)
 				return
 			}
 			switch types.MCPSource(mp.Source) {
 			case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
 				if mp.Package == "" {
-					writeErr(w, http.StatusBadRequest, "bad_request", "package required for mcp "+mp.Name+" source "+mp.Source)
+					httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "package required for mcp "+mp.Name+" source "+mp.Source)
 					return
 				}
 			case types.MCPSourceDocker:
 				if mp.Image == "" {
-					writeErr(w, http.StatusBadRequest, "bad_request", "image required for mcp "+mp.Name+" source docker")
+					httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "image required for mcp "+mp.Name+" source docker")
 					return
 				}
 			case types.MCPSourceSSE:
 				if mp.URL == "" {
-					writeErr(w, http.StatusBadRequest, "bad_request", "url required for mcp "+mp.Name+" source sse")
+					httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "url required for mcp "+mp.Name+" source sse")
 					return
 				}
 			default:
-				writeErr(w, http.StatusBadRequest, "bad_request", "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse")
+				httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid mcp source for "+mp.Name+": must be npx, uvx, smithery, docker, or sse")
 				return
 			}
 			mcp := &types.MCPServerHubConfig{
@@ -1544,18 +1545,18 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Save to disk before applying to in-memory config
 	if err := config.SaveHubConfig(&updatedCfg); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
 		return
 	}
 
 	// Only update in-memory config after successful disk write
-	s.hubCfg = &updatedCfg
+	s.setHubCfg(&updatedCfg)
 
 	// If the concurrency limit was raised or removed, try to promote pending claws.
-	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.
+	// This must run AFTER s.hubCfg() is updated so promotePendingClaws reads the new limit.
 	if patch.MaxConcurrentClaws != nil {
 		go s.promotePendingClaws()
 	}
 
-	jsonOK(w, map[string]bool{"ok": true})
+	httpserver.JSONOK(w, map[string]bool{"ok": true})
 }

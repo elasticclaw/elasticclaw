@@ -45,28 +45,6 @@ type BootstrapParams struct {
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
 }
 
-// resolveActiveKey selects the active key by selected name, then default, then first.
-func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
-	for _, k := range keys {
-		if k.Name == selectedKeyName && llmKeyHasRequiredAPIKey(k) {
-			return k
-		}
-	}
-	for _, k := range keys {
-		if k.Default && llmKeyHasRequiredAPIKey(k) {
-			return k
-		}
-	}
-	if len(keys) > 0 {
-		for _, k := range keys {
-			if llmKeyHasRequiredAPIKey(k) {
-				return k
-			}
-		}
-	}
-	return nil
-}
-
 // buildOpenClawProviderConfig returns a python snippet that patches
 // ~/.openclaw/openclaw.json with the agent default, gateway settings, and any
 // auth-profile compatibility writes needed after openclaw onboard.

@@ -1,4 +1,4 @@
-package hub
+package settings
 
 import (
 	"bufio"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -24,10 +25,10 @@ import (
 
 type aiConfigRequest struct {
 	Message string          `json:"message"`
-	History []aiChatMessage `json:"history"`
+	History []AIChatMessage `json:"history"`
 }
 
-type aiChatMessage struct {
+type AIChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
@@ -59,42 +60,42 @@ type aiConfigBackupResponse struct {
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
-func (s *Server) handleAIConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.Message == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "message required")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "message required")
 		return
 	}
 
 	// Load and sanitize current hub config
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
 		return
 	}
-	sanitized, err := sanitizeHubConfig(diskCfg)
+	sanitized, err := SanitizeHubConfig(diskCfg)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
 		return
 	}
 
 	// Select LLM key
 	s.mu.RLock()
-	llmKeys := s.hubCfg.LLMKeys
-	defaultModel := s.hubCfg.DefaultModel
+	llmKeys := s.hubCfg().LLMKeys
+	defaultModel := s.hubCfg().DefaultModel
 	s.mu.RUnlock()
 
 	reply, err := callLLMForConfig(sanitized, req.Message, req.History, llmKeys, defaultModel)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "LLM error: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "LLM error: "+err.Error())
 		return
 	}
 
@@ -106,147 +107,147 @@ func (s *Server) handleAIConfig(w http.ResponseWriter, r *http.Request) {
 		resp.Placeholders = extractPlaceholders(yaml)
 	}
 
-	jsonOK(w, resp)
+	httpserver.JSONOK(w, resp)
 }
 
-func (s *Server) handleAIConfigApply(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfigApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.ProposedYAML == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "proposed_yaml required")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "proposed_yaml required")
 		return
 	}
 
 	// Substitute placeholders
-	finalYAML, err := substitutePlaceholders(req.ProposedYAML, req.Secrets)
+	finalYAML, err := SubstitutePlaceholders(req.ProposedYAML, req.Secrets)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid yaml: "+err.Error())
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid yaml: "+err.Error())
 		return
 	}
 
 	// Restore masked secrets (*** from sanitized config) from disk before parsing.
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
 		return
 	}
-	finalYAML, err = restoreMaskedSecretsFromDisk(finalYAML, diskCfg)
+	finalYAML, err = RestoreMaskedSecretsFromDisk(finalYAML, diskCfg)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to restore masked secrets: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to restore masked secrets: "+err.Error())
 		return
 	}
 
 	// Parse and validate
 	var newCfg types.HubConfig
 	if err := yaml.Unmarshal([]byte(finalYAML), &newCfg); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid yaml: "+err.Error())
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid yaml: "+err.Error())
 		return
 	}
-	if err := validateHubConfig(&newCfg); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "validation failed: "+err.Error())
+	if err := ValidateHubConfig(&newCfg); err != nil {
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "validation failed: "+err.Error())
 		return
 	}
 
 	// Backup current config
 	backupPath, err := backupHubConfig()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "backup failed: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "backup failed: "+err.Error())
 		return
 	}
 
 	// Save new config
 	if err := config.SaveHubConfigNoSecretMerge(&newCfg); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "save failed: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "save failed: "+err.Error())
 		return
 	}
 
 	// Hot-reload
 	s.mu.Lock()
-	s.hubCfg = &newCfg
+	s.setHubCfg(&newCfg)
 	s.mu.Unlock()
 
-	jsonOK(w, aiConfigApplyResponse{Success: true, BackupPath: backupPath})
+	httpserver.JSONOK(w, aiConfigApplyResponse{Success: true, BackupPath: backupPath})
 }
 
-func (s *Server) handleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfigRevert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRevertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.BackupPath == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "backup_path required")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "backup_path required")
 		return
 	}
 
 	// Validate path to prevent traversal
 	hubYAMLPath, err := config.ActiveHubConfigPath()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "cannot determine hub config path: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "cannot determine hub config path: "+err.Error())
 		return
 	}
 	cleanHubYAMLPath := filepath.Clean(hubYAMLPath)
 	cleanBackupPath := filepath.Clean(req.BackupPath)
 	expectedPrefix := cleanHubYAMLPath + ".bak."
 	if !strings.HasPrefix(cleanBackupPath, expectedPrefix) {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid backup path")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid backup path")
 		return
 	}
 	suffix := strings.TrimPrefix(cleanBackupPath, expectedPrefix)
 	if !backupTimestampSuffixRe.MatchString(suffix) {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid backup path")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid backup path")
 		return
 	}
 
 	data, err := os.ReadFile(cleanBackupPath)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "cannot read backup: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "cannot read backup: "+err.Error())
 		return
 	}
 
 	var restoredCfg types.HubConfig
 	if err := yaml.Unmarshal(data, &restoredCfg); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "backup file is corrupt: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "backup file is corrupt: "+err.Error())
 		return
 	}
-	if err := validateHubConfig(&restoredCfg); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "backup validation failed: "+err.Error())
+	if err := ValidateHubConfig(&restoredCfg); err != nil {
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "backup validation failed: "+err.Error())
 		return
 	}
 
 	if err := config.SaveHubConfigNoSecretMerge(&restoredCfg); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "save failed: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "save failed: "+err.Error())
 		return
 	}
 
 	// Hot-reload
 	s.mu.Lock()
-	s.hubCfg = &restoredCfg
+	s.setHubCfg(&restoredCfg)
 	s.mu.Unlock()
 
-	jsonOK(w, map[string]bool{"success": true})
+	httpserver.JSONOK(w, map[string]bool{"success": true})
 }
 
-func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	hubYAMLPath, err := config.ActiveHubConfigPath()
 	if err != nil {
-		jsonOK(w, aiConfigBackupResponse{})
+		httpserver.JSONOK(w, aiConfigBackupResponse{})
 		return
 	}
 
@@ -254,7 +255,7 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 	base := filepath.Base(hubYAMLPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		jsonOK(w, aiConfigBackupResponse{})
+		httpserver.JSONOK(w, aiConfigBackupResponse{})
 		return
 	}
 
@@ -266,7 +267,7 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(backups) == 0 {
-		jsonOK(w, aiConfigBackupResponse{})
+		httpserver.JSONOK(w, aiConfigBackupResponse{})
 		return
 	}
 
@@ -279,21 +280,21 @@ func (s *Server) handleAIConfigBackup(w http.ResponseWriter, r *http.Request) {
 		backupTime = info.ModTime().UTC().Format(time.RFC3339)
 	}
 
-	jsonOK(w, aiConfigBackupResponse{BackupPath: latest, BackupTime: backupTime})
+	httpserver.JSONOK(w, aiConfigBackupResponse{BackupPath: latest, BackupTime: backupTime})
 }
 
 // ─── Current-config endpoint ────────────────────────────────────────────────
 
-// handleAIConfigCurrentConfig returns the hub.yaml as plain text.
+// HandleAIConfigCurrentConfig returns the hub.yaml as plain text.
 // By default, secrets are masked. Pass ?reveal=true to get the raw unmasked config.
-func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
 		return
 	}
 
@@ -302,7 +303,7 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 		// Return raw config with actual secret values
 		raw, err := yaml.Marshal(diskCfg)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal", "failed to marshal config: "+err.Error())
+			httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to marshal config: "+err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -310,9 +311,9 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	sanitized, err := sanitizeHubConfig(diskCfg)
+	sanitized, err := SanitizeHubConfig(diskCfg)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -321,42 +322,42 @@ func (s *Server) handleAIConfigCurrentConfig(w http.ResponseWriter, r *http.Requ
 
 // ─── Streaming SSE endpoint ──────────────────────────────────────────────────
 
-// handleAIConfigStream streams the LLM response as Server-Sent Events.
+// HandleAIConfigStream streams the LLM response as Server-Sent Events.
 // Events:
 //
 //	data: {"type":"token","content":"..."}
 //	data: {"type":"proposed_yaml","yaml":"..."}
 //	data: {"type":"placeholders","items":["SECRET"]}
 //	data: {"type":"done"}
-func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleAIConfigStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req aiConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.Message == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request", "message required")
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "message required")
 		return
 	}
 
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to load hub config: "+err.Error())
 		return
 	}
-	sanitized, err := sanitizeHubConfig(diskCfg)
+	sanitized, err := SanitizeHubConfig(diskCfg)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "failed to sanitize config: "+err.Error())
 		return
 	}
 
 	s.mu.RLock()
-	llmKeys := s.hubCfg.LLMKeys
-	defaultModel := s.hubCfg.DefaultModel
+	llmKeys := s.hubCfg().LLMKeys
+	defaultModel := s.hubCfg().DefaultModel
 	s.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -366,7 +367,7 @@ func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeErr(w, http.StatusInternalServerError, "internal", "streaming not supported")
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "streaming not supported")
 		return
 	}
 
@@ -405,14 +406,14 @@ func (s *Server) handleAIConfigStream(w http.ResponseWriter, r *http.Request) {
 
 // ─── LLM call ────────────────────────────────────────────────────────────────
 
-func sanitizeAIChatHistory(history []aiChatMessage) []aiChatMessage {
-	msgs := make([]aiChatMessage, 0, len(history))
+func SanitizeAIChatHistory(history []AIChatMessage) []AIChatMessage {
+	msgs := make([]AIChatMessage, 0, len(history))
 	for _, m := range history {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		msgs = append(msgs, aiChatMessage{
+		msgs = append(msgs, AIChatMessage{
 			Role:    role,
 			Content: m.Content,
 		})
@@ -460,15 +461,15 @@ When proposing config changes:
 - Never remove claw_token or url
 - Explain what you changed in plain English before the YAML block`
 
-func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string) (string, error) {
+func callLLMForConfig(sanitizedYAML, message string, history []AIChatMessage, llmKeys types.LLMKeysList, defaultModel string) (string, error) {
 	systemPrompt := fmt.Sprintf(aiConfigSystemPromptTemplate, sanitizedYAML)
 
 	// Build message list
-	var msgs []aiChatMessage
-	msgs = append(msgs, sanitizeAIChatHistory(history)...)
-	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
+	var msgs []AIChatMessage
+	msgs = append(msgs, SanitizeAIChatHistory(history)...)
+	msgs = append(msgs, AIChatMessage{Role: "user", Content: message})
 
-	choice, err := selectAIConfigProvider(llmKeys, defaultModel)
+	choice, err := SelectAIConfigProvider(llmKeys, defaultModel)
 	if err != nil {
 		return "", err
 	}
@@ -479,20 +480,20 @@ func callLLMForConfig(sanitizedYAML, message string, history []aiChatMessage, ll
 }
 
 // callLLMForConfigStream selects the best available provider and streams tokens via onToken.
-func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, history []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
+func callLLMForConfigStream(ctx context.Context, sanitizedYAML, message string, history []AIChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
 	systemPrompt := fmt.Sprintf(aiConfigSystemPromptTemplate, sanitizedYAML)
 
-	var msgs []aiChatMessage
-	msgs = append(msgs, sanitizeAIChatHistory(history)...)
-	msgs = append(msgs, aiChatMessage{Role: "user", Content: message})
+	var msgs []AIChatMessage
+	msgs = append(msgs, SanitizeAIChatHistory(history)...)
+	msgs = append(msgs, AIChatMessage{Role: "user", Content: message})
 
-	return streamLLMWithSystemPrompt(ctx, systemPrompt, msgs, llmKeys, defaultModel, onToken)
+	return StreamLLMWithSystemPrompt(ctx, systemPrompt, msgs, llmKeys, defaultModel, onToken)
 }
 
-// streamLLMWithSystemPrompt selects a provider from llmKeys/defaultModel and streams tokens via onToken.
+// StreamLLMWithSystemPrompt selects a provider from llmKeys/defaultModel and streams tokens via onToken.
 // Callers supply a fully-built system prompt and message list.
-func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []aiChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
-	choice, err := selectAIConfigProvider(llmKeys, defaultModel)
+func StreamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []AIChatMessage, llmKeys types.LLMKeysList, defaultModel string, onToken func(string)) error {
+	choice, err := SelectAIConfigProvider(llmKeys, defaultModel)
 	if err != nil {
 		return err
 	}
@@ -502,14 +503,14 @@ func streamLLMWithSystemPrompt(ctx context.Context, systemPrompt string, msgs []
 	return streamOpenAI(ctx, choice.Provider, choice.Key.APIKey, systemPrompt, msgs, onToken, choice.Model)
 }
 
-type aiConfigProviderChoice struct {
+type AIConfigProviderChoice struct {
 	Key       *types.LLMKeyConfig
 	Anthropic bool
-	Provider  openAICompatibleProvider
+	Provider  OpenAICompatibleProvider
 	Model     string
 }
 
-func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*aiConfigProviderChoice, error) {
+func SelectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*AIConfigProviderChoice, error) {
 	if len(llmKeys) == 0 {
 		return nil, fmt.Errorf("no LLM keys configured")
 	}
@@ -517,7 +518,7 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	var anthropicKey *types.LLMKeyConfig
 	openAIKeys := map[string]*types.LLMKeyConfig{}
 	for _, k := range llmKeys {
-		if k == nil || !llmKeyHasRequiredAPIKey(k) {
+		if k == nil || !LLMKeyHasRequiredAPIKey(k) {
 			continue
 		}
 		if k.Provider == "anthropic" && anthropicKey == nil {
@@ -532,27 +533,27 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	switch defaultProvider {
 	case "anthropic":
 		if anthropicKey != nil {
-			return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
+			return &AIConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 		}
 	default:
 		if key := openAIKeys[defaultProvider]; key != nil {
-			return &aiConfigProviderChoice{
+			return &AIConfigProviderChoice{
 				Key:      key,
-				Provider: openAICompatibleConfig(key.Provider),
-				Model:    stripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
+				Provider: OpenAICompatibleConfig(key.Provider),
+				Model:    StripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
 			}, nil
 		}
 	}
 
 	if anthropicKey != nil {
-		return &aiConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
+		return &AIConfigProviderChoice{Key: anthropicKey, Anthropic: true}, nil
 	}
 	for _, provider := range []string{"openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama"} {
 		if key := openAIKeys[provider]; key != nil {
-			return &aiConfigProviderChoice{
+			return &AIConfigProviderChoice{
 				Key:      key,
-				Provider: openAICompatibleConfig(key.Provider),
-				Model:    stripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
+				Provider: OpenAICompatibleConfig(key.Provider),
+				Model:    StripProviderPrefix(aiConfigModelForKey(key, defaultModel)),
 			}, nil
 		}
 	}
@@ -564,7 +565,7 @@ func selectAIConfigProvider(llmKeys types.LLMKeysList, defaultModel string) (*ai
 	return nil, fmt.Errorf("no supported LLM key configured (supported providers: anthropic, openai, codex, grok, fireworks, groq, deepseek, ollama; configured: %s)", strings.Join(availableProviders, ", "))
 }
 
-func llmKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
+func LLMKeyHasRequiredAPIKey(key *types.LLMKeyConfig) bool {
 	if key == nil {
 		return false
 	}
@@ -601,7 +602,7 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 	case "grok":
 		return "grok/grok-build-0.1"
 	case "fireworks":
-		return defaultFireworksModel
+		return DefaultFireworksModel
 	case "groq":
 		return "groq/llama-3.3-70b-versatile"
 	case "deepseek":
@@ -614,7 +615,7 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 }
 
 // streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
-func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
+func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []AIChatMessage, onToken func(string)) error {
 	type anthropicMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -707,7 +708,7 @@ func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []ai
 
 // streamOpenAI calls an OpenAI-compatible Chat Completions API with stream:true,
 // forwarding delta.content.
-func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
+func streamOpenAI(ctx context.Context, provider OpenAICompatibleProvider, apiKey, systemPrompt string, msgs []AIChatMessage, onToken func(string), model string) error {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -788,7 +789,7 @@ func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey
 	return scanner.Err()
 }
 
-func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {
+func callAnthropic(apiKey, systemPrompt string, msgs []AIChatMessage) (string, error) {
 	type anthropicMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -855,7 +856,7 @@ func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, e
 	return "", fmt.Errorf("no text content in Anthropic response")
 }
 
-func callOpenAI(provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, model string) (string, error) {
+func callOpenAI(provider OpenAICompatibleProvider, apiKey, systemPrompt string, msgs []AIChatMessage, model string) (string, error) {
 	type openAIMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -916,8 +917,8 @@ func callOpenAI(provider openAICompatibleProvider, apiKey, systemPrompt string, 
 
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
-// sanitizeHubConfig marshals to YAML and masks known secret fields.
-func sanitizeHubConfig(cfg *types.HubConfig) (string, error) {
+// SanitizeHubConfig marshals to YAML and masks known secret fields.
+func SanitizeHubConfig(cfg *types.HubConfig) (string, error) {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return "", err
@@ -1012,8 +1013,8 @@ func extractPlaceholders(s string) []string {
 	return result
 }
 
-// substitutePlaceholders replaces __NAME__ placeholders with provided values.
-func substitutePlaceholders(yamlStr string, secrets map[string]string) (string, error) {
+// SubstitutePlaceholders replaces __NAME__ placeholders with provided values.
+func SubstitutePlaceholders(yamlStr string, secrets map[string]string) (string, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(yamlStr), &root); err != nil {
 		return "", err
@@ -1052,7 +1053,7 @@ func substitutePlaceholdersInYAMLNode(node *yaml.Node, secrets map[string]string
 	}
 }
 
-func restoreMaskedSecretsFromDisk(yamlStr string, diskCfg *types.HubConfig) (string, error) {
+func RestoreMaskedSecretsFromDisk(yamlStr string, diskCfg *types.HubConfig) (string, error) {
 	if diskCfg == nil {
 		return yamlStr, nil
 	}
@@ -1258,8 +1259,8 @@ func uniqueProviders(llmKeys types.LLMKeysList) []string {
 	return providers
 }
 
-// validateHubConfig checks that the config has required fields.
-func validateHubConfig(cfg *types.HubConfig) error {
+// ValidateHubConfig checks that the config has required fields.
+func ValidateHubConfig(cfg *types.HubConfig) error {
 	// Marshal/unmarshal roundtrip
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -1287,16 +1288,16 @@ func validateHubConfig(cfg *types.HubConfig) error {
 			return fmt.Errorf("llm_keys[%d] (%s): provider is required", i, k.Name)
 		}
 	}
-	if err := checkMaskedValues(cfg); err != nil {
+	if err := CheckMaskedValues(cfg); err != nil {
 		return err
 	}
 	return nil
 }
 
-// checkMaskedValues returns an error if any sensitive field still contains the
-// mask sentinel "***", which indicates restoreMaskedSecretsFromDisk failed to
+// CheckMaskedValues returns an error if any sensitive field still contains the
+// mask sentinel "***", which indicates RestoreMaskedSecretsFromDisk failed to
 // match it to a real disk value (e.g. the LLM hallucinated *** for a new key).
-func checkMaskedValues(cfg *types.HubConfig) error {
+func CheckMaskedValues(cfg *types.HubConfig) error {
 	const mask = "***"
 	if cfg.ClawToken == mask {
 		return fmt.Errorf("claw_token contains unresolved mask value; provide the real value or use a __PLACEHOLDER__")
