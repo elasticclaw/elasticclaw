@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -208,7 +207,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		_ = db.Close()
 		return nil, fmt.Errorf("hub identity: %w", err)
 	}
-	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
+	logf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
 		db:                db,
 		addr:              addr,
@@ -236,7 +235,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	// Start cron scheduler for workflow triggers
 	srv.cronScheduler = newCronScheduler(srv)
 	if err := srv.cronScheduler.start(); err != nil {
-		log.Printf("[cron] failed to start scheduler: %v", err)
+		logf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
 
@@ -258,19 +257,19 @@ func (s *Server) Run(opts ...RunOptions) error {
 
 	// Serve embedded web UI (static export)
 	if noWebUI {
-		log.Printf("[hub] web UI disabled (--no-web-ui)")
+		logf("[hub] web UI disabled (--no-web-ui)")
 	} else if webFS, err := webui.FS(); err == nil {
 		if _, indexErr := webFS.Open("index.html"); indexErr != nil {
-			log.Printf("[hub] web UI not built — run: make build-web")
+			logf("[hub] web UI not built — run: make build-web")
 		} else {
 			s.serveWebUI(mux, webFS)
-			log.Printf("[hub] serving embedded web UI")
+			logf("[hub] serving embedded web UI")
 		}
 	}
 
-	log.Printf("ElasticClaw Hub listening on %s", s.addr)
+	logf("ElasticClaw Hub listening on %s", s.addr)
 	if s.hubCfg.UIPassword == "" {
-		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
+		logf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
 	return http.ListenAndServe(s.addr, withRecovery(s.withRequestID(corsMiddleware(mux))))
 }
@@ -787,7 +786,7 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
-		log.Printf("[webui] embedded files: %v", names)
+		logf("[webui] embedded files: %v", names)
 	}
 
 	// Wrap file server to serve index.html for directory requests
@@ -959,7 +958,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		tenantID,
 	)
 	if err != nil {
-		log.Printf("handleClaws query error: %v", err)
+		logfCtx(r.Context(), "handleClaws query error: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal", fmt.Sprintf("db error: %v", err))
 		return
 	}
@@ -1068,9 +1067,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	for envName, secretRef := range req.SecretRefs {
 		if val, ok := hubSecrets[secretRef]; ok {
 			env[envName] = val
-			log.Printf("[create] injected secret_ref %s as %s into claw env", secretRef, envName)
+			logfCtx(r.Context(), "[create] injected secret_ref %s as %s into claw env", secretRef, envName)
 		} else {
-			log.Printf("[create] WARNING: secret_ref %q not found in hub secrets", secretRef)
+			logfCtx(r.Context(), "[create] WARNING: secret_ref %q not found in hub secrets", secretRef)
 		}
 	}
 	req.Env = env
@@ -1098,7 +1097,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	if req.Docker {
 		dockerEnabled = 1
 	}
-	log.Printf("[create] claw %s: nix=%d docker=%d", req.Name, nixEnabled, dockerEnabled)
+	logfCtx(r.Context(), "[create] claw %s: nix=%d docker=%d", req.Name, nixEnabled, dockerEnabled)
 
 	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
@@ -1165,11 +1164,11 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 				}
 			}
 			if hubMCP == nil {
-				log.Printf("[create] MCP server %q not found in hub config, skipping", mcpRef.Name)
+				logfCtx(r.Context(), "[create] MCP server %q not found in hub config, skipping", mcpRef.Name)
 				continue
 			}
 			if !hubMCP.Enabled {
-				log.Printf("[create] MCP server %q is disabled, skipping", mcpRef.Name)
+				logfCtx(r.Context(), "[create] MCP server %q is disabled, skipping", mcpRef.Name)
 				continue
 			}
 			// Build command
@@ -1186,12 +1185,12 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 					cmd = []string{"docker", "run", "-i", "--rm", hubMCP.Image}
 				case types.MCPSourceSSE:
 					// SSE is remote — no local command, skip for now
-					log.Printf("[create] SSE MCP server %q not yet supported for local stdio", mcpRef.Name)
+					logfCtx(r.Context(), "[create] SSE MCP server %q not yet supported for local stdio", mcpRef.Name)
 					continue
 				}
 			}
 			if len(cmd) == 0 {
-				log.Printf("[create] MCP server %q has no command, skipping", mcpRef.Name)
+				logfCtx(r.Context(), "[create] MCP server %q has no command, skipping", mcpRef.Name)
 				continue
 			}
 			// Build env: merge hub config + template overrides + resolved secrets
@@ -1226,7 +1225,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	req.ProviderName = providerNamePrefix + clawID[:8]
 	go func() {
-		log.Printf("Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
+		logfCtx(r.Context(), "Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
 		ctx := context.Background()
 		var provErr error
 
@@ -1246,7 +1245,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		}
 
 		if provErr != nil {
-			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
+			logfCtx(r.Context(), "provisioning failed for claw %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Provisioning failed: %v", provErr), false)
 		}
 	}()
@@ -1373,18 +1372,18 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 				token := s.resolveLinearTokenForFactory(factory)
 				if token != "" {
 					if err := s.commentLinearIssue(token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
-						log.Printf("[kill] failed to comment Linear issue %s: %v", issueID, err)
+						logfCtx(r.Context(), "[kill] failed to comment Linear issue %s: %v", issueID, err)
 					} else {
-						log.Printf("[kill] commented Linear issue %s", issueID)
+						logfCtx(r.Context(), "[kill] commented Linear issue %s", issueID)
 					}
 				}
 			case "shortcut":
 				token := s.resolveShortcutToken(factory.Workspace)
 				if token != "" {
 					if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: killed manually via dashboard"); err != nil {
-						log.Printf("[kill] failed to comment Shortcut story %s: %v", issueID, err)
+						logfCtx(r.Context(), "[kill] failed to comment Shortcut story %s: %v", issueID, err)
 					} else {
-						log.Printf("[kill] commented Shortcut story %s", issueID)
+						logfCtx(r.Context(), "[kill] commented Shortcut story %s", issueID)
 					}
 				}
 			case "github-issues":
@@ -1396,9 +1395,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 						var issueNum int
 						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 							if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: killed manually via dashboard"); err != nil {
-								log.Printf("[kill] failed to comment GitHub issue %s: %v", issueID, err)
+								logfCtx(r.Context(), "[kill] failed to comment GitHub issue %s: %v", issueID, err)
 							} else {
-								log.Printf("[kill] commented GitHub issue %s", issueID)
+								logfCtx(r.Context(), "[kill] commented GitHub issue %s", issueID)
 							}
 						}
 					}
@@ -1408,7 +1407,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
 		if err != nil {
-			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
+			logfCtx(r.Context(), "kill: db soft-delete error for claw %s: %v", clawID, err)
 			writeErr(w, http.StatusInternalServerError, "internal", fmt.Sprintf("db error: %v", err))
 			return
 		}
@@ -1575,7 +1574,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				cc.messageQueue = append(cc.messageQueue, msg)
 				queueLen := len(cc.messageQueue)
 				cc.mu.Unlock()
-				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], queueLen)
+				logfCtx(r.Context(), "[hub] message queued for %s (queue length: %d)", clawID[:8], queueLen)
 			} else {
 				cc.mu.Unlock()
 				// Send immediately
@@ -2017,7 +2016,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	tenantID, err := s.tenantByClawToken(rp.Token)
 	if err != nil {
-		log.Printf("[claw ws] invalid token for claw %.8s: received_len=%d configured_len=%d err=%v", rp.ClawID, len(rp.Token), len(s.hubCfg.ClawToken), err)
+		logfCtx(r.Context(), "[claw ws] invalid token for claw %.8s: received_len=%d configured_len=%d err=%v", rp.ClawID, len(rp.Token), len(s.hubCfg.ClawToken), err)
 		conn.Close(websocket.StatusPolicyViolation, "invalid token")
 		return
 	}
@@ -2075,7 +2074,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			existing.statusConn = conn
 			existing.mu.Unlock()
 			s.mu.Unlock()
-			log.Printf("[bridge] ✓ status channel connected: %s (%s)", rp.Name, clawID[:8])
+			logfCtx(r.Context(), "[bridge] ✓ status channel connected: %s (%s)", rp.Name, clawID[:8])
 			_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID, "channel": "status"}})
 			// Simple read loop for status channel — just keepalive
 			for {
@@ -2124,7 +2123,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
-	log.Printf("[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.gatewayReady)
+	logfCtx(r.Context(), "[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.gatewayReady)
 
 	// Ack
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
@@ -2194,7 +2193,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
-		log.Printf("[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
+		logfCtx(r.Context(), "[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
 	}()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -2244,7 +2243,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 									Type:    "claw_status",
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 								})
-								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
+								logfCtx(r.Context(), "[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
 								shouldWake = true
 								wakeConn = cc
 								go s.requestBootstrapCheckpoint(clawID)
@@ -2253,9 +2252,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						if !hb.GatewayHealthy {
 							cc.gatewayUnhealthyCount++
 							if cc.gatewayUnhealthyCount == 1 {
-								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
+								logfCtx(r.Context(), "[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
 							} else if cc.gatewayUnhealthyCount%4 == 0 {
-								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+								logfCtx(r.Context(), "[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
 							}
 							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
@@ -2264,10 +2263,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// Log context usage on every heartbeat when it crosses the 80% threshold,
 						// regardless of gateway health — don't silence diagnostics during outages.
 						if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
-							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
+							logfCtx(r.Context(), "[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
 						if hb.GatewayHealthy && cc.gatewayUnhealthyCount > 0 {
-							log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+							logfCtx(r.Context(), "[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
 							cc.gatewayUnhealthyCount = 0
 						}
 						// Inject context warning once per streaming turn when usage is >=95%
@@ -2312,7 +2311,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			} else if msg.Type == "agent_activity" {
 				if activity, payload, ok := normalizeAgentActivityPayload(msg.Payload); ok {
 					if err := s.flushStreamingSegment(clawID, tenantID, cc); err != nil {
-						log.Printf("[agent_activity] flush streaming segment for %s: %v", clawID[:8], err)
+						logfCtx(r.Context(), "[agent_activity] flush streaming segment for %s: %v", clawID[:8], err)
 					}
 					if isBusyAgentActivity(activity) {
 						cc.mu.Lock()
@@ -2458,7 +2457,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(hm.Content, "[DONE]") {
 					go func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
-							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
+							logfCtx(r.Context(), "[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					}()
 					if !pipelineHandledDone {
@@ -2558,10 +2557,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						Header map[string]string `json:"header"`
 					}
 					if err := json.Unmarshal(rawPayload, &req); err != nil {
-						log.Printf("[hub-proxy] bad req payload: %v", err)
+						logfCtx(r.Context(), "[hub-proxy] bad req payload: %v", err)
 						return
 					}
-					log.Printf("[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
+					logfCtx(r.Context(), "[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
 					// Build an internal HTTP request
 					urls := req.Path
 					if req.Query != "" {
@@ -2569,7 +2568,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 					if err != nil {
-						log.Printf("[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
+						logfCtx(r.Context(), "[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
 						s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 						return
 					}
@@ -2587,7 +2586,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if w.status == 0 {
 						w.status = 200
 					}
-					log.Printf("[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
+					logfCtx(r.Context(), "[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
 					s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
 				}(mustJSONRaw(msg.Payload), conn)
 			}
@@ -2900,7 +2899,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona create: %w", err)
 	}
-	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
+	logfCtx(ctx, "daytona workspace created: %s (claw %s)", instance.ID, clawID)
 	recordE2EDaytonaSandboxID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
@@ -2913,7 +2912,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		var lastErr error
 		for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
 			if attempt > 1 {
-				log.Printf("[daytona] full bootstrap retry for claw %s in 15s...", clawName)
+				logfCtx(ctx, "[daytona] full bootstrap retry for claw %s in 15s...", clawName)
 				time.Sleep(15 * time.Second)
 			}
 			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
@@ -2921,12 +2920,12 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 				return
 			}
 			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
-				log.Printf("[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
+				logfCtx(ctx, "[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 				return
 			}
-			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
+			logfCtx(ctx, "[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
-		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
+		logfCtx(ctx, "[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
@@ -2934,7 +2933,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 }
 
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
-	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
+	logfCtx(ctx, "[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
 
 	execResult := func(label string, timeout time.Duration, cmd string) (*types.ExecResult, error) {
@@ -2943,9 +2942,9 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if attempt == 1 {
-				log.Printf("[daytona] %s...", label)
+				logfCtx(ctx, "[daytona] %s...", label)
 			} else {
-				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
+				logfCtx(ctx, "[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
 				time.Sleep(5 * time.Second)
 			}
 			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
@@ -2962,7 +2961,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				lastErr = fmt.Errorf("%s failed (exit %d): %s", label, result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
 				continue
 			}
-			log.Printf("[daytona] %s done", label)
+			logfCtx(ctx, "[daytona] %s done", label)
 			return result, nil
 		}
 		return nil, lastErr
@@ -2984,7 +2983,7 @@ echo "npm=$NPM prefix=$PREFIX"; \
 sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
 hash -r; \
 echo uninstalled`); err != nil {
-		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
+		logfCtx(ctx, "[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
 	const daytonaOpenClawVersion = cliversion.OpenClawVersion
@@ -3044,7 +3043,7 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
   sh -s -- install linux --no-confirm --init none >> /tmp/nix-install.log 2>&1; \
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true; \
 nix --version`); err != nil {
-			log.Printf("[daytona] warning: nix install failed: %v", err)
+			logfCtx(ctx, "[daytona] warning: nix install failed: %v", err)
 		}
 	}
 
@@ -3072,7 +3071,7 @@ sudo apt-get update -qq && \
 sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
 sudo usermod -aG docker daytona 2>/dev/null || true && \
 docker --version`); err != nil {
-			log.Printf("[daytona] warning: docker install failed: %v", err)
+			logfCtx(ctx, "[daytona] warning: docker install failed: %v", err)
 		}
 	}
 
@@ -3095,7 +3094,7 @@ docker --version`); err != nil {
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
 	s.mu.RUnlock()
-	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
+	logfCtx(ctx, "[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
 		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
 	if restoreShell := buildModelAuthRestoreShell(modelAuthEnvDaytona); restoreShell != "" {
@@ -3113,22 +3112,22 @@ docker --version`); err != nil {
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
-	log.Printf("[daytona] onboard openclaw...")
+	logfCtx(ctx, "[daytona] onboard openclaw...")
 	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
 	if onboardErr != nil {
 		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw: %w", onboardErr)
 		}
-		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
+		logfCtx(ctx, "[daytona] onboard returned error, but config file exists; continuing")
 	} else if onboardResult.ExitCode != 0 {
 		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, onboardResult.Stdout)
 		}
-		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
+		logfCtx(ctx, "[daytona] onboard returned non-zero, but config file exists; continuing")
 	} else {
-		log.Printf("[daytona] onboard openclaw done")
+		logfCtx(ctx, "[daytona] onboard openclaw done")
 	}
 
 	if apiKeyAuthSyncDaytona != "" {
@@ -3157,7 +3156,7 @@ echo "preflight ok"`); err != nil {
 		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
 export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
 openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
-		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
+		logfCtx(ctx, "[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
 	// Step 2c: Configure gateway bind/port and start it.
@@ -3246,7 +3245,7 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 			content := content
 			safeName, err := cleanWorkspaceFilePath(name)
 			if err != nil {
-				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
+				logfCtx(ctx, "[daytona] warning: skipping invalid template file path %q: %v", name, err)
 				continue
 			}
 			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
@@ -3257,10 +3256,10 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 ELASTICCLAW_EOF`,
 				shellQuote(targetDir), shellQuote(targetPath), content)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
-				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+				logfCtx(ctx, "[daytona] warning: failed to write %s: %v", name, err)
 			}
 		}
-		log.Printf("[daytona] template files written for claw %s", clawID)
+		logfCtx(ctx, "[daytona] template files written for claw %s", clawID)
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
@@ -3337,7 +3336,7 @@ set +x
 command -v gh
 [ -n "${GH_TOKEN:-}" ]
 gh --version`
-			log.Printf("[daytona] configure gh token refresh (no retries)...")
+			logfCtx(ctx, "[daytona] configure gh token refresh (no retries)...")
 			ghAuthResult, ghAuthErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", configureGitHubTokenRefresh}, 30*time.Second)
 			if ghAuthErr != nil {
 				return fmt.Errorf("configure gh token refresh: %w", ghAuthErr)
@@ -3345,13 +3344,13 @@ gh --version`
 			if ghAuthResult.ExitCode != 0 {
 				return fmt.Errorf("configure gh token refresh failed (exit %d): %s", ghAuthResult.ExitCode, sanitizeBootstrapOutput(ghAuthResult.Stdout))
 			}
-			log.Printf("[daytona] configure gh token refresh done")
+			logfCtx(ctx, "[daytona] configure gh token refresh done")
 
 			ghStatusScript := `export HOME=/home/daytona
 set +x
 . /etc/profile.d/elasticclaw-github.sh
 gh auth status`
-			log.Printf("[daytona] verify gh auth (no retries)...")
+			logfCtx(ctx, "[daytona] verify gh auth (no retries)...")
 			ghStatusResult, ghStatusErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", ghStatusScript}, 20*time.Second)
 			if ghStatusErr != nil {
 				return fmt.Errorf("verify gh auth: %w", ghStatusErr)
@@ -3364,7 +3363,7 @@ gh auth status`
 				for _, repo := range repositories {
 					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", shellQuote(repo.Repo))
 				}
-				log.Printf("[daytona] verify configured repositories (no retries)...")
+				logfCtx(ctx, "[daytona] verify configured repositories (no retries)...")
 				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
 				if verifyReposErr != nil {
 					return fmt.Errorf("verify configured repositories: %w", verifyReposErr)
@@ -3373,12 +3372,12 @@ gh auth status`
 					return fmt.Errorf("verify configured repositories failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
 				}
 			}
-			log.Printf("[daytona] verify gh auth done")
+			logfCtx(ctx, "[daytona] verify gh auth done")
 
-			log.Printf("[daytona] cloning %d repositories for claw %s", len(repositories), clawID)
+			logfCtx(ctx, "[daytona] cloning %d repositories for claw %s", len(repositories), clawID)
 			s.setBootstrapStatus(clawID, "Syncing repositories")
 			for i, repo := range repositories {
-				log.Printf("[daytona] repository[%d]: %s", i, repo.Repo)
+				logfCtx(ctx, "[daytona] repository[%d]: %s", i, repo.Repo)
 			}
 
 			cloneScript := buildDaytonaGitHubCloneScript(repositories)
@@ -3389,7 +3388,7 @@ gh auth status`
 			if cloneResult.ExitCode != 0 {
 				return fmt.Errorf("clone repos failed (exit %d): %s", cloneResult.ExitCode, sanitizeBootstrapOutput(cloneResult.Stdout))
 			}
-			log.Printf("[daytona] clone repos done")
+			logfCtx(ctx, "[daytona] clone repos done")
 
 			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
@@ -3403,13 +3402,13 @@ gh auth status`
 				if verifyResult.ExitCode != 0 {
 					return fmt.Errorf("verify cloned repos failed (exit %d): %s", verifyResult.ExitCode, sanitizeBootstrapOutput(verifyResult.Stdout))
 				}
-				log.Printf("[daytona] verify cloned repos done")
+				logfCtx(ctx, "[daytona] verify cloned repos done")
 			}
 			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
 				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
-					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
+					logfCtx(ctx, "[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
 				} else {
-					log.Printf("[daytona] repo instruction discovery done")
+					logfCtx(ctx, "[daytona] repo instruction discovery done")
 				}
 			}
 		}
@@ -3440,11 +3439,11 @@ gh auth status`
 			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
 			return fmt.Errorf("workspace readiness failed (exit %d): %s", verifyResult.ExitCode, sanitizeBootstrapOutput(verifyResult.Stdout))
 		}
-		log.Printf("[daytona] workspace readiness verified for claw %s", clawID)
+		logfCtx(ctx, "[daytona] workspace readiness verified for claw %s", clawID)
 	}
 
 	s.markBootstrapReady(clawID)
-	log.Printf("[daytona] bootstrap gated ready for claw %s", clawID)
+	logfCtx(ctx, "[daytona] bootstrap gated ready for claw %s", clawID)
 	s.setBootstrapStatus(clawID, "Connecting to hub")
 
 	// Start the bridge last so the first registration happens only after the
@@ -3455,7 +3454,7 @@ gh auth status`
 		return err
 	}
 
-	log.Printf("[daytona] bootstrap complete for claw %s", clawID)
+	logfCtx(ctx, "[daytona] bootstrap complete for claw %s", clawID)
 	return nil
 }
 
@@ -3474,18 +3473,18 @@ func recordE2EProviderID(label, envName, id string) {
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
-			log.Printf("[e2e] record %s id: mkdir %s: %v", label, dir, err)
+			logf("[e2e] record %s id: mkdir %s: %v", label, dir, err)
 			return
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		log.Printf("[e2e] record %s id: open %s: %v", label, path, err)
+		logf("[e2e] record %s id: open %s: %v", label, path, err)
 		return
 	}
 	defer f.Close()
 	if _, err := fmt.Fprintln(f, id); err != nil {
-		log.Printf("[e2e] record %s id: write %s: %v", label, path, err)
+		logf("[e2e] record %s id: write %s: %v", label, path, err)
 	}
 }
 
@@ -3499,7 +3498,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 		return fmt.Errorf("start claw-bridge prep failed (exit %d): %s", result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
 	}
 	if strings.Contains(result.Stdout, "claw-bridge already running") {
-		log.Printf("[daytona] claw-bridge already running")
+		logfCtx(ctx, "[daytona] claw-bridge already running")
 		return nil
 	}
 
@@ -3511,7 +3510,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	if err != nil {
 		return fmt.Errorf("start claw-bridge async: %w", err)
 	}
-	log.Printf("[daytona] claw-bridge async command started session=%s command=%s", sessionID, cmdID)
+	logfCtx(ctx, "[daytona] claw-bridge async command started session=%s command=%s", sessionID, cmdID)
 
 	verifyCmd := daytonaBridgeRunningCommand()
 	var lastVerify string
@@ -3525,7 +3524,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 			continue
 		}
 		if result.ExitCode == 0 {
-			log.Printf("[daytona] start claw-bridge done: %s", strings.TrimSpace(result.Stdout))
+			logfCtx(ctx, "[daytona] start claw-bridge done: %s", strings.TrimSpace(result.Stdout))
 			return nil
 		}
 		lastVerify = result.Stdout
@@ -3702,11 +3701,11 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt == 1 {
 			s.setBootstrapStatus(clawID, "Downloading ElasticClaw connector")
-			log.Printf("[daytona] download claw-bridge...")
+			logfCtx(ctx, "[daytona] download claw-bridge...")
 		} else {
 			delay := delays[attempt-2]
 			s.setBootstrapStatus(clawID, fmt.Sprintf("Retrying connector download in %s", formatRetryDelay(delay)))
-			log.Printf("[daytona] download claw-bridge retry %d/%d in %s...", attempt, maxAttempts, delay)
+			logfCtx(ctx, "[daytona] download claw-bridge retry %d/%d in %s...", attempt, maxAttempts, delay)
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("could not download ElasticClaw connector after %d attempts: %w", attempt-1, ctx.Err())
@@ -3719,17 +3718,17 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + downloadCmd}, 3*time.Minute)
 		if err != nil {
 			lastErr = err
-			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			logfCtx(ctx, "[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
 			continue
 		}
 		if result.ExitCode != 0 {
 			lastErr = fmt.Errorf("exit %d: %s", result.ExitCode, sanitizeBootstrapOutput(result.Stdout))
-			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, lastErr)
+			logfCtx(ctx, "[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, lastErr)
 			continue
 		}
 
 		s.setBootstrapStatus(clawID, "Starting ElasticClaw connector")
-		log.Printf("[daytona] download claw-bridge done")
+		logfCtx(ctx, "[daytona] download claw-bridge done")
 		return nil
 	}
 
@@ -3763,7 +3762,7 @@ func retryReplicatedBootstrapStep(s *Server, clawID string, opts replicatedBoots
 			if s != nil && clawID != "" {
 				s.setBootstrapStatus(clawID, fmt.Sprintf("%s in %s", opts.RetryLabel, formatRetryDelay(delay)))
 			}
-			log.Printf("[bootstrap] %s retry %d/%d in %s...", opts.Label, attempt, opts.Attempts, delay)
+			logf("[bootstrap] %s retry %d/%d in %s...", opts.Label, attempt, opts.Attempts, delay)
 			opts.Sleep(delay)
 		}
 		if s != nil && clawID != "" {
@@ -3771,7 +3770,7 @@ func retryReplicatedBootstrapStep(s *Server, clawID string, opts replicatedBoots
 		}
 		if err := opts.Run(); err != nil {
 			lastErr = err
-			log.Printf("[bootstrap] %s attempt %d/%d failed: %s", opts.Label, attempt, opts.Attempts, sanitizeBootstrapError(err))
+			logf("[bootstrap] %s attempt %d/%d failed: %s", opts.Label, attempt, opts.Attempts, sanitizeBootstrapError(err))
 			continue
 		}
 		return nil
@@ -3892,7 +3891,7 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 	})
-	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
+	logf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
 	go s.requestBootstrapCheckpoint(clawID)
 	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
 	return true
@@ -3915,7 +3914,7 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 			cc.mu.Lock()
 			cc.workflowStartPending = false
 			cc.mu.Unlock()
-			log.Printf("[volume] attach workflow volumes for %s failed: %v", clawID[:8], err)
+			logfCtx(ctx, "[volume] attach workflow volumes for %s failed: %v", clawID[:8], err)
 			s.releaseWorkflowVolumeLeases(clawID)
 			go s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false)
 			return
@@ -4110,13 +4109,13 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	if err != nil {
 		return fmt.Errorf("exedev create: %w", err)
 	}
-	log.Printf("exedev VM created: %s (claw %s)", instance.ID, clawID)
+	logfCtx(ctx, "exedev VM created: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap asynchronously
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
-			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
+			logfCtx(ctx, "exedev bootstrap failed for claw %s: %v", clawID, err)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
@@ -4125,7 +4124,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 }
 
 func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte) error {
-	log.Printf("[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
+	logfCtx(ctx, "[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
 	// Wait for VM to be reachable
@@ -4175,7 +4174,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	log.Printf("[exedev bootstrap] claw %.8s nix=%d docker=%d llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
+	logfCtx(ctx, "[exedev bootstrap] claw %.8s nix=%d docker=%d llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
 		clawID, nixEnabled, dockerEnabled, llmKeyName, templateDefaultModel, hubCfg.DefaultModel, defaultModel)
 
 	bridgeURL := s.bridgeDownloadURL()
@@ -4223,7 +4222,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := p.SetupScript(ctx, vmName, script); err != nil {
 		return fmt.Errorf("exedev bootstrap script failed: %s", sanitizeBootstrapError(err))
 	}
-	log.Printf("[exedev] bootstrap script completed on %s", vmName)
+	logfCtx(ctx, "[exedev] bootstrap script completed on %s", vmName)
 	s.setBootstrapStatus(clawID, "Writing workspace files")
 
 	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
@@ -4248,11 +4247,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
 			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
 		}
-		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+		logfCtx(ctx, "[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
 	}
 	s.markBootstrapReady(clawID)
 
-	log.Printf("[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
+	logfCtx(ctx, "[exedev] bootstrap complete for claw %.8s on %s", clawID, vmName)
 	return nil
 }
 
@@ -4342,7 +4341,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)
 	}
-	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
+	logfCtx(ctx, "[docker] container started: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
 	homeDir, err := p.HomeDir(ctx, instance.ID)
 	if err != nil {
@@ -4368,7 +4367,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		_ = p.Destroy(context.Background(), instance.ID, false)
 		return fmt.Errorf("docker workspace ready marker: %w", err)
 	}
-	log.Printf("[docker] workspace files copied for claw %.8s to %s", clawID, workspaceDir)
+	logfCtx(ctx, "[docker] workspace files copied for claw %.8s to %s", clawID, workspaceDir)
 	s.setBootstrapStatus(clawID, "Starting agent bridge")
 	if err := s.ensureDockerBridge(ctx, p, instance.ID, homeDir); err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
@@ -4410,7 +4409,7 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	Exec(context.Context, string, []string) (*types.ExecResult, error)
 }, containerID, homeDir string) error {
 	if _, err := p.Exec(ctx, containerID, []string{"sh", "-lc", "command -v pgrep >/dev/null 2>&1 && pgrep -x claw-bridge >/dev/null"}); err == nil {
-		log.Printf("[docker] claw-bridge already running in container %s", containerID)
+		logfCtx(ctx, "[docker] claw-bridge already running in container %s", containerID)
 		return nil
 	}
 
@@ -4439,7 +4438,7 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	if _, err := p.Exec(ctx, containerID, []string{"sh", "-lc", startCmd}); err != nil {
 		return fmt.Errorf("docker claw-bridge start failed: %w", err)
 	}
-	log.Printf("[docker] claw-bridge started in container %s", containerID)
+	logfCtx(ctx, "[docker] claw-bridge started in container %s", containerID)
 	return nil
 }
 
@@ -4566,7 +4565,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 	if err != nil {
 		return fmt.Errorf("lambda microvms create: %w", err)
 	}
-	log.Printf("[lambda-microvms] microvm started: %s (claw %s)", instance.ID, clawID)
+	logfCtx(ctx, "[lambda-microvms] microvm started: %s (claw %s)", instance.ID, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='lambda-microvms', provider_id=? WHERE id=?`, instance.ID, clawID)
 	return nil
 }
@@ -4606,7 +4605,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if currentStatus == "deleted" {
-		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
+		logfCtx(ctx, "[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("claw deleted mid-provision")
 	}
@@ -4626,13 +4625,13 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		}
 	}
 
-	log.Printf("Replicated VM provisioned")
-	log.Printf("  Claw:          %s (%s)", req.Name, clawID)
-	log.Printf("  VM ID:         %s", vmID)
-	log.Printf("  Instance type: %s", instanceType)
-	log.Printf("  TTL:           %s", ttl)
-	log.Printf("  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
-	log.Printf("  Status:        provisioning (waiting for VM to start)")
+	logfCtx(ctx, "Replicated VM provisioned")
+	logfCtx(ctx, "  Claw:          %s (%s)", req.Name, clawID)
+	logfCtx(ctx, "  VM ID:         %s", vmID)
+	logfCtx(ctx, "  Instance type: %s", instanceType)
+	logfCtx(ctx, "  TTL:           %s", ttl)
+	logfCtx(ctx, "  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
+	logfCtx(ctx, "  Status:        provisioning (waiting for VM to start)")
 	return nil
 }
 
@@ -4674,7 +4673,7 @@ func (s *Server) petDaytonaSandboxes() {
 		  AND status NOT IN ('idle','deleted','error','offline')
 	`)
 	if err != nil {
-		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
+		logf("keepAliveDaytonaSandboxes: query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -4695,12 +4694,12 @@ func (s *Server) petDaytonaSandboxes() {
 	cfg, ok := s.hubCfg.Providers["daytona"]
 	s.mu.RUnlock()
 	if !ok {
-		log.Printf("keepAliveDaytonaSandboxes: no daytona provider configured")
+		logf("keepAliveDaytonaSandboxes: no daytona provider configured")
 		return
 	}
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
-		log.Printf("keepAliveDaytonaSandboxes: provider init error: %v", err)
+		logf("keepAliveDaytonaSandboxes: provider init error: %v", err)
 		return
 	}
 
@@ -4709,10 +4708,10 @@ func (s *Server) petDaytonaSandboxes() {
 		_, err := p.ExecWithTimeout(ctx, c.providerID, []string{"bash", "-lc", "true"}, 20*time.Second)
 		cancel()
 		if err != nil {
-			log.Printf("[daytona] keepalive failed for %s (%s): %v", c.name, c.id[:8], err)
+			logf("[daytona] keepalive failed for %s (%s): %v", c.name, c.id[:8], err)
 			continue
 		}
-		log.Printf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
+		logf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
 	}
 }
 
@@ -4788,7 +4787,7 @@ func (s *Server) checkClawStatus() {
 			now.Sub(lastUserMessageAt) > 5*time.Minute &&
 			now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
 			msg := fmt.Sprintf("🚨 Agent %s appears unresponsive (no status in 5m). It may have crashed.", name)
-			log.Printf("[watchdog] %s", msg)
+			logf("[watchdog] %s", msg)
 			// Inject as system message so user sees it in the chat stream
 			s.broadcastToUsers(tenantID, types.WSMessage{
 				Type: "message",
@@ -4811,7 +4810,7 @@ func (s *Server) checkClawStatus() {
 		cc.mu.RUnlock()
 		if contextUsage > 90 && !contextWarningSent && !streaming {
 			msg := fmt.Sprintf("⚠️ Agent %s is at %d%% context usage. It should wrap up soon or restart.", name, contextUsage)
-			log.Printf("[watchdog] %s", msg)
+			logf("[watchdog] %s", msg)
 			s.broadcastToUsers(tenantID, types.WSMessage{
 				Type: "message",
 				Payload: map[string]interface{}{
@@ -4846,7 +4845,7 @@ func (s *Server) syncReplicatedVMs() {
 		  AND status IN ('provisioning', 'starting')
 	`)
 	if err != nil {
-		log.Printf("pollProviderStatus: query error: %v", err)
+		logf("pollProviderStatus: query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -4870,7 +4869,7 @@ func (s *Server) syncReplicatedVMs() {
 
 	p, err := newReplicatedProvider(replicatedCfg)
 	if err != nil {
-		log.Printf("pollProviderStatus: provider init error: %v", err)
+		logf("pollProviderStatus: provider init error: %v", err)
 		return
 	}
 
@@ -4879,7 +4878,7 @@ func (s *Server) syncReplicatedVMs() {
 		if err != nil {
 			// 404 means VM was deleted externally — clean up the claw
 			if strings.Contains(err.Error(), "HTTP 404") {
-				log.Printf("pollProviderStatus: VM %s not found (404) — marking claw %s offline", c.providerID, c.id[:8])
+				logf("pollProviderStatus: VM %s not found (404) — marking claw %s offline", c.providerID, c.id[:8])
 				res, execErr := s.db.Exec(
 					`UPDATE claws SET status='offline' WHERE id=? AND status IN ('provisioning','starting')`,
 					c.id)
@@ -4898,13 +4897,13 @@ func (s *Server) syncReplicatedVMs() {
 					}
 				}
 			} else {
-				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
+				logf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
 			continue
 		}
 		// Only log if status changed or there's a problem
 		if vm.Status != c.status && vm.Status != "running" {
-			log.Printf("Claw %s (%s): VM %s %s → %s", c.name, c.id[:8], c.providerID, c.status, vm.Status)
+			logf("Claw %s (%s): VM %s %s → %s", c.name, c.id[:8], c.providerID, c.status, vm.Status)
 		}
 
 		// Map Replicated VM status to claw status
@@ -4914,11 +4913,11 @@ func (s *Server) syncReplicatedVMs() {
 			newStatus = "starting"
 			// First time we see running — trigger bootstrap
 			if c.status == "provisioning" {
-				log.Printf("Claw %s (%s): VM running, bootstrapping...", c.name, c.id[:8])
+				logf("Claw %s (%s): VM running, bootstrapping...", c.name, c.id[:8])
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg)
 			}
 		case "terminated", "error":
-			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
+			logf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
 			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)", true)
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
@@ -4938,7 +4937,7 @@ func (s *Server) syncReplicatedVMs() {
 				newStatus, c.id)
 			if execErr == nil {
 				if n, _ := res.RowsAffected(); n > 0 {
-					log.Printf("Claw %s (%s): VM %s %s → hub status %s",
+					logf("Claw %s (%s): VM %s %s → hub status %s",
 						c.name, c.id[:8], c.providerID, vm.Status, newStatus)
 					s.broadcastToUsers(c.tenantID, types.WSMessage{
 						Type:    "claw_status",
@@ -5154,7 +5153,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	var checkStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&checkStatus)
 	if checkStatus == "deleted" {
-		log.Printf("[bootstrap] claw %s deleted before bootstrap, destroying VM %s", clawID[:8], vmID)
+		logf("[bootstrap] claw %s deleted before bootstrap, destroying VM %s", clawID[:8], vmID)
 		p, _ := newReplicatedProvider(cfg)
 		if p != nil {
 			_ = p.DeleteVM(context.Background(), vmID)
@@ -5187,23 +5186,23 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Read nix flag
 	var nixEnabled int
 	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
-		log.Printf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
+		logf("[bootstrap] warning: could not read nix flag for claw %s: %v", clawID[:8], err)
 	}
 	var dockerEnabled int
 	if err := s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled); err != nil {
-		log.Printf("[bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
+		logf("[bootstrap] warning: could not read docker flag for claw %s: %v", clawID[:8], err)
 	}
-	log.Printf("[bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
+	logf("[bootstrap] claw %s nix=%d docker=%d", clawID[:8], nixEnabled, dockerEnabled)
 	// Read llm_key selection
 	var llmKeyName string
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyName)
 	defaultModel, llmKeyName = resolveModelAndLLMKey(s.hubCfg, llmKeyName, defaultModel)
-	log.Printf("[bootstrap] OpenClaw model resolution claw=%s llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
+	logf("[bootstrap] OpenClaw model resolution claw=%s llm_key=%q template_default_model=%q hub_default_model=%q resolved_default_model=%q",
 		clawID[:8], llmKeyName, templateDefaultModel, s.hubCfg.DefaultModel, defaultModel)
 
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
-		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
+		logf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
 		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
@@ -5212,12 +5211,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Get the direct SSH endpoint from Replicated (IP:port, user is always root)
 	cp, err := newReplicatedProvider(cfg)
 	if err != nil {
-		log.Printf("bootstrap: provider init error: %v", err)
+		logf("bootstrap: provider init error: %v", err)
 		return
 	}
 	vm, err := cp.GetVM(context.Background(), vmID)
 	if err != nil || vm.DirectSSHEndpoint == "" || vm.DirectSSHPort == 0 {
-		log.Printf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
+		logf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
 	}
 	// Replicated uses the comment from the SSH public key as the Linux username.
@@ -5225,7 +5224,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshUser := replicatedpkg.SSHUserFromPublicKey(s.identity.PublicKey)
 	sshHome, err := sshHomeDir(sshUser)
 	if err != nil {
-		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
+		logf("bootstrap: invalid SSH user %q: %v", sshUser, err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
@@ -5237,7 +5236,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		40 * time.Second,
 		60 * time.Second,
 	}
-	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
+	logf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
 	_, _ = s.db.Exec(
 		`UPDATE claws SET ssh_host=?, ssh_port=?, ssh_user=? WHERE id=?`,
@@ -5316,7 +5315,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), flakeFiles)
 			},
 		}); err != nil {
-			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
+			logf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
@@ -5334,7 +5333,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			return s.sshRun(sshUser, sshHost, script)
 		},
 	}); err != nil {
-		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
+		logf("Bootstrap failed for claw %s: %v", clawID, err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
@@ -5348,7 +5347,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			fileNames = append(fileNames, k)
 		}
 		sort.Strings(fileNames)
-		log.Printf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
+		logf("[bootstrap] writing %d template files for claw %s: %v", len(files), clawName, fileNames)
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
 			Label:      "Writing workspace files",
 			RetryLabel: "Retrying workspace file write",
@@ -5373,11 +5372,11 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
 			return
 		}
-		log.Printf("Template files written for claw %s", clawName)
+		logf("Template files written for claw %s", clawName)
 	}
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
-		log.Printf("[bootstrap] restore checkpoint failed: %v", err)
+		logf("[bootstrap] restore checkpoint failed: %v", err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
@@ -5397,11 +5396,11 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
-		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		logf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
 	}
 	s.markBootstrapReady(clawID)
 
-	log.Printf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
+	logf("Bootstrap complete for claw %s (%s)", clawName, clawID[:8])
 }
 
 // randomHex returns a random hex string of n bytes (2*n hex chars).
@@ -5943,7 +5942,7 @@ func (s *Server) sshRun(user, host, script string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("bootstrap output:\n%s", output)
+	logf("bootstrap output:\n%s", output)
 	return nil
 }
 
@@ -5952,8 +5951,8 @@ func (s *Server) sshRun(user, host, script string) error {
 func (s *Server) sshRunWithTimeout(user, host, script string, timeout time.Duration) (string, error) {
 	pubKeyType := s.identity.PrivateKey.PublicKey().Type()
 	pubKeyFP := gossh.FingerprintSHA256(s.identity.PrivateKey.PublicKey())
-	log.Printf("SSH attempting: user=%s host=%s key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
-	log.Printf("SSH public key being used:\n%s", s.identity.PublicKey)
+	logf("SSH attempting: user=%s host=%s key-type=%s fingerprint=%s", user, host, pubKeyType, pubKeyFP)
+	logf("SSH public key being used:\n%s", s.identity.PublicKey)
 
 	sshCfg := &gossh.ClientConfig{
 		User:            user,
@@ -6154,7 +6153,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	sshAddr := fmt.Sprintf("%s:%d", sshHost, sshPort)
 	sshClient, err := gossh.Dial("tcp", sshAddr, sshCfg)
 	if err != nil {
-		log.Printf("terminal: ssh dial %s: %v", sshAddr, err)
+		logfCtx(r.Context(), "terminal: ssh dial %s: %v", sshAddr, err)
 		_ = conn.Close(websocket.StatusInternalError, "ssh connection failed")
 		return
 	}
@@ -6162,7 +6161,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 	sshSess, err := sshClient.NewSession()
 	if err != nil {
-		log.Printf("terminal: ssh session: %v", err)
+		logfCtx(r.Context(), "terminal: ssh session: %v", err)
 		_ = conn.Close(websocket.StatusInternalError, "ssh session failed")
 		return
 	}
@@ -6174,7 +6173,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		gossh.TTY_OP_ISPEED: 14400,
 		gossh.TTY_OP_OSPEED: 14400,
 	}); err != nil {
-		log.Printf("terminal: request pty: %v", err)
+		logfCtx(r.Context(), "terminal: request pty: %v", err)
 		_ = conn.Close(websocket.StatusInternalError, "pty failed")
 		return
 	}
@@ -6193,7 +6192,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	sshSess.Stderr = sshSess.Stdout // merge stderr
 
 	if err := sshSess.Shell(); err != nil {
-		log.Printf("terminal: shell: %v", err)
+		logfCtx(r.Context(), "terminal: shell: %v", err)
 		_ = conn.Close(websocket.StatusInternalError, "shell failed")
 		return
 	}
@@ -6255,7 +6254,7 @@ func (s *Server) terminateVM(provider, vmID string) {
 	case "lambda-microvms":
 		s.terminateLambdaMicroVM(vmID)
 	default:
-		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
+		logf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
 	}
 }
 
@@ -6265,19 +6264,19 @@ func (s *Server) terminateDockerVM(vmID string) {
 	cfg, ok := s.hubCfg.Providers["docker"]
 	s.mu.RUnlock()
 	if !ok {
-		log.Printf("terminateDockerVM: no docker provider configured")
+		logf("terminateDockerVM: no docker provider configured")
 		return
 	}
 	p, err := newDockerProvider(cfg)
 	if err != nil {
-		log.Printf("terminateDockerVM: provider init error: %v", err)
+		logf("terminateDockerVM: provider init error: %v", err)
 		return
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
-		log.Printf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
+		logf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
 		return
 	}
-	log.Printf("Docker container %s terminated", vmID)
+	logf("Docker container %s terminated", vmID)
 }
 
 // terminateLambdaMicroVM destroys an AWS Lambda MicroVM by ID.
@@ -6286,19 +6285,19 @@ func (s *Server) terminateLambdaMicroVM(vmID string) {
 	cfg, ok := s.hubCfg.Providers["lambda-microvms"]
 	s.mu.RUnlock()
 	if !ok {
-		log.Printf("terminateLambdaMicroVM: no lambda-microvms provider configured")
+		logf("terminateLambdaMicroVM: no lambda-microvms provider configured")
 		return
 	}
 	p, err := newLambdaMicroVMsProvider(cfg)
 	if err != nil {
-		log.Printf("terminateLambdaMicroVM: provider init error: %v", err)
+		logf("terminateLambdaMicroVM: provider init error: %v", err)
 		return
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
-		log.Printf("terminateLambdaMicroVM: failed to destroy MicroVM %s: %v", vmID, err)
+		logf("terminateLambdaMicroVM: failed to destroy MicroVM %s: %v", vmID, err)
 		return
 	}
-	log.Printf("Lambda MicroVM %s terminated", vmID)
+	logf("Lambda MicroVM %s terminated", vmID)
 }
 
 // terminateExedevVM destroys an exedev VM by ID.
@@ -6307,21 +6306,21 @@ func (s *Server) terminateExedevVM(vmID string) {
 	cfg, ok := s.hubCfg.Providers["exedev"]
 	s.mu.RUnlock()
 	if !ok {
-		log.Printf("terminateExedevVM: no exedev provider configured")
+		logf("terminateExedevVM: no exedev provider configured")
 		return
 	}
 
-	log.Printf("terminateExedevVM: destroying VM %s (ssh_key_path=%q)", vmID, cfg.SSHKeyPath)
+	logf("terminateExedevVM: destroying VM %s (ssh_key_path=%q)", vmID, cfg.SSHKeyPath)
 	p, err := newExedevProvider(cfg)
 	if err != nil {
-		log.Printf("terminateExedevVM: provider init error: %v", err)
+		logf("terminateExedevVM: provider init error: %v", err)
 		return
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
-		log.Printf("terminateExedevVM: failed to destroy VM %s: %v", vmID, err)
+		logf("terminateExedevVM: failed to destroy VM %s: %v", vmID, err)
 		return
 	}
-	log.Printf("Exedev VM %s terminated", vmID)
+	logf("Exedev VM %s terminated", vmID)
 }
 
 // terminateDaytonaVM destroys a Daytona workspace by ID.
@@ -6334,14 +6333,14 @@ func (s *Server) terminateDaytonaVM(workspaceID string) {
 	}
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
-		log.Printf("terminateDaytonaVM: provider init error: %v", err)
+		logf("terminateDaytonaVM: provider init error: %v", err)
 		return
 	}
 	if err := p.Destroy(context.Background(), workspaceID, false); err != nil {
-		log.Printf("terminateDaytonaVM: failed to destroy workspace %s: %v", workspaceID, err)
+		logf("terminateDaytonaVM: failed to destroy workspace %s: %v", workspaceID, err)
 		return
 	}
-	log.Printf("Daytona workspace %s terminated", workspaceID)
+	logf("Daytona workspace %s terminated", workspaceID)
 }
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.
@@ -6350,19 +6349,19 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 	cfg, ok := s.hubCfg.Providers["replicated"]
 	s.mu.RUnlock()
 	if !ok {
-		log.Printf("terminateReplicatedVM: no replicated provider configured")
+		logf("terminateReplicatedVM: no replicated provider configured")
 		return
 	}
 	p, err := newReplicatedProvider(cfg)
 	if err != nil {
-		log.Printf("terminateReplicatedVM: provider init error: %v", err)
+		logf("terminateReplicatedVM: provider init error: %v", err)
 		return
 	}
 	if err := p.DeleteVM(context.Background(), vmID); err != nil {
-		log.Printf("terminateReplicatedVM: failed to delete VM %s: %v", vmID, err)
+		logf("terminateReplicatedVM: failed to delete VM %s: %v", vmID, err)
 		return
 	}
-	log.Printf("Replicated VM %s terminated", vmID)
+	logf("Replicated VM %s terminated", vmID)
 }
 
 // ─── GitHub Token Endpoint ────────────────────────────────────────────────────
@@ -6447,16 +6446,16 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
-			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
+			logfCtx(r.Context(), "github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
 			continue
 		}
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
+			logfCtx(r.Context(), "[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
+		logfCtx(r.Context(), "github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
@@ -6464,7 +6463,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
+	logfCtx(r.Context(), "no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
 	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
 }
 
@@ -6538,7 +6537,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 
 	if err != nil {
 		// Write failed - re-enqueue the message at the front so it can be retried
-		log.Printf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
+		logf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
 		s.mu.RLock()
 		if currentCC, ok := s.claws[clawID]; ok {
 			currentCC.mu.Lock()
@@ -6559,5 +6558,5 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		},
 	})
 
-	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", clawID[:8], remainingCount)
+	logf("[hub] sent queued message to %s (%d remaining in queue)", clawID[:8], remainingCount)
 }
