@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -322,7 +321,7 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 	s.mu.RUnlock()
 	if cc == nil {
 		if hasActiveWritableLease {
-			log.Printf("[volume] sync %s skipped: claw disconnected with writable volume lease; keeping lease until expiry", clawID)
+			logf("[volume] sync %s skipped: claw disconnected with writable volume lease; keeping lease until expiry", clawID)
 			return
 		}
 		s.releaseWorkflowVolumeLeases(clawID)
@@ -337,12 +336,12 @@ func (s *Server) syncWorkflowVolumes(clawID string) {
 			continue
 		}
 		if err := s.dispatchVolumeSync(context.Background(), cc, volume); err != nil {
-			log.Printf("[volume] sync %s/%s failed: %v", clawID, volume.Name, err)
+			logf("[volume] sync %s/%s failed: %v", clawID, volume.Name, err)
 			syncFailed = true
 		}
 	}
 	if syncFailed {
-		log.Printf("[volume] sync %s incomplete; keeping writable volume leases until expiry", clawID)
+		logf("[volume] sync %s incomplete; keeping writable volume leases until expiry", clawID)
 		return
 	}
 	s.releaseWorkflowVolumeLeases(clawID)
@@ -485,7 +484,7 @@ func (s *Server) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if _, err := s.db.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=? AND claw_id=? AND access_token=?`, manifestDigest, time.Now().UTC(), leaseID, clawID, accessToken); err != nil {
-		log.Printf("[volume] lease %s: failed to update manifest_digest after successful tag: %v", leaseID, err)
+		logfCtx(r.Context(), "[volume] lease %s: failed to update manifest_digest after successful tag: %v", leaseID, err)
 	}
 	jsonOK(w, map[string]string{"manifest_digest": manifestDigest})
 }

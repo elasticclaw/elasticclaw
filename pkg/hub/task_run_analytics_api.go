@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -527,7 +526,7 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 		event.Detail = map[string]any{}
 		if detailJSON != "" {
 			if err := json.Unmarshal([]byte(detailJSON), &event.Detail); err != nil {
-				log.Printf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
+				logf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
 			}
 		}
 		events = append(events, event)
@@ -769,7 +768,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 		run.WarningTypes = []string{}
 		if warningsJSON != "" {
 			if err := json.Unmarshal([]byte(warningsJSON), &run.WarningTypes); err != nil {
-				log.Printf("[task-run-analytics] failed to unmarshal warning types for run %s: %v", run.RunID, err)
+				logf("[task-run-analytics] failed to unmarshal warning types for run %s: %v", run.RunID, err)
 			}
 		}
 		runs = append(runs, run)

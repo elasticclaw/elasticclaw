@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -958,7 +957,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				if existing.SSHKeyPath == "" {
 					_, privPath, err := GenerateExedevKey(filepath.Join(hubConfigDir(), "keys"))
 					if err != nil {
-						log.Printf("failed to generate exedev key: %v", err)
+						logfCtx(r.Context(), "failed to generate exedev key: %v", err)
 					} else {
 						existing.SSHKeyPath = privPath
 					}

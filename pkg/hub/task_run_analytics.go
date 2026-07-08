@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -537,7 +536,7 @@ func (s *Server) recordTaskRunHumanEventForClaw(clawID, eventType, eventKey, act
 		Detail:          detail,
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record human event %s for claw %s: %v", eventType, clawID, err)
+		logf("[task-run-analytics] failed to record human event %s for claw %s: %v", eventType, clawID, err)
 	}
 }
 
@@ -558,7 +557,7 @@ func (s *Server) recordTaskRunDashboardMessage(clawID, actorLogin, messageID str
 		Detail:          map[string]any{"message_id": messageID},
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record dashboard message for claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to record dashboard message for claw %s: %v", clawID, err)
 	}
 }
 
@@ -580,7 +579,7 @@ func (s *Server) recordTaskRunManualStopBeforeDelivery(clawID, actorLogin string
 		Detail:          map[string]any{"reason": "dashboard_delete"},
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record manual stop for claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to record manual stop for claw %s: %v", clawID, err)
 	}
 }
 

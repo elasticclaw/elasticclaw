@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -51,30 +50,30 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 			base = "https://api.github.com"
 		}
 		if err := commentGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, comment); err != nil {
-			log.Printf("[agent-failure-feedback] failed to comment GitHub issue %s#%d: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, err)
+			logf("[agent-failure-feedback] failed to comment GitHub issue %s#%d: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, err)
 		}
 		if feedback.AgentStatusError != "" {
 			if err := githubAPIAddLabel(base, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, token); err != nil {
-				log.Printf("[agent-failure-feedback] failed to mark GitHub issue %s#%d with label %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, err)
+				logf("[agent-failure-feedback] failed to mark GitHub issue %s#%d with label %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, err)
 			}
 		}
 		if canAssignFailureFeedback(feedback) {
 			if err := assignGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login); err != nil {
-				log.Printf("[agent-failure-feedback] failed to assign GitHub issue %s#%d to %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login, err)
+				logf("[agent-failure-feedback] failed to assign GitHub issue %s#%d to %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login, err)
 			}
 		}
 	case "linear":
 		if err := s.commentLinearIssue(token, feedback.LinearIdentifier, comment); err != nil {
-			log.Printf("[agent-failure-feedback] failed to comment Linear issue %s: %v", feedback.LinearIdentifier, err)
+			logf("[agent-failure-feedback] failed to comment Linear issue %s: %v", feedback.LinearIdentifier, err)
 		}
 		if feedback.AgentStatusError != "" {
 			if err := s.moveLinearIssueOnServer(token, feedback.LinearIdentifier, feedback.AgentStatusError); err != nil {
-				log.Printf("[agent-failure-feedback] failed to mark Linear issue %s with status %q: %v", feedback.LinearIdentifier, feedback.AgentStatusError, err)
+				logf("[agent-failure-feedback] failed to mark Linear issue %s with status %q: %v", feedback.LinearIdentifier, feedback.AgentStatusError, err)
 			}
 		}
 		if canAssignFailureFeedback(feedback) {
 			if err := s.assignLinearIssue(token, feedback.LinearIdentifier, feedback.TriggerActor.ID); err != nil {
-				log.Printf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
+				logf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
 			}
 		}
 	}
@@ -90,7 +89,7 @@ func (s *Server) triggerActorForClaw(clawID string) triggerActor {
 	}
 	var actor triggerActor
 	if err := json.Unmarshal([]byte(actorJSON), &actor); err != nil {
-		log.Printf("[agent-failure-feedback] failed to parse trigger actor for claw %s: %v", shortID(clawID), err)
+		logf("[agent-failure-feedback] failed to parse trigger actor for claw %s: %v", shortID(clawID), err)
 		return triggerActor{}
 	}
 	return actor

@@ -2,7 +2,6 @@ package hub
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -79,7 +78,7 @@ func (s *Server) handleFactoryAnalytics(w http.ResponseWriter, r *http.Request) 
 
 	summary, err := s.computeFactoryAnalytics(factoryName, since)
 	if err != nil {
-		log.Printf("[analytics] error computing analytics for %s: %v", factoryName, err)
+		logfCtx(r.Context(), "[analytics] error computing analytics for %s: %v", factoryName, err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -113,7 +112,7 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		since,
 	)
 	if err != nil {
-		log.Printf("[analytics] error listing factories: %v", err)
+		logfCtx(r.Context(), "[analytics] error listing factories: %v", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -128,7 +127,7 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 		factoryNames = append(factoryNames, name)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("[analytics] error iterating factory names: %v", err)
+		logfCtx(r.Context(), "[analytics] error iterating factory names: %v", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -307,7 +306,7 @@ func (s *Server) trackPRMerged(factoryName, issueID, clawID, repo string, prNumb
 		Detail:          map[string]any{"repo": repo, "prNumber": prNumber},
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record PR merge for claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to record PR merge for claw %s: %v", clawID, err)
 	}
 }
 
@@ -326,7 +325,7 @@ func (s *Server) trackPRClosed(factoryName, issueID, clawID, repo string, prNumb
 		Detail:          map[string]any{"repo": repo, "prNumber": prNumber},
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record PR close for claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to record PR close for claw %s: %v", clawID, err)
 	}
 }
 

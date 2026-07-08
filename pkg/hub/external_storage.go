@@ -682,7 +682,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 		if _, err := s.db.Exec(`DROP TABLE IF EXISTS hub_templates`); err != nil {
 			return fmt.Errorf("drop hub_templates: %w", err)
 		}
-		fmt.Println("[hub] dropped legacy hub_templates table")
+		logf("[hub] dropped legacy hub_templates table")
 	}
 	return nil
 }
@@ -711,9 +711,9 @@ func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
 		return migrated, fmt.Errorf("strip factories from hub.yaml: %w", err)
 	}
 	if len(migrated) > 0 {
-		fmt.Println("[hub] stripped migrated factories from hub.yaml")
+		logf("[hub] stripped migrated factories from hub.yaml")
 	} else {
-		fmt.Println("[hub] no inline factories to migrate — cleared factories from hub.yaml")
+		logf("[hub] no inline factories to migrate — cleared factories from hub.yaml")
 	}
 	return migrated, nil
 }

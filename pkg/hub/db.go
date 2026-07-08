@@ -3,7 +3,6 @@ package hub
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
@@ -579,7 +578,7 @@ func migrate(db *sql.DB) error {
 func pruneFactoryAnalytics(db *sql.DB) {
 	_, err := db.Exec(`DELETE FROM factory_analytics WHERE created_at < datetime('now', '-1 year')`)
 	if err != nil {
-		log.Printf("[db] factory analytics prune error: %v", err)
+		logf("[db] factory analytics prune error: %v", err)
 	}
 }
 

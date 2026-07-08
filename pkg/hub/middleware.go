@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log"
 	"net/http"
 	"runtime/debug"
 
@@ -67,7 +66,7 @@ func withRecovery(next http.Handler) http.Handler {
 			if rec == http.ErrAbortHandler {
 				panic(rec)
 			}
-			log.Printf("[hub] panic recovered: %v (%s %s from %s)\n%s",
+			logfCtx(r.Context(), "[hub] panic recovered: %v (%s %s from %s)\n%s",
 				rec, r.Method, r.URL.Path, r.RemoteAddr, debug.Stack())
 			// Best effort: if the handler already wrote a response this is a
 			// no-op apart from a superfluous-WriteHeader log line.

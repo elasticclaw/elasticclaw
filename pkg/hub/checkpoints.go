@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -159,7 +158,7 @@ func (s *Server) requestIdleCheckpoints() {
 		}
 		go func(clawID string) {
 			if _, err := s.requestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
-				log.Printf("[checkpoint] idle request for %s failed: %v", shortID(clawID), err)
+				logf("[checkpoint] idle request for %s failed: %v", shortID(clawID), err)
 			}
 		}(item.id)
 	}
@@ -182,7 +181,7 @@ func (s *Server) requestBootstrapCheckpoint(clawID string) {
 		return
 	}
 	if _, err := s.requestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
-		log.Printf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
+		logf("[checkpoint] bootstrap request for %s failed: %v", shortID(clawID), err)
 	}
 }
 
@@ -322,7 +321,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey)
 	if err != nil {
-		log.Printf("[restore] failed to load claw %s: %v", shortID(clawID), err)
+		logf("[restore] failed to load claw %s: %v", shortID(clawID), err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
 		return
 	}
@@ -390,7 +389,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		provErr = fmt.Errorf("unsupported provider: %s", provider)
 	}
 	if provErr != nil {
-		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
+		logf("[restore] provision failed for claw %s: %v", clawID, provErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore provision failed: %v", provErr), false)
 		return
 	}
@@ -546,14 +545,14 @@ func (s *Server) drainPendingCheckpoint(clawID string) {
 	}
 	go func() {
 		if _, err := s.dispatchCheckpoint(context.Background(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
-			log.Printf("[checkpoint] queued request for %s failed: %v", shortID(clawID), err)
+			logf("[checkpoint] queued request for %s failed: %v", shortID(clawID), err)
 		}
 	}()
 }
 
 func (s *Server) checkpointBeforeTermination(clawID, reason string) {
 	if _, err := s.requestCheckpoint(context.Background(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
-		log.Printf("[checkpoint] termination checkpoint for %s failed: %v", shortID(clawID), err)
+		logf("[checkpoint] termination checkpoint for %s failed: %v", shortID(clawID), err)
 	}
 }
 
