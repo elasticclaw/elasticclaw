@@ -31,6 +31,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -2181,6 +2182,239 @@ func syncOpenClawAPIKeyAuth() error {
 	return nil
 }
 
+var openClawWorkspaceManagedFiles = map[string]bool{
+	"elasticclaw-config.yaml": true,
+	"SOUL.md":                 true,
+	"AGENTS.md":               true,
+	"TOOLS.md":                true,
+	"IDENTITY.md":             true,
+	"USER.md":                 true,
+	"MEMORY.md":               true,
+	"BOOTSTRAP.md":            true,
+	"HEARTBEAT.md":            true,
+	"CONTEXT.md":              true,
+	"SECRETS.md":              true,
+	"TRIGGER_INPUTS.json":     true,
+}
+
+func syncStagedWorkspaceToOpenClawWorkspace() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	if _, err := os.Stat(stagedDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat staged workspace: %w", err)
+	}
+	if err := os.MkdirAll(activeDir, 0700); err != nil {
+		return fmt.Errorf("create OpenClaw workspace: %w", err)
+	}
+	for name := range openClawWorkspaceManagedFiles {
+		if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
+			return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
+		}
+	}
+	stagedAbs, err := filepath.Abs(stagedDir)
+	if err != nil {
+		return fmt.Errorf("abs staged workspace: %w", err)
+	}
+	activeAbs, err := filepath.Abs(activeDir)
+	if err != nil {
+		return fmt.Errorf("abs OpenClaw workspace: %w", err)
+	}
+	copied := 0
+	err = filepath.Walk(stagedAbs, func(src string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(stagedAbs, src)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == ".elasticclaw-workspace-ready" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			log.Printf("[bootstrap] skipping workspace symlink %s", rel)
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		dest := filepath.Join(activeAbs, rel)
+		if dest != activeAbs && !strings.HasPrefix(dest, activeAbs+string(filepath.Separator)) {
+			return fmt.Errorf("workspace path escapes OpenClaw workspace: %s", rel)
+		}
+		if info.IsDir() {
+			return os.MkdirAll(dest, 0700)
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("read staged workspace file %s: %w", rel, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+			return fmt.Errorf("create OpenClaw workspace dir for %s: %w", rel, err)
+		}
+		mode := info.Mode().Perm()
+		if mode == 0 {
+			mode = 0600
+		}
+		if err := os.WriteFile(dest, data, mode); err != nil {
+			return fmt.Errorf("write OpenClaw workspace file %s: %w", rel, err)
+		}
+		copied++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("[bootstrap] synced %d staged workspace files into %s", copied, activeDir)
+	return nil
+}
+
+type bootstrapRepoAccess struct {
+	Repo        string `json:"repo"`
+	Permissions string `json:"permissions"`
+}
+
+func configuredGitHubRepos() ([]bootstrapRepoAccess, error) {
+	raw := strings.TrimSpace(os.Getenv("ELASTICCLAW_GITHUB_REPOS"))
+	if raw == "" || raw == "[]" {
+		return nil, nil
+	}
+	var repos []bootstrapRepoAccess
+	if err := json.Unmarshal([]byte(raw), &repos); err != nil {
+		return nil, fmt.Errorf("parse ELASTICCLAW_GITHUB_REPOS: %w", err)
+	}
+	out := repos[:0]
+	for _, repo := range repos {
+		repo.Repo = strings.TrimSpace(repo.Repo)
+		if repo.Repo != "" {
+			out = append(out, repo)
+		}
+	}
+	return out, nil
+}
+
+func repoDirectoryName(repo string) string {
+	parts := strings.Split(repo, "/")
+	if len(parts) == 0 {
+		return repo
+	}
+	name := strings.TrimSpace(parts[len(parts)-1])
+	return strings.TrimSuffix(name, ".git")
+}
+
+func dockerGitHubCredentialHelperScript(tokenEndpoint string) string {
+	return fmt.Sprintf(`set -euo pipefail
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required to clone configured repositories" >&2
+  exit 1
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required to refresh GitHub credentials" >&2
+  exit 1
+fi
+if ! command -v sed >/dev/null 2>&1; then
+  echo "sed is required to parse GitHub credential responses" >&2
+  exit 1
+fi
+tmp_helper="$(mktemp)"
+cat > "$tmp_helper" << 'CREDEOF'
+#!/bin/sh
+set -eu
+claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
+if [ -z "$claw_token" ]; then
+  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
+  exit 1
+fi
+response="$(curl -sf --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
+token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$token" ]; then
+  echo "GitHub token response did not include token" >&2
+  exit 1
+fi
+printf 'protocol=https\n'
+printf 'host=github.com\n'
+printf 'username=x-access-token\n'
+printf 'password=%%s\n' "$token"
+CREDEOF
+sudo install -m 0755 "$tmp_helper" /usr/local/bin/elasticclaw-git-credentials
+rm -f "$tmp_helper"
+git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
+`, shellQuote(tokenEndpoint))
+}
+
+func installDockerGitHubCredentialHelper() error {
+	repos, err := configuredGitHubRepos()
+	if err != nil {
+		return err
+	}
+	if len(repos) == 0 {
+		return nil
+	}
+	hubURL := strings.TrimRight(os.Getenv("ELASTICCLAW_HUB_URL"), "/")
+	clawID := os.Getenv("ELASTICCLAW_CLAW_ID")
+	clawToken := os.Getenv("ELASTICCLAW_CLAW_TOKEN")
+	if hubURL == "" || clawID == "" || clawToken == "" {
+		return fmt.Errorf("GitHub repositories configured but hub URL, claw ID, or claw token is missing")
+	}
+	script := dockerGitHubCredentialHelperScript(hubURL + "/api/github/token/" + url.PathEscape(clawID))
+	if err := runShell(script); err != nil {
+		return fmt.Errorf("install GitHub credential helper: %w", err)
+	}
+	log.Printf("[bootstrap] GitHub credential helper installed for %d configured repositories", len(repos))
+	return nil
+}
+
+func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("export GIT_TERMINAL_PROMPT=0\n")
+	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
+	b.WriteString("git config --global --get credential.helper >/dev/null\n")
+	for _, repo := range repos {
+		dir := repoDirectoryName(repo.Repo)
+		cloneURL := "https://github.com/" + repo.Repo + ".git"
+		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
+		fmt.Fprintf(&b, "if [ ! -d %s ]; then git clone %s %s; else git -C %s remote set-url origin %s || true; git -C %s fetch origin; branch=\"$(git -C %s symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"; if [ -z \"$branch\" ]; then branch=\"$(git -C %s rev-parse --abbrev-ref HEAD)\"; fi; git -C %s reset --hard \"origin/$branch\"; fi\n",
+			shellQuote(dir), shellQuote(cloneURL), shellQuote(dir), shellQuote(dir), shellQuote(cloneURL), shellQuote(dir), shellQuote(dir), shellQuote(dir), shellQuote(dir))
+		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
+	}
+	return b.String()
+}
+
+func cloneConfiguredGitHubRepos() error {
+	repos, err := configuredGitHubRepos()
+	if err != nil {
+		return err
+	}
+	if len(repos) == 0 {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	workspaceDir := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
+		return fmt.Errorf("create OpenClaw workspace: %w", err)
+	}
+	if err := runShell(dockerGitHubCloneScript(workspaceDir, repos)); err != nil {
+		return fmt.Errorf("clone configured repositories: %w", err)
+	}
+	log.Printf("[bootstrap] cloned or updated %d configured repositories", len(repos))
+	return nil
+}
+
 // configureOpenClaw patches ~/.openclaw/openclaw.json with model, LLM keys,
 // gateway auth, and disables the bonjour plugin.
 func configureOpenClaw() error {
@@ -2534,6 +2768,17 @@ func runBootstrap() error {
 		}
 	} else {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		return fmt.Errorf("syncStagedWorkspaceToOpenClawWorkspace: %w", err)
+	}
+
+	if err := installDockerGitHubCredentialHelper(); err != nil {
+		return fmt.Errorf("installDockerGitHubCredentialHelper: %w", err)
+	}
+	if err := cloneConfiguredGitHubRepos(); err != nil {
+		return fmt.Errorf("cloneConfiguredGitHubRepos: %w", err)
 	}
 
 	if err := syncOpenClawAPIKeyAuth(); err != nil {
