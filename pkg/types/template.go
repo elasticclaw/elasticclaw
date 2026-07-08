@@ -11,11 +11,11 @@ import (
 
 // LLMKeyConfig represents a named LLM API key entry in hub.yaml.
 type LLMKeyConfig struct {
-	Name         string `yaml:"name"          json:"name"`                    // unique label, e.g. "anthropic-prod"
-	Provider     string `yaml:"provider"      json:"provider"`                // e.g. "anthropic", "fireworks", "moonshot"
-	APIKey       string `yaml:"api_key"       json:"-"`                       // the actual key (never exposed in API)
-	Default      bool   `yaml:"default"       json:"default"`                 // use when no llm_key specified
-	DefaultModel string `yaml:"default_model" json:"default_model,omitempty"` // preferred model for this key, e.g. "fireworks/accounts/fireworks/models/kimi-k2p7"
+	Name         string `yaml:"name"          json:"name"`                        // unique label, e.g. "anthropic-prod"
+	Provider     string `yaml:"provider"      json:"provider"`                    // e.g. "anthropic", "fireworks", "moonshot"
+	APIKey       string `yaml:"api_key"       json:"-"             secret:"true"` // the actual key (never exposed in API)
+	Default      bool   `yaml:"default"       json:"default"`                     // use when no llm_key specified
+	DefaultModel string `yaml:"default_model" json:"default_model,omitempty"`     // preferred model for this key, e.g. "fireworks/accounts/fireworks/models/kimi-k2p7"
 	AuthProfile  string `yaml:"auth_profile,omitempty" json:"auth_profile,omitempty"`
 }
 
@@ -23,7 +23,7 @@ type ModelAuthProfileConfig struct {
 	Name      string `yaml:"name" json:"name"`
 	Provider  string `yaml:"provider" json:"provider"`
 	Mode      string `yaml:"mode" json:"mode"`
-	AuthState string `yaml:"auth_state,omitempty" json:"-"`
+	AuthState string `yaml:"auth_state,omitempty" json:"-" secret:"true"`
 	UpdatedAt string `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
@@ -157,7 +157,7 @@ type TemplateResources struct {
 // LinearConfig holds a Linear API token for one workspace.
 // Configure in hub.yaml under 'linear:' as a list.
 type LinearConfig struct {
-	Token     string `yaml:"token"`               // Linear API key (lin_api_...)
+	Token     string `yaml:"token" secret:"true"` // Linear API key (lin_api_...)
 	Workspace string `yaml:"workspace,omitempty"` // human label for matching; defaults to first entry
 }
 
@@ -278,7 +278,7 @@ type MCPRef struct {
 type GitHubAppConfig struct {
 	URL           string `yaml:"url,omitempty"` // GitHub App URL for reference/logging only
 	AppID         int64  `yaml:"app_id"`
-	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
+	PrivateKeyPEM string `yaml:"private_key_pem" secret:"true"` // PEM-encoded RSA private key (paste directly in yaml)
 }
 
 // GitHubRepoAccess specifies a repo and the permissions needed.
@@ -421,14 +421,14 @@ type BrandingConfig struct {
 type AuthConfig struct {
 	GitHubOAuth         *GitHubOAuthConfig `yaml:"github_oauth,omitempty"`
 	Access              *AccessConfig      `yaml:"access,omitempty"`
-	SessionSecret       string             `yaml:"session_secret,omitempty"`
+	SessionSecret       string             `yaml:"session_secret,omitempty" secret:"true"`
 	DisablePasswordAuth bool               `yaml:"disable_password_auth,omitempty"`
 }
 
 // GitHubOAuthConfig holds GitHub OAuth app credentials and allowlist.
 type GitHubOAuthConfig struct {
 	ClientID     string   `yaml:"client_id"`
-	ClientSecret string   `yaml:"client_secret"`
+	ClientSecret string   `yaml:"client_secret" secret:"true"`
 	AllowedUsers []string `yaml:"allowed_users,omitempty"` // GitHub logins
 	AllowedOrgs  []string `yaml:"allowed_orgs,omitempty"`  // GitHub org names
 	AllowedTeams []string `yaml:"allowed_teams,omitempty"` // "org/team" format
@@ -459,8 +459,8 @@ type S3ArtifactStorageConfig struct {
 	Endpoint        string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
 	Prefix          string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 	AccessKeyID     string `yaml:"access_key_id,omitempty" json:"accessKeyId,omitempty"`
-	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secretAccessKey,omitempty"`
-	SessionToken    string `yaml:"session_token,omitempty" json:"sessionToken,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secretAccessKey,omitempty" secret:"true"`
+	SessionToken    string `yaml:"session_token,omitempty" json:"sessionToken,omitempty" secret:"true"`
 	PathStyle       bool   `yaml:"path_style,omitempty" json:"pathStyle,omitempty"`
 }
 
@@ -471,13 +471,13 @@ type HubConfig struct {
 
 	// CLI connection fields
 	URL   string `yaml:"url"`
-	Token string `yaml:"token"`
+	Token string `yaml:"token" secret:"true"`
 
 	// Hub server fields
 	// PublicURL is the URL claws use to connect back to the hub from remote VMs.
 	// If not set, falls back to URL.
 	PublicURL string                    `yaml:"public_url,omitempty"`
-	ClawToken string                    `yaml:"claw_token,omitempty"`
+	ClawToken string                    `yaml:"claw_token,omitempty" secret:"true"`
 	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
 	SSHPublicKeys []string `yaml:"ssh_public_keys,omitempty"`
@@ -508,7 +508,7 @@ type HubConfig struct {
 	GitHubApps []*GitHubAppConfig `yaml:"github,omitempty"`
 
 	// UIPassword is the password for the web UI. If not set, defaults to "admin".
-	UIPassword string `yaml:"ui_password,omitempty"`
+	UIPassword string `yaml:"ui_password,omitempty" secret:"true"`
 
 	// Branding allows white-labeling the web UI.
 	Branding *BrandingConfig `yaml:"branding,omitempty"`
@@ -519,7 +519,7 @@ type HubConfig struct {
 	// Factories defines automation rules that spin up claws based on integration events.
 	Factories []*FactoryConfig `yaml:"factories,omitempty"`
 	// Secrets is a named map of secret values referenced by factories via webhook_secret_ref.
-	Secrets map[string]string `yaml:"secrets,omitempty"`
+	Secrets map[string]string `yaml:"secrets,omitempty" secret:"true"`
 
 	// MCPServers is a list of MCP server configurations available to claws.
 	MCPServers []*MCPServerHubConfig `yaml:"mcp_servers,omitempty"`
@@ -555,37 +555,37 @@ type IntegrationsConfig struct {
 // ExternalTriggerConfig holds config for external webhook triggers.
 // Unlike other integrations, this doesn't need API tokens - just webhook secrets.
 type ExternalTriggerConfig struct {
-	Name          string `yaml:"name" json:"name"`                                        // unique identifier for this trigger source
-	WebhookSecret string `yaml:"webhook_secret,omitempty" json:"webhookSecret,omitempty"` // HMAC secret for validating webhooks
+	Name          string `yaml:"name" json:"name"`                                                      // unique identifier for this trigger source
+	WebhookSecret string `yaml:"webhook_secret,omitempty" json:"webhookSecret,omitempty" secret:"true"` // HMAC secret for validating webhooks
 }
 
 // ShortcutIntegrationConfig holds credentials for one Shortcut workspace.
 type ShortcutIntegrationConfig struct {
-	Workspace string `yaml:"workspace"` // human label
-	Token     string `yaml:"token"`     // Shortcut API token
+	Workspace string `yaml:"workspace"`           // human label
+	Token     string `yaml:"token" secret:"true"` // Shortcut API token
 }
 
 // LinearIntegrationConfig holds credentials for one Linear workspace.
 type LinearIntegrationConfig struct {
-	Workspace     string `yaml:"workspace"`                // human label
-	Token         string `yaml:"token"`                    // Linear API token (lin_api_...)
-	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
+	Workspace     string `yaml:"workspace"`                              // human label
+	Token         string `yaml:"token" secret:"true"`                    // Linear API token (lin_api_...)
+	WebhookSecret string `yaml:"webhook_secret,omitempty" secret:"true"` // HMAC secret for validating webhooks
 }
 
 // GitHubIssuesIntegrationConfig holds credentials for one GitHub Issues integration.
 type GitHubIssuesIntegrationConfig struct {
-	Workspace     string `yaml:"workspace"`                // human label (e.g. "my-org")
-	Token         string `yaml:"token"`                    // GitHub personal access token
-	WebhookSecret string `yaml:"webhook_secret,omitempty"` // HMAC secret for validating webhooks
+	Workspace     string `yaml:"workspace"`                              // human label (e.g. "my-org")
+	Token         string `yaml:"token" secret:"true"`                    // GitHub personal access token
+	WebhookSecret string `yaml:"webhook_secret,omitempty" secret:"true"` // HMAC secret for validating webhooks
 }
 
 // JiraIntegrationConfig holds credentials for one Jira site.
 type JiraIntegrationConfig struct {
-	Workspace     string `yaml:"workspace"`                // human label
-	BaseURL       string `yaml:"base_url,omitempty"`       // Jira base URL, e.g. https://jira.example.com
-	Username      string `yaml:"username,omitempty"`       // optional for basic auth
-	Token         string `yaml:"token"`                    // Jira PAT/API token
-	WebhookSecret string `yaml:"webhook_secret,omitempty"` // shared webhook secret
+	Workspace     string `yaml:"workspace"`                              // human label
+	BaseURL       string `yaml:"base_url,omitempty"`                     // Jira base URL, e.g. https://jira.example.com
+	Username      string `yaml:"username,omitempty"`                     // optional for basic auth
+	Token         string `yaml:"token" secret:"true"`                    // Jira PAT/API token
+	WebhookSecret string `yaml:"webhook_secret,omitempty" secret:"true"` // shared webhook secret
 }
 
 // FactoryInput defines a user-provided input for manual factory triggers.
@@ -613,24 +613,24 @@ type FactoryConfig struct {
 	// Defaults to "v1" if not specified for backward compatibility.
 	SchemaVersion    string   `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
 	Name             string   `yaml:"name" json:"name"`
-	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                       // nil = true (default on); set false to pause
-	Integration      string   `yaml:"integration" json:"integration"`                                   // "linear", "shortcut", "github-issues", or "github"
-	Workspace        string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`                   // matches integrations.<type>[].workspace
-	Team             string   `yaml:"team,omitempty" json:"team,omitempty"`                             // Linear team key (e.g. "ELA")
-	TriggerStatus    string   `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`         // entering this status → create claw
-	WorkingStatus    string   `yaml:"working_status,omitempty" json:"working_status,omitempty"`         // claw moves issue here when it starts working
-	FinishedStatus   string   `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`       // claw moves issue here when it finishes working
-	DoneStatus       string   `yaml:"done_status,omitempty" json:"done_status,omitempty"`               // claw moves issue here when done (PR merged)
-	TerminateOnLeave bool     `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
-	Template         string   `yaml:"template" json:"template"`                                         // template name (must be pushed to hub)
-	Provider         string   `yaml:"provider,omitempty" json:"provider,omitempty"`                     // override the default provider for this factory
-	NamePattern      string   `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`             // claw name pattern, e.g. "{issue_id}"
-	WebhookSecret    string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty"`         // HMAC-SHA256 secret for validating webhooks
-	Tags             []string `yaml:"tags,omitempty" json:"tags,omitempty"`                             // tags applied to created claws
-	Color            string   `yaml:"color,omitempty" json:"color,omitempty"`                           // color applied to created claws
-	RunKind          string   `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                     // analytics run kind: "code_task" or "pr_task"
-	AnalyticsEnabled *bool    `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`   // nil = infer from integration
-	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`               // nil = infer from analytics eligibility
+	Enabled          *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                             // nil = true (default on); set false to pause
+	Integration      string   `yaml:"integration" json:"integration"`                                         // "linear", "shortcut", "github-issues", or "github"
+	Workspace        string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`                         // matches integrations.<type>[].workspace
+	Team             string   `yaml:"team,omitempty" json:"team,omitempty"`                                   // Linear team key (e.g. "ELA")
+	TriggerStatus    string   `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`               // entering this status → create claw
+	WorkingStatus    string   `yaml:"working_status,omitempty" json:"working_status,omitempty"`               // claw moves issue here when it starts working
+	FinishedStatus   string   `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`             // claw moves issue here when it finishes working
+	DoneStatus       string   `yaml:"done_status,omitempty" json:"done_status,omitempty"`                     // claw moves issue here when done (PR merged)
+	TerminateOnLeave bool     `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"`       // leaving trigger_status → kill claw
+	Template         string   `yaml:"template" json:"template"`                                               // template name (must be pushed to hub)
+	Provider         string   `yaml:"provider,omitempty" json:"provider,omitempty"`                           // override the default provider for this factory
+	NamePattern      string   `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`                   // claw name pattern, e.g. "{issue_id}"
+	WebhookSecret    string   `yaml:"webhook_secret,omitempty" json:"webhook_secret,omitempty" secret:"true"` // HMAC-SHA256 secret for validating webhooks
+	Tags             []string `yaml:"tags,omitempty" json:"tags,omitempty"`                                   // tags applied to created claws
+	Color            string   `yaml:"color,omitempty" json:"color,omitempty"`                                 // color applied to created claws
+	RunKind          string   `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`                           // analytics run kind: "code_task" or "pr_task"
+	AnalyticsEnabled *bool    `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`         // nil = infer from integration
+	RequiresPR       *bool    `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`                     // nil = infer from analytics eligibility
 	// Labels: all must be present on the issue to trigger (AND)
 	Labels []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	// ExcludeLabels: none may be present on the issue to trigger (NOT)
@@ -715,7 +715,7 @@ type ProviderConfig struct {
 
 	// Daytona
 	APIURL string `yaml:"api_url,omitempty"`
-	APIKey string `yaml:"api_key,omitempty"`
+	APIKey string `yaml:"api_key,omitempty" secret:"true"`
 	Target string `yaml:"target,omitempty"`
 
 	// Daytona snapshot size (maps to Daytona SnapshotParams.Snapshot)
@@ -723,12 +723,12 @@ type ProviderConfig struct {
 	DefaultSnapshot string `yaml:"default_snapshot,omitempty"`
 
 	// Vercel Sandbox
-	AccessToken string `yaml:"access_token,omitempty"` // Vercel access token
-	TeamID      string `yaml:"team_id,omitempty"`      // optional Vercel team ID
-	ProjectID   string `yaml:"project_id,omitempty"`   // optional Vercel project ID
+	AccessToken string `yaml:"access_token,omitempty" secret:"true"` // Vercel access token
+	TeamID      string `yaml:"team_id,omitempty"`                    // optional Vercel team ID
+	ProjectID   string `yaml:"project_id,omitempty"`                 // optional Vercel project ID
 
 	// Replicated CMX
-	Token               string `yaml:"token,omitempty"`
+	Token               string `yaml:"token,omitempty" secret:"true"`
 	DefaultTTL          string `yaml:"default_ttl,omitempty"`
 	DefaultInstanceType string `yaml:"default_instance_type,omitempty"`
 	// SSHPublicKey is injected automatically from the hub's generated identity — do not configure manually.
