@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -45,7 +46,7 @@ func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Also clean up legacy DB row if present
-		_, _ = s.db.Exec(`DELETE FROM hub_templates WHERE name = ?`, name)
+		_ = s.st().Settings().DeleteTemplate(r.Context(), name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -62,25 +63,19 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 
 	// Collect legacy DB templates and their updated_at timestamps in one pass
 	dbUpdatedAt := make(map[string]string)
-	rows, err := s.db.Query(`SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var name, updatedAt string
-			if err := rows.Scan(&name, &updatedAt); err != nil {
-				continue
-			}
-			dbUpdatedAt[name] = updatedAt
+	if dbTemplates, err := s.st().Settings().ListTemplates(r.Context()); err == nil {
+		for _, tmpl := range dbTemplates {
+			dbUpdatedAt[tmpl.Name] = tmpl.UpdatedAt
 			// Deduplicate: external takes precedence
 			found := false
 			for _, n := range names {
-				if n == name {
+				if n == tmpl.Name {
 					found = true
 					break
 				}
 			}
 			if !found {
-				names = append(names, name)
+				names = append(names, tmpl.Name)
 			}
 		}
 	}
@@ -143,13 +138,7 @@ func (s *Server) pushTemplate(w http.ResponseWriter, r *http.Request) {
 
 	// Also write to legacy DB for backward compat during migration
 	filesJSON, _ := json.Marshal(body.Files)
-	now := time.Now().UTC()
-	_, _ = s.db.Exec(`
-		INSERT INTO hub_templates(name, files, created_at, updated_at)
-		VALUES(?, ?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET files=excluded.files, updated_at=excluded.updated_at`,
-		body.Name, string(filesJSON), now, now,
-	)
+	_ = s.st().Settings().UpsertTemplate(r.Context(), body.Name, string(filesJSON), time.Now().UTC())
 
 	jsonOK(w, map[string]string{"name": body.Name})
 }
@@ -163,8 +152,7 @@ func (s *Server) loadHubTemplate(name string) (map[string]string, error) {
 		return files, nil
 	}
 	// Legacy DB fallback
-	var filesJSON string
-	err = s.db.QueryRow(`SELECT files FROM hub_templates WHERE name = ?`, name).Scan(&filesJSON)
+	filesJSON, err := s.st().Settings().TemplateFiles(context.Background(), name)
 	if err != nil {
 		return nil, err
 	}

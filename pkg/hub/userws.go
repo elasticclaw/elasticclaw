@@ -79,19 +79,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
-	type dbClaw struct {
-		id, name, status, tagsJSON, bootstrapStatus, bootstrapDiagnostic, githubIssueID string
-	}
-	var dbClaws []dbClaw
-	rows, _ := s.db.QueryContext(ctx, `SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`, tenantID)
-	if rows != nil {
-		for rows.Next() {
-			var c dbClaw
-			_ = rows.Scan(&c.id, &c.name, &c.status, &c.tagsJSON, &c.bootstrapStatus, &c.bootstrapDiagnostic, &c.githubIssueID)
-			dbClaws = append(dbClaws, c)
-		}
-		_ = rows.Close()
-	}
+	dbClaws := s.st().Claws().ListStatusRows(ctx, tenantID)
 	s.mu.RLock()
 	connectedIDs := make(map[string]bool)
 	for _, cc := range s.claws {
@@ -119,13 +107,13 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	// Emit DB-only claws (still bootstrapping, not yet bridge-connected)
 	for _, c := range dbClaws {
-		if connectedIDs[c.id] {
+		if connectedIDs[c.ID] {
 			continue // already sent above
 		}
 		// Apply tag-based view filter for GitHub OAuth users
 		if ghLogin != "" {
 			var clawTags []string
-			_ = json.Unmarshal([]byte(c.tagsJSON), &clawTags)
+			_ = json.Unmarshal([]byte(c.TagsJSON), &clawTags)
 			if !canViewClaw(accessCfg, ghLogin, clawTags) {
 				continue
 			}
@@ -133,13 +121,13 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		_ = wsjson.Write(ctx, conn, types.WSMessage{
 			Type: "claw_status",
 			Payload: map[string]interface{}{
-				"claw_id":              c.id,
-				"name":                 c.name,
-				"status":               c.status, // provisioning / starting / error
-				"bootstrap_status":     c.bootstrapStatus,
-				"bootstrap_diagnostic": c.bootstrapDiagnostic,
-				"github_issue_id":      c.githubIssueID,
-				"github_issue_url":     githubIssueURL(c.githubIssueID),
+				"claw_id":              c.ID,
+				"name":                 c.Name,
+				"status":               c.Status, // provisioning / starting / error
+				"bootstrap_status":     c.BootstrapStatus,
+				"bootstrap_diagnostic": c.BootstrapDiagnostic,
+				"github_issue_id":      c.GitHubIssueID,
+				"github_issue_url":     githubIssueURL(c.GitHubIssueID),
 			},
 		})
 	}
@@ -160,10 +148,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			}
 			// Apply tag-based interact filter for GitHub OAuth users
 			if ghLogin != "" {
-				var tagsJSON string
-				_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, hm.ClawID, tenantID).Scan(&tagsJSON)
-				var clawTags []string
-				_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+				clawTags, _ := s.st().Claws().Tags(ctx, hm.ClawID, tenantID)
 				var currentAccessCfg *types.AccessConfig
 				s.mu.RLock()
 				if s.hubCfg.Auth != nil {
@@ -178,10 +163,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.TenantID = tenantID
 			hm.Role = "user"
 			hm.CreatedAt = now()
-			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
-			)
+			_ = s.st().Messages().Insert(ctx, hm)
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()
 			cc := s.claws[hm.ClawID]
@@ -238,10 +220,7 @@ func (s *Server) clawTagsForBroadcast(tenantID, clawID string) []string {
 	}
 	s.mu.RUnlock()
 
-	var tagsJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON)
-	var tags []string
-	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	tags, _ := s.st().Claws().Tags(context.Background(), clawID, tenantID)
 	return tags
 }
 

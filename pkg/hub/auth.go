@@ -158,21 +158,15 @@ func (s *Server) githubTenantID() (string, error) {
 			return tenantID, nil
 		}
 	}
-	var tenantID string
-	err := s.db.QueryRow(`SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
-	return tenantID, err
+	return s.st().Tenants().FirstID(context.Background())
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
-	var id string
-	err := s.db.QueryRow(`SELECT id FROM tenants WHERE token = ?`, token).Scan(&id)
-	return id, err
+	return s.st().Tenants().IDByToken(context.Background(), token)
 }
 
 func (s *Server) tenantByClawToken(token string) (string, error) {
-	var id string
-	err := s.db.QueryRow(`SELECT id FROM tenants WHERE claw_token = ?`, token).Scan(&id)
-	return id, err
+	return s.st().Tenants().IDByClawToken(context.Background(), token)
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
@@ -396,12 +390,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var workspaceName string
-	var reposJSON string
-	err := s.db.QueryRow(
-		`SELECT COALESCE(template,''), github_repos FROM claws WHERE id = ?`,
-		clawID,
-	).Scan(&workspaceName, &reposJSON)
+	workspaceName, reposJSON, err := s.st().Claws().WorkspaceRepos(r.Context(), clawID)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
 		return

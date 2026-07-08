@@ -12,6 +12,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -465,10 +466,14 @@ func (s *Service) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig)
 	}
 
 	// Legacy DB templates (for migration period)
-	rows, err := s.db.Query(`SELECT name FROM hub_templates`)
+	dbTemplateNames, err := store.New(s.db).Settings().TemplateNames(context.Background())
+	for _, name := range dbTemplateNames {
+		templateNames[name] = true
+	}
 	if err != nil {
-		// Query itself failed — templateNames may be empty from external too,
-		// so we must skip template-existence checks to avoid false critical alerts.
+		// Query or iteration failed — templateNames may be empty from
+		// external too, so we must skip template-existence checks to
+		// avoid false critical alerts.
 		if len(templateNames) == 0 {
 			templateNamesValid = false
 			checks = append(checks, DoctorCheck{
@@ -478,29 +483,6 @@ func (s *Service) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig)
 				Description: fmt.Sprintf("Template list query failed: %v. Factory template references cannot be validated.", err),
 				OK:          false,
 			})
-		}
-	} else if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err == nil {
-				templateNames[name] = true
-			}
-		}
-		if err := rows.Err(); err != nil {
-			// DB iteration failed — templateNames may be incomplete.
-			// Emit a warning and skip the template-existence factory check
-			// to avoid false "missing template" critical alerts.
-			if len(templateNames) == 0 {
-				templateNamesValid = false
-				checks = append(checks, DoctorCheck{
-					Category:    "factories",
-					Severity:    "warning",
-					Title:       "Could not verify templates",
-					Description: fmt.Sprintf("Template list query failed during iteration: %v. Factory template references cannot be validated.", err),
-					OK:          false,
-				})
-			}
 		}
 	}
 	// Also check local templates via config resolution

@@ -29,7 +29,9 @@ func (s *Server) pruneAnalytics() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
-		pruneFactoryAnalytics(s.db)
+		if err := s.st().Analytics().PruneFactoryAnalytics(context.Background()); err != nil {
+			logf("[db] factory analytics prune error: %v", err)
+		}
 	}
 }
 
