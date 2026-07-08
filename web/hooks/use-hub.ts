@@ -15,7 +15,15 @@ import {
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime, isDeletedClaw } from "@/lib/mappers"
 import { isTerminalAssistantMessage } from "@/lib/messages"
+import {
+  CLAW_POLL_INTERVAL_MS,
+  DEPENDENCY_POLL_INTERVAL_MS,
+  STORAGE_KEY_CLAW_ORDER,
+  STORAGE_KEY_PINNED,
+} from "@/lib/constants"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
+import { useWebSocket } from "@/hooks/use-websocket"
+import { useMessageCache, isTransientMessage } from "@/hooks/use-message-cache"
 
 export interface HubState {
   claws: Claw[]
@@ -35,24 +43,6 @@ export interface HubState {
   setUnreadCount: (clawId: string, count: number) => void
   refreshClaws: () => Promise<void>
   reorderClaws: (ids: string[]) => void
-}
-
-const ORDER_KEY = "elasticclaw_claw_order"
-
-function describeWsUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl)
-    if (url.searchParams.has("token")) {
-      url.searchParams.set("token", "[redacted]")
-    }
-    return url.toString()
-  } catch {
-    return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
-  }
-}
-
-function isTransientMessage(message: Message): boolean {
-  return message.id.startsWith("activity-") || message.id.startsWith("live-") || message.id.startsWith("thinking-")
 }
 
 function formatActivityContent(activity: AgentActivity): string {
@@ -83,7 +73,7 @@ function withoutModelWaitActivities(messages: Message[]): Message[] {
 
 function loadSavedOrder(): string[] {
   try {
-    const raw = localStorage.getItem(ORDER_KEY)
+    const raw = localStorage.getItem(STORAGE_KEY_CLAW_ORDER)
     return raw ? JSON.parse(raw) : []
   } catch {
     return []
@@ -92,17 +82,21 @@ function loadSavedOrder(): string[] {
 
 function saveOrder(ids: string[]) {
   try {
-    localStorage.setItem(ORDER_KEY, JSON.stringify(ids))
+    localStorage.setItem(STORAGE_KEY_CLAW_ORDER, JSON.stringify(ids))
   } catch {}
 }
 
+/**
+ * useHub — composition root for the hub UI state: claw list (poll + reorder +
+ * pin), dependency status, hub WebSocket events, and the message transcript.
+ * Connection management lives in useWebSocket; message persistence and the
+ * durable/transient merge live in useMessageCache.
+ */
 export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
   const [dependencies, setDependencies] = useState<DependencyStatus[]>([])
   const orderRef = useRef<string[]>([])
-  const [messages, setMessages] = useState<Record<string, Message[]>>({})
-  const messagesRef = useRef<Record<string, Message[]>>({})
-  const [connected, setConnected] = useState(false)
+  const { messages, messagesRef, loadCachedMessages, updateMessages, mergeTimeline, removeClaw } = useMessageCache()
   const {
     displayBuffers: streamingBuffers,
     pushChunk,
@@ -113,6 +107,7 @@ export function useHub(selectedClawId: string | null): HubState {
   const [configured, setConfigured] = useState(false)
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
+  const [wsEnabled, setWsEnabled] = useState(false)
   const segmentedStreamRef = useRef<Record<string, boolean>>({})
   const clientMessageSeqRef = useRef(0)
 
@@ -125,41 +120,6 @@ export function useHub(selectedClawId: string | null): HubState {
   // Track pinned state from localStorage
   const pinnedRef = useRef<Record<string, boolean>>({})
 
-  // ── localStorage message cache ──────────────────────────────────────────────
-  const MESSAGES_KEY = "elasticclaw_messages"
-  const MAX_CACHED_PER_CLAW = 200
-
-  const loadCachedMessages = useCallback(() => {
-    try {
-      const raw = localStorage.getItem(MESSAGES_KEY)
-      if (!raw) return
-      const parsed: Record<string, Array<{ id: string; role: string; content: string; timestamp: string }>> = JSON.parse(raw)
-      const hydrated: Record<string, Message[]> = {}
-      for (const [clawId, msgs] of Object.entries(parsed)) {
-        hydrated[clawId] = msgs.map((m) => ({ ...m, role: m.role as Message["role"], timestamp: new Date(m.timestamp) }))
-      }
-      setMessages(hydrated)
-    } catch {}
-  }, [])
-
-  const persistMessages = useCallback((msgs: Record<string, Message[]>) => {
-    try {
-      const toSave: Record<string, unknown[]> = {}
-      for (const [clawId, clawMsgs] of Object.entries(msgs)) {
-        // Keep last N durable messages per claw. Live stream segments and activity
-        // rows are per-tab transcript state; the API stores canonical messages.
-        toSave[clawId] = clawMsgs
-          .filter((m) => !m.id.startsWith("opt-") && m.role !== "system" && !isTransientMessage(m))
-          .slice(-MAX_CACHED_PER_CLAW)
-      }
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(toSave))
-    } catch {}
-  }, [])
-  const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimerRef = useRef<number | null>(null)
-  const reconnectAttemptRef = useRef(0)
-  const shouldReconnectRef = useRef(false)
-  const lastWsErrorLogRef = useRef(0)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const dependencyPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const selectedClawIdRef = useRef<string | null>(selectedClawId)
@@ -168,14 +128,10 @@ export function useHub(selectedClawId: string | null): HubState {
     selectedClawIdRef.current = selectedClawId
   }, [selectedClawId])
 
-  useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
-
   // Load pinned state + message cache + order from localStorage on mount
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("elasticclaw_pinned")
+      const saved = localStorage.getItem(STORAGE_KEY_PINNED)
       if (saved) pinnedRef.current = JSON.parse(saved)
     } catch {}
     orderRef.current = loadSavedOrder()
@@ -185,7 +141,7 @@ export function useHub(selectedClawId: string | null): HubState {
   const savePinned = useCallback((pinned: Record<string, boolean>) => {
     pinnedRef.current = pinned
     try {
-      localStorage.setItem("elasticclaw_pinned", JSON.stringify(pinned))
+      localStorage.setItem(STORAGE_KEY_PINNED, JSON.stringify(pinned))
     } catch {}
   }, [])
 
@@ -271,28 +227,13 @@ export function useHub(selectedClawId: string | null): HubState {
     try {
       const apiMsgs = await fetchMessageTimeline(clawId)
       const msgs = apiMsgs.map(mapApiMessage)
-      
+
       // Capture existing IDs before updating so we can diff outside the updater.
       // React 18 batches state updates — side effects inside updaters are unreliable.
       const existingIds = new Set((messagesRef.current[clawId] || []).map((m) => m.id))
       const newClawMsgs = msgs.filter((m) => !existingIds.has(m.id) && m.role !== 'user' && m.role !== 'system')
 
-      setMessages((prev) => {
-        const existing = prev[clawId] || []
-        // Merge API result with cached state:
-        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
-        // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
-        const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
-        const apiIds = new Set(msgs.map((m) => m.id))
-        const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
-        const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
-          !msgs.some((r) => r.content === m.content && r.role === m.role))
-        const merged = [...msgs, ...cachedOnly, ...inflight]
-        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-        const next = { ...prev, [clawId]: merged }
-        persistMessages(next)
-        return next
-      })
+      mergeTimeline(clawId, msgs)
 
       if (newClawMsgs.length > 0 && selectedClawIdRef.current !== clawId) {
         setClaws((prevClaws) =>
@@ -306,126 +247,110 @@ export function useHub(selectedClawId: string | null): HubState {
     } catch (err) {
       console.warn(`Failed to load messages for ${clawId}:`, err)
     }
-  }, [persistMessages])
+  }, [mergeTimeline, messagesRef])
 
-  const connectWebSocket = useCallback(() => {
-    if (!shouldReconnectRef.current) return
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.onerror = null
-      wsRef.current.close()
-    }
-    const wsUrl = getHubWsUrl()
-    const safeWsUrl = describeWsUrl(wsUrl)
-    let ws: WebSocket
+  const handleWsMessage = useCallback((event: MessageEvent) => {
     try {
-      ws = new WebSocket(wsUrl)
-    } catch (err) {
-      console.error(`WS create failed for ${safeWsUrl}:`, err)
-      return
-    }
-    wsRef.current = ws
+      const data = JSON.parse(event.data)
+      const { type, payload } = data
 
-    ws.onopen = () => {
-      reconnectAttemptRef.current = 0
-      setConnected(true)
-    }
-
-    ws.onclose = (event) => {
-      if (wsRef.current !== ws) return
-      setConnected(false)
-      if (!shouldReconnectRef.current) return
-      const attempt = reconnectAttemptRef.current
-      reconnectAttemptRef.current += 1
-      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5))
-      if (event.code !== 1000) {
-        console.warn(
-          `WS closed for ${safeWsUrl}: code=${event.code} reason=${event.reason || "none"}; reconnecting in ${Math.round(delayMs / 1000)}s`
-        )
-      }
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
-    }
-
-    ws.onerror = () => {
-      const nowMs = Date.now()
-      if (nowMs - lastWsErrorLogRef.current < 10_000) return
-      lastWsErrorLogRef.current = nowMs
-      console.warn(`WS error for ${safeWsUrl}; check the Network tab for /api/ws status and close code`)
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        const { type, payload } = data
-
-        if (type === "chunk") {
-          // Streaming chunk — feed into typewriter
-          const { claw_id, content } = payload
-          pushChunk(claw_id, content)
-          setClaws((prev) =>
-            prev.map((c) =>
-                c.id === claw_id ? { ...c, isStreaming: true } : c
-            )
+      if (type === "chunk") {
+        // Streaming chunk — feed into typewriter
+        const { claw_id, content } = payload
+        pushChunk(claw_id, content)
+        setClaws((prev) =>
+          prev.map((c) =>
+              c.id === claw_id ? { ...c, isStreaming: true } : c
           )
-        } else if (type === "agent_activity") {
-          const clawId = payload.claw_id
-          if (!clawId) return
-          const activity: AgentActivity = {
-            kind: payload.kind || "activity",
-            stream: payload.stream,
-            phase: payload.phase,
-            tool: payload.tool,
-            detail: payload.detail,
-            command: payload.command,
-            path: payload.path,
-            url: payload.url,
-            message: payload.message,
-            error: payload.error,
-          }
-          if (isUnhelpfulActivity(activity)) return
-          const currentMessages = messagesRef.current[clawId] || []
-          const lastDurable = [...currentMessages].reverse().find((message) => !isTransientMessage(message) && message.role !== "activity")
-          if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return
-          const segment = splitTypewriter(clawId)
-          const createdAt = payload.created_at ? new Date(payload.created_at) : new Date()
-          const segmentId = segment.trim() ? nextClientMessageId("live-segment", clawId) : null
-          const activityId = nextClientMessageId("activity", clawId)
-          segmentedStreamRef.current[clawId] = true
-          setMessages((prev) => {
-            const nextMessages = [...(prev[clawId] || [])]
-            if (segmentId) {
-              nextMessages.push({
-                id: segmentId,
-                role: "claw",
-                content: segment,
-                timestamp: createdAt,
-              })
-            }
+        )
+      } else if (type === "agent_activity") {
+        const clawId = payload.claw_id
+        if (!clawId) return
+        const activity: AgentActivity = {
+          kind: payload.kind || "activity",
+          stream: payload.stream,
+          phase: payload.phase,
+          tool: payload.tool,
+          detail: payload.detail,
+          command: payload.command,
+          path: payload.path,
+          url: payload.url,
+          message: payload.message,
+          error: payload.error,
+        }
+        if (isUnhelpfulActivity(activity)) return
+        const currentMessages = messagesRef.current[clawId] || []
+        const lastDurable = [...currentMessages].reverse().find((message) => !isTransientMessage(message) && message.role !== "activity")
+        if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return
+        const segment = splitTypewriter(clawId)
+        const createdAt = payload.created_at ? new Date(payload.created_at) : new Date()
+        const segmentId = segment.trim() ? nextClientMessageId("live-segment", clawId) : null
+        const activityId = nextClientMessageId("activity", clawId)
+        segmentedStreamRef.current[clawId] = true
+        updateMessages((prev) => {
+          const nextMessages = [...(prev[clawId] || [])]
+          if (segmentId) {
             nextMessages.push({
-              id: activityId,
-              role: "activity",
-              content: formatActivityContent(activity),
-              activity,
+              id: segmentId,
+              role: "claw",
+              content: segment,
               timestamp: createdAt,
             })
-            const next = { ...prev, [clawId]: nextMessages }
-            persistMessages(next)
-            return next
+          }
+          nextMessages.push({
+            id: activityId,
+            role: "activity",
+            content: formatActivityContent(activity),
+            activity,
+            timestamp: createdAt,
           })
+          return { ...prev, [clawId]: nextMessages }
+        })
+        setClaws((prev) =>
+          prev.map((c) =>
+            c.id === clawId ? { ...c, isStreaming: true } : c
+          )
+        )
+      } else if (type === "message") {
+        // Final message — hold until typewriter drains, then commit
+        const msg = mapApiMessage(payload)
+        const clawId = payload.claw_id
+        if (segmentedStreamRef.current[clawId]) {
+          const tail = clearTypewriter(clawId)
+          delete segmentedStreamRef.current[clawId]
+          const tailId = tail.trim() ? nextClientMessageId("live-segment", clawId) : null
+          // Called once typewriter is fully drained — safe to add final message
           setClaws((prev) =>
             prev.map((c) =>
-              c.id === clawId ? { ...c, isStreaming: true } : c
+              c.id === clawId
+                ? {
+                    ...c,
+                    isStreaming: false,
+                    unreadCount:
+                      selectedClawIdRef.current !== clawId && msg.role === "claw"
+                        ? c.unreadCount + 1
+                        : c.unreadCount,
+                  }
+                : c
             )
           )
-        } else if (type === "message") {
-          // Final message — hold until typewriter drains, then commit
-          const msg = mapApiMessage(payload)
-          const clawId = payload.claw_id
-          if (segmentedStreamRef.current[clawId]) {
-            const tail = clearTypewriter(clawId)
-            delete segmentedStreamRef.current[clawId]
-            const tailId = tail.trim() ? nextClientMessageId("live-segment", clawId) : null
+          updateMessages((prev) => {
+            const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
+            const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
+            if (tailId) {
+              nextMessages.push({
+                id: tailId,
+                role: "claw",
+                content: tail,
+                timestamp: msg.timestamp,
+              })
+            } else if (!hasLiveSegment && msg.content.trim()) {
+              nextMessages.push(msg)
+            }
+            return { ...prev, [clawId]: nextMessages }
+          })
+        } else {
+          finalizeTypewriter(clawId, () => {
             // Called once typewriter is fully drained — safe to add final message
             setClaws((prev) =>
               prev.map((c) =>
@@ -441,82 +366,49 @@ export function useHub(selectedClawId: string | null): HubState {
                   : c
               )
             )
-            setMessages((prev) => {
-              const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
-              const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
-              if (tailId) {
-                nextMessages.push({
-                  id: tailId,
-                  role: "claw",
-                  content: tail,
-                  timestamp: msg.timestamp,
-                })
-              } else if (!hasLiveSegment && msg.content.trim()) {
-                nextMessages.push(msg)
-              }
-              const next = { ...prev, [clawId]: nextMessages }
-              persistMessages(next)
-              return next
-            })
-          } else {
-            finalizeTypewriter(clawId, () => {
-              // Called once typewriter is fully drained — safe to add final message
-              setClaws((prev) =>
-                prev.map((c) =>
-                  c.id === clawId
-                    ? {
-                        ...c,
-                        isStreaming: false,
-                        unreadCount:
-                          selectedClawIdRef.current !== clawId && msg.role === "claw"
-                            ? c.unreadCount + 1
-                            : c.unreadCount,
-                      }
-                    : c
-                )
-              )
-              setMessages((prev) => {
-                const next = { ...prev, [clawId]: [...withoutModelWaitActivities(prev[clawId] || []), msg] }
-                persistMessages(next)
-                return next
-              })
-            })
-          }
-        } else if (type === "claw_status") {
-          const { claw_id, status } = payload
-          if (status === "deleted") {
-            // Remove immediately — don't wait for next poll
-            setClaws((prev) => prev.filter((c) => c.id !== claw_id))
-          } else {
-            setClaws((prev) =>
-              prev.map((c) =>
-                c.id === claw_id
-                  ? {
-                      ...c,
-                      status: mapApiStatus(status),
-                      isStreaming: status !== "connected" ? false : c.isStreaming,
-                      reason: status === "error" ? payload.reason : undefined,
-                      bootstrap_status: status === "connected" || status === "error" ? undefined : payload.bootstrap_status ?? c.bootstrap_status,
-                      githubIssueId: payload.github_issue_id ?? c.githubIssueId,
-                      githubIssueUrl: payload.github_issue_url ?? c.githubIssueUrl,
-                    }
-                  : c
-              )
-            )
-            // If a new claw came online that we don't know about, refresh
-            setClaws((prev) => {
-              if (!prev.find((c) => c.id === claw_id)) {
-                refreshClaws()
-              }
-              return prev
-            })
-          }
+            updateMessages((prev) => ({ ...prev, [clawId]: [...withoutModelWaitActivities(prev[clawId] || []), msg] }))
+          })
         }
-      } catch (err) {
-        console.warn("Failed to parse WS message:", err)
+      } else if (type === "claw_status") {
+        const { claw_id, status } = payload
+        if (status === "deleted") {
+          // Remove immediately — don't wait for next poll
+          setClaws((prev) => prev.filter((c) => c.id !== claw_id))
+        } else {
+          setClaws((prev) =>
+            prev.map((c) =>
+              c.id === claw_id
+                ? {
+                    ...c,
+                    status: mapApiStatus(status),
+                    isStreaming: status !== "connected" ? false : c.isStreaming,
+                    reason: status === "error" ? payload.reason : undefined,
+                    bootstrap_status: status === "connected" || status === "error" ? undefined : payload.bootstrap_status ?? c.bootstrap_status,
+                    githubIssueId: payload.github_issue_id ?? c.githubIssueId,
+                    githubIssueUrl: payload.github_issue_url ?? c.githubIssueUrl,
+                  }
+                : c
+            )
+          )
+          // If a new claw came online that we don't know about, refresh
+          setClaws((prev) => {
+            if (!prev.find((c) => c.id === claw_id)) {
+              refreshClaws()
+            }
+            return prev
+          })
+        }
       }
+    } catch (err) {
+      console.warn("Failed to parse WS message:", err)
     }
-  }, [clearTypewriter, finalizeTypewriter, nextClientMessageId, persistMessages, pushChunk, refreshClaws, splitTypewriter])
+  }, [clearTypewriter, finalizeTypewriter, messagesRef, nextClientMessageId, pushChunk, refreshClaws, splitTypewriter, updateMessages])
+
+  const { connected } = useWebSocket({
+    getUrl: getHubWsUrl,
+    enabled: wsEnabled,
+    onMessage: handleWsMessage,
+  })
 
   // Initialize
   useEffect(() => {
@@ -529,24 +421,18 @@ export function useHub(selectedClawId: string | null): HubState {
     refreshDependencies().then(() => {})
 
     // Poll claws frequently; dependency status is slower-moving and separately cached by the hub.
-    pollIntervalRef.current = setInterval(refreshClaws, 10_000)
-    dependencyPollIntervalRef.current = setInterval(refreshDependencies, 60_000)
+    pollIntervalRef.current = setInterval(refreshClaws, CLAW_POLL_INTERVAL_MS)
+    dependencyPollIntervalRef.current = setInterval(refreshDependencies, DEPENDENCY_POLL_INTERVAL_MS)
 
     // Wait for token then connect WS
-    shouldReconnectRef.current = true
-    resolveToken().then(() => connectWebSocket())
+    resolveToken().then(() => setWsEnabled(true))
 
     return () => {
-      shouldReconnectRef.current = false
+      setWsEnabled(false)
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
       if (dependencyPollIntervalRef.current) clearInterval(dependencyPollIntervalRef.current)
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
-      if (wsRef.current) {
-        wsRef.current.onclose = null
-        wsRef.current.onerror = null
-        wsRef.current.close()
-      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // run once on mount
 
   const send = useCallback(async (clawId: string, content: string) => {
@@ -559,11 +445,7 @@ export function useHub(selectedClawId: string | null): HubState {
       content: content.trim(),
       timestamp: new Date(),
     }
-    setMessages((prev) => {
-      const next = { ...prev, [clawId]: [...(prev[clawId] || []), optimistic] }
-      persistMessages(next)
-      return next
-    })
+    updateMessages((prev) => ({ ...prev, [clawId]: [...(prev[clawId] || []), optimistic] }))
 
     setClaws((prev) =>
       prev.map((c) => (c.id === clawId ? { ...c, isStreaming: true } : c))
@@ -576,12 +458,10 @@ export function useHub(selectedClawId: string | null): HubState {
       // Replace the optimistic message with the real one from the DB
       // so it survives cache persistence (opt- IDs are filtered out)
       const realMsg = mapApiMessage(sent)
-      setMessages((prev) => {
+      updateMessages((prev) => {
         const msgs = prev[clawId] || []
         const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)
-        const next = { ...prev, [clawId]: replaced }
-        persistMessages(next)
-        return next
+        return { ...prev, [clawId]: replaced }
       })
       // WS events will handle the response (chunk/message)
     } catch (err) {
@@ -590,7 +470,7 @@ export function useHub(selectedClawId: string | null): HubState {
         prev.map((c) => (c.id === clawId ? { ...c, isStreaming: false } : c))
       )
     }
-  }, [nextClientMessageId, persistMessages, pushChunk])
+  }, [nextClientMessageId, pushChunk, updateMessages])
 
   const createClaw = useCallback(async (req: { name: string; template: string }) => {
     const apiClaw = await apiCreateClaw({
@@ -605,14 +485,8 @@ export function useHub(selectedClawId: string | null): HubState {
   const killClaw = useCallback(async (clawId: string) => {
     await apiKillClaw(clawId)
     setClaws((prev) => prev.filter((c) => c.id !== clawId))
-    setMessages((prev) => {
-      const next = { ...prev }
-      delete next[clawId]
-      persistMessages(next)
-      return next
-    })
-
-  }, [persistMessages])
+    removeClaw(clawId)
+  }, [removeClaw])
 
   const downtimeDependencies = dependencies.filter((dependency) => dependency.status === "downtime")
 
