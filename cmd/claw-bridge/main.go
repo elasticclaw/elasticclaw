@@ -2336,7 +2336,7 @@ if [ -z "$claw_token" ]; then
   echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
   exit 1
 fi
-response="$(curl -sf --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
+response="$(curl -fsS --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
 token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 if [ -z "$token" ]; then
   echo "GitHub token response did not include token" >&2
@@ -2352,7 +2352,25 @@ chmod 0700 "$helper_path"
 git config --global --unset-all credential.helper >/dev/null 2>&1 || true
 git config --global credential.helper "!$helper_path"
 git config --global --get-all credential.helper | grep -Fx "!$helper_path" >/dev/null
-credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git credential fill)"
+helper_check="$("$helper_path" 2>&1)" || {
+  echo "GitHub credential helper failed during bootstrap:" >&2
+  printf '%%s\n' "$helper_check" >&2
+  exit 1
+}
+printf '%%s\n' "$helper_check" | grep -Fx 'username=x-access-token' >/dev/null || {
+  echo "GitHub credential helper did not output 'username=x-access-token'" >&2
+  exit 1
+}
+printf '%%s\n' "$helper_check" | grep -E '^password=.' >/dev/null || {
+  echo "GitHub credential helper did not output a password" >&2
+  exit 1
+}
+credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git credential fill 2>&1)" || {
+  echo "git credential fill failed after helper registration:" >&2
+  git config --global --get-all credential.helper >&2 || true
+  printf '%%s\n' "$credential_check" >&2
+  exit 1
+}
 printf '%%s\n' "$credential_check" | grep -Fx 'username=x-access-token' >/dev/null
 printf '%%s\n' "$credential_check" | grep -E '^password=.' >/dev/null
 `, shellQuote(tokenEndpoint))
