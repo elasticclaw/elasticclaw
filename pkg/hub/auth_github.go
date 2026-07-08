@@ -29,8 +29,11 @@ type githubSessionPayload struct {
 	Exp       int64  `json:"exp"`
 }
 
-// signGitHubSession creates a signed session token for a GitHub user.
+// signGitHubSession creates a legacy signed session token for a GitHub user.
 // Format: base64url(payload).base64url(hmac-sha256)
+//
+// Deprecated: new sessions are standard JWTs (see auth_session.go). This is
+// kept only as a fallback for servers without a master key.
 func signGitHubSession(secret, login, name, avatarURL string) (string, error) {
 	payload := githubSessionPayload{
 		Login:     login,
@@ -49,7 +52,11 @@ func signGitHubSession(secret, login, name, avatarURL string) (string, error) {
 	return encoded + "." + sig, nil
 }
 
-// verifyGitHubSession validates the token and returns the payload if valid and unexpired.
+// verifyGitHubSession validates a legacy token and returns the payload if
+// valid and unexpired.
+//
+// Deprecated: kept for one release so sessions issued before the JWT
+// migration keep working (dual verification in Server.verifySession).
 func verifyGitHubSession(secret, token string) (*githubSessionPayload, bool) {
 	parts := strings.SplitN(token, ".", 2)
 	if len(parts) != 2 {
@@ -104,7 +111,9 @@ func (s *Server) ghBaseURL() string {
 	return "https://api.github.com"
 }
 
-// webSessionSecret returns the HMAC key used to sign/verify web session tokens.
+// webSessionSecret returns the HMAC key for the legacy web session token
+// format. It is only used to verify pre-JWT sessions during the transition
+// window and to sign sessions when no master key is available.
 func (s *Server) webSessionSecret() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -157,11 +166,6 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	oauthCfg := cfg.GitHubOAuth
-	secret := s.webSessionSecret()
-	if secret == "" {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 
 	var body struct {
 		Code        string `json:"code"`
@@ -201,9 +205,10 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Issue signed session token
-	sessionToken, err := signGitHubSession(secret, ghUser.Login, ghUser.Name, ghUser.AvatarURL)
+	// Issue signed session token (JWT; legacy HMAC fallback without a master key)
+	sessionToken, err := s.signSession(ghUser.Login, ghUser.Name, ghUser.AvatarURL)
 	if err != nil {
+		log.Printf("[github-oauth] session signing error: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

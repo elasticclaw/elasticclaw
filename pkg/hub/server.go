@@ -64,6 +64,12 @@ type Server struct {
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
 
+	// sessionJWTKey is the HS256 key for web session JWTs, derived from the
+	// master key via HKDF on first use (see auth_session.go). nil means no
+	// master key is available and the legacy HMAC format is used instead.
+	sessionJWTOnce sync.Once
+	sessionJWTKey  []byte
+
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
@@ -484,18 +490,15 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			return
 		}
 
-		sessionSecret := s.webSessionSecret()
-		if sessionSecret != "" {
-			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
-				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
-				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
-				r = r.WithContext(ctx)
-				next(w, r)
+		if payload, ok := s.verifySession(token); ok {
+			if !isAccessAdmin(accessCfg, payload.Login) {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
+			ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+			r = r.WithContext(ctx)
+			next(w, r)
+			return
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -528,11 +531,7 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 	if tenantID, err := s.tenantByToken(token); err == nil {
 		return tenantID, "", true
 	}
-	sessionSecret := s.webSessionSecret()
-	if sessionSecret == "" {
-		return "", "", false
-	}
-	payload, valid := verifyGitHubSession(sessionSecret, token)
+	payload, valid := s.verifySession(token)
 	if !valid {
 		return "", "", false
 	}
@@ -600,7 +599,6 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		s.mu.RLock()
 		hubToken := s.hubCfg.Token
 		s.mu.RUnlock()
-		sessionSecret := s.webSessionSecret()
 
 		// Accept shared hub token (existing behavior)
 		if token == hubToken {
@@ -609,14 +607,12 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Try GitHub OAuth session token
-		if sessionSecret != "" {
-			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
-				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
-				ctx = context.WithValue(ctx, ctxGitHubSessionPayloadKey{}, payload)
-				r = r.WithContext(ctx)
-				next(w, r)
-				return
-			}
+		if payload, ok := s.verifySession(token); ok {
+			ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+			ctx = context.WithValue(ctx, ctxGitHubSessionPayloadKey{}, payload)
+			r = r.WithContext(ctx)
+			next(w, r)
+			return
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -652,7 +648,6 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			accessCfg = s.hubCfg.Auth.Access
 		}
 		s.mu.RUnlock()
-		sessionSecret := s.webSessionSecret()
 
 		// Password-authenticated sessions keep existing admin access.
 		if token == hubToken {
@@ -660,17 +655,15 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if sessionSecret != "" {
-			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
-				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
-				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
-				r = r.WithContext(ctx)
-				next(w, r)
+		if payload, ok := s.verifySession(token); ok {
+			if !isAccessAdmin(accessCfg, payload.Login) {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
+			ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
+			r = r.WithContext(ctx)
+			next(w, r)
+			return
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
