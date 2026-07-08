@@ -6441,25 +6441,29 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no github apps configured", http.StatusNotImplemented)
 		return
 	}
+	providers := make([]githubTokenProviderCandidate, 0, len(githubApps))
 	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
 			continue
 		}
+		providers = append(providers, githubTokenProviderCandidate{
+			index:    i,
+			appID:    appCfg.AppID,
+			url:      appCfg.URL,
+			provider: provider,
+		})
+	}
+	for _, candidate := range providers {
+		provider := candidate.provider
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
-			if len(repos) > 0 {
-				inaccessible := diagnoseGitHubAppRepoAccess(r.Context(), provider, repos)
-				if len(inaccessible) > 0 {
-					log.Printf("[github] app[%d] app_id=%d inaccessible repos for claw %s: %s", i, appCfg.AppID, clawID[:8], strings.Join(inaccessible, ", "))
-				}
-			}
+			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
+		log.Printf("github token issued via app_id=%d for claw %s", candidate.appID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
@@ -6467,7 +6471,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inaccessible := diagnoseGitHubRepoAccess(r.Context(), githubApps, repos)
+	inaccessible := diagnoseGitHubRepoAccess(r.Context(), providers, repos)
 	if len(inaccessible) > 0 {
 		msg := inaccessibleGitHubReposMessage(inaccessible)
 		log.Printf("no github app found with installation for repos %v (claw %s): %s", repos, clawID[:8], msg)
@@ -6483,8 +6487,15 @@ func inaccessibleGitHubReposMessage(repos []string) string {
 	return fmt.Sprintf("GitHub App cannot access: %s", strings.Join(repos, ", "))
 }
 
-func diagnoseGitHubRepoAccess(ctx context.Context, appCfgs []*types.GitHubAppConfig, repos []RepoAccess) []string {
-	if len(appCfgs) == 0 || len(repos) == 0 {
+type githubTokenProviderCandidate struct {
+	index    int
+	appID    int64
+	url      string
+	provider *GitHubTokenProvider
+}
+
+func diagnoseGitHubRepoAccess(ctx context.Context, providers []githubTokenProviderCandidate, repos []RepoAccess) []string {
+	if len(providers) == 0 || len(repos) == 0 {
 		return nil
 	}
 	inaccessible := make(map[string]bool, len(repos))
@@ -6493,11 +6504,8 @@ func diagnoseGitHubRepoAccess(ctx context.Context, appCfgs []*types.GitHubAppCon
 			inaccessible[repo.Repo] = true
 		}
 	}
-	for _, appCfg := range appCfgs {
-		provider, err := NewGitHubTokenProvider(appCfg)
-		if err != nil {
-			continue
-		}
+	for _, candidate := range providers {
+		provider := candidate.provider
 		for _, repo := range repos {
 			if !inaccessible[repo.Repo] {
 				continue
@@ -6505,22 +6513,6 @@ func diagnoseGitHubRepoAccess(ctx context.Context, appCfgs []*types.GitHubAppCon
 			if _, _, err := provider.InstallationToken(ctx, 0, []RepoAccess{repo}); err == nil {
 				delete(inaccessible, repo.Repo)
 			}
-		}
-	}
-	return sortedStringKeys(inaccessible)
-}
-
-func diagnoseGitHubAppRepoAccess(ctx context.Context, provider *GitHubTokenProvider, repos []RepoAccess) []string {
-	if provider == nil || len(repos) == 0 {
-		return nil
-	}
-	inaccessible := make(map[string]bool, len(repos))
-	for _, repo := range repos {
-		if strings.TrimSpace(repo.Repo) == "" {
-			continue
-		}
-		if _, _, err := provider.InstallationToken(ctx, 0, []RepoAccess{repo}); err != nil {
-			inaccessible[repo.Repo] = true
 		}
 	}
 	return sortedStringKeys(inaccessible)
