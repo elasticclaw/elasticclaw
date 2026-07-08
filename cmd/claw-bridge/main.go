@@ -2326,6 +2326,8 @@ fi
 helper_dir="${HOME}/.elasticclaw/bin"
 helper_path="${helper_dir}/elasticclaw-git-credentials"
 mkdir -p "$helper_dir"
+old_umask="$(umask)"
+umask 0077
 cat > "$helper_path" << 'CREDEOF'
 #!/bin/sh
 set -eu
@@ -2345,6 +2347,7 @@ printf 'host=github.com\n'
 printf 'username=x-access-token\n'
 printf 'password=%%s\n' "$token"
 CREDEOF
+umask "$old_umask"
 chmod 0700 "$helper_path"
 git config --global credential.helper "$helper_path"
 git config --global --get-all credential.helper | grep -Fx "$helper_path" >/dev/null
