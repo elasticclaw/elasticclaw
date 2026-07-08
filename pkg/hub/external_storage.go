@@ -93,6 +93,39 @@ func validateName(name string) error {
 	return nil
 }
 
+// reservedWorkspaceNames are the slugs used by the settings UI catch-all route
+// (web/app/settings/[[...parts]]/sections.ts). A workspace named with any of
+// these would collide with a system section, so they are forbidden.
+// Keep this list in sync with the frontend VALID_SECTIONS.
+var reservedWorkspaceNames = map[string]bool{
+	"runtimes":            true,
+	"models":              true,
+	"github":              true,
+	"authentication":      true,
+	"issue-trackers":      true,
+	"workspaces":          true,
+	"workflows":           true,
+	"workspace-analytics": true,
+	"secrets":             true,
+	"ai-config":           true,
+	"mcp-servers":         true,
+	"analytics":           true,
+	"doctor":              true,
+	"troubleshoot":        true,
+}
+
+// validateWorkspaceName rejects names that are unsafe for filesystem use or
+// reserved by the settings UI routes.
+func validateWorkspaceName(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	if reservedWorkspaceNames[name] {
+		return fmt.Errorf("workspace name %q is reserved", name)
+	}
+	return nil
+}
+
 // saveExternalTemplate writes a template to the external templates directory.
 // Any files present on disk but absent from the new files map are removed
 // so that deletions are persisted across pushes.
@@ -422,7 +455,7 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 	if workspace == nil || workspace.Name == "" {
 		return fmt.Errorf("workspace name required")
 	}
-	if err := validateName(workspace.Name); err != nil {
+	if err := validateWorkspaceName(workspace.Name); err != nil {
 		return err
 	}
 	if err := workspace.Validate(); err != nil {
