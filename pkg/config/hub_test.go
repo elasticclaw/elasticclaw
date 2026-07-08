@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -21,8 +22,136 @@ func TestSaveHubConfigUsesExplicitEnvPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env hub config: %v", err)
 	}
-	if !strings.Contains(string(data), "token: test-token") {
-		t.Fatalf("saved config = %s", string(data))
+	// Secrets are encrypted at rest: the raw file must not contain the token.
+	if strings.Contains(string(data), "test-token") {
+		t.Fatalf("saved config leaks plaintext token: %s", string(data))
+	}
+	if !strings.Contains(string(data), secrets.EnvelopePrefix) {
+		t.Fatalf("saved config has no encryption envelope: %s", string(data))
+	}
+	// Loading decrypts transparently.
+	cfg, err := LoadHubConfig()
+	if err != nil {
+		t.Fatalf("LoadHubConfig: %v", err)
+	}
+	if cfg.Token != "test-token" {
+		t.Fatalf("loaded token = %q, want %q", cfg.Token, "test-token")
+	}
+}
+
+func TestHubConfigSecretsEncryptedAtRest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+
+	cfg := &types.HubConfig{
+		URL:        "https://hub.example.com",
+		Token:      "hub-token",
+		ClawToken:  "claw-token",
+		UIPassword: "ui-pass",
+		LLMKeys:    types.LLMKeysList{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-ant-123", Default: true}},
+		GitHubApps: []*types.GitHubAppConfig{{AppID: 42, PrivateKeyPEM: "-----BEGIN RSA PRIVATE KEY-----\nkeydata\n-----END RSA PRIVATE KEY-----"}},
+		Secrets:    map[string]string{"webhook": "hook-secret"},
+		Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{{Workspace: "acme", Token: "lin_api_abc", WebhookSecret: "lin-hook"}},
+			Jira:   []*types.JiraIntegrationConfig{{Workspace: "jira", Token: "jira-token"}},
+		},
+	}
+	if err := SaveHubConfig(cfg); err != nil {
+		t.Fatalf("SaveHubConfig: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read hub config: %v", err)
+	}
+	for _, plaintext := range []string{"hub-token", "claw-token", "ui-pass", "sk-ant-123", "keydata", "hook-secret", "lin_api_abc", "lin-hook", "jira-token"} {
+		if strings.Contains(string(raw), plaintext) {
+			t.Errorf("hub.yaml leaks plaintext secret %q", plaintext)
+		}
+	}
+	// Non-secret fields stay readable.
+	if !strings.Contains(string(raw), "https://hub.example.com") {
+		t.Error("non-secret url should stay plaintext")
+	}
+	if !strings.Contains(string(raw), "workspace: acme") {
+		t.Error("non-secret workspace should stay plaintext")
+	}
+
+	// Caller's in-memory config must not be mutated by saving.
+	if cfg.Token != "hub-token" || cfg.LLMKeys[0].APIKey != "sk-ant-123" {
+		t.Fatal("SaveHubConfig mutated the caller's config")
+	}
+
+	loaded, err := LoadHubConfig()
+	if err != nil {
+		t.Fatalf("LoadHubConfig: %v", err)
+	}
+	if loaded.Token != "hub-token" || loaded.ClawToken != "claw-token" || loaded.UIPassword != "ui-pass" ||
+		loaded.LLMKeys[0].APIKey != "sk-ant-123" ||
+		loaded.Secrets["webhook"] != "hook-secret" ||
+		loaded.Integrations.Linear[0].Token != "lin_api_abc" ||
+		loaded.Integrations.Jira[0].Token != "jira-token" {
+		t.Fatalf("loaded config does not roundtrip: %+v", loaded)
+	}
+	if !strings.Contains(loaded.GitHubApps[0].PrivateKeyPEM, "keydata") {
+		t.Fatalf("github app private key does not roundtrip: %q", loaded.GitHubApps[0].PrivateKeyPEM)
+	}
+}
+
+func TestLoadHubConfigAcceptsPlaintextAndMigratesOnSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+
+	// Pre-encryption config written by hand: plaintext secrets.
+	plaintext := "token: legacy-token\nui_password: legacy-pass\n"
+	if err := os.WriteFile(path, []byte(plaintext), 0600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	cfg, err := LoadHubConfig()
+	if err != nil {
+		t.Fatalf("LoadHubConfig (plaintext): %v", err)
+	}
+	if cfg.Token != "legacy-token" || cfg.UIPassword != "legacy-pass" {
+		t.Fatalf("plaintext values not accepted: %+v", cfg)
+	}
+
+	// Saving migrates to encrypted form.
+	if err := SaveHubConfig(cfg); err != nil {
+		t.Fatalf("SaveHubConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	if strings.Contains(string(raw), "legacy-token") || strings.Contains(string(raw), "legacy-pass") {
+		t.Fatalf("migration left plaintext secrets: %s", string(raw))
+	}
+	reloaded, err := LoadHubConfig()
+	if err != nil {
+		t.Fatalf("LoadHubConfig (migrated): %v", err)
+	}
+	if reloaded.Token != "legacy-token" || reloaded.UIPassword != "legacy-pass" {
+		t.Fatalf("migrated config does not roundtrip: %+v", reloaded)
+	}
+}
+
+func TestLoadHubConfigMissingMasterKeyFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	t.Setenv(secrets.MasterKeyEnvVar, "")
+
+	if err := SaveHubConfig(&types.HubConfig{Token: "sekret"}); err != nil {
+		t.Fatalf("SaveHubConfig: %v", err)
+	}
+	// Simulate a lost master key.
+	if err := os.Remove(filepath.Join(dir, "master.key")); err != nil {
+		t.Fatalf("remove master.key: %v", err)
+	}
+	if _, err := LoadHubConfig(); err == nil {
+		t.Fatal("expected LoadHubConfig to fail without the master key")
 	}
 }
 

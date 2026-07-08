@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -34,9 +35,30 @@ func LoadHubConfig() (*types.HubConfig, error) {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse hub config %s: %w", path, err)
 		}
+		if err := decryptHubSecrets(cfg, path); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 	return &types.HubConfig{}, nil
+}
+
+// decryptHubSecrets transparently decrypts enc:v1: envelopes on fields tagged
+// secret:"true". Plaintext values (pre-encryption configs) pass through
+// unchanged and are re-written encrypted on the next save.
+func decryptHubSecrets(cfg *types.HubConfig, path string) error {
+	if !secrets.ContainsEncrypted(cfg) {
+		return nil
+	}
+	key, err := secrets.LoadMasterKey()
+	if err != nil {
+		return fmt.Errorf("hub config %s contains encrypted secrets but the master key is unavailable (set %s or restore master.key; if the key is lost, re-enter the secrets — see docs/secrets-at-rest.md): %w",
+			path, secrets.MasterKeyEnvVar, err)
+	}
+	if err := secrets.DecryptFields(cfg, key); err != nil {
+		return fmt.Errorf("failed to decrypt secrets in hub config %s (if the master key was lost, re-enter the secrets — see docs/secrets-at-rest.md): %w", path, err)
+	}
+	return nil
 }
 
 // SaveHubConfig writes hub config to ~/.elasticclaw/hub.yaml.
@@ -102,11 +124,33 @@ func saveHubConfig(cfg *types.HubConfig, mergeDiskSecrets bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(&cfgToWrite)
+	data, err := encryptedHubConfigYAML(&cfgToWrite)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+// encryptedHubConfigYAML marshals cfg with every secret:"true" field encrypted
+// under the master key (generated on first use). The caller's config is never
+// mutated: encryption happens on a deep copy obtained via a YAML round-trip.
+func encryptedHubConfigYAML(cfg *types.HubConfig) ([]byte, error) {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	encCfg := &types.HubConfig{}
+	if err := yaml.Unmarshal(data, encCfg); err != nil {
+		return nil, fmt.Errorf("failed to copy hub config for encryption: %w", err)
+	}
+	key, err := secrets.EnsureMasterKey()
+	if err != nil {
+		return nil, fmt.Errorf("cannot encrypt hub config secrets: %w", err)
+	}
+	if err := secrets.EncryptFields(encCfg, key); err != nil {
+		return nil, fmt.Errorf("failed to encrypt hub config secrets: %w", err)
+	}
+	return yaml.Marshal(encCfg)
 }
 
 func hubConfigPaths() []string {

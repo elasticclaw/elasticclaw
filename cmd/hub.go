@@ -8,6 +8,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	"github.com/elasticclaw/elasticclaw/pkg/secrets"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -66,6 +67,13 @@ func runHub(cmd *cobra.Command, args []string) error {
 	dbPath := hubDBPath
 	if dbPath == "" {
 		dbPath = filepath.Join(dir, "hub.db")
+	}
+
+	// Ensure the secrets master key exists (created on first boot, 0600).
+	// It is required to decrypt enc:v1: values in hub.yaml and to encrypt
+	// sensitive fields on save.
+	if _, err := secrets.EnsureMasterKey(); err != nil {
+		return fmt.Errorf("failed to initialize secrets master key: %w", err)
 	}
 
 	hubCfg, err := config.LoadHubConfig()
