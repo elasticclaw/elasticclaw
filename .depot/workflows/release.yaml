@@ -18,6 +18,24 @@ jobs:
       contents: write
 
     steps:
+      - name: Validate release tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VALID_TAG_RE='^20[0-9]{2}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          if [[ ! "$TAG" =~ $VALID_TAG_RE ]]; then
+            printf '%s\n' \
+              "Invalid release tag: ${TAG}" \
+              "" \
+              "Release tags must use unpadded CalVer components:" \
+              "  valid:   2026.7.7" \
+              "  valid:   2026.7.7.1" \
+              "  valid:   2026.7.7-rc1" \
+              "  invalid: 2026.07.07" \
+              "" \
+              "Do not use leading zeros for month, day, or hotfix numbers." >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
