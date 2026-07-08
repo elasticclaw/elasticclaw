@@ -30,11 +30,13 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/telemetry"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -49,6 +51,7 @@ type Server struct {
 	identity  *HubIdentity
 	mux       *http.ServeMux
 	artifacts artifact.Store
+	metrics   *serverMetrics
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -215,6 +218,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		hubCfg:            hubCfg,
 		identity:          id,
 		artifacts:         artifacts,
+		metrics:           newServerMetrics(db),
 		claws:             make(map[string]*clawConn),
 		users:             make(map[string]*userConn),
 		dependencyStatus:  newDependencyStatusService(hubCfg),
@@ -271,10 +275,23 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		logf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, withRecovery(s.withRequestID(corsMiddleware(mux))))
+	// withMetrics wraps the mux directly so it sees the matched route pattern;
+	// the otelhttp span (opt-in via ELASTICCLAW_OTLP_ENDPOINT) sits just
+	// outside it and is skipped entirely when tracing is disabled.
+	var handler http.Handler = s.withMetrics(mux)
+	if telemetry.Enabled() {
+		handler = otelhttp.NewHandler(handler, "hub")
+	}
+	return http.ListenAndServe(s.addr, withRecovery(s.withRequestID(corsMiddleware(handler))))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
+	// Prometheus metrics (exposition format; no auth, like most exporters —
+	// keep the port private or firewall the path if that is a concern).
+	if s.metrics != nil {
+		mux.Handle("/metrics", s.metrics.handler())
+	}
+
 	// Claw WebSocket
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
 
@@ -1579,6 +1596,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				cc.mu.Unlock()
 				// Send immediately
 				_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+				s.metrics.wsMessage("out", "claw")
 				// Immediately signal to UI that agent is working, before first chunk arrives
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
@@ -2089,6 +2107,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Unlock()
 					return
 				}
+				s.metrics.wsMessage("in", "claw")
 				if msg.Type == "status_pong" {
 					s.mu.Lock()
 					if existing2, ok2 := s.claws[clawID]; ok2 {
@@ -2211,6 +2230,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if err := wsjson.Read(ctx, conn, &msg); err != nil {
 				return
 			}
+			s.metrics.wsMessage("in", "claw")
 			if msg.Type == "heartbeat" {
 				payload, _ := json.Marshal(msg.Payload)
 				var hb struct {
@@ -2729,6 +2749,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 		if err := wsjson.Read(ctx, conn, &msg); err != nil {
 			return
 		}
+		s.metrics.wsMessage("in", "user")
 		// Forward user messages to the specified claw
 		if msg.Type == "message" {
 			payload, _ := json.Marshal(msg.Payload)
@@ -2766,6 +2787,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			s.mu.RUnlock()
 			if cc != nil {
 				_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: hm})
+				s.metrics.wsMessage("out", "claw")
 			}
 		}
 	}
@@ -2774,6 +2796,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) broadcastToUsers(tenantID string, msg types.WSMessage) {
 	for _, uc := range s.broadcastRecipients(tenantID, msg) {
 		_ = wsjson.Write(context.Background(), uc.conn, msg)
+		s.metrics.wsMessage("out", "user")
 	}
 }
 
@@ -2895,7 +2918,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := p.Create(ctx, createReq)
+	createCtx, endSpan := telemetry.StartProviderSpan(ctx, "create", "daytona")
+	instance, err := p.Create(createCtx, createReq)
+	endSpan(err)
 	if err != nil {
 		return fmt.Errorf("daytona create: %w", err)
 	}
@@ -4105,7 +4130,9 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := p.Create(ctx, createReq)
+	createCtx, endSpan := telemetry.StartProviderSpan(ctx, "create", "exedev")
+	instance, err := p.Create(createCtx, createReq)
+	endSpan(err)
 	if err != nil {
 		return fmt.Errorf("exedev create: %w", err)
 	}
@@ -4337,7 +4364,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		Env:  containerEnv,
 	}
 
-	instance, err := p.Create(ctx, createReq)
+	createCtx, endSpan := telemetry.StartProviderSpan(ctx, "create", "docker")
+	instance, err := p.Create(createCtx, createReq)
+	endSpan(err)
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)
 	}
@@ -4561,7 +4590,9 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		Env:           env,
 		TemplateFiles: files,
 	}
-	instance, err := p.Create(ctx, createReq)
+	createCtx, endSpan := telemetry.StartProviderSpan(ctx, "create", "lambda-microvms")
+	instance, err := p.Create(createCtx, createReq)
+	endSpan(err)
 	if err != nil {
 		return fmt.Errorf("lambda microvms create: %w", err)
 	}
@@ -4587,11 +4618,13 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		return fmt.Errorf("replicated init: %w", err)
 	}
 
-	vmID, err := p.ProvisionClaw(ctx, replicatedpkg.VMCreateRequest{
+	createCtx, endSpan := telemetry.StartProviderSpan(ctx, "create", "replicated")
+	vmID, err := p.ProvisionClaw(createCtx, replicatedpkg.VMCreateRequest{
 		Name:         req.ProviderName, // stable ec-<shortid>
 		InstanceType: req.InstanceType,
 		TTL:          req.TTL,
 	}, nil, nil)
+	endSpan(err)
 	if err != nil {
 		return fmt.Errorf("replicated provision: %w", err)
 	}
@@ -6272,7 +6305,10 @@ func (s *Server) terminateDockerVM(vmID string) {
 		logf("terminateDockerVM: provider init error: %v", err)
 		return
 	}
-	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "docker")
+	err = p.Destroy(destroyCtx, vmID, false)
+	endSpan(err)
+	if err != nil {
 		logf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
 		return
 	}
@@ -6293,7 +6329,10 @@ func (s *Server) terminateLambdaMicroVM(vmID string) {
 		logf("terminateLambdaMicroVM: provider init error: %v", err)
 		return
 	}
-	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "lambda-microvms")
+	err = p.Destroy(destroyCtx, vmID, false)
+	endSpan(err)
+	if err != nil {
 		logf("terminateLambdaMicroVM: failed to destroy MicroVM %s: %v", vmID, err)
 		return
 	}
@@ -6316,7 +6355,10 @@ func (s *Server) terminateExedevVM(vmID string) {
 		logf("terminateExedevVM: provider init error: %v", err)
 		return
 	}
-	if err := p.Destroy(context.Background(), vmID, false); err != nil {
+	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "exedev")
+	err = p.Destroy(destroyCtx, vmID, false)
+	endSpan(err)
+	if err != nil {
 		logf("terminateExedevVM: failed to destroy VM %s: %v", vmID, err)
 		return
 	}
@@ -6336,7 +6378,10 @@ func (s *Server) terminateDaytonaVM(workspaceID string) {
 		logf("terminateDaytonaVM: provider init error: %v", err)
 		return
 	}
-	if err := p.Destroy(context.Background(), workspaceID, false); err != nil {
+	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "daytona")
+	err = p.Destroy(destroyCtx, workspaceID, false)
+	endSpan(err)
+	if err != nil {
 		logf("terminateDaytonaVM: failed to destroy workspace %s: %v", workspaceID, err)
 		return
 	}
@@ -6357,7 +6402,10 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 		logf("terminateReplicatedVM: provider init error: %v", err)
 		return
 	}
-	if err := p.DeleteVM(context.Background(), vmID); err != nil {
+	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "replicated")
+	err = p.DeleteVM(destroyCtx, vmID)
+	endSpan(err)
+	if err != nil {
 		logf("terminateReplicatedVM: failed to delete VM %s: %v", vmID, err)
 		return
 	}
@@ -6500,6 +6548,7 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
+	s.metrics.wsMessage("out", "claw")
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
@@ -6534,6 +6583,9 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+	if err == nil {
+		s.metrics.wsMessage("out", "claw")
+	}
 
 	if err != nil {
 		// Write failed - re-enqueue the message at the front so it can be retried

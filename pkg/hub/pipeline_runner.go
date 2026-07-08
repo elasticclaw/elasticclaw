@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/telemetry"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -392,7 +393,7 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 	return s.executePipelineCommand(clawID, command, timeout)
 }
 
-func (s *Server) executePipelineCommand(clawID, command string, timeout time.Duration) (*pipelineRunResult, error) {
+func (s *Server) executePipelineCommand(clawID, command string, timeout time.Duration) (result *pipelineRunResult, err error) {
 	var providerName, providerID, sshHost, sshUser string
 	var sshPort int
 	if err := s.db.QueryRow(`
@@ -408,6 +409,10 @@ func (s *Server) executePipelineCommand(clawID, command string, timeout time.Dur
 	workspaceCommand := `cd "$HOME/.openclaw/workspace" && ` + command
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+30*time.Second)
 	defer cancel()
+
+	// One span around the whole exec dispatch, whichever provider serves it.
+	ctx, endSpan := telemetry.StartProviderSpan(ctx, "exec", providerName)
+	defer func() { endSpan(err) }()
 
 	s.mu.RLock()
 	provCfg, ok := s.hubCfg.Providers[providerName]

@@ -1,11 +1,14 @@
 package hub
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"runtime/debug"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 )
@@ -47,6 +50,75 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 		w.Header().Set("X-Request-ID", id)
 		l := s.logger.With("request_id", id)
 		next.ServeHTTP(w, r.WithContext(logger.NewContext(r.Context(), l)))
+	})
+}
+
+// statusRecorder captures the response status code while delegating
+// everything else — including Hijack (WebSocket upgrades) and Flush — to the
+// wrapped ResponseWriter.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusRecorder) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack supports handlers (WebSocket upgrades) that type-assert
+// http.Hijacker directly instead of going through http.ResponseController.
+func (w *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.status == 0 {
+		w.status = http.StatusSwitchingProtocols
+	}
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+// Flush supports streaming handlers that type-assert http.Flusher directly.
+func (w *statusRecorder) Flush() {
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// withMetrics records a request counter and a latency histogram for every
+// request, labeled by the ServeMux route pattern (never the raw path, to keep
+// cardinality bounded). It must wrap the mux directly so r.Pattern is set on
+// the same *http.Request it observes. Failed integration webhook deliveries
+// (4xx/5xx) are additionally counted per integration.
+func (s *Server) withMetrics(next http.Handler) http.Handler {
+	if s.metrics == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.metrics.observeRequest(route, r.Method, status, time.Since(start))
+		if status >= 400 {
+			if integration := webhookIntegration(route); integration != "" {
+				s.metrics.webhookError(integration)
+			}
+		}
 	})
 }
 
