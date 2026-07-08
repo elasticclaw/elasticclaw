@@ -2349,8 +2349,12 @@ printf 'password=%%s\n' "$token"
 CREDEOF
 umask "$old_umask"
 chmod 0700 "$helper_path"
-git config --global credential.helper "$helper_path"
-git config --global --get-all credential.helper | grep -Fx "$helper_path" >/dev/null
+git config --global --unset-all credential.helper >/dev/null 2>&1 || true
+git config --global credential.helper "!$helper_path"
+git config --global --get-all credential.helper | grep -Fx "!$helper_path" >/dev/null
+credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git credential fill)"
+printf '%%s\n' "$credential_check" | grep -Fx 'username=x-access-token' >/dev/null
+printf '%%s\n' "$credential_check" | grep -E '^password=.' >/dev/null
 `, shellQuote(tokenEndpoint))
 }
 
