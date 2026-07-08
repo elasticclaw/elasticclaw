@@ -15,6 +15,8 @@ package claws
 import (
 	"database/sql"
 	"sync"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 )
 
 // Service hosts the claw-core logic. All mutable state stays on the hub's
@@ -26,7 +28,10 @@ type Service struct {
 
 	// db, mu and fileAckMu mirror the hub Server fields of the same names
 	// so the mechanically-moved method bodies keep their original shape.
+	// st wraps the same database with the store repositories (phase-2
+	// item 2.4); the claw/message persistence goes through it.
 	db        *sql.DB
+	st        *store.Store
 	mu        *sync.RWMutex
 	fileAckMu *sync.Mutex
 
@@ -40,6 +45,7 @@ func New(deps Deps) *Service {
 	return &Service{
 		deps:      deps,
 		db:        deps.DB,
+		st:        store.New(deps.DB),
 		mu:        deps.Mu,
 		fileAckMu: deps.FileAckMu,
 		metrics:   metricsHook{ws: deps.WSMessageMetric},

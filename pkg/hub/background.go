@@ -97,8 +97,7 @@ func (s *Server) checkClawStatus() {
 			}
 		}
 
-		var name string
-		_ = s.db.QueryRow(`SELECT name FROM claws WHERE id=?`, id).Scan(&name)
+		name := s.st().Claws().Name(context.Background(), id)
 
 		// Detect silent death: no status response AND no user message for >5 min
 		// while the claw is supposedly connected and gateway was ready

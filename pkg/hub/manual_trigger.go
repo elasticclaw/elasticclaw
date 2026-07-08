@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -9,8 +10,8 @@ import (
 // loadManualTriggerInputs reads the manual trigger inputs stored in a claw's
 // TRIGGER_INPUTS.json file. Returns nil if the claw was not manually triggered.
 func (s *Server) loadManualTriggerInputs(clawID string) map[string]string {
-	var filesJSON, tagsJSON string
-	if err := s.db.QueryRow(`SELECT template_files, tags FROM claws WHERE id=?`, clawID).Scan(&filesJSON, &tagsJSON); err != nil {
+	filesJSON, tagsJSON, err := s.st().Claws().TemplateFilesTags(context.Background(), clawID)
+	if err != nil {
 		if err != sql.ErrNoRows {
 			logf("[manual-trigger] failed to load claw %s: %v", clawID[:8], err)
 		}

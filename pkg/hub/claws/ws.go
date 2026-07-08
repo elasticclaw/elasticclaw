@@ -63,10 +63,8 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
 
-	var bootstrapOK int
-	var provider string
 	var currentStatus string
-	_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&bootstrapOK, &provider)
+	bootstrapOK, provider := s.st.Claws().BootstrapInfo(r.Context(), clawID, tenantID)
 
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
@@ -75,28 +73,20 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 			desiredStatus = "starting"
 		}
 		currentStatus = desiredStatus
-		_ = s.db.QueryRow(
-			`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
-			 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
-			 last_seen=excluded.last_seen
-			 RETURNING status`,
-			clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),
-		).Scan(&currentStatus)
+		if status, err := s.st.Claws().RegisterUpsert(r.Context(), clawID, tenantID, rp.Name, rp.Template, desiredStatus, now()); err == nil {
+			currentStatus = status
+		}
 		if currentStatus == "deleted" {
 			conn.Close(websocket.StatusPolicyViolation, "claw deleted")
 			return
 		}
 	} else {
 		// For status channel, just read current status from DB
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
+		currentStatus = s.st.Claws().StatusForTenant(r.Context(), clawID, tenantID)
 	}
 
-	var registrationTagsJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&registrationTagsJSON)
+	registrationTags, _ := s.st.Claws().Tags(r.Context(), clawID, tenantID)
 	allowWake := AllowWakeBeforeBootstrap(provider, bootstrapOK)
-	var registrationTags []string
-	_ = json.Unmarshal([]byte(registrationTagsJSON), &registrationTags)
 
 	if isStatusChannel {
 		// Status channel connects to existing claw
@@ -199,11 +189,10 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		if partialContent != "" {
 			interruptedAt := now()
-			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-				partialMsgID, clawID, tenantID, "claw", partialContent, interruptedAt,
-			)
+			_ = s.st.Messages().Upsert(context.Background(), types.HubMessage{
+				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+				Content: partialContent, CreatedAt: interruptedAt,
+			})
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{
 				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
 				Content: partialContent, CreatedAt: interruptedAt,
@@ -218,12 +207,11 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				"status":  "idle",
 			},
 		})
-		var currentStatus string
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		currentStatus := s.st.Claws().Status(context.Background(), clawID)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
 		// and is watching for PR merge; deleted means it's being cleaned up.
 		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" {
-			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
+			_ = s.st.Claws().MarkOffline(context.Background(), clawID, now())
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
 		logfCtx(r.Context(), "[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
@@ -237,7 +225,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = s.db.Exec(`UPDATE claws SET last_seen=? WHERE id=?`, now(), clawID)
+			_ = s.st.Claws().TouchLastSeen(ctx, clawID, now())
 		default:
 			var msg types.WSMessage
 			conn.SetReadLimit(32 << 20) // 32MB (file uploads ride this channel)
@@ -266,11 +254,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) {
-							res, execErr := s.db.Exec(`UPDATE claws SET status='connected', bootstrap_status='' WHERE id=? AND status='starting' AND bootstrap_ok=1`, clawID)
-							var rowsUpdated int64
-							if execErr == nil {
-								rowsUpdated, _ = res.RowsAffected()
-							}
+							rowsUpdated, _ := s.st.Claws().PromoteStartingToConnected(ctx, clawID)
 							cc.GatewayReady = true
 							if rowsUpdated > 0 {
 								s.broadcastToUsers(tenantID, types.WSMessage{
@@ -362,10 +346,10 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 					content := activityContent(activity)
 					if content != "" && !isUnhelpfulActivityContent(activity, content) {
 						format := "activity:" + string(payload)
-						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
-							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt,
-						)
+						_ = s.st.Messages().Insert(ctx, types.HubMessage{
+							ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
+							Role: "activity", Content: content, Format: format, CreatedAt: createdAt,
+						})
 					}
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type:    "agent_activity",
@@ -403,11 +387,10 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						bufContent := cc.StreamingBuf.String()
 						cc.Mu.Unlock()
 						// Upsert — insert on first chunk, update content on subsequent
-						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-							 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-							msgID, clawID, tenantID, "claw", bufContent, now(),
-						)
+						_ = s.st.Messages().Upsert(ctx, types.HubMessage{
+							ID: msgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+							Content: bufContent, CreatedAt: now(),
+						})
 					}
 				}
 			} else if msg.Type == "message" {
@@ -455,11 +438,10 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if !skipPersist && strings.TrimSpace(persistContent) != "" {
-					_, _ = s.db.Exec(
-						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-						 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt,
-					)
+					_ = s.st.Messages().Upsert(ctx, types.HubMessage{
+						ID: hm.ID, ClawID: hm.ClawID, TenantID: hm.TenantID, Role: hm.Role,
+						Content: persistContent, CreatedAt: hm.CreatedAt,
+					})
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
 				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)

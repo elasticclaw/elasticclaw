@@ -26,10 +26,7 @@ func (s *Service) injectHubMessage(ctx context.Context, cc *Conn, text string) {
 		Format:    "pre",
 		CreatedAt: now(),
 	}
-	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
-		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
-	)
+	_ = s.st.Messages().Insert(ctx, msg)
 	_ = wsjson.Write(ctx, cc.WS, types.WSMessage{Type: "message", Payload: msg})
 	s.metrics.wsMessage("out", "claw")
 	s.broadcastToUsers(cc.TenantID, types.WSMessage{Type: "message", Payload: msg})

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,8 +59,8 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 }
 
 func (s *Server) triggerActorForClaw(clawID string) triggerActor {
-	var actorJSON string
-	if err := s.db.QueryRow(`SELECT COALESCE(trigger_actor_json,'') FROM claws WHERE id=?`, clawID).Scan(&actorJSON); err != nil {
+	actorJSON, err := s.st().Claws().TriggerActorJSON(context.Background(), clawID)
+	if err != nil {
 		return triggerActor{}
 	}
 	if strings.TrimSpace(actorJSON) == "" {

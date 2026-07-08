@@ -48,10 +48,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		Content:   wakeMessageMarker,
 		CreatedAt: now(),
 	}
-	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt,
-	)
+	_ = s.st().Messages().Insert(context.Background(), wakeMsg)
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.WS, types.WSMessage{Type: "message", Payload: wakeMsg})
 
@@ -93,15 +90,12 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 }
 
 func (s *Server) tenantIDForClaw(clawID string) string {
-	var tenantID string
-	_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID)
-	return tenantID
+	return s.st().Claws().TenantID(context.Background(), clawID)
 }
 
 func (s *Server) hasSystemMarker(clawID, marker string) bool {
-	var count int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='system' AND content=?`, clawID, marker).Scan(&count)
-	return count > 0
+	has, _ := s.st().Messages().HasSystemMarker(context.Background(), clawID, marker)
+	return has
 }
 
 func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
@@ -113,15 +107,11 @@ func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
 	if s.hasSystemMarker(clawID, marker) {
 		return false
 	}
-	res, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, tenantID, "system", marker, now(),
-	)
-	if err != nil {
-		return false
-	}
-	rows, _ := res.RowsAffected()
-	return rows > 0
+	err := s.st().Messages().Insert(context.Background(), types.HubMessage{
+		ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
+		Role: "system", Content: marker, CreatedAt: now(),
+	})
+	return err == nil
 }
 
 func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
@@ -182,7 +172,6 @@ func isValidInitialPlan(content string) bool {
 // clawHasMessages returns true if the claw already has message history.
 // Used to suppress the intro wake message on reconnect.
 func (s *Server) clawHasMessages(clawID string) bool {
-	var count int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id = ?`, clawID).Scan(&count)
+	count, _ := s.st().Messages().CountByClaw(context.Background(), clawID)
 	return count > 0
 }

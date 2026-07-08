@@ -1,6 +1,12 @@
 package claws
 
-import "github.com/google/uuid"
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
 
 // flushStreamingSegment persists the accumulated streaming buffer of a claw
 // as its own message segment (used when agent activity splits a turn),
@@ -21,12 +27,10 @@ func (s *Service) flushStreamingSegment(clawID, tenantID string, cc *Conn) error
 	cc.StreamingSplit = true
 	cc.Mu.Unlock()
 
-	_, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-		msgID, clawID, tenantID, "claw", content, now(),
-	)
-	return err
+	return s.st.Messages().Upsert(context.Background(), types.HubMessage{
+		ID: msgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+		Content: content, CreatedAt: now(),
+	})
 }
 
 // FlushStreamingSegment is the exported entry point for the pkg/hub bridge

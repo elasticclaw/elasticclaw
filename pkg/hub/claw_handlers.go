@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -25,16 +26,12 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.db.Query(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
-		tenantID,
-	)
+	dbClaws, err := s.st().Claws().List(r.Context(), tenantID)
 	if err != nil {
 		logfCtx(r.Context(), "handleClaws query error: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal", fmt.Sprintf("db error: %v", err))
 		return
 	}
-	defer rows.Close()
 
 	// Resolve access config and GitHub login for tag-based filtering
 	s.mu.RLock()
@@ -46,19 +43,9 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	ghLogin := githubLoginFromContext(r.Context())
 
 	var out []types.Claw
-	for rows.Next() {
-		var c types.Claw
-		var lastSeen sql.NullTime
-		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID); err != nil {
-			continue
-		}
+	for _, c := range dbClaws {
 		c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
-		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 		c.TenantID = tenantID
-		if lastSeen.Valid {
-			c.LastSeen = lastSeen.Time
-		}
 		s.mu.RLock()
 		cc, online := s.claws[c.ID]
 		s.mu.RUnlock()
@@ -201,15 +188,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.DefaultModel = defaultModel
 
 	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
-	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
-	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
-	)
-	if err != nil {
+	if err := s.st().Claws().Create(r.Context(), store.CreateParams{
+		ID: clawID, TenantID: tenantID, Name: req.Name, Template: req.TemplateName,
+		Provider: req.Provider, DefaultModel: req.DefaultModel, TemplateFiles: string(filesJSON),
+		GitHubRepos: githubReposJSON, LinearWorkspace: linearWorkspace,
+		Nix: req.Nix, Docker: req.Docker, Tags: tags, Color: color, LLMKey: req.LLMKey,
+		Status: "provisioning", CreatedAt: now(),
+	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
@@ -348,8 +335,8 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPatch {
 		if ghLogin != "" {
-			var tagsJSON string
-			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+			clawTags, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
+			if err != nil {
 				if err == sql.ErrNoRows {
 					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
@@ -357,8 +344,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			var clawTags []string
-			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
 				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
@@ -374,7 +359,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.Name != nil && strings.TrimSpace(*body.Name) != "" {
-			_, _ = s.db.Exec(`UPDATE claws SET name = ? WHERE id = ? AND tenant_id = ?`, strings.TrimSpace(*body.Name), clawID, tenantID)
+			_ = s.st().Claws().SetName(r.Context(), clawID, tenantID, strings.TrimSpace(*body.Name))
 		}
 		if body.Tags != nil {
 			// Normalize tags to k=v format
@@ -390,8 +375,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 					normalized = append(normalized, t)
 				}
 			}
-			tagsJSON, _ := json.Marshal(normalized)
-			_, _ = s.db.Exec(`UPDATE claws SET tags = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`, string(tagsJSON), clawID, tenantID)
+			_ = s.st().Claws().SetTags(r.Context(), clawID, tenantID, normalized)
 			// Update in-memory cache so WS broadcast filtering stays current
 			s.mu.Lock()
 			if cc, ok := s.claws[clawID]; ok {
@@ -401,7 +385,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Color != nil {
 			color := resolveColor(*body.Color, clawID)
-			_, _ = s.db.Exec(`UPDATE claws SET color = ? WHERE id = ? AND tenant_id = ?`, color, clawID, tenantID)
+			_ = s.st().Claws().SetColor(r.Context(), clawID, tenantID, color)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -409,14 +393,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodDelete {
 		// Resolve short ID prefix to full UUID
-		var fullID string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
-		if fullID != "" {
+		if fullID := s.st().Claws().ResolveID(r.Context(), tenantID, clawID); fullID != "" {
 			clawID = fullID
 		}
 		if ghLogin != "" {
-			var tagsJSON string
-			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSON); err != nil {
+			clawTags, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
+			if err != nil {
 				if err == sql.ErrNoRows {
 					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
@@ -424,8 +406,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			var clawTags []string
-			_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
 			if !canModifyClaw(accessCfg, ghLogin, clawTags) {
 				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
@@ -433,8 +413,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Look up provider info before marking deleted so we can terminate the VM.
-		var provider, providerID, clawStatus string
-		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(status,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID, &clawStatus)
+		provider, providerID, clawStatus := s.st().Claws().ProviderInfo(r.Context(), clawID, tenantID)
 
 		// Post a comment on the linked issue/story when a factory-created claw is killed manually
 		factory, issueID := s.findFactoryForClaw(clawID)
@@ -477,14 +456,13 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
+		rowsAffected, err := s.st().Claws().SoftDelete(r.Context(), clawID, tenantID)
 		if err != nil {
 			logfCtx(r.Context(), "kill: db soft-delete error for claw %s: %v", clawID, err)
 			writeErr(w, http.StatusInternalServerError, "internal", fmt.Sprintf("db error: %v", err))
 			return
 		}
-		rowsAffected, err := res.RowsAffected()
-		if err != nil || rowsAffected == 0 {
+		if rowsAffected == 0 {
 			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
@@ -511,8 +489,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if providerID != "" {
 				s.terminateVM(provider, providerID)
 			}
-			_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
-			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
+			if err := s.st().Claws().PurgeConversation(context.Background(), clawID); err != nil {
+				logf("[kill] purge conversation for claw %s: %v", clawID, err)
+			}
 		}()
 		// Promote any pending claws now that a slot is free
 		go s.promotePendingClaws()
@@ -520,14 +499,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var c types.Claw
-	var lastSeen sql.NullTime
-	var tagsJSON string
-	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
-		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
-	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
+	c, err := s.st().Claws().Get(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
 		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
@@ -542,9 +514,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	c.TenantID = tenantID
 	c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
-	if lastSeen.Valid {
-		c.LastSeen = lastSeen.Time
-	}
 	s.mu.RLock()
 	cc, online := s.claws[c.ID]
 	s.mu.RUnlock()

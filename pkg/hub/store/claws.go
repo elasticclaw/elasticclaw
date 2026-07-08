@@ -305,3 +305,59 @@ func (r *ClawsRepo) ListStatusRows(ctx context.Context, tenantID string) []Statu
 	}
 	return out
 }
+
+// Name returns the claw's display name ("" when absent).
+func (r *ClawsRepo) Name(ctx context.Context, clawID string) string {
+	var name string
+	_ = r.st.queryRowScan(ctx, `SELECT name FROM claws WHERE id=?`, []any{clawID}, &name)
+	return name
+}
+
+// TenantID returns the claw's tenant ("" when absent).
+func (r *ClawsRepo) TenantID(ctx context.Context, clawID string) string {
+	var tenantID string
+	_ = r.st.queryRowScan(ctx, `SELECT tenant_id FROM claws WHERE id=?`, []any{clawID}, &tenantID)
+	return tenantID
+}
+
+// TemplateFilesTags returns the claw's raw template_files and tags JSON.
+func (r *ClawsRepo) TemplateFilesTags(ctx context.Context, clawID string) (filesJSON, tagsJSON string, err error) {
+	err = r.st.queryRowScan(ctx, `SELECT template_files, tags FROM claws WHERE id=?`, []any{clawID}, &filesJSON, &tagsJSON)
+	return filesJSON, tagsJSON, err
+}
+
+// NixEnabled reports whether the claw was provisioned with Nix.
+func (r *ClawsRepo) NixEnabled(ctx context.Context, clawID string) (bool, error) {
+	var nixEnabled int
+	if err := r.st.queryRowScan(ctx, `SELECT nix FROM claws WHERE id=?`, []any{clawID}, &nixEnabled); err != nil {
+		return false, err
+	}
+	return nixEnabled != 0, nil
+}
+
+// TriggerActorJSON returns the claw's raw trigger actor JSON.
+func (r *ClawsRepo) TriggerActorJSON(ctx context.Context, clawID string) (string, error) {
+	var actorJSON string
+	err := r.st.queryRowScan(ctx, `SELECT COALESCE(trigger_actor_json,'') FROM claws WHERE id=?`, []any{clawID}, &actorJSON)
+	return actorJSON, err
+}
+
+// StatusCounts returns the number of claws per status (the Prometheus
+// claw-status gauge).
+func (r *ClawsRepo) StatusCounts(ctx context.Context) (map[string]float64, error) {
+	rows, err := r.st.query(ctx, `SELECT status, COUNT(*) FROM claws GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]float64)
+	for rows.Next() {
+		var status string
+		var count float64
+		if err := rows.Scan(&status, &count); err != nil {
+			continue
+		}
+		counts[status] = count
+	}
+	return counts, rows.Err()
+}

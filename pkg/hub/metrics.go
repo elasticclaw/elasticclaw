@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 	"net/http"
 	"strconv"
 	"time"
@@ -43,17 +45,11 @@ func (c *clawStatusCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, status := range knownClawStatuses {
 		counts[status] = 0
 	}
-	rows, err := c.db.Query(`SELECT status, COUNT(*) FROM claws GROUP BY status`)
+	statusCounts, err := store.New(c.db).Claws().StatusCounts(context.Background())
 	if err != nil {
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var status string
-		var count float64
-		if err := rows.Scan(&status, &count); err != nil {
-			continue
-		}
+	for status, count := range statusCounts {
 		counts[status] = count
 	}
 	for status, count := range counts {

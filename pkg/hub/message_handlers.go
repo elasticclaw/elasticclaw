@@ -4,6 +4,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
@@ -59,8 +61,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		// Apply tag-based interact filter for GitHub OAuth users
 		if ghLoginMsg != "" {
 			// Fetch claw tags to check interact permission
-			var tagsJSONMsg string
-			if err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg); err != nil {
+			clawTagsMsg, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
+			if err != nil {
 				if err == sql.ErrNoRows {
 					writeErr(w, http.StatusNotFound, "not_found", "not found")
 				} else {
@@ -68,8 +70,6 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			var clawTagsMsg []string
-			_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 			if !canInteractWithClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
 				writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 				return
@@ -80,10 +80,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
 		}
-		if _, err := s.db.Exec(
-			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
-		); err != nil {
+		if err := s.st().Messages().Insert(r.Context(), msg); err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
 		}
@@ -122,14 +119,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ghLoginMsg != "" {
-		var tagsJSONMsg string
-		err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+		clawTagsMsg, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
 		if err == sql.ErrNoRows {
 			writeErr(w, http.StatusNotFound, "not_found", "not found")
 			return
 		}
-		var clawTagsMsg []string
-		_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 		if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
 			writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
@@ -144,47 +138,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	before := r.URL.Query().Get("before") // ISO timestamp — return messages older than this
 	after := r.URL.Query().Get("after")   // ISO timestamp — return messages newer than this
 
-	var rows *sql.Rows
-	var err error
-	if before != "" {
-		// Fetch older messages — return in ASC order after fetching DESC
-		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
-			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
-			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
-		)
-	} else if after != "" {
-		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
-			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
-			 ORDER BY created_at ASC LIMIT ?`,
-			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
-		)
-	} else {
-		// Default: last N messages
-		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
-			 WHERE claw_id = ? AND tenant_id = ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
-			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
-		)
-	}
+	msgs, err := s.st().Messages().ListVisible(r.Context(), store.VisibleWindow{
+		ClawID:               clawID,
+		TenantID:             tenantID,
+		Before:               before,
+		After:                after,
+		Limit:                limit,
+		HiddenSystemContents: hiddenSystemMessagesContents(),
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
-	}
-	defer rows.Close()
-	var msgs []types.HubMessage
-	for rows.Next() {
-		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
-			continue
-		}
-		msgs = append(msgs, m)
 	}
 	// Reverse DESC results to get ASC order
 	if before != "" || (before == "" && after == "") {
@@ -204,8 +168,11 @@ type activitySummaryMeta struct {
 	To    string `json:"to,omitempty"`
 }
 
-func hiddenSystemMessagesArgs() []interface{} {
-	return []interface{}{
+// hiddenSystemMessagesContents lists the system-role marker messages the
+// UI never shows (wake and initial-plan markers). The store excludes
+// them from every conversation page.
+func hiddenSystemMessagesContents() []string {
+	return []string{
 		wakeMessageMarker,
 		defaultWakeContent,
 		initialPlanWakeContent,
@@ -213,10 +180,6 @@ func hiddenSystemMessagesArgs() []interface{} {
 		initialPlanAcceptedMarker,
 		initialPlanCorrectionSentMarker,
 	}
-}
-
-func hiddenSystemMessagesSQL() string {
-	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))`
 }
 
 func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
@@ -312,48 +275,15 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 		order = "asc"
 	}
 
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
-		FROM messages
-		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
-	args := []interface{}{clawID, tenantID}
-	if from != "" {
-		query += ` AND created_at > ?`
-		if parsed := parseTimeCursor(from); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, from)
-		}
-	}
-	if to != "" {
-		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(to); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, to)
-		}
-	}
-	if before != "" {
-		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, before)
-		}
-	}
-	if order == "desc" {
-		query += ` ORDER BY created_at DESC LIMIT ?`
-	} else {
-		query += ` ORDER BY created_at ASC LIMIT ?`
-	}
-	args = append(args, limit)
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "db error")
-		return
-	}
-	defer rows.Close()
-	msgs, err := scanHubMessages(rows)
+	msgs, err := s.st().Messages().ListActivity(r.Context(), store.ActivityWindow{
+		ClawID:   clawID,
+		TenantID: tenantID,
+		From:     cursorValue(from),
+		To:       cursorValue(to),
+		Before:   cursorValue(before),
+		Limit:    limit,
+		Desc:     order == "desc",
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
@@ -390,40 +320,21 @@ func parseTimeCursor(raw string) *time.Time {
 	return nil
 }
 
-func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
-	var msgs []types.HubMessage
-	for rows.Next() {
-		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
-			return nil, err
-		}
-		msgs = append(msgs, m)
+// cursorValue converts a raw query-string cursor to the value bound in
+// the SQL comparison: the parsed time when it is RFC3339, the raw string
+// otherwise, nil when absent (pre-extraction behavior).
+func cursorValue(raw string) any {
+	if raw == "" {
+		return nil
 	}
-	return msgs, rows.Err()
+	if parsed := parseTimeCursor(raw); parsed != nil {
+		return *parsed
+	}
+	return raw
 }
 
 func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
-		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' ` + hiddenSystemMessagesSQL()
-	args := []interface{}{clawID, tenantID}
-	args = append(args, hiddenSystemMessagesArgs()...)
-	if before != "" {
-		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, before)
-		}
-	}
-	query += ` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	msgs, err := scanHubMessages(rows)
+	msgs, err := s.st().Messages().ListConversation(context.Background(), clawID, tenantID, cursorValue(before), limit, hiddenSystemMessagesContents())
 	if err != nil {
 		return nil, err
 	}
@@ -434,33 +345,12 @@ func (s *Server) queryConversationMessages(clawID, tenantID, before string, limi
 }
 
 func (s *Server) hasConversationBefore(clawID, tenantID string, before time.Time) (bool, error) {
-	query := `SELECT COUNT(*) FROM messages
-		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' AND created_at < ? ` + hiddenSystemMessagesSQL()
-	args := []interface{}{clawID, tenantID, before}
-	args = append(args, hiddenSystemMessagesArgs()...)
-	var count int
-	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
-		return false, err
-	}
-	return count > 0, nil
+	return s.st().Messages().HasConversationBefore(context.Background(), clawID, tenantID, before, hiddenSystemMessagesContents())
 }
 
 func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {
-	query := `SELECT COUNT(*), COALESCE(MIN(created_at), ''), COALESCE(MAX(created_at), '')
-		FROM messages WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
-	args := []interface{}{clawID, tenantID}
-	if from != nil {
-		query += ` AND created_at > ?`
-		args = append(args, *from)
-	}
-	if to != nil {
-		query += ` AND created_at < ?`
-		args = append(args, *to)
-	}
-
-	var count int
-	var minCreated, maxCreated string
-	if err := s.db.QueryRow(query, args...).Scan(&count, &minCreated, &maxCreated); err != nil {
+	count, _, maxCreated, err := s.st().Messages().ActivityStats(context.Background(), clawID, tenantID, from, to)
+	if err != nil {
 		return nil, err
 	}
 	if count == 0 {
@@ -500,8 +390,7 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	s.mu.RUnlock()
 
-	var tagsJSONMsg string
-	err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
+	clawTagsMsg, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return false
@@ -510,8 +399,6 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return false
 	}
-	var clawTagsMsg []string
-	_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false

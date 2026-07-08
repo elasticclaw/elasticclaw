@@ -226,3 +226,20 @@ func (r *MessagesRepo) ActivityStats(ctx context.Context, clawID, tenantID strin
 	err = r.st.queryRowScan(ctx, query, args, &count, &minCreated, &maxCreated)
 	return count, minCreated, maxCreated, err
 }
+
+// CountByClaw returns the claw's total message count.
+func (r *MessagesRepo) CountByClaw(ctx context.Context, clawID string) (int, error) {
+	var count int
+	err := r.st.queryRowScan(ctx, `SELECT COUNT(*) FROM messages WHERE claw_id = ?`, []any{clawID}, &count)
+	return count, err
+}
+
+// HasSystemMarker reports whether the claw already has a system-role
+// message with exactly the marker content.
+func (r *MessagesRepo) HasSystemMarker(ctx context.Context, clawID, marker string) (bool, error) {
+	var count int
+	if err := r.st.queryRowScan(ctx, `SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='system' AND content=?`, []any{clawID, marker}, &count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}

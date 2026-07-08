@@ -37,13 +37,7 @@ func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up SSH details, verify tenant owns the claw
-	var sshHost string
-	var sshPort int
-	var sshUser string
-	err = s.db.QueryRow(
-		`SELECT ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
-		clawID, tenantID,
-	).Scan(&sshHost, &sshPort, &sshUser)
+	sshHost, sshPort, sshUser, err := s.st.Claws().SSHEndpoint(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
