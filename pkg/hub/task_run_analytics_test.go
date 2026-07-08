@@ -932,12 +932,12 @@ func TestTaskRunHumanInteractionInstrumentationRecordsWarnings(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-human-events")
 	runID, _ := startTaskRunForTest(t, s, "claw-human-events", "human-events")
 	pr := clawPR{
-		clawID:              "claw-human-events",
-		repo:                "elastic/claw",
-		prNumber:            75,
-		prURL:               "https://github.com/elastic/claw/pull/75",
-		lastCommentID:       10,
-		lastReviewCommentID: 20,
+		ClawID:              "claw-human-events",
+		Repo:                "elastic/claw",
+		PRNumber:            75,
+		PRURL:               "https://github.com/elastic/claw/pull/75",
+		LastCommentID:       10,
+		LastReviewCommentID: 20,
 	}
 
 	s.checkPRComments(pr, []interface{}{
@@ -947,7 +947,7 @@ func TestTaskRunHumanInteractionInstrumentationRecordsWarnings(t *testing.T) {
 			"body":     "please adjust naming",
 			"html_url": "https://github.com/elastic/claw/pull/75#issuecomment-11",
 		},
-	}, prCommentOptions{skipBugbot: true, skipGreptile: true, forward: true})
+	}, prCommentOptions{SkipBugbot: true, SkipGreptile: true, Forward: true})
 	s.checkGreptileReviewComments(pr, []interface{}{
 		map[string]interface{}{
 			"id":       float64(21),
@@ -970,11 +970,11 @@ func TestTaskRunHumanPRCommentInstrumentationRecordsWithoutForwarding(t *testing
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-human-pr-comment")
 	runID, _ := startTaskRunForTest(t, s, "claw-human-pr-comment", "human-pr-comment")
 	pr := clawPR{
-		clawID:        "claw-human-pr-comment",
-		repo:          "elastic/claw",
-		prNumber:      76,
-		prURL:         "https://github.com/elastic/claw/pull/76",
-		lastCommentID: 100,
+		ClawID:        "claw-human-pr-comment",
+		Repo:          "elastic/claw",
+		PRNumber:      76,
+		PRURL:         "https://github.com/elastic/claw/pull/76",
+		LastCommentID: 100,
 	}
 
 	s.checkPRComments(pr, []interface{}{
@@ -984,7 +984,7 @@ func TestTaskRunHumanPRCommentInstrumentationRecordsWithoutForwarding(t *testing
 			"body":     "normal PR comment",
 			"html_url": "https://github.com/elastic/claw/pull/76#issuecomment-101",
 		},
-	}, prCommentOptions{skipBugbot: true, skipGreptile: true})
+	}, prCommentOptions{SkipBugbot: true, SkipGreptile: true})
 
 	assertTaskRunEventExists(t, db, runID, taskRunEventHumanPRComment, taskRunInteractionWarning)
 	assertTaskRunSummary(t, db, runID, taskRunStatusRunning, taskRunPhaseAgentRunning, "", `["human_pr_comment"]`, 1, 0, 0, 0, 0)
@@ -1002,10 +1002,10 @@ func TestTaskRunRequestedChangesInstrumentationRecordsWarning(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-requested-changes")
 	runID, _ := startTaskRunForTest(t, s, "claw-requested-changes", "requested-changes")
 	pr := clawPR{
-		clawID:   "claw-requested-changes",
-		repo:     "elastic/claw",
-		prNumber: 77,
-		prURL:    "https://github.com/elastic/claw/pull/77",
+		ClawID:   "claw-requested-changes",
+		Repo:     "elastic/claw",
+		PRNumber: 77,
+		PRURL:    "https://github.com/elastic/claw/pull/77",
 	}
 
 	s.checkPRReviews(pr, []interface{}{
@@ -1043,11 +1043,11 @@ func TestTaskRunRequestedChangesInstrumentationIgnoresHistoricalReviews(t *testi
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-requested-changes-history")
 	runID, _ := startTaskRunForTest(t, s, "claw-requested-changes-history", "requested-changes-history")
 	pr := clawPR{
-		clawID:       "claw-requested-changes-history",
-		repo:         "elastic/claw",
-		prNumber:     78,
-		prURL:        "https://github.com/elastic/claw/pull/78",
-		lastReviewID: 300,
+		ClawID:       "claw-requested-changes-history",
+		Repo:         "elastic/claw",
+		PRNumber:     78,
+		PRURL:        "https://github.com/elastic/claw/pull/78",
+		LastReviewID: 300,
 	}
 
 	s.checkPRReviews(pr, []interface{}{

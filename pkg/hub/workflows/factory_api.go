@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"encoding/json"
@@ -14,7 +14,7 @@ import (
 //	GET  /api/factories        → list all factories (secrets masked)
 //	POST /api/factories        → upsert batch from factory push
 //	DELETE /api/factories?name=<name> → remove a factory
-func (s *Server) handleFactoriesCRUD(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleFactoriesCRUD(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.handleFactoriesList(w, r)
@@ -73,7 +73,7 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 	}
 }
 
-func (s *Server) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
 	nameFilter := strings.TrimSpace(r.URL.Query().Get("name"))
 
 	factories, err := loadExternalFactories()
@@ -100,7 +100,7 @@ type FactoryPushRequest struct {
 	Factories []*types.FactoryConfig `json:"factories"`
 }
 
-func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	var req FactoryPushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -165,7 +165,7 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, name string) {
+func (s *Service) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, name string) {
 	if err := deleteExternalFactory(name); err != nil {
 		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
 		return

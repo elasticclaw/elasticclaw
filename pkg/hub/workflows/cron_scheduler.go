@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"database/sql"
@@ -14,7 +14,7 @@ import (
 
 // cronScheduler manages scheduled workflow runs using cron expressions.
 type cronScheduler struct {
-	srv *Server
+	srv *Service
 
 	mu        sync.RWMutex
 	cron      *cron.Cron
@@ -46,7 +46,7 @@ const (
 	workflowRunFailed  workflowRunStartStatus = "failed"
 )
 
-func newCronScheduler(srv *Server) *cronScheduler {
+func newCronScheduler(srv *Service) *cronScheduler {
 	return &cronScheduler{
 		srv:          srv,
 		entries:      make(map[string]cron.EntryID),
@@ -301,9 +301,9 @@ func (cs *cronScheduler) recordRun(runID string, sw *scheduledWorkflow, status, 
 	now := time.Now().UTC()
 
 	var tenantID string
-	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+	_ = cs.srv.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
 
-	_, err := cs.srv.db.Exec(
+	_, err := cs.srv.deps.DB.Exec(
 		`INSERT INTO workflow_runs (id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		runID, tenantID, sw.workflow.Name, sw.workspace.Name, "cron", status, clawID, context, now, now,
@@ -315,7 +315,7 @@ func (cs *cronScheduler) recordRun(runID string, sw *scheduledWorkflow, status, 
 
 // updateRun updates an existing workflow run with claw ID and status.
 func (cs *cronScheduler) updateRun(runID, clawID, status string) {
-	_, err := cs.srv.db.Exec(
+	_, err := cs.srv.deps.DB.Exec(
 		`UPDATE workflow_runs SET claw_id = ?, status = ? WHERE id = ?`,
 		clawID, status, runID,
 	)
@@ -327,7 +327,7 @@ func (cs *cronScheduler) updateRun(runID, clawID, status string) {
 // finishRun marks a workflow run as completed.
 func (cs *cronScheduler) finishRun(runID, result string) {
 	now := time.Now().UTC()
-	_, err := cs.srv.db.Exec(
+	_, err := cs.srv.deps.DB.Exec(
 		`UPDATE workflow_runs SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
 		"completed", result, now, runID,
 	)
@@ -339,7 +339,7 @@ func (cs *cronScheduler) finishRun(runID, result string) {
 // failRun marks a workflow run as failed with a result message.
 func (cs *cronScheduler) failRun(runID, result string) {
 	now := time.Now().UTC()
-	_, err := cs.srv.db.Exec(
+	_, err := cs.srv.deps.DB.Exec(
 		`UPDATE workflow_runs SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
 		"failed", result, now, runID,
 	)
@@ -355,7 +355,7 @@ func (cs *cronScheduler) finishRunByClawID(clawID, status, result string) {
 		return
 	}
 	now := time.Now().UTC()
-	_, err := cs.srv.db.Exec(
+	_, err := cs.srv.deps.DB.Exec(
 		`UPDATE workflow_runs SET status = ?, result = ?, finished_at = ? WHERE claw_id = ? AND status = 'running'`,
 		status, result, now, clawID,
 	)
@@ -481,9 +481,9 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 	}
 
 	var tenantID string
-	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+	_ = cs.srv.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
 
-	rows, err := cs.srv.db.Query(
+	rows, err := cs.srv.deps.DB.Query(
 		`SELECT id, tenant_id, workflow_name, workspace_name, trigger_type, status, result, claw_id, run_context, started_at, finished_at, created_at
 		 FROM workflow_runs
 		 WHERE tenant_id = ? AND workspace_name = ? AND workflow_name = ?
@@ -521,6 +521,6 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 }
 
 // loadAllWorkspaces loads all workspace configurations.
-func (s *Server) loadAllWorkspaces() ([]*types.WorkspaceConfig, error) {
+func (s *Service) loadAllWorkspaces() ([]*types.WorkspaceConfig, error) {
 	return loadExternalWorkspaces()
 }

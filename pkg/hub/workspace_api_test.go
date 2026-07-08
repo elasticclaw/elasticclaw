@@ -197,7 +197,7 @@ func TestWorkflowPushReloadsCronScheduler(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	s.cronScheduler = newCronScheduler(s)
-	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+	s.cronScheduler.SetCronForTest(cron.New(cron.WithSeconds()))
 
 	body := `{"workspaces":[{"name":"engineering"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
@@ -219,8 +219,8 @@ func TestWorkflowPushReloadsCronScheduler(t *testing.T) {
 		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
-		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	if _, ok := s.cronScheduler.Entries()["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.Entries())
 	}
 }
 
@@ -278,13 +278,13 @@ func TestCronSchedulerStartLoadsExternalWorkflows(t *testing.T) {
 	)
 
 	s.cronScheduler = newCronScheduler(s)
-	if err := s.cronScheduler.start(); err != nil {
+	if err := s.cronScheduler.Start(); err != nil {
 		t.Fatalf("start cron scheduler: %v", err)
 	}
-	t.Cleanup(s.cronScheduler.stop)
+	t.Cleanup(s.cronScheduler.Stop)
 
-	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
-		t.Fatalf("cron workflow was not registered on startup: %#v", s.cronScheduler.entries)
+	if _, ok := s.cronScheduler.Entries()["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered on startup: %#v", s.cronScheduler.Entries())
 	}
 }
 
@@ -350,7 +350,7 @@ func TestWorkspaceWorkflowPatchReloadsCronScheduler(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	s.cronScheduler = newCronScheduler(s)
-	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+	s.cronScheduler.SetCronForTest(cron.New(cron.WithSeconds()))
 
 	body := `{"workspaces":[{"name":"engineering"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
@@ -371,8 +371,8 @@ func TestWorkspaceWorkflowPatchReloadsCronScheduler(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
-		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	if _, ok := s.cronScheduler.Entries()["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.Entries())
 	}
 
 	req = httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/dependency-update-go", strings.NewReader(`{"enabled":false}`))
@@ -384,8 +384,8 @@ func TestWorkspaceWorkflowPatchReloadsCronScheduler(t *testing.T) {
 		t.Fatalf("patch status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; ok {
-		t.Fatalf("disabled cron workflow remained registered: %#v", s.cronScheduler.entries)
+	if _, ok := s.cronScheduler.Entries()["engineering/dependency-update-go"]; ok {
+		t.Fatalf("disabled cron workflow remained registered: %#v", s.cronScheduler.Entries())
 	}
 }
 

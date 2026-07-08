@@ -239,7 +239,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 
 	// Start cron scheduler for workflow triggers
 	srv.cronScheduler = newCronScheduler(srv)
-	if err := srv.cronScheduler.start(); err != nil {
+	if err := srv.cronScheduler.Start(); err != nil {
 		logf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
@@ -1420,7 +1420,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
 		}
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
+			s.cronScheduler.FinishRunByClawID(clawID, "canceled", "manually killed")
 		}
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{

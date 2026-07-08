@@ -22,12 +22,12 @@ func TestPollHumanInlineReviewCommentForwardsToClaw(t *testing.T) {
 	startTaskRunForTest(t, s, "claw-inline-poll", "inline-poll")
 
 	pr := clawPR{
-		id:                  "pr-claw-inline-poll",
-		clawID:              "claw-inline-poll",
-		repo:                "elastic/claw",
-		prNumber:            75,
-		prURL:               "https://github.com/elastic/claw/pull/75",
-		lastReviewCommentID: 20,
+		ID:                  "pr-claw-inline-poll",
+		ClawID:              "claw-inline-poll",
+		Repo:                "elastic/claw",
+		PRNumber:            75,
+		PRURL:               "https://github.com/elastic/claw/pull/75",
+		LastReviewCommentID: 20,
 	}
 
 	s.checkGreptileReviewComments(pr, []interface{}{
@@ -56,12 +56,12 @@ func TestPollHumanRequestedChangesReviewForwardsToClaw(t *testing.T) {
 	startTaskRunForTest(t, s, "claw-review-poll", "review-poll")
 
 	pr := clawPR{
-		id:           "pr-claw-review-poll",
-		clawID:       "claw-review-poll",
-		repo:         "elastic/claw",
-		prNumber:     77,
-		prURL:        "https://github.com/elastic/claw/pull/77",
-		lastReviewID: 200,
+		ID:           "pr-claw-review-poll",
+		ClawID:       "claw-review-poll",
+		Repo:         "elastic/claw",
+		PRNumber:     77,
+		PRURL:        "https://github.com/elastic/claw/pull/77",
+		LastReviewID: 200,
 	}
 
 	s.checkPRReviews(pr, []interface{}{
@@ -171,12 +171,12 @@ func TestReviewCommentWebhookAndStalePollDoNotDuplicateMessage(t *testing.T) {
 	waitForMessageContains(t, db, "claw-inline-race", "hub", []string{"race inline concern"})
 
 	stalePollSnapshot := clawPR{
-		id:                  "pr-claw-inline-race",
-		clawID:              "claw-inline-race",
-		repo:                "elastic/claw",
-		prNumber:            83,
-		prURL:               "https://github.com/elastic/claw/pull/83",
-		lastReviewCommentID: 20,
+		ID:                  "pr-claw-inline-race",
+		ClawID:              "claw-inline-race",
+		Repo:                "elastic/claw",
+		PRNumber:            83,
+		PRURL:               "https://github.com/elastic/claw/pull/83",
+		LastReviewCommentID: 20,
 	}
 	s.checkGreptileReviewComments(stalePollSnapshot, []interface{}{
 		map[string]interface{}{
@@ -217,12 +217,12 @@ func TestReviewWebhookAndStalePollDoNotDuplicateMessage(t *testing.T) {
 	waitForMessageContains(t, db, "claw-review-race", "hub", []string{"race requested changes"})
 
 	stalePollSnapshot := clawPR{
-		id:           "pr-claw-review-race",
-		clawID:       "claw-review-race",
-		repo:         "elastic/claw",
-		prNumber:     84,
-		prURL:        "https://github.com/elastic/claw/pull/84",
-		lastReviewID: 200,
+		ID:           "pr-claw-review-race",
+		ClawID:       "claw-review-race",
+		Repo:         "elastic/claw",
+		PRNumber:     84,
+		PRURL:        "https://github.com/elastic/claw/pull/84",
+		LastReviewID: 200,
 	}
 	s.checkPRReviews(stalePollSnapshot, []interface{}{
 		map[string]interface{}{
@@ -296,12 +296,12 @@ func TestPollRecoversLowerReviewCommentAfterHigherWebhook(t *testing.T) {
 	waitForMessageContains(t, db, "claw-inline-recover", "hub", []string{"webhook comment 23"})
 
 	stalePollSnapshot := clawPR{
-		id:                  "pr-claw-inline-recover",
-		clawID:              "claw-inline-recover",
-		repo:                "elastic/claw",
-		prNumber:            86,
-		prURL:               "https://github.com/elastic/claw/pull/86",
-		lastReviewCommentID: 20,
+		ID:                  "pr-claw-inline-recover",
+		ClawID:              "claw-inline-recover",
+		Repo:                "elastic/claw",
+		PRNumber:            86,
+		PRURL:               "https://github.com/elastic/claw/pull/86",
+		LastReviewCommentID: 20,
 	}
 	s.checkGreptileReviewComments(stalePollSnapshot, []interface{}{
 		map[string]interface{}{

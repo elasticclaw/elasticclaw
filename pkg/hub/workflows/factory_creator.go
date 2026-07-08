@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func resolveProvider(factory *types.FactoryConfig, tmplCfg *types.TemplateConfig
 // reason is a human-readable string describing why the claw is being created
 // (e.g. "linear webhook", "manual trigger", "poll"). It is logged for debugging.
 // Returns the claw ID, whether it was queued as pending (concurrency limit), and any error.
-func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, bool, error) {
+func (s *Service) createClawFromFactory(factory *types.FactoryConfig, issueID string, inputs map[string]string, prebuiltTemplateFiles map[string]string, reason string) (string, bool, error) {
 	// Resolve template files (or use pre-built ones from caller)
 	var templateFiles map[string]string
 	var err error
@@ -107,7 +107,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 
 	// Find tenant
 	var tenantID string
-	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+	if err := s.deps.DB.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
 		return "", false, fmt.Errorf("no tenant: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	// Build env vars
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
+		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg().ClawToken,
 	}
 
 	// Resolve integration tokens based on factory type
@@ -163,7 +163,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	// Template-level refs go first; factory-level refs override them for the same env var.
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
 				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
@@ -177,7 +177,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	// Factory-level refs win over template-level refs for the same env var.
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
-			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+			if val, ok := s.hubCfg().Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
 				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
@@ -275,27 +275,27 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	templateFiles["SECRETS.md"] = secretsContent
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
+	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {
-		s.mu.RLock()
-		for _, k := range s.hubCfg.LLMKeys {
+		s.deps.Mu.RLock()
+		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
-				defaultModel = resolveDefaultModelForKey(s.hubCfg, k)
+				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.mu.RUnlock()
+		s.deps.Mu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.mu.RLock()
-		defaultModel = s.hubCfg.DefaultModel
-		s.mu.RUnlock()
+		s.deps.Mu.RLock()
+		defaultModel = s.hubCfg().DefaultModel
+		s.deps.Mu.RUnlock()
 	}
 
 	// Build tags
-	tags := mergeTags(factory.Template, factory.Tags, nil)
+	tags := s.deps.MergeTags(factory.Template, factory.Tags, nil)
 	hasfactory := false
 	for _, t := range tags {
 		if t == "factory:"+factory.Name {
@@ -321,11 +321,11 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	githubReposJSON, _ := json.Marshal(githubRepos)
 
 	// Check concurrency limit (group-aware)
-	s.promoteMu.Lock()
+	s.deps.PromoteMu.Lock()
 
-	s.mu.RLock()
+	s.deps.Mu.RLock()
 	groupName, groupLimit := s.resolveGroupLimit(factory)
-	s.mu.RUnlock()
+	s.deps.Mu.RUnlock()
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
@@ -358,7 +358,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		jiraIssueID = issueID
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.deps.DB.Exec(`
 		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id, status, created_at, factory_name, concurrency_group)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
@@ -366,15 +366,15 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, initialStatus, now, factory.Name, groupName,
 	)
 
-	s.promoteMu.Unlock()
+	s.deps.PromoteMu.Unlock()
 
 	if err != nil {
 		return "", false, fmt.Errorf("db insert: %w", err)
 	}
 
-	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForFactory(factory)
+	analyticsEnabled, requiresPR, excludedReason := s.deps.TaskRunAnalyticsContractForFactory(factory)
 	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
-		RunKind:          taskRunKindForFactory(factory),
+		RunKind:          s.deps.TaskRunKindForFactory(factory),
 		OwnerType:        taskRunOwnerFactory,
 		OwnerName:        factory.Name,
 		OwnerDisplayName: factory.Name,
@@ -391,7 +391,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		StartedAt:        now,
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {
-		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
+		if _, cleanupErr := s.deps.DB.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
 			logf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
 		go s.promotePendingClaws()
@@ -409,10 +409,10 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	// Provision asynchronously
-	provCfg, _ := s.hubCfg.Providers[provider]
+	provCfg, _ := s.hubCfg().Providers[provider]
 	go func() {
 		var currentStatus string
-		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
+		_ = s.deps.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
@@ -447,7 +447,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+				_, _ = s.deps.DB.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)

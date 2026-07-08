@@ -183,7 +183,7 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if s.cronScheduler != nil {
-		if err := s.cronScheduler.reload(); err != nil {
+		if err := s.cronScheduler.Reload(); err != nil {
 			logfCtx(r.Context(), "[cron] failed to reload workflows after workflow push for workspace %s: %v", name, err)
 		}
 	}
@@ -268,7 +268,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if s.cronScheduler != nil {
-		if err := s.cronScheduler.reload(); err != nil {
+		if err := s.cronScheduler.Reload(); err != nil {
 			logfCtx(r.Context(), "[cron] failed to reload workflows after workflow patch for workspace %s workflow %s: %v", workspace.Name, workflow.Name, err)
 		}
 	}

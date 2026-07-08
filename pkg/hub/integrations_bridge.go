@@ -63,7 +63,7 @@ func (s *Server) integrationsSvc() *integrations.Service {
 
 		CronFinishRunByClawID: func(clawID, status, detail string) {
 			if s.cronScheduler != nil {
-				s.cronScheduler.finishRunByClawID(clawID, status, detail)
+				s.cronScheduler.FinishRunByClawID(clawID, status, detail)
 			}
 		},
 
@@ -107,11 +107,11 @@ func (s *Server) integrationsSvc() *integrations.Service {
 
 		StorePRMention: s.storePRMention,
 		ForwardHumanReviewComment: func(clawID, repo string, prNumber int, prURL string, id int64, login, body, htmlURL, path string, line int) {
-			pr := clawPR{clawID: clawID, repo: repo, prNumber: prNumber, prURL: prURL}
+			pr := clawPR{ClawID: clawID, Repo: repo, PRNumber: prNumber, PRURL: prURL}
 			s.forwardHumanReviewComment(pr, id, login, body, htmlURL, path, line)
 		},
 		ForwardHumanRequestedChangesReview: func(clawID, repo string, prNumber int, prURL string, id int64, login, body, htmlURL string) {
-			pr := clawPR{clawID: clawID, repo: repo, prNumber: prNumber, prURL: prURL}
+			pr := clawPR{ClawID: clawID, Repo: repo, PRNumber: prNumber, PRURL: prURL}
 			s.forwardHumanRequestedChangesReview(pr, id, login, body, htmlURL)
 		},
 		IsHumanGitHubActor:    s.isHumanGitHubActor,

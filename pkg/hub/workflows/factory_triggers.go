@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"database/sql"
@@ -32,12 +32,12 @@ func triggerPayloadJSON(payload any) string {
 	return string(b)
 }
 
-func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, source string, payload any) (bool, error) {
+func (s *Service) claimFactoryTrigger(factoryName, integration, triggerKey, source string, payload any) (bool, error) {
 	if factoryName == "" || integration == "" || triggerKey == "" {
 		return false, fmt.Errorf("invalid factory trigger claim")
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.deps.DB.Begin()
 	if err != nil {
 		return false, err
 	}
@@ -99,8 +99,8 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 
 	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
 		_, _ = tx.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "canceled", "factory trigger reclaimed")
+		if s.cronScheduler() != nil {
+			s.cronScheduler().finishRunByClawID(clawID, "canceled", "factory trigger reclaimed")
 		}
 	}
 	_, err = tx.Exec(`
@@ -115,11 +115,11 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 	return true, tx.Commit()
 }
 
-func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, clawID string) error {
+func (s *Service) completeFactoryTrigger(factoryName, integration, triggerKey, clawID string) error {
 	if clawID == "" {
 		return fmt.Errorf("complete factory trigger: missing claw id")
 	}
-	res, err := s.db.Exec(`
+	res, err := s.deps.DB.Exec(`
 		UPDATE factory_triggers
 		   SET claw_id=?, status='active', updated_at=?
 		 WHERE factory_name=? AND integration=? AND trigger_key=?`,
@@ -135,8 +135,8 @@ func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, cl
 	return nil
 }
 
-func (s *Server) failFactoryTrigger(factoryName, integration, triggerKey string) {
-	_, _ = s.db.Exec(`
+func (s *Service) failFactoryTrigger(factoryName, integration, triggerKey string) {
+	_, _ = s.deps.DB.Exec(`
 		UPDATE factory_triggers
 		   SET status='failed', updated_at=?
 		 WHERE factory_name=? AND integration=? AND trigger_key=? AND claw_id=''`,

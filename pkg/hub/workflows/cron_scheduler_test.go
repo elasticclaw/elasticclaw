@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"testing"

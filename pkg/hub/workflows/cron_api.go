@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 
 // handleCronWorkflowTrigger handles POST /api/workspaces/{workspace}/workflows/{workflow}/cron/trigger
 // Manually triggers a cron workflow run.
-func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -19,12 +19,12 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 	workspace := r.PathValue("workspace")
 	workflow := r.PathValue("workflow")
 
-	if s.cronScheduler == nil {
+	if s.cronScheduler() == nil {
 		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	key, err := s.cronScheduler.manualTrigger(workspace, workflow)
+	key, err := s.cronScheduler().manualTrigger(workspace, workflow)
 	if err != nil {
 		if _, ok := err.(*cronTriggerNotFoundError); ok {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -47,7 +47,7 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 
 // handleCronWorkflowRuns handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/runs
 // Returns the run history for a cron workflow.
-func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -56,7 +56,7 @@ func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 	workspace := r.PathValue("workspace")
 	workflow := r.PathValue("workflow")
 
-	if s.cronScheduler == nil {
+	if s.cronScheduler() == nil {
 		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -69,7 +69,7 @@ func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	runs, err := s.cronScheduler.getRunHistory(workspace, workflow, limit)
+	runs, err := s.cronScheduler().getRunHistory(workspace, workflow, limit)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get run history: %v", err), http.StatusInternalServerError)
 		return
@@ -84,7 +84,7 @@ func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 
 // handleCronWorkflowNextRun handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/next
 // Returns the next scheduled run time for a cron workflow.
-func (s *Server) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -93,12 +93,12 @@ func (s *Server) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Reques
 	workspace := r.PathValue("workspace")
 	workflow := r.PathValue("workflow")
 
-	if s.cronScheduler == nil {
+	if s.cronScheduler() == nil {
 		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	nextRuns := s.cronScheduler.getNextRuns()
+	nextRuns := s.cronScheduler().getNextRuns()
 	key := workspace + "/" + workflow
 
 	nextRun, ok := nextRuns[key]

@@ -1,4 +1,4 @@
-package hub
+package workflows
 
 import (
 	"encoding/json"
@@ -200,7 +200,7 @@ func coerceInput(typ string, raw interface{}) (string, error) {
 }
 
 // handleFactoryTrigger handles POST /api/factories/{name}/trigger.
-func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -215,7 +215,7 @@ func (s *Server) handleFactoryTrigger(w http.ResponseWriter, r *http.Request) {
 	s.triggerFactoryByName(w, r, name)
 }
 
-func (s *Server) triggerFactoryByName(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Service) triggerFactoryByName(w http.ResponseWriter, r *http.Request, name string) {
 	factory, err := s.resolveFactoryByName(name)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to load factory: "+err.Error())
@@ -228,7 +228,7 @@ func (s *Server) triggerFactoryByName(w http.ResponseWriter, r *http.Request, na
 	s.triggerFactoryConfig(w, r, factory)
 }
 
-func (s *Server) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, factory *types.FactoryConfig) {
+func (s *Service) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, factory *types.FactoryConfig) {
 	// Verify factory supports manual triggers
 	if !factory.EnableManualTrigger {
 		jsonError(w, http.StatusForbidden, "factory does not support manual triggers")
@@ -271,7 +271,7 @@ func (s *Server) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, fa
 	})
 }
 
-func (s *Server) resolveFactoryByName(name string) (*types.FactoryConfig, error) {
+func (s *Service) resolveFactoryByName(name string) (*types.FactoryConfig, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, nil
 	}
