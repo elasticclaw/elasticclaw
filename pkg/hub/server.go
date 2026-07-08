@@ -289,133 +289,127 @@ func (s *Server) Run(opts ...RunOptions) error {
 	return http.ListenAndServe(s.addr, httpserver.WithRecovery(httpserver.WithRequestID(s.logger, httpserver.CORS(handler))))
 }
 
+// registerRoutes wires the Server's handlers and auth middlewares into the
+// httpserver route table. The route patterns themselves live in
+// pkg/hub/httpserver; this method is only the composition site.
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	// Prometheus metrics (exposition format; no auth, like most exporters —
-	// keep the port private or firewall the path if that is a concern).
+	var metricsHandler http.Handler
 	if s.metrics != nil {
-		mux.Handle("/metrics", s.metrics.handler())
+		metricsHandler = s.metrics.handler()
 	}
+	httpserver.RegisterRoutes(mux, serverAuth{s}, httpserver.Handlers{
+		Metrics: metricsHandler,
 
-	// Claw WebSocket
-	mux.HandleFunc("/claw/ws", s.handleClawWS)
+		ClawWS: s.handleClawWS,
+		UserWS: s.handleUserWS,
 
-	// Browser WebSocket
-	mux.HandleFunc("/api/ws", s.withAuth(s.handleUserWS))
+		Login:               s.handleLogin,
+		WebLogin:            s.handleWebLogin,
+		WebLogout:           s.handleWebLogout,
+		WebMe:               s.handleWebMe,
+		AuthConfig:          s.handleAuthConfig,
+		GitHubClientID:      s.handleGitHubClientID,
+		GitHubOAuthExchange: s.handleGitHubOAuthExchange,
+		Branding:            s.handleBranding,
 
-	// REST API
-	mux.HandleFunc("/api/login", s.handleLogin)
-	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
-	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
-	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
-	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
-	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
-	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
-	mux.HandleFunc("/api/branding", s.handleBranding) // public — no auth required
-	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
-	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
-	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
-	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
-	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
-	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
+		HubConfig:            s.handleHubConfig,
+		Settings:             s.handleSettings,
+		SettingsStatus:       s.handleSettingsStatus,
+		GitHubAppTest:        s.handleGitHubAppTest,
+		ModelAuthLogin:       s.handleModelAuthLogin,
+		ModelAuthLoginStatus: s.handleModelAuthLoginStatus,
 
-	// Template store
-	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
-	mux.HandleFunc("/api/templates/{name}", s.withWebAuth(s.handleTemplateDetail))
+		Templates:      s.handleTemplates,
+		TemplateDetail: s.handleTemplateDetail,
 
-	// Integration webhooks (signature-validated, no session auth)
-	mux.HandleFunc("/api/integrations/linear/webhook", s.handleLinearWebhook)
-	mux.HandleFunc("/api/integrations/github/webhook", s.handleGitHubWebhook)
-	mux.HandleFunc("/api/integrations/github-issues/webhook", s.handleGitHubIssuesWebhook)
-	mux.HandleFunc("/api/integrations/shortcut/webhook", s.handleShortcutWebhook)
-	mux.HandleFunc("/api/integrations/jira/webhook", s.handleJiraWebhook)
-	mux.HandleFunc("/api/integrations/external/webhook", s.handleExternalWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/linear", s.handleLinearWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github", s.handleGitHubWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/github-issues", s.handleGitHubIssuesWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/shortcut", s.handleShortcutWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/jira", s.handleJiraWebhook)
-	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
-	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
-	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
-	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
-	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
-	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
-	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
-	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
-	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
-	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
-	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
-	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
-	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
-	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
-	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
-	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
-	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
-	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
-	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
-	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
-	mux.HandleFunc("/api/terminal/", s.handleTerminal)
-	mux.HandleFunc("/api/github/token/", s.handleGitHubToken) // credential helper endpoint (claw-token auth)
-	mux.HandleFunc("/api/messages/", s.withAuth(s.handleMessages))
-	mux.HandleFunc("/api/files/", s.withAuth(s.handleFileUpload))
-	mux.HandleFunc("/api/files/view/", s.withAuth(s.handleFileView))
-	mux.HandleFunc("/api/claws/", s.withAuth(s.handleClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
+		LinearWebhook:       s.handleLinearWebhook,
+		GitHubWebhook:       s.handleGitHubWebhook,
+		GitHubIssuesWebhook: s.handleGitHubIssuesWebhook,
+		ShortcutWebhook:     s.handleShortcutWebhook,
+		JiraWebhook:         s.handleJiraWebhook,
+		ExternalWebhook:     s.handleExternalWebhook,
 
-	// AI Config
-	// AI Config — register sub-paths before the bare path so Go's exact-match
-	// ServeMux routes them correctly (avoids 404 on specific sub-paths).
-	mux.HandleFunc("/api/settings/ai-config/apply", s.withWebAdminAuth(s.handleAIConfigApply))
-	mux.HandleFunc("/api/settings/ai-config/revert", s.withWebAdminAuth(s.handleAIConfigRevert))
-	mux.HandleFunc("/api/settings/ai-config/backup", s.withWebAdminAuth(s.handleAIConfigBackup))
-	mux.HandleFunc("/api/settings/ai-config/stream", s.withWebAdminAuth(s.handleAIConfigStream))
-	mux.HandleFunc("/api/settings/ai-config/current-config", s.withWebAdminAuth(s.handleAIConfigCurrentConfig))
-	mux.HandleFunc("/api/settings/ai-config", s.withWebAdminAuth(s.handleAIConfig))
+		FactoryEvents:                 s.handleFactoryEvents,
+		FactoryTrigger:                s.handleFactoryTrigger,
+		FactoryAnalytics:              s.handleFactoryAnalytics,
+		FactoriesCRUD:                 s.handleFactoriesCRUD,
+		AllFactoriesAnalytics:         s.handleAllFactoriesAnalytics,
+		TaskRunAnalyticsSummary:       s.handleTaskRunAnalyticsSummary,
+		TaskRunAnalyticsFilterOptions: s.handleTaskRunAnalyticsFilterOptions,
+		TaskRunAnalyticsRuns:          s.handleTaskRunAnalyticsRuns,
+		DependencyStatus:              s.handleDependencyStatus,
 
-	// Doctor / Troubleshoot
-	mux.HandleFunc("/api/doctor", s.withWebAdminAuth(s.handleDoctor))
-	mux.HandleFunc("/api/troubleshoot/stream", s.withWebAdminAuth(s.handleTroubleshootStream))
+		WorkspacesCRUD:             s.handleWorkspacesCRUD,
+		WorkspaceWorkflowsList:     s.handleWorkspaceWorkflowsList,
+		WorkspaceWorkflowDetail:    s.handleWorkspaceWorkflowDetail,
+		WorkspaceWorkflowTrigger:   s.handleWorkspaceWorkflowTrigger,
+		CronWorkflowTrigger:        s.handleCronWorkflowTrigger,
+		CronWorkflowRuns:           s.handleCronWorkflowRuns,
+		CronWorkflowNextRun:        s.handleCronWorkflowNextRun,
+		WorkspaceSecretsCRUD:       s.handleWorkspaceSecretsCRUD,
+		WorkspaceGitHubAppsCRUD:    s.handleWorkspaceGitHubAppsCRUD,
+		WorkspaceIssueTrackersCRUD: s.handleWorkspaceIssueTrackersCRUD,
 
-	// Health
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		SecretsCRUD:          s.handleSecretsCRUD,
+		MCPCrud:              s.handleMCPCrud,
+		Claws:                s.handleClaws,
+		ClawDetail:           s.handleClawDetail,
+		CheckpointBlobUpload: s.handleCheckpointBlobUpload,
+		CheckpointInternal:   s.handleCheckpointInternal,
+		VolumeArchive:        s.handleVolumeArchive,
+		Terminal:             s.handleTerminal,
+		GitHubToken:          s.handleGitHubToken,
+		Messages:             s.handleMessages,
+		FileUpload:           s.handleFileUpload,
+		FileView:             s.handleFileView,
+		ClawSubresource:      s.handleClawSubresource,
+
+		AIConfigApply:         s.handleAIConfigApply,
+		AIConfigRevert:        s.handleAIConfigRevert,
+		AIConfigBackup:        s.handleAIConfigBackup,
+		AIConfigStream:        s.handleAIConfigStream,
+		AIConfigCurrentConfig: s.handleAIConfigCurrentConfig,
+		AIConfig:              s.handleAIConfig,
+
+		Doctor:             s.handleDoctor,
+		TroubleshootStream: s.handleTroubleshootStream,
+
+		DebugClaws: s.handleDebugClaws,
 	})
-	if bridgePath, bridgeToken := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"), os.Getenv("ELASTICCLAW_E2E_BRIDGE_TOKEN"); bridgePath != "" && bridgeToken != "" {
-		mux.HandleFunc("/__elasticclaw_e2e/claw-bridge-linux-amd64", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			if r.URL.Query().Get("token") != bridgeToken {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			http.ServeFile(w, r, bridgePath)
-		})
-	}
+}
 
-	// Debug: dump in-memory claw state (auth required)
-	mux.HandleFunc("/api/debug/claws", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		type debugClaw struct {
-			ID           string `json:"id"`
-			GatewayReady bool   `json:"gateway_ready"`
-			ContextUsage int    `json:"context_usage"`
-		}
-		out := make([]debugClaw, 0, len(s.claws))
-		for id, cc := range s.claws {
-			out = append(out, debugClaw{ID: id, GatewayReady: cc.gatewayReady, ContextUsage: cc.contextUsage})
-		}
-		s.mu.RUnlock()
-		jsonOK(w, out)
-	}))
+// serverAuth adapts the Server's unexported auth middlewares to the
+// httpserver.Auth interface consumed by the route table.
+type serverAuth struct{ s *Server }
+
+func (a serverAuth) WithAuth(next http.HandlerFunc) http.HandlerFunc { return a.s.withAuth(next) }
+
+func (a serverAuth) WithWebAuth(next http.HandlerFunc) http.HandlerFunc {
+	return a.s.withWebAuth(next)
+}
+
+func (a serverAuth) WithWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return a.s.withWebAdminAuth(next)
+}
+
+func (a serverAuth) WithAdminForMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
+	return a.s.withAdminForMethods(next, methods...)
+}
+
+// handleDebugClaws dumps the in-memory claw state (auth required).
+func (s *Server) handleDebugClaws(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	type debugClaw struct {
+		ID           string `json:"id"`
+		GatewayReady bool   `json:"gateway_ready"`
+		ContextUsage int    `json:"context_usage"`
+	}
+	out := make([]debugClaw, 0, len(s.claws))
+	for id, cc := range s.claws {
+		out = append(out, debugClaw{ID: id, GatewayReady: cc.gatewayReady, ContextUsage: cc.contextUsage})
+	}
+	s.mu.RUnlock()
+	jsonOK(w, out)
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────

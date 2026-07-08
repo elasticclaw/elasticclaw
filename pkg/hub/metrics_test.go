@@ -62,4 +62,3 @@ func TestWithMetricsNilSafe(t *testing.T) {
 	s.metrics.WebhookError("linear")
 	s.metrics.ObserveRequest("/x", http.MethodGet, 200, 0)
 }
-

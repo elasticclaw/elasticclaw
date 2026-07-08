@@ -133,4 +133,3 @@ func (m *serverMetrics) WebhookError(integration string) {
 	}
 	m.webhookErrors.WithLabelValues(integration).Inc()
 }
-
