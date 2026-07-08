@@ -2336,10 +2336,11 @@ if [ -z "$claw_token" ]; then
   echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
   exit 1
 fi
-response="$(curl -fsS --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
+response="$(curl -sS --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
 token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 if [ -z "$token" ]; then
   echo "GitHub token response did not include token" >&2
+  printf '%%s\n' "$response" >&2
   exit 1
 fi
 printf 'protocol=https\n'
