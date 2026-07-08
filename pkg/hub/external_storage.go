@@ -668,7 +668,7 @@ func (s *Server) MigrateLegacyTemplates() error {
 			continue
 		}
 		migrated++
-		fmt.Printf("[hub] migrated template %q to external storage\n", name)
+		logf("[hub] migrated template %q to external storage", name)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("migrate templates: %w", err)

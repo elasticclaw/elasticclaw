@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        # Structured logging only in the hub: use logger.FromContext(ctx) /
+        # the logf/logfCtx bridges instead of the stdlib printf-style loggers.
+        - pattern: '^log\.(Print|Printf|Println)$'
+          msg: use log/slog (logger.FromContext or the logf/logfCtx bridges) instead of the stdlib log package
+        - pattern: '^fmt\.(Print|Printf|Println)$'
+          msg: use log/slog instead of printing to stdout
+  exclusions:
+    rules:
+      # The structured-logging rule applies to the hub only (for now); the CLI
+      # under cmd/ legitimately prints to stdout.
+      - path-except: ^pkg/hub/
+        linters:
+          - forbidigo
+      # Test scaffolding (fake claw bridge) prints progress to stdout on purpose.
+      - path: ^pkg/hub/factorytest/
+        linters:
+          - forbidigo
