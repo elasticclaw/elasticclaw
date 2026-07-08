@@ -9,11 +9,12 @@ import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
 import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
+import { STORAGE_KEY_SELECTED_CLAW } from "@/lib/constants"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
-    return localStorage.getItem('elasticclaw_selected_claw') ?? null
+    return localStorage.getItem(STORAGE_KEY_SELECTED_CLAW) ?? null
   })
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
@@ -155,7 +156,7 @@ export default function Home() {
   const handleSelectClaw = useCallback(
     (id: string) => {
       setSelectedClawId(id)
-      localStorage.setItem('elasticclaw_selected_claw', id)
+      localStorage.setItem(STORAGE_KEY_SELECTED_CLAW, id)
       hub.setUnreadCount(id, 0)
       hub.loadMessages(id)
     },
@@ -212,7 +213,7 @@ export default function Home() {
     if (!selectedClawId) return
     hub.killClaw(selectedClawId)
     setSelectedClawId(null)
-    localStorage.removeItem('elasticclaw_selected_claw')
+    localStorage.removeItem(STORAGE_KEY_SELECTED_CLAW)
   }, [selectedClawId, hub])
 
   const handleKillClaw = useCallback(
@@ -220,7 +221,7 @@ export default function Home() {
       hub.killClaw(clawId)
       if (selectedClawId === clawId) {
         setSelectedClawId(null)
-        localStorage.removeItem('elasticclaw_selected_claw')
+        localStorage.removeItem(STORAGE_KEY_SELECTED_CLAW)
       }
     },
     [selectedClawId, hub]
@@ -270,7 +271,7 @@ export default function Home() {
           onKill={handleKill}
           onKillClaw={handleKillClaw}
           onSelectClaw={handleSelectClaw}
-          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem(STORAGE_KEY_SELECTED_CLAW) }}
           onReorderClaws={reorderClaws}
           loading={loading}
           hubError={hubError}
