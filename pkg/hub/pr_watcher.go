@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -112,11 +111,11 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
 	); err != nil {
-		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
+		logf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
 		return
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
-		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 	} else if ok {
 		if err := s.associateTaskRunPR(TaskRunPR{
 			RunID:      runID,
@@ -127,10 +126,10 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			State:      taskRunPRStateOpen,
 			OccurredAt: now(),
 		}); err != nil {
-			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
+			logf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
 		}
 	}
-	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
+	logf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
@@ -179,7 +178,7 @@ func (s *Server) pollAllPRs() {
 		if strings.Contains(err.Error(), "database is closed") {
 			return
 		}
-		log.Printf("[pr-watcher] poll query error: %v", err)
+		logf("[pr-watcher] poll query error: %v", err)
 		return
 	}
 	defer rows.Close()
@@ -208,12 +207,12 @@ func (s *Server) pollAllPRs() {
 	}
 
 	if len(prs) > 0 {
-		log.Printf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
+		logf("[pr-watcher] poll: checking %d tracked PR(s)", len(prs))
 	}
 
 	terminatedClaws := map[string]bool{}
 	for _, r := range prs {
-		log.Printf("[pr-watcher] poll: claw=%s status=%s pr=%s", r.pr.clawID[:8], r.clawStatus, r.pr.prURL)
+		logf("[pr-watcher] poll: claw=%s status=%s pr=%s", r.pr.clawID[:8], r.clawStatus, r.pr.prURL)
 		// Skip PRs for claws that were already terminated in this poll
 		if terminatedClaws[r.pr.clawID] {
 			continue
@@ -221,7 +220,7 @@ func (s *Server) pollAllPRs() {
 
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(r.pr.clawID)
 		isPipelineDriven := hasPipelineCtx && parsePipelineForContext(pipelineCtx) != nil
-		log.Printf("[pr-watcher] claw=%s pipeline=%s pipelineDriven=%v", r.pr.clawID[:8], pipelineCtx.Name(), isPipelineDriven)
+		logf("[pr-watcher] claw=%s pipeline=%s pipelineDriven=%v", r.pr.clawID[:8], pipelineCtx.Name(), isPipelineDriven)
 
 		// Check if PR is merged/closed for any non-terminal claw status.
 		if s.checkPRMerged(r.pr, token) {
@@ -237,13 +236,13 @@ func (s *Server) pollAllPRs() {
 		}
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
 		if err != nil {
-			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
+			logf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
 			continue
 		}
 		// Always check bugbot and greptile comments
 		s.checkBugbotComments(r.pr, commentsData)
 		s.checkGreptileComments(r.pr, commentsData)
-		log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d, forward=%v)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID, isPipelineDriven)
+		logf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d, forward=%v)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID, isPipelineDriven)
 		s.checkPRComments(r.pr, commentsData, prCommentOptions{
 			skipBugbot:   true,
 			skipGreptile: true,
@@ -255,7 +254,7 @@ func (s *Server) pollAllPRs() {
 		// Fetch and track them separately from issue comments.
 		reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
 		if err != nil {
-			log.Printf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
+			logf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
 		} else {
 			s.checkGreptileReviewComments(r.pr, reviewCommentsData)
 			s.updateReviewCommentWatermark(r.pr, reviewCommentsData)
@@ -263,7 +262,7 @@ func (s *Server) pollAllPRs() {
 
 		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", r.pr.repo, r.pr.prNumber), repoToken)
 		if err != nil {
-			log.Printf("[pr-watcher] error fetching reviews for %s: %v", r.pr.prURL, err)
+			logf("[pr-watcher] error fetching reviews for %s: %v", r.pr.prURL, err)
 		} else {
 			s.checkPRReviews(r.pr, reviewsData)
 			s.updatePRReviewWatermark(r.pr, reviewsData)
@@ -419,7 +418,7 @@ func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, opts prC
 		return
 	}
 
-	log.Printf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
+	logf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
 	s.injectHubMessageByID(pr.clawID, strings.Join(newComments, "\n\n"))
 }
 
@@ -710,12 +709,12 @@ func (s *Server) claimPRFeedbackDelivery(clawID, feedbackType string, id int64) 
 		clawID, feedbackType, id, now(),
 	)
 	if err != nil {
-		log.Printf("[pr-watcher] failed to claim %s %d for claw %s: %v", feedbackType, id, clawID, err)
+		logf("[pr-watcher] failed to claim %s %d for claw %s: %v", feedbackType, id, clawID, err)
 		return true
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		log.Printf("[pr-watcher] failed to inspect %s claim %d for claw %s: %v", feedbackType, id, clawID, err)
+		logf("[pr-watcher] failed to inspect %s claim %d for claw %s: %v", feedbackType, id, clawID, err)
 		return true
 	}
 	return affected > 0
@@ -794,7 +793,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	if err != nil {
-		log.Printf("[pr-watcher] failed to insert message: %v", err)
+		logf("[pr-watcher] failed to insert message: %v", err)
 		return
 	}
 
@@ -814,7 +813,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 			queueLen := len(cc.messageQueue)
 			cc.mu.Unlock()
 			acceptedForAgent = true
-			log.Printf("[pr-watcher] queued injected message for claw %s (queue length: %d)", shortID(clawID), queueLen)
+			logf("[pr-watcher] queued injected message for claw %s (queue length: %d)", shortID(clawID), queueLen)
 		} else {
 			conn := cc.conn
 			cc.mu.Unlock()
@@ -823,7 +822,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 			err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 			cancel()
 			if err != nil {
-				log.Printf("[pr-watcher] failed to send injected message to claw %s: %v, queueing", shortID(clawID), err)
+				logf("[pr-watcher] failed to send injected message to claw %s: %v, queueing", shortID(clawID), err)
 				s.mu.RLock()
 				currentCC := s.claws[clawID]
 				s.mu.RUnlock()
@@ -833,12 +832,12 @@ func (s *Server) injectMessage(clawID, content, role string) {
 					queueLen := len(currentCC.messageQueue)
 					currentCC.mu.Unlock()
 					acceptedForAgent = true
-					log.Printf("[pr-watcher] queued injected message for claw %s after send failure (queue length: %d)", shortID(clawID), queueLen)
+					logf("[pr-watcher] queued injected message for claw %s after send failure (queue length: %d)", shortID(clawID), queueLen)
 					go s.sendNextQueuedMessage(currentCC)
 				}
 			} else {
 				acceptedForAgent = true
-				log.Printf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
+				logf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
 			}
 		}
 	}
@@ -867,9 +866,9 @@ func (s *Server) injectMessage(clawID, content, role string) {
 					scToken := s.resolveShortcutToken(factory.Workspace)
 					if scToken != "" {
 						if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, factory.WorkingStatus); err != nil {
-							log.Printf("[factory] failed to move story %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+							logf("[factory] failed to move story %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
 						} else {
-							log.Printf("[factory] moved story %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+							logf("[factory] moved story %s to working status '%s' on resume", issueID, factory.WorkingStatus)
 						}
 					}
 				} else if strings.HasPrefix(issueID, "gh-") {
@@ -887,9 +886,9 @@ func (s *Server) injectMessage(clawID, content, role string) {
 									base = "https://api.github.com"
 								}
 								if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
-									log.Printf("[factory] failed to move GitHub issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+									logf("[factory] failed to move GitHub issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
 								} else {
-									log.Printf("[factory] moved GitHub issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+									logf("[factory] moved GitHub issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
 								}
 							}
 						}
@@ -899,9 +898,9 @@ func (s *Server) injectMessage(clawID, content, role string) {
 					linearToken := s.resolveLinearTokenForFactory(factory)
 					if linearToken != "" {
 						if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
-							log.Printf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
+							logf("[factory] failed to move issue %s to working status '%s' on resume: %v", issueID, factory.WorkingStatus, err)
 						} else {
-							log.Printf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
+							logf("[factory] moved issue %s to working status '%s' on resume", issueID, factory.WorkingStatus)
 						}
 					}
 				}
@@ -909,7 +908,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		}
 	}
 
-	log.Printf("[pr-watcher] injected message into claw %s", shortID(clawID))
+	logf("[pr-watcher] injected message into claw %s", shortID(clawID))
 }
 
 // githubAPI makes a GET request to the GitHub API and returns parsed JSON.
@@ -1051,7 +1050,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 
-	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
+	logf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
 	if state != "closed" && !merged {
 		return false // still open
@@ -1065,7 +1064,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 
 	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
 	if state == "closed" && !merged {
-		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
+		logf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
 
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
@@ -1093,7 +1092,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 
 	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
-	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
+	logf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	// Track analytics for PR merge
 	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
@@ -1122,9 +1121,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			scToken := s.resolveShortcutToken(mergeFactory.Workspace)
 			if scToken != "" {
 				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
-					log.Printf("[factory] failed to move story %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+					logf("[factory] failed to move story %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
 				} else {
-					log.Printf("[factory] moved story %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+					logf("[factory] moved story %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
 				}
 			}
 		} else if strings.HasPrefix(mergeIssueID, "gh-") {
@@ -1142,9 +1141,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 							base = "https://api.github.com"
 						}
 						if err := moveGitHubIssue(ghToken, repo, issueNum, mergeFactory.DoneStatus, base); err != nil {
-							log.Printf("[factory] failed to move GitHub issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+							logf("[factory] failed to move GitHub issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
 						} else {
-							log.Printf("[factory] moved GitHub issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+							logf("[factory] moved GitHub issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
 						}
 					}
 				}
@@ -1154,9 +1153,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			linearToken := s.resolveLinearTokenForFactory(mergeFactory)
 			if linearToken != "" {
 				if err := s.moveLinearIssueOnServer(linearToken, mergeIssueID, mergeFactory.DoneStatus); err != nil {
-					log.Printf("[factory] failed to move issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
+					logf("[factory] failed to move issue %s to done status '%s': %v", mergeIssueID, mergeFactory.DoneStatus, err)
 				} else {
-					log.Printf("[factory] moved issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
+					logf("[factory] moved issue %s to done status '%s'", mergeIssueID, mergeFactory.DoneStatus)
 				}
 			}
 		}
@@ -1237,7 +1236,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 	if cond.CI == "passing" {
 		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
-			log.Printf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
+			logf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
 			return nil
 		}
 		headObj, _ := prData["head"].(map[string]interface{})
@@ -1247,7 +1246,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		}
 		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
 		if err != nil {
-			log.Printf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
+			logf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
 			return nil
 		}
 		checkRuns, _ := checksData["check_runs"].([]interface{})
@@ -1271,7 +1270,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 	if cond.Reviews == "clean" {
 		reviewsData, err := githubAPIListWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
-			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
+			logf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
 			return nil
 		}
 		latestReviewStateByUser := make(map[string]struct {
@@ -1308,7 +1307,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 	if cond.QuietFor != "" {
 		dur, err := time.ParseDuration(cond.QuietFor)
 		if err != nil {
-			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
+			logf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
 			return nil
 		}
 		// If no comments yet, use PR creation time — a PR with no comments

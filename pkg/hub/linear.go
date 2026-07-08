@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -104,7 +103,7 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	dedupKey := payload.WebhookID + ":" + payload.Data.Identifier + ":" + createdAt
 	if payload.WebhookID != "" && s.isDuplicateWebhook(dedupKey) {
-		log.Printf("[linear-webhook] dedup: skipping duplicate delivery %s for %s (createdAt=%s)", payload.WebhookID, payload.Data.Identifier, createdAt)
+		logfCtx(r.Context(), "[linear-webhook] dedup: skipping duplicate delivery %s for %s (createdAt=%s)", payload.WebhookID, payload.Data.Identifier, createdAt)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -299,13 +298,13 @@ func (s *Server) processLinearEvent(workspaceName string, payload linearWebhookP
 		// When previousStatus is empty (Linear omits it), EqualFold returns false, so the guard passes.
 		if strings.EqualFold(currentStatus, factory.TriggerStatus) && !strings.EqualFold(previousStatus, factory.TriggerStatus) {
 			matched = true
-			log.Printf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
+			logf("[factory:%s] issue %s entered '%s' — creating claw", factory.Name, issueID, factory.TriggerStatus)
 			clawID := ""
 			if err := s.createClawForIssue(factory, payload, "linear webhook"); err != nil {
 				if isFactoryTriggerAlreadyClaimed(err) {
 					continue
 				}
-				log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
+				logf("[factory:%s] failed to create claw for %s: %v", factory.Name, issueID, err)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "error", "", err.Error())
 				s.trackFactoryCreationFailure(factory.Name, issueID, err.Error())
 			} else {
@@ -328,7 +327,7 @@ func (s *Server) processLinearEvent(workspaceName string, payload linearWebhookP
 			).Scan(&activeClaw)
 			if activeClaw != "" {
 				matched = true
-				log.Printf("[factory:%s] issue %s moved to '%s' (not trigger) — terminating claw", factory.Name, issueID, currentStatus)
+				logf("[factory:%s] issue %s moved to '%s' (not trigger) — terminating claw", factory.Name, issueID, currentStatus)
 				s.terminateClawForIssue(issueID)
 				s.logFactoryEvent(factory.Name, issueID, payload.Data.Title, previousStatus, currentStatus, "claw_terminated", activeClaw, "terminated: issue left trigger status")
 			}
@@ -390,9 +389,9 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 			}
 			if strings.EqualFold(currentStatus, workflow.TriggerStatus) && !strings.EqualFold(previousStatus, workflow.TriggerStatus) {
 				matched = true
-				log.Printf("[workflow:%s/%s] Linear issue %s entered %q — creating claw", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus)
+				logf("[workflow:%s/%s] Linear issue %s entered %q — creating claw", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus)
 				if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "linear webhook"); err != nil {
-					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+					logf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
 					s.notifyLinearWorkflowCreateFailure(workspace, workflow, payload, err)
 				}
 			}
@@ -401,7 +400,7 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 				_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&activeClaw)
 				if activeClaw != "" {
 					matched = true
-					log.Printf("[workflow:%s/%s] Linear issue %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus, activeClaw[:8])
+					logf("[workflow:%s/%s] Linear issue %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, issueID, workflow.TriggerStatus, activeClaw[:8])
 					s.terminateClawForIssue(issueID)
 				}
 			}
@@ -416,7 +415,7 @@ func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceCon
 	}
 	token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
 	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
+		logf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
 		return
 	}
 	s.handleAgentFailureFeedback(agentFailureFeedback{
@@ -440,7 +439,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
-		log.Printf("[workflow:%s/%s] Linear issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
+		logf("[workflow:%s/%s] Linear issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
 		return nil
 	}
 
@@ -456,7 +455,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return fmt.Errorf("claim workflow trigger: %w", err)
 	}
 	if !claimed {
-		log.Printf("[workflow:%s/%s] Linear issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
+		logf("[workflow:%s/%s] Linear issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
 		return nil
 	}
 	claimOpen := true
@@ -505,11 +504,11 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	if !isPending && workflow.WorkingStatus != "" {
 		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
 			if err := s.moveLinearIssueOnServer(token, issueID, workflow.WorkingStatus); err != nil {
-				log.Printf("[workflow:%s/%s] failed to move issue %s to working status %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
+				logf("[workflow:%s/%s] failed to move issue %s to working status %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
 			}
 		}
 	}
-	log.Printf("[workflow:%s/%s] created claw %s for Linear issue %s", workspace.Name, workflow.Name, clawID[:8], issueID)
+	logf("[workflow:%s/%s] created claw %s for Linear issue %s", workspace.Name, workflow.Name, clawID[:8], issueID)
 	return nil
 }
 
@@ -534,7 +533,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 	if !claimed {
 		if reason != "poll" {
-			log.Printf("[factory:%s] Linear issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
+			logf("[factory:%s] Linear issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
 		}
 		return errFactoryTriggerAlreadyClaimed
 	}
@@ -550,11 +549,11 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	linearToken := s.resolveLinearTokenForFactory(factory)
 	if linearToken != "" {
 		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
-			log.Printf("[factory:%s] pre-flight FAILED for %s: %v", factory.Name, issueID, err)
+			logf("[factory:%s] pre-flight FAILED for %s: %v", factory.Name, issueID, err)
 			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
 		}
 	} else {
-		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
+		logf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
 	}
 
 	// Build Linear-specific context and inject into template files
@@ -579,7 +578,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
-	log.Printf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
+	logf("[factory] created claw %s for Linear issue %s", clawID[:8], issueID)
 
 	// Move the issue to WorkingStatus if configured (only if not pending —
 	// a queued claw hasn't actually started working yet)
@@ -587,9 +586,9 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		linearToken := s.resolveLinearTokenForFactory(factory)
 		if linearToken != "" {
 			if err := s.moveLinearIssueOnServer(linearToken, issueID, factory.WorkingStatus); err != nil {
-				log.Printf("[factory] failed to move issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
+				logf("[factory] failed to move issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
 			} else {
-				log.Printf("[factory] moved issue %s to working status '%s'", issueID, factory.WorkingStatus)
+				logf("[factory] moved issue %s to working status '%s'", issueID, factory.WorkingStatus)
 			}
 		}
 	}
@@ -605,7 +604,7 @@ func (s *Server) terminateClawForIssue(issueID string) {
 	).Scan(&clawID, &tenantID, &factoryName); err != nil {
 		return
 	}
-	log.Printf("[factory] terminating claw %s for issue %s", clawID[:8], issueID)
+	logf("[factory] terminating claw %s for issue %s", clawID[:8], issueID)
 
 	// Post a comment on the linked issue/story before terminating
 	factory := s.findFactoryForIssue(issueID)
@@ -615,18 +614,18 @@ func (s *Server) terminateClawForIssue(issueID string) {
 			token := s.resolveLinearTokenForFactory(factory)
 			if token != "" {
 				if err := s.commentLinearIssue(token, issueID, "Agent stopped: issue left trigger status"); err != nil {
-					log.Printf("[factory] failed to comment Linear issue %s: %v", issueID, err)
+					logf("[factory] failed to comment Linear issue %s: %v", issueID, err)
 				} else {
-					log.Printf("[factory] commented Linear issue %s", issueID)
+					logf("[factory] commented Linear issue %s", issueID)
 				}
 			}
 		case "shortcut":
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token != "" {
 				if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: issue left trigger status"); err != nil {
-					log.Printf("[factory] failed to comment Shortcut story %s: %v", issueID, err)
+					logf("[factory] failed to comment Shortcut story %s: %v", issueID, err)
 				} else {
-					log.Printf("[factory] commented Shortcut story %s", issueID)
+					logf("[factory] commented Shortcut story %s", issueID)
 				}
 			}
 		case "github-issues":
@@ -638,9 +637,9 @@ func (s *Server) terminateClawForIssue(issueID string) {
 					var issueNum int
 					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 						if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: issue left trigger status"); err != nil {
-							log.Printf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
+							logf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
 						} else {
-							log.Printf("[factory] commented GitHub issue %s", issueID)
+							logf("[factory] commented GitHub issue %s", issueID)
 						}
 					}
 				}
@@ -648,9 +647,9 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		case "jira":
 			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
 				if err := s.commentJiraIssue(tracker, issueID, "Agent stopped: issue left trigger status"); err != nil {
-					log.Printf("[factory] failed to comment Jira issue %s: %v", issueID, err)
+					logf("[factory] failed to comment Jira issue %s: %v", issueID, err)
 				} else {
-					log.Printf("[factory] commented Jira issue %s", issueID)
+					logf("[factory] commented Jira issue %s", issueID)
 				}
 			}
 		}
@@ -927,7 +926,7 @@ func (s *Server) promotePendingClaws() {
 
 		// Promote to provisioning — scope UPDATE to pending status so a
 		// concurrent hard-delete doesn't match zero rows silently.
-		log.Printf("[factory] promoting pending claw %s to provisioning (active=%d, group=%s, limit=%d)", clawID[:8], active, groupName, groupLimit)
+		logf("[factory] promoting pending claw %s to provisioning (active=%d, group=%s, limit=%d)", clawID[:8], active, groupName, groupLimit)
 		res, _ := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID)
 		n, _ := res.RowsAffected()
 		if n == 0 {
@@ -963,7 +962,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &issueID)
 	if err != nil {
-		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
+		logf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
 		return
 	}
@@ -972,7 +971,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	var currentStatus string
 	err2 := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if err2 != nil || currentStatus == "deleted" {
-		log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+		logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 		return
 	}
 
@@ -1034,21 +1033,21 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		var parseErr error
 		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
 		if parseErr != nil {
-			log.Printf("[factory] warning: could not parse elasticclaw-config.yaml for pending claw %s: %v", clawID[:8], parseErr)
+			logf("[factory] warning: could not parse elasticclaw-config.yaml for pending claw %s: %v", clawID[:8], parseErr)
 			tmplCfg = nil
 		}
 	}
 
 	// Resolve and inject template-requested secrets (same as factory create paths).
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 && factory != nil {
-		log.Printf("[factory] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", template)
+		logf("[factory] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", template)
 		for _, ref := range tmplCfg.Secrets {
 			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = secretVal
-				log.Printf("[factory] injected template secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
+				logf("[factory] injected template secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
 			} else {
-				log.Printf("[factory] warning: requested secret (type=%s name=%s workspace=%s) not found for pending claw %s", ref.Type, ref.Name, ref.Workspace, clawID[:8])
+				logf("[factory] warning: requested secret (type=%s name=%s workspace=%s) not found for pending claw %s", ref.Type, ref.Name, ref.Workspace, clawID[:8])
 			}
 		}
 	}
@@ -1058,9 +1057,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory] injected template secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
+				logf("[factory] injected template secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
 			} else {
-				log.Printf("[factory] WARNING: template secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
+				logf("[factory] WARNING: template secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
 			}
 		}
 	}
@@ -1070,9 +1069,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory] injected factory secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
+				logf("[factory] injected factory secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
 			} else {
-				log.Printf("[factory] WARNING: factory secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
+				logf("[factory] WARNING: factory secret_ref %q not found in hub secrets for pending claw %s", secretRef, clawID[:8])
 			}
 		}
 	}
@@ -1123,7 +1122,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		provErr = fmt.Errorf("unsupported provider: %s", provider)
 	}
 	if provErr != nil {
-		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
+		logf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		// Slot is now free (error claws don't count toward limit); try to
 		// promote the next pending claw.
@@ -1177,7 +1176,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return // not a factory claw
 	}
 
-	log.Printf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
+	logf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
 
 	// Extract PR URLs from the [DONE] line.
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
@@ -1204,7 +1203,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 				Detail:          map[string]any{"issueID": issueID},
 				OccurredAt:      now(),
 			}); err != nil {
-				log.Printf("[task-run-analytics] failed to record done_without_pr for claw %s: %v", clawID, err)
+				logf("[task-run-analytics] failed to record done_without_pr for claw %s: %v", clawID, err)
 			}
 			s.injectUserMessage(clawID, "[factory] `[DONE]` received with no PR URLs. Please open a PR and resend: `[DONE] https://github.com/org/repo/pull/N`")
 			return
@@ -1224,7 +1223,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Block PR creation if any required gate has failed.
 	if s.hasFailedRequiredGate(clawID) {
 		msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
-		log.Printf("[factory] claw %s [DONE] blocked by failed required gate", clawID[:8])
+		logf("[factory] claw %s [DONE] blocked by failed required gate", clawID[:8])
 		s.injectUserMessage(clawID, msg)
 		return
 	}
@@ -1276,9 +1275,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		case "jira":
 			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
 				if err := s.moveJiraIssue(tracker, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
+					logf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
 				} else {
-					log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
+					logf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
 				}
 			}
 		case "shortcut":
@@ -1286,9 +1285,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			scToken := s.resolveShortcutToken(factory.Workspace)
 			if scToken != "" {
 				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
+					logf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
 				} else {
-					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
+					logf("[factory] moved story %s to '%s'", issueID, targetStatus)
 				}
 			}
 		case "github-issues":
@@ -1308,9 +1307,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 							base = "https://api.github.com"
 						}
 						if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
-							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
+							logf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
 						} else {
-							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
+							logf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
 						}
 					}
 				}
@@ -1320,9 +1319,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken != "" {
 				if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
+					logf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
 				} else {
-					log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)
+					logf("[factory] moved issue %s to '%s'", issueID, targetStatus)
 				}
 			}
 		}
@@ -1344,7 +1343,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	rowsAffected, err := res.RowsAffected()
 	if err != nil || rowsAffected == 0 {
 		if rowsAffected == 0 {
-			log.Printf("[factory] non-pr completion skipped for claw %s: already deleted or terminal", clawID[:8])
+			logf("[factory] non-pr completion skipped for claw %s: already deleted or terminal", clawID[:8])
 		}
 		return
 	}
@@ -1376,7 +1375,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID)
 	res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id=? AND tenant_id=? AND status NOT IN ('deleted','error')`, clawID, tenantID)
 	if err != nil {
-		log.Printf("[factory] failed to complete non-pr claw %s: %v", clawID, err)
+		logf("[factory] failed to complete non-pr claw %s: %v", clawID, err)
 		return
 	}
 	rowsAffected, err := res.RowsAffected()
@@ -1393,7 +1392,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		Detail:          map[string]any{"issueID": issueID, "requires_pr": false},
 		OccurredAt:      now(),
 	}); err != nil {
-		log.Printf("[task-run-analytics] failed to record non-pr completion for claw %s: %v", clawID, err)
+		logf("[task-run-analytics] failed to record non-pr completion for claw %s: %v", clawID, err)
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -1424,11 +1423,11 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
 	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
-		log.Printf("[terminate] claw %s not found in DB: %v", clawID[:8], err)
+		logf("[terminate] claw %s not found in DB: %v", clawID[:8], err)
 		return
 	}
 
-	log.Printf("[terminate] claw %s sent [TERMINATE] for issue %s", clawID[:8], issueID)
+	logf("[terminate] claw %s sent [TERMINATE] for issue %s", clawID[:8], issueID)
 
 	// Find the factory config for this issue (for commenting)
 	factory := s.findFactoryForIssue(issueID)
@@ -1439,18 +1438,18 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 			token := s.resolveLinearTokenForFactory(factory)
 			if token != "" {
 				if err := s.commentLinearIssue(token, issueID, "Agent stopped: claw requested self-termination"); err != nil {
-					log.Printf("[terminate] failed to comment Linear issue %s: %v", issueID, err)
+					logf("[terminate] failed to comment Linear issue %s: %v", issueID, err)
 				} else {
-					log.Printf("[terminate] commented Linear issue %s", issueID)
+					logf("[terminate] commented Linear issue %s", issueID)
 				}
 			}
 		case "shortcut":
 			token := s.resolveShortcutToken(factory.Workspace)
 			if token != "" {
 				if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, "Agent stopped: claw requested self-termination"); err != nil {
-					log.Printf("[terminate] failed to comment Shortcut story %s: %v", issueID, err)
+					logf("[terminate] failed to comment Shortcut story %s: %v", issueID, err)
 				} else {
-					log.Printf("[terminate] commented Shortcut story %s", issueID)
+					logf("[terminate] commented Shortcut story %s", issueID)
 				}
 			}
 		case "github-issues":
@@ -1462,9 +1461,9 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 					var issueNum int
 					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 						if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: claw requested self-termination"); err != nil {
-							log.Printf("[terminate] failed to comment GitHub issue %s: %v", issueID, err)
+							logf("[terminate] failed to comment GitHub issue %s: %v", issueID, err)
 						} else {
-							log.Printf("[terminate] commented GitHub issue %s", issueID)
+							logf("[terminate] commented GitHub issue %s", issueID)
 						}
 					}
 				}
@@ -1472,9 +1471,9 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 		case "jira":
 			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
 				if err := s.commentJiraIssue(tracker, issueID, "Agent stopped: claw requested self-termination"); err != nil {
-					log.Printf("[terminate] failed to comment Jira issue %s: %v", issueID, err)
+					logf("[terminate] failed to comment Jira issue %s: %v", issueID, err)
 				} else {
-					log.Printf("[terminate] commented Jira issue %s", issueID)
+					logf("[terminate] commented Jira issue %s", issueID)
 				}
 			}
 		}
@@ -1516,7 +1515,7 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Promote any pending claws now that a slot is free
 	go s.promotePendingClaws()
 
-	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
+	logf("[terminate] claw %s terminated successfully", clawID[:8])
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.
@@ -1916,7 +1915,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	} else if token != "" {
 		keyPrefix = token + "..."
 	}
-	log.Printf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
+	logf("[linear] fetchLinearIssueDetails: issue=%s base=%s keyPrefix=%s", issueIdentifier, base, keyPrefix)
 
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
@@ -1937,7 +1936,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[linear] fetchLinearIssueDetails HTTP error for %s: %v", issueIdentifier, err)
+		logf("[linear] fetchLinearIssueDetails HTTP error for %s: %v", issueIdentifier, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -1953,7 +1952,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		log.Printf("[linear] fetchLinearIssueDetails JSON decode error for %s: %v", issueIdentifier, err)
+		logf("[linear] fetchLinearIssueDetails JSON decode error for %s: %v", issueIdentifier, err)
 		return nil, err
 	}
 	if len(result.Errors) > 0 {
@@ -1962,14 +1961,14 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 			errMsgs = append(errMsgs, e.Message)
 		}
 		combined := strings.Join(errMsgs, "; ")
-		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, combined)
-		log.Printf("[linear] fetchLinearIssueDetails response body for %s: %s", issueIdentifier, string(bodyBytes))
+		logf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, combined)
+		logf("[linear] fetchLinearIssueDetails response body for %s: %s", issueIdentifier, string(bodyBytes))
 		return nil, fmt.Errorf("GraphQL error: %s", combined)
 	}
 	if result.Data.Issue.Identifier == "" {
-		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
+		logf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
 		return nil, fmt.Errorf("issue %s not found", issueIdentifier)
 	}
-	log.Printf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, result.Data.Issue.Identifier, result.Data.Issue.Title)
+	logf("[linear] fetchLinearIssueDetails success for %s: id=%s title=%s", issueIdentifier, result.Data.Issue.Identifier, result.Data.Issue.Title)
 	return &result.Data.Issue, nil
 }

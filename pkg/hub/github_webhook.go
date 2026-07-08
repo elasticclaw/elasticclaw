@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -63,7 +62,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	// Verify HMAC-SHA256 signature against any matching factory webhook secret.
 	sig := r.Header.Get("X-Hub-Signature-256")
 	if !s.validateGitHubSignature(body, sig) {
-		log.Printf("[github-webhook] signature validation failed for event=%q — check webhook secret", event)
+		logfCtx(r.Context(), "[github-webhook] signature validation failed for event=%q — check webhook secret", event)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -77,65 +76,65 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	case "issues":
 		var payload githubIssuesWebhookPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[github-webhook] failed to parse issues payload: %v", err)
+			logfCtx(r.Context(), "[github-webhook] failed to parse issues payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		log.Printf("[github-webhook] issues action=%q repo=%q issue=#%d author=%q",
+		logfCtx(r.Context(), "[github-webhook] issues action=%q repo=%q issue=#%d author=%q",
 			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Issue.User.Login)
 		go s.processGitHubIssueEvent(payload)
 	case "pull_request":
 		var payload githubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[github-webhook] failed to parse pull_request payload: %v", err)
+			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		log.Printf("[github-webhook] pull_request action=%q repo=%q pr=#%d author=%q base=%q",
+		logfCtx(r.Context(), "[github-webhook] pull_request action=%q repo=%q pr=#%d author=%q base=%q",
 			payload.Action, payload.Repository.FullName, payload.Number,
 			payload.PullRequest.User.Login, payload.PullRequest.Base.Ref)
 		go s.processGitHubPREvent(payload)
 	case "pull_request_review_comment":
 		var payload githubPRReviewCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[github-webhook] failed to parse pull_request_review_comment payload: %v", err)
+			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request_review_comment payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		log.Printf("[github-webhook] pull_request_review_comment action=%q repo=%q pr=#%d author=%q",
+		logfCtx(r.Context(), "[github-webhook] pull_request_review_comment action=%q repo=%q pr=#%d author=%q",
 			payload.Action, payload.Repository.FullName, payload.PullRequest.Number, payload.Comment.User.Login)
 		go s.processGitHubPRReviewCommentEvent(payload)
 	case "pull_request_review":
 		var payload githubPRReviewPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[github-webhook] failed to parse pull_request_review payload: %v", err)
+			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request_review payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		log.Printf("[github-webhook] pull_request_review action=%q state=%q repo=%q pr=#%d author=%q",
+		logfCtx(r.Context(), "[github-webhook] pull_request_review action=%q state=%q repo=%q pr=#%d author=%q",
 			payload.Action, payload.Review.State, payload.Repository.FullName, payload.PullRequest.Number, payload.Review.User.Login)
 		go s.processGitHubPRReviewEvent(payload)
 	case "issue_comment":
 		var payload githubIssueCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[github-webhook] failed to parse issue_comment payload: %v", err)
+			logfCtx(r.Context(), "[github-webhook] failed to parse issue_comment payload: %v", err)
 			break
 		}
 		if payload.Issue.PullRequest.URL != "" {
 			// Comment on a pull request
-			log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
+			logfCtx(r.Context(), "[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			go s.processGitHubIssueCommentEvent(payload)
 		} else {
 			// Comment on a plain issue (not PR)
-			log.Printf("[github-webhook] issue_comment action=%q repo=%q issue=#%d author=%q",
+			logfCtx(r.Context(), "[github-webhook] issue_comment action=%q repo=%q issue=#%d author=%q",
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			go s.processGitHubIssueComment(payload)
 		}
 	case "ping":
-		log.Printf("[github-webhook] ping received — webhook configured correctly")
+		logfCtx(r.Context(), "[github-webhook] ping received — webhook configured correctly")
 	default:
-		log.Printf("[github-webhook] unsupported event type %q — ignored", event)
+		logfCtx(r.Context(), "[github-webhook] unsupported event type %q — ignored", event)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -184,38 +183,38 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 	factories := s.resolveFactories()
 
 	repoFullName := payload.Repository.FullName
-	log.Printf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
+	logf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
 			continue
 		}
 		if factory.Enabled != nil && !*factory.Enabled {
-			log.Printf("[github-webhook] factory %q: skipped (disabled)", factory.Name)
+			logf("[github-webhook] factory %q: skipped (disabled)", factory.Name)
 			continue
 		}
 		if factory.Trigger == nil {
-			log.Printf("[github-webhook] factory %q: skipped (no trigger configured)", factory.Name)
+			logf("[github-webhook] factory %q: skipped (no trigger configured)", factory.Name)
 			continue
 		}
 		if factory.Trigger.On != "pull_request" {
-			log.Printf("[github-webhook] factory %q: skipped (trigger.on=%q, not pull_request)", factory.Name, factory.Trigger.On)
+			logf("[github-webhook] factory %q: skipped (trigger.on=%q, not pull_request)", factory.Name, factory.Trigger.On)
 			continue
 		}
 		// Check repo match
 		if !githubRepoMatches(repoFullName, factory.Repos) {
-			log.Printf("[github-webhook] factory %q: skipped (repo %q not in %v)", factory.Name, repoFullName, factory.Repos)
+			logf("[github-webhook] factory %q: skipped (repo %q not in %v)", factory.Name, repoFullName, factory.Repos)
 			continue
 		}
 		// Check filter
 		if factory.Trigger.Filter != nil {
 			f := factory.Trigger.Filter
 			if f.Author != "" && !strings.EqualFold(f.Author, payload.PullRequest.User.Login) {
-				log.Printf("[github-webhook] factory %q: skipped (author mismatch: want %q, got %q)", factory.Name, f.Author, payload.PullRequest.User.Login)
+				logf("[github-webhook] factory %q: skipped (author mismatch: want %q, got %q)", factory.Name, f.Author, payload.PullRequest.User.Login)
 				continue
 			}
 			if f.BaseBranch != "" && !strings.EqualFold(f.BaseBranch, payload.PullRequest.Base.Ref) {
-				log.Printf("[github-webhook] factory %q: skipped (base_branch mismatch: want %q, got %q)", factory.Name, f.BaseBranch, payload.PullRequest.Base.Ref)
+				logf("[github-webhook] factory %q: skipped (base_branch mismatch: want %q, got %q)", factory.Name, f.BaseBranch, payload.PullRequest.Base.Ref)
 				continue
 			}
 		}
@@ -224,7 +223,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			continue
 		}
 		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
-			log.Printf("[github-webhook] factory %q: skipped (PR backing issue labels did not match)", factory.Name)
+			logf("[github-webhook] factory %q: skipped (PR backing issue labels did not match)", factory.Name)
 			continue
 		}
 
@@ -238,7 +237,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				// Skip synchronize events triggered by the claw itself pushing commits.
 				// Only skip if the sender is our own GitHub App bot, not other bots (e.g. dependabot).
 				if payload.Action == "synchronize" && s.isOwnAppBot(payload.Sender.Login) {
-					log.Printf("[factory:%s] github PR #%d synchronize from own app bot %q — skipping", factory.Name, payload.Number, payload.Sender.Login)
+					logf("[factory:%s] github PR #%d synchronize from own app bot %q — skipping", factory.Name, payload.Number, payload.Sender.Login)
 					continue
 				}
 				// Only inject if the claw is connected and ready — otherwise the
@@ -249,7 +248,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				ready := connected && cc.gatewayReady
 				s.mu.RUnlock()
 				if !ready {
-					log.Printf("[factory:%s] github PR #%d action=%s — claw %s not ready yet, skipping inject", factory.Name, payload.Number, payload.Action, existingClawID[:8])
+					logf("[factory:%s] github PR #%d action=%s — claw %s not ready yet, skipping inject", factory.Name, payload.Number, payload.Action, existingClawID[:8])
 				} else {
 					msg := fmt.Sprintf("PR #%d update: %s.", payload.Number, payload.Action)
 					if payload.Action == "synchronize" {
@@ -257,19 +256,19 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 					} else if payload.Action == "reopened" {
 						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 					}
-					log.Printf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
+					logf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
 					s.injectHubMessageByID(existingClawID, msg)
 				}
 			default:
-				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, no action taken", factory.Name, payload.Number, payload.Action)
+				logf("[factory:%s] github PR #%d action=%s — claw exists, no action taken", factory.Name, payload.Number, payload.Action)
 			}
 			continue
 		}
 
 		// No existing claw — create one (regardless of action, first event wins)
-		log.Printf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
+		logf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
 		if err := s.createClawForGitHubPR(factory, payload, "github-pr webhook"); err != nil {
-			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, payload.Number, err)
+			logf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, payload.Number, err)
 			s.logFactoryEvent(factory.Name, fmt.Sprintf("%s#%d", repoFullName, payload.Number),
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
 		}
@@ -331,7 +330,7 @@ func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewComment
 	prURL := payload.PullRequest.HTMLURL
 	clawID := s.findClawForGitHubPR(prURL)
 	if clawID == "" {
-		log.Printf("[github-webhook] review_comment on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
+		logf("[github-webhook] review_comment on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
 		return
 	}
 	pr := clawPR{
@@ -353,7 +352,7 @@ func (s *Server) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
 	prURL := payload.PullRequest.HTMLURL
 	clawID := s.findClawForGitHubPR(prURL)
 	if clawID == "" {
-		log.Printf("[github-webhook] review on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
+		logf("[github-webhook] review on PR #%d — no claw found for %s", payload.PullRequest.Number, prURL)
 		return
 	}
 	pr := clawPR{
@@ -411,12 +410,12 @@ func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
 
 	existingClawID := s.findClawForGitHubIssue(issueURL)
 	if existingClawID != "" {
-		log.Printf("[github-webhook] issue_comment on issue #%d — injecting into existing claw %s", payload.Issue.Number, existingClawID[:8])
+		logf("[github-webhook] issue_comment on issue #%d — injecting into existing claw %s", payload.Issue.Number, existingClawID[:8])
 		s.injectHubMessageByID(existingClawID, commentMsg)
 		return
 	}
 
-	log.Printf("[github-webhook] issue_comment on issue #%d — no claw found for %s", payload.Issue.Number, issueURL)
+	logf("[github-webhook] issue_comment on issue #%d — no claw found for %s", payload.Issue.Number, issueURL)
 }
 
 // processGitHubIssueCommentEvent handles issue_comment events on PRs.
@@ -445,7 +444,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	existingClawID := s.findClawForGitHubPR(prURL)
 	if existingClawID != "" {
 		// Inject the comment into the existing claw
-		log.Printf("[github-webhook] issue_comment on PR #%d — injecting into existing claw %s", prNumber, existingClawID[:8])
+		logf("[github-webhook] issue_comment on PR #%d — injecting into existing claw %s", prNumber, existingClawID[:8])
 		s.injectHubMessageByID(existingClawID, commentMsg)
 		return
 	}
@@ -475,7 +474,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		}
 		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repoFullName, prNumber), token)
 		if err != nil {
-			log.Printf("[github-webhook] issue_comment: failed to fetch PR %s#%d: %v", repoFullName, prNumber, err)
+			logf("[github-webhook] issue_comment: failed to fetch PR %s#%d: %v", repoFullName, prNumber, err)
 			continue
 		}
 		var prPayload githubPRPayload
@@ -502,12 +501,12 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 			f := factory.Trigger.Filter
 			// Author filter: check PR author, not commenter
 			if f.Author != "" && !strings.EqualFold(f.Author, prPayload.PullRequest.User.Login) {
-				log.Printf("[github-webhook] factory %q: issue_comment skipped (PR author mismatch: want %q, got %q)",
+				logf("[github-webhook] factory %q: issue_comment skipped (PR author mismatch: want %q, got %q)",
 					factory.Name, f.Author, prPayload.PullRequest.User.Login)
 				continue
 			}
 			if f.BaseBranch != "" && !strings.EqualFold(f.BaseBranch, prPayload.PullRequest.Base.Ref) {
-				log.Printf("[github-webhook] factory %q: issue_comment skipped (base_branch mismatch: want %q, got %q)",
+				logf("[github-webhook] factory %q: issue_comment skipped (base_branch mismatch: want %q, got %q)",
 					factory.Name, f.BaseBranch, prPayload.PullRequest.Base.Ref)
 				continue
 			}
@@ -517,17 +516,17 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 			continue
 		}
 		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
-			log.Printf("[github-webhook] factory %q: issue_comment skipped (PR backing issue labels did not match)", factory.Name)
+			logf("[github-webhook] factory %q: issue_comment skipped (PR backing issue labels did not match)", factory.Name)
 			continue
 		}
-		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
+		logf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
 		if err := s.createClawForGitHubPR(factory, prPayload, "github-pr webhook (issue_comment)"); err != nil {
-			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
+			logf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
 			continue // let next matching factory try
 		}
 		createdClawID := s.findClawForGitHubPR(prPayload.PullRequest.HTMLURL)
 		if createdClawID != "" {
-			log.Printf("[github-webhook] issue_comment on PR #%d — injecting into newly created claw %s", prNumber, createdClawID[:8])
+			logf("[github-webhook] issue_comment on PR #%d — injecting into newly created claw %s", prNumber, createdClawID[:8])
 			s.injectHubMessageByID(createdClawID, commentMsg)
 		}
 		break // success — one factory match is enough
@@ -563,15 +562,15 @@ func (s *Server) processGitHubIssueEvent(payload githubIssuesWebhookPayload) {
 			continue
 		}
 		if !labelsAllowed(currentLabels, factory.Labels, factory.ExcludeLabels) {
-			log.Printf("[github-webhook] factory %q: skipped issue %s (labels did not match)", factory.Name, issueID)
+			logf("[github-webhook] factory %q: skipped issue %s (labels did not match)", factory.Name, issueID)
 			continue
 		}
-		log.Printf("[factory:%s] github issue %s (action=%s) — creating claw", factory.Name, issueID, payload.Action)
+		logf("[factory:%s] github issue %s (action=%s) — creating claw", factory.Name, issueID, payload.Action)
 		if err := s.createClawForGitHubIssue(factory, payload, "github-issue webhook"); err != nil {
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
+			logf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
 			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", payload.Action, "error", "", err.Error())
 		} else {
 			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", payload.Action, "claw_created", "", "github-issue webhook")
@@ -585,7 +584,7 @@ func (s *Server) githubFactoryPRLabels(factory *types.FactoryConfig, repo string
 	}
 	labels, err := s.fetchGitHubIssueLabelsForFactory(factory, repo, prNumber)
 	if err != nil {
-		log.Printf("[github-webhook] factory %q: skipping PR %s#%d because backing issue labels could not be fetched: %v", factory.Name, repo, prNumber, err)
+		logf("[github-webhook] factory %q: skipping PR %s#%d because backing issue labels could not be fetched: %v", factory.Name, repo, prNumber, err)
 		return nil, false
 	}
 	return labels, true
@@ -761,14 +760,14 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Resolve and inject template-requested secrets (typed refs + legacy)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
+		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
-				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
+				logf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
 			}
 		}
 	}
@@ -778,9 +777,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -790,9 +789,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -883,7 +882,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub PR %s#%d as pending", groupName, activeCount, groupLimit, repoFullName, prNumber)
+		logf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub PR %s#%d as pending", groupName, activeCount, groupLimit, repoFullName, prNumber)
 	}
 
 	initialStatus := "provisioning"
@@ -914,7 +913,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		fmt.Sprintf("%s#%d", repoFullName, prNumber),
 		pr.PullRequest.Title, "", pr.Action, "claw_created", clawID, "")
 
-	log.Printf("[factory] created claw %s (%s) for GitHub PR %s#%d (status=%s, reason=%s)", clawName, clawID[:8], repoFullName, prNumber, initialStatus, reason)
+	logf("[factory] created claw %s (%s) for GitHub PR %s#%d (status=%s, reason=%s)", clawName, clawID[:8], repoFullName, prNumber, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
@@ -930,7 +929,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
-			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
 		ctx := context.Background()
@@ -969,7 +968,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
 		if provErr != nil {
-			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			logf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
@@ -1007,13 +1006,13 @@ func (s *Server) mergePRForClaw(clawID string) {
 		clawID,
 	).Scan(&prURL, &repo, &prNumber)
 	if err != nil || prURL == "" {
-		log.Printf("[pipeline] merge_pr: no tracked PR for claw %s", clawID[:8])
+		logf("[pipeline] merge_pr: no tracked PR for claw %s", clawID[:8])
 		return
 	}
 
 	token := s.resolveGitHubTokenForRepo(repo)
 	if token == "" {
-		log.Printf("[pipeline] merge_pr: no GitHub token for repo %s", repo)
+		logf("[pipeline] merge_pr: no GitHub token for repo %s", repo)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: no GitHub token available for %s — cannot auto-merge.", repo))
 		return
 	}
@@ -1027,7 +1026,7 @@ func (s *Server) mergePRForClaw(clawID string) {
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		log.Printf("[pipeline] merge_pr: failed to build request for %s#%d: %v", repo, prNumber, err)
+		logf("[pipeline] merge_pr: failed to build request for %s#%d: %v", repo, prNumber, err)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to prepare merge request for PR #%d: %v", prNumber, err))
 		return
 	}
@@ -1038,7 +1037,7 @@ func (s *Server) mergePRForClaw(clawID string) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
+		logf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
 		return
 	}
@@ -1046,10 +1045,10 @@ func (s *Server) mergePRForClaw(clawID string) {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
-		log.Printf("[pipeline] merge_pr: merged %s#%d successfully", repo, prNumber)
+		logf("[pipeline] merge_pr: merged %s#%d successfully", repo, prNumber)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR #%d merged successfully.", prNumber))
 	} else {
-		log.Printf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(respBody))
+		logf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(respBody))
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
 	}
 }

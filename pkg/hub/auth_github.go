@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -175,7 +174,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	// Exchange code for GitHub access token
 	accessToken, err := s.githubExchangeCode(r.Context(), oauthCfg.ClientID, oauthCfg.ClientSecret, body.Code, body.RedirectURI)
 	if err != nil {
-		log.Printf("[github-oauth] token exchange error: %v", err)
+		logfCtx(r.Context(), "[github-oauth] token exchange error: %v", err)
 		writeErr(w, http.StatusBadGateway, "upstream_error", "token exchange failed")
 		return
 	}
@@ -183,7 +182,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	// Fetch user info
 	ghUser, err := s.githubFetchUser(r.Context(), accessToken)
 	if err != nil {
-		log.Printf("[github-oauth] fetch user error: %v", err)
+		logfCtx(r.Context(), "[github-oauth] fetch user error: %v", err)
 		writeErr(w, http.StatusBadGateway, "upstream_error", "fetch user failed")
 		return
 	}
@@ -191,12 +190,12 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 	// Check allowlist
 	allowed, err := s.githubCheckAllowlist(r.Context(), oauthCfg, accessToken, ghUser.Login)
 	if err != nil {
-		log.Printf("[github-oauth] allowlist check error: %v", err)
+		logfCtx(r.Context(), "[github-oauth] allowlist check error: %v", err)
 		writeErr(w, http.StatusBadGateway, "upstream_error", "allowlist check failed")
 		return
 	}
 	if !allowed {
-		log.Printf("[github-oauth] denied: user %s not in allowlist", ghUser.Login)
+		logfCtx(r.Context(), "[github-oauth] denied: user %s not in allowlist", ghUser.Login)
 		writeErr(w, http.StatusForbidden, "forbidden", "access denied")
 		return
 	}
@@ -208,7 +207,7 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	log.Printf("[github-oauth] login: %s (%s)", ghUser.Login, ghUser.Name)
+	logfCtx(r.Context(), "[github-oauth] login: %s (%s)", ghUser.Login, ghUser.Name)
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]string{"github_token": sessionToken})
@@ -317,7 +316,7 @@ func (s *Server) githubCheckAllowlist(ctx context.Context, cfg *types.GitHubOAut
 		org, team := parts[0], parts[1]
 		member, err := s.githubCheckTeamMembership(ctx, accessToken, org, team, login)
 		if err != nil {
-			log.Printf("[github-oauth] team check %s/%s: %v", org, team, err)
+			logfCtx(ctx, "[github-oauth] team check %s/%s: %v", org, team, err)
 			continue
 		}
 		if member {

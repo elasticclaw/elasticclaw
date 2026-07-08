@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -78,7 +77,7 @@ type githubIssueComment struct {
 
 func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		log.Printf("[github-issues-webhook] %s %s → 405 method not allowed", r.Method, r.URL.Path)
+		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 405 method not allowed", r.Method, r.URL.Path)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -86,7 +85,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		log.Printf("[github-issues-webhook] %s %s → 400 read error: %v", r.Method, r.URL.Path, err)
+		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 400 read error: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
@@ -95,7 +94,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 	sig := r.Header.Get("X-Hub-Signature-256")
 	reason := s.validateGitHubIssuesSignatureReason(workspaceName, body, sig)
 	if reason != "" {
-		log.Printf("[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
+		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -116,7 +115,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 	// Dedup: ignore duplicate webhook deliveries using GitHub's delivery ID
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 	if deliveryID != "" && s.isDuplicateWebhook("gh-issues:"+deliveryID) {
-		log.Printf("[github-issues-webhook] dedup: skipping duplicate delivery %s for issue #%d in %s", deliveryID, payload.Issue.Number, payload.Repository.FullName)
+		logfCtx(r.Context(), "[github-issues-webhook] dedup: skipping duplicate delivery %s for issue #%d in %s", deliveryID, payload.Issue.Number, payload.Repository.FullName)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -181,7 +180,7 @@ func verifyGitHubHMAC(body []byte, sig, secret string) bool {
 
 func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIssuesWebhookPayload) {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
-	log.Printf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
+	logf("[github-issues-webhook] processing event: action=%q issue=%s title=%q sender=%q",
 		payload.Action, issueID, payload.Issue.Title, payload.Sender.Login)
 
 	currentStatus := payload.Issue.State
@@ -205,7 +204,7 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 	for _, l := range payload.Issue.Labels {
 		issueLabels[strings.ToLower(l.Name)] = true
 	}
-	log.Printf("[github-issues-webhook] issue %s labels=%v assignee=%q currentStatus=%q previousStatus=%q",
+	logf("[github-issues-webhook] issue %s labels=%v assignee=%q currentStatus=%q previousStatus=%q",
 		issueID, func() []string {
 			out := make([]string, 0, len(issueLabels))
 			for k := range issueLabels {
@@ -229,7 +228,7 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 		if previousStatus == "" {
 			previousStatus = currentStatus
 		}
-		log.Printf("[github-issues-webhook] label '%s' added by %q — previousLabels=%v",
+		logf("[github-issues-webhook] label '%s' added by %q — previousLabels=%v",
 			payload.Label.Name, payload.Sender.Login, func() []string {
 				out := make([]string, 0, len(previousLabels))
 				for k := range previousLabels {
@@ -247,7 +246,7 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 
 	if workspaceName == "" {
 		if !s.processGitHubIssuesFactoryEvent(payload, issueID, currentStatus, issueLabels, assignee) {
-			log.Printf("[github-issues-webhook] no factory matched for issue %s", issueID)
+			logf("[github-issues-webhook] no factory matched for issue %s", issueID)
 		}
 		return
 	}
@@ -255,13 +254,13 @@ func (s *Server) processGitHubIssuesEvent(workspaceName string, payload githubIs
 	workflowWorkspaces, _ := loadExternalWorkflowsByIntegration("github-issues")
 	workflowWorkspaces = filterWorkflowWorkspacesByName(workflowWorkspaces, workspaceName)
 	if len(workflowWorkspaces) == 0 {
-		log.Printf("[github-issues-webhook] no workflows configured — nothing to do")
+		logf("[github-issues-webhook] no workflows configured — nothing to do")
 		return
 	}
-	log.Printf("[github-issues-webhook] checking %d workflow workspace(s)", len(workflowWorkspaces))
+	logf("[github-issues-webhook] checking %d workflow workspace(s)", len(workflowWorkspaces))
 
 	if !s.processGitHubIssuesWorkflowEvent(workflowWorkspaces, payload, issueID, issueTitle, currentStatus, previousStatus, previousLabels, issueLabels, assignee) {
-		log.Printf("[github-issues-webhook] no workflow matched for issue %s", issueID)
+		logf("[github-issues-webhook] no workflow matched for issue %s", issueID)
 	}
 }
 
@@ -320,12 +319,12 @@ func (s *Server) processGitHubIssuesFactoryEvent(payload githubIssuesWebhookPayl
 			}
 		}
 		matched = true
-		log.Printf("[factory:%s] GitHub issue %s matched factory trigger — creating claw", factory.Name, issueID)
+		logf("[factory:%s] GitHub issue %s matched factory trigger — creating claw", factory.Name, issueID)
 		if err := s.createClawForGitHubIssue(factory, payload, "github-issues webhook"); err != nil {
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
+			logf("[factory:%s] failed to create claw for issue %s: %v", factory.Name, issueID, err)
 			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", currentStatus, "error", "", err.Error())
 		} else {
 			s.logFactoryEvent(factory.Name, issueID, payload.Issue.Title, "", currentStatus, "claw_created", "", "github-issues webhook")
@@ -385,12 +384,12 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 				}
 			}
 			matched = true
-			log.Printf("[workflow:%s/%s] GitHub issue %s matched workflow trigger — creating claw", workspace.Name, workflow.Name, issueID)
+			logf("[workflow:%s/%s] GitHub issue %s matched workflow trigger — creating claw", workspace.Name, workflow.Name, issueID)
 			if _, _, err := s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "github-issues webhook"); err != nil {
 				if isFactoryTriggerAlreadyClaimed(err) {
 					continue
 				}
-				log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
+				logf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, issueID, err)
 				s.notifyGitHubIssueWorkflowCreateFailure(workspace, workflow, payload, err)
 			}
 		}
@@ -404,7 +403,7 @@ func (s *Server) notifyGitHubIssueWorkflowCreateFailure(workspace *types.Workspa
 	}
 	token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
 	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no GitHub Issues token; skipping failure feedback", workspace.Name, workflow.Name)
+		logf("[agent-failure-feedback] workflow %s/%s has no GitHub Issues token; skipping failure feedback", workspace.Name, workflow.Name)
 		return
 	}
 	s.handleAgentFailureFeedback(agentFailureFeedback{
@@ -525,7 +524,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
-		log.Printf("[workflow:%s/%s] GitHub issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
+		logf("[workflow:%s/%s] GitHub issue %s already has active claw %s", workspace.Name, workflow.Name, issueID, existing[:8])
 		return existing, false, nil
 	}
 
@@ -541,7 +540,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		return "", false, fmt.Errorf("claim workflow trigger: %w", err)
 	}
 	if !claimed {
-		log.Printf("[workflow:%s/%s] GitHub issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
+		logf("[workflow:%s/%s] GitHub issue %s already has an active trigger claim", workspace.Name, workflow.Name, issueID)
 		return "", false, errFactoryTriggerAlreadyClaimed
 	}
 	claimOpen := true
@@ -609,7 +608,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 	if !claimed {
 		if reason != "poll" {
-			log.Printf("[factory:%s] GitHub issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
+			logf("[factory:%s] GitHub issue %s already has an active trigger claim — treating as idempotent success", factory.Name, issueID)
 		}
 		return errFactoryTriggerAlreadyClaimed
 	}
@@ -644,7 +643,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		var parseErr error
 		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
 		if parseErr != nil {
-			log.Printf("[factory:%s] warning: elasticclaw-config.yaml parse error: %v", factory.Name, parseErr)
+			logf("[factory:%s] warning: elasticclaw-config.yaml parse error: %v", factory.Name, parseErr)
 			tmplCfg = nil
 		}
 	}
@@ -697,15 +696,15 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	// Resolve and inject template-requested secrets
 	resolvedSecrets := make(map[string]string)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
+		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = secretVal
 				resolvedSecrets[envName] = secretVal
-				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
-				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
+				logf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
 			}
 		}
 	}
@@ -716,9 +715,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -729,9 +728,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
 				resolvedSecrets[envName] = val
-				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -837,7 +836,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub issue %s as pending", groupName, activeCount, groupLimit, issueID)
+		logf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub issue %s as pending", groupName, activeCount, groupLimit, issueID)
 	}
 
 	// Insert claw record
@@ -873,7 +872,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 	claimOpen = false
 
-	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
+	logf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -896,9 +895,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 						base = "https://api.github.com"
 					}
 					if err := moveGitHubIssue(ghToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
-						log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
+						logf("[factory] failed to move GitHub issue %s to working status '%s': %v", issueID, factory.WorkingStatus, err)
 					} else {
-						log.Printf("[factory] moved GitHub issue %s to working status '%s'", issueID, factory.WorkingStatus)
+						logf("[factory] moved GitHub issue %s to working status '%s'", issueID, factory.WorkingStatus)
 					}
 				}
 			}
@@ -915,7 +914,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
-			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
 		ctx := context.Background()
@@ -950,11 +949,11 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		}
 
 		if provErr != nil {
-			log.Printf("[factory] claw %s provision failed: %v", clawID[:8], provErr)
+			logf("[factory] claw %s provision failed: %v", clawID[:8], provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 			return
 		}
-		log.Printf("[factory] claw %s provisioned successfully", clawID[:8])
+		logf("[factory] claw %s provisioned successfully", clawID[:8])
 	}()
 
 	return nil
@@ -965,7 +964,7 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 	if err := s.db.QueryRow(`SELECT id, tenant_id FROM claws WHERE github_issue_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&clawID, &tenantID); err != nil {
 		return
 	}
-	log.Printf("[factory] terminating claw %s for GitHub issue %s", clawID[:8], issueID)
+	logf("[factory] terminating claw %s for GitHub issue %s", clawID[:8], issueID)
 
 	// Post a comment on the linked GitHub issue before terminating
 	factory := s.findFactoryForIssue(issueID)
@@ -978,9 +977,9 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 				var issueNum int
 				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
 					if err := commentGitHubIssue(token, repo, issueNum, "Agent stopped: issue left trigger status"); err != nil {
-						log.Printf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
+						logf("[factory] failed to comment GitHub issue %s: %v", issueID, err)
 					} else {
-						log.Printf("[factory] commented GitHub issue %s", issueID)
+						logf("[factory] commented GitHub issue %s", issueID)
 					}
 				}
 			}
@@ -1033,7 +1032,7 @@ func (s *Server) buildGitHubIssuesContextWithComments(payload githubIssuesWebhoo
 	}
 	comments, err := fetchGitHubIssueComments(base, payload.Repository.FullName, payload.Issue.Number, token)
 	if err != nil {
-		log.Printf("[github-issues] failed to fetch comments for %s#%d: %v", payload.Repository.FullName, payload.Issue.Number, err)
+		logf("[github-issues] failed to fetch comments for %s#%d: %v", payload.Repository.FullName, payload.Issue.Number, err)
 		return buildGitHubIssuesContext(payload, nil, "Issue comments could not be loaded automatically. Review the issue URL for additional context.")
 	}
 	return buildGitHubIssuesContext(payload, comments, "")
@@ -1245,7 +1244,7 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 		clawID,
 	).Scan(&issueURL)
 	if err != nil || issueURL == "" {
-		log.Printf("[pipeline] close_issue: no tracked GitHub issue for claw %s", clawID[:8])
+		logf("[pipeline] close_issue: no tracked GitHub issue for claw %s", clawID[:8])
 		return
 	}
 
@@ -1253,7 +1252,7 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 	// URL format: https://github.com/owner/repo/issues/123
 	parts := strings.Split(issueURL, "/")
 	if len(parts) < 2 {
-		log.Printf("[pipeline] close_issue: invalid issue URL %q", issueURL)
+		logf("[pipeline] close_issue: invalid issue URL %q", issueURL)
 		return
 	}
 	// Extract owner/repo from URL
@@ -1266,7 +1265,7 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 		}
 	}
 	if owner == "" || repo == "" {
-		log.Printf("[pipeline] close_issue: could not parse owner/repo from %q", issueURL)
+		logf("[pipeline] close_issue: could not parse owner/repo from %q", issueURL)
 		return
 	}
 	repoFullName := owner + "/" + repo
@@ -1275,14 +1274,14 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 	var issueNumber int
 	fmt.Sscanf(parts[len(parts)-1], "%d", &issueNumber)
 	if issueNumber == 0 {
-		log.Printf("[pipeline] close_issue: could not parse issue number from %q", issueURL)
+		logf("[pipeline] close_issue: could not parse issue number from %q", issueURL)
 		return
 	}
 
 	// Find token for this repo
 	token := s.resolveGitHubIssuesTokenForRepo(repoFullName)
 	if token == "" {
-		log.Printf("[pipeline] close_issue: no GitHub token for repo %s", repoFullName)
+		logf("[pipeline] close_issue: no GitHub token for repo %s", repoFullName)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: no GitHub token available for %s — cannot close issue.", repoFullName))
 		return
 	}
@@ -1295,12 +1294,12 @@ func (s *Server) closeGitHubIssueForClaw(clawID string) {
 	})
 	_, err = githubAPIPostWithBase(baseURL, fmt.Sprintf("repos/%s/issues/%d", repoFullName, issueNumber), token, "PATCH", body)
 	if err != nil {
-		log.Printf("[pipeline] close_issue: failed to close issue %s#%d: %v", repoFullName, issueNumber, err)
+		logf("[pipeline] close_issue: failed to close issue %s#%d: %v", repoFullName, issueNumber, err)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] close_issue: failed to close issue #%d: %v", issueNumber, err))
 		return
 	}
 
-	log.Printf("[pipeline] close_issue: closed issue %s#%d", repoFullName, issueNumber)
+	logf("[pipeline] close_issue: closed issue %s#%d", repoFullName, issueNumber)
 	s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Closed GitHub issue #%d in %s.", issueNumber, repoFullName))
 }
 

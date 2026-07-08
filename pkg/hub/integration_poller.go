@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,22 +37,22 @@ func (s *Server) pollTick() {
 	factories := s.resolveFactories()
 	linearWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("linear")
 	if err != nil {
-		log.Printf("[poll] tick: failed to load linear workflows: %v", err)
+		logf("[poll] tick: failed to load linear workflows: %v", err)
 	}
 	shortcutWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("shortcut")
 	if err != nil {
-		log.Printf("[poll] tick: failed to load shortcut workflows: %v", err)
+		logf("[poll] tick: failed to load shortcut workflows: %v", err)
 	}
 	githubIssueWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("github-issues")
 	if err != nil {
-		log.Printf("[poll] tick: failed to load github-issues workflows: %v", err)
+		logf("[poll] tick: failed to load github-issues workflows: %v", err)
 	}
 	jiraWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("jira")
 	if err != nil {
-		log.Printf("[poll] tick: failed to load jira workflows: %v", err)
+		logf("[poll] tick: failed to load jira workflows: %v", err)
 	}
 	if len(factories) == 0 && len(linearWorkflowWorkspaces) == 0 && len(shortcutWorkflowWorkspaces) == 0 && len(githubIssueWorkflowWorkspaces) == 0 && len(jiraWorkflowWorkspaces) == 0 {
-		log.Printf("[poll] tick: no factories or workflows configured")
+		logf("[poll] tick: no factories or workflows configured")
 		return
 	}
 
@@ -137,7 +136,7 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 
 		issues, err := s.queryLinearIssues(li.Token, since)
 		if err != nil {
-			log.Printf("[poll-linear] query failed for workspace %q: %v", ws, err)
+			logf("[poll-linear] query failed for workspace %q: %v", ws, err)
 			continue
 		}
 
@@ -167,7 +166,7 @@ func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since 
 			}
 			token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
 			if token == "" {
-				log.Printf("[poll-linear] workflow %s/%s: no Linear token configured — skipping", workspace.Name, workflow.Name)
+				logf("[poll-linear] workflow %s/%s: no Linear token configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
 			tokenTargets[token] = append(tokenTargets[token], linearWorkflowPollTarget{workspace: workspace, workflow: workflow})
@@ -176,7 +175,7 @@ func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since 
 	for token, targets := range tokenTargets {
 		issues, err := s.queryLinearIssues(token, since)
 		if err != nil {
-			log.Printf("[poll-linear] workflow query failed: %v", err)
+			logf("[poll-linear] workflow query failed: %v", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -346,10 +345,10 @@ func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[poll-linear] failed to create claw for %s: %v", entityID, err)
+			logf("[poll-linear] failed to create claw for %s: %v", entityID, err)
 			s.trackFactoryCreationFailure(factory.Name, entityID, err.Error())
 		} else {
-			log.Printf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
+			logf("[poll-linear] created claw for %s via factory %s", entityID, factory.Name)
 			s.logFactoryEvent(factory.Name, entityID, issue.Title, "", currentStatus, "claw_created", "", "poll")
 			var clawID string
 			_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND factory_name=? ORDER BY created_at DESC LIMIT 1`, entityID, factory.Name).Scan(&clawID)
@@ -392,9 +391,9 @@ func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []
 			continue
 		}
 
-		log.Printf("[workflow:%s/%s] Linear issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, entityID)
+		logf("[workflow:%s/%s] Linear issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, entityID)
 		if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "poll"); err != nil {
-			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, entityID, err)
+			logf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, entityID, err)
 		}
 	}
 }
@@ -458,7 +457,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 
 		stories, err := s.queryShortcutStories(sc.Token, since)
 		if err != nil {
-			log.Printf("[poll-shortcut] query failed for workspace %q: %v", ws, err)
+			logf("[poll-shortcut] query failed for workspace %q: %v", ws, err)
 			continue
 		}
 
@@ -466,7 +465,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		// not repeat the full /workflows API call for every story.
 		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), sc.Token)
 		if len(stateNameMap) == 0 {
-			log.Printf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
+			logf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
 			continue
 		}
 		for _, story := range stories {
@@ -536,7 +535,7 @@ func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, sinc
 			}
 			token := s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
 			if token == "" {
-				log.Printf("[poll-shortcut] workflow %s/%s: no Shortcut token configured — skipping", workspace.Name, workflow.Name)
+				logf("[poll-shortcut] workflow %s/%s: no Shortcut token configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
 			tokenTargets[token] = append(tokenTargets[token], shortcutWorkflowPollTarget{workspace: workspace, workflow: workflow, token: token})
@@ -545,12 +544,12 @@ func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, sinc
 	for token, targets := range tokenTargets {
 		stories, err := s.queryShortcutStories(token, since)
 		if err != nil {
-			log.Printf("[poll-shortcut] workflow query failed: %v", err)
+			logf("[poll-shortcut] workflow query failed: %v", err)
 			continue
 		}
 		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
 		if len(stateNameMap) == 0 {
-			log.Printf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
+			logf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
 			continue
 		}
 		for _, story := range stories {
@@ -625,9 +624,9 @@ func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*t
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
+			logf("[poll-shortcut] failed to create claw for %s: %v", storyID, err)
 		} else {
-			log.Printf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
+			logf("[poll-shortcut] created claw for %s via factory %s", storyID, factory.Name)
 			s.logFactoryEvent(factory.Name, storyID, story.Name, "", currentStateName, "claw_created", "", "poll")
 		}
 	}
@@ -684,9 +683,9 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 		if !labelSetAllowed(currentLabels, workflow.Labels, workflow.ExcludeLabels) {
 			continue
 		}
-		log.Printf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
+		logf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
 		if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "poll"); err != nil {
-			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, storyID, err)
+			logf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, storyID, err)
 		}
 	}
 }
@@ -705,7 +704,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		}
 		triggerRepos := githubIssuesPollingRepos(f)
 		if len(triggerRepos) == 0 {
-			log.Printf("[poll-github-issues] factory %q: missing required 'trigger_repos' field — skipping", f.Name)
+			logf("[poll-github-issues] factory %q: missing required 'trigger_repos' field — skipping", f.Name)
 			continue
 		}
 		for _, repo := range triggerRepos {
@@ -713,7 +712,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 				continue
 			}
 			if strings.HasSuffix(repo, "/*") {
-				log.Printf("[poll-github-issues] factory %q: trigger_repos entry %q is an org wildcard; webhooks can match it, but polling requires exact owner/repo entries", f.Name, repo)
+				logf("[poll-github-issues] factory %q: trigger_repos entry %q is an org wildcard; webhooks can match it, but polling requires exact owner/repo entries", f.Name, repo)
 				continue
 			}
 			repoFactories[repo] = append(repoFactories[repo], f)
@@ -740,7 +739,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 
 		issues, err := s.queryGitHubIssues(repo, token, since, base)
 		if err != nil {
-			log.Printf("[poll-github-issues] query failed for repo %q: %v", repo, err)
+			logf("[poll-github-issues] query failed for repo %q: %v", repo, err)
 			continue
 		}
 
@@ -775,7 +774,7 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 			}
 			token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
 			if token == "" {
-				log.Printf("[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
+				logf("[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
 			for _, repo := range githubIssuesWorkflowTriggerRepos(workflow) {
@@ -783,7 +782,7 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 					continue
 				}
 				if strings.HasSuffix(repo, "/*") {
-					log.Printf("[poll-github-issues] workflow %s/%s: repository %q is an org wildcard; polling requires exact owner/repo entries", workspace.Name, workflow.Name, repo)
+					logf("[poll-github-issues] workflow %s/%s: repository %q is an org wildcard; polling requires exact owner/repo entries", workspace.Name, workflow.Name, repo)
 					continue
 				}
 				key := repoTokenKey{repo: repo, token: token}
@@ -806,7 +805,7 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 		}
 		issues, err := s.queryGitHubIssues(key.repo, key.token, since, base)
 		if err != nil {
-			log.Printf("[poll-github-issues] workflow query failed for repo %q: %v", key.repo, err)
+			logf("[poll-github-issues] workflow query failed for repo %q: %v", key.repo, err)
 			continue
 		}
 		for _, issue := range issues {
@@ -930,7 +929,7 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 		var err error
 		events, err = s.queryGitHubIssueEvents(repo, token, base, issue.Number)
 		if err != nil {
-			log.Printf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
+			logf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
 		}
 	}
 
@@ -995,9 +994,9 @@ func (s *Server) processGitHubIssuesPollItem(issue githubIssuesPollItem, factori
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
+			logf("[poll-github-issues] failed to create claw for %s: %v", issueID, err)
 		} else {
-			log.Printf("[poll-github-issues] created claw for %s via factory %s", issueID, factory.Name)
+			logf("[poll-github-issues] created claw for %s via factory %s", issueID, factory.Name)
 			s.logFactoryEvent(factory.Name, issueID, issue.Title, "", currentStatus, "claw_created", "", "poll")
 		}
 	}
@@ -1016,7 +1015,7 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 		var err error
 		events, err = s.queryGitHubIssueEvents(repo, token, base, issue.Number)
 		if err != nil {
-			log.Printf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
+			logf("[poll-github-issues] failed to fetch events for %s: %v", issueID, err)
 		}
 	}
 
@@ -1034,7 +1033,7 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
+			logf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
 		}
 	}
 }
@@ -1245,7 +1244,7 @@ func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.Ji
 		tracker := workspaceIssueTracker{BaseURL: ji.BaseURL, Username: ji.Username, Token: ji.Token, WebhookSecret: ji.WebhookSecret}
 		issues, err := s.queryJiraIssues(tracker, since, projects)
 		if err != nil {
-			log.Printf("[poll-jira] query failed for workspace %q: %v", ji.Workspace, err)
+			logf("[poll-jira] query failed for workspace %q: %v", ji.Workspace, err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1280,7 +1279,7 @@ func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since ti
 			}
 			tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
 			if !ok || tracker.Token == "" || tracker.BaseURL == "" {
-				log.Printf("[poll-jira] workflow %s/%s: no Jira tracker configured — skipping", workspace.Name, workflow.Name)
+				logf("[poll-jira] workflow %s/%s: no Jira tracker configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
 			key := trackerKey{baseURL: tracker.BaseURL, username: tracker.Username, token: tracker.Token}
@@ -1294,7 +1293,7 @@ func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since ti
 		tracker := targets[0].tracker
 		issues, err := s.queryJiraIssues(tracker, since, jiraWorkflowProjects(targets))
 		if err != nil {
-			log.Printf("[poll-jira] workflow query failed: %v", err)
+			logf("[poll-jira] workflow query failed: %v", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1363,7 +1362,7 @@ func (s *Server) processJiraPollItem(issue jiraPollIssue, factories []*types.Fac
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[poll-jira] failed to create claw for %s: %v", issue.Key, err)
+			logf("[poll-jira] failed to create claw for %s: %v", issue.Key, err)
 		}
 	}
 	_ = tracker
@@ -1395,7 +1394,7 @@ func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jira
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s via poll: %v", workspace.Name, workflow.Name, issue.Key, err)
+			logf("[workflow:%s/%s] failed to create claw for Jira issue %s via poll: %v", workspace.Name, workflow.Name, issue.Key, err)
 		}
 	}
 }
@@ -1447,7 +1446,7 @@ func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 
 		prs, err := s.queryGitHubPRs(repo, token, since, base)
 		if err != nil {
-			log.Printf("[poll-github-prs] query failed for repo %q: %v", repo, err)
+			logf("[poll-github-prs] query failed for repo %q: %v", repo, err)
 			continue
 		}
 
@@ -1534,9 +1533,9 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 
 		payload := s.buildGitHubPRPollPayload(pr, repo)
 		if err := s.createClawForGitHubPR(factory, payload, "poll"); err != nil {
-			log.Printf("[poll-github-prs] failed to create claw for %s: %v", prID, err)
+			logf("[poll-github-prs] failed to create claw for %s: %v", prID, err)
 		} else {
-			log.Printf("[poll-github-prs] created claw for %s via factory %s", prID, factory.Name)
+			logf("[poll-github-prs] created claw for %s via factory %s", prID, factory.Name)
 			s.logFactoryEvent(factory.Name, prID, pr.Title, "", "open", "claw_created", "", "poll")
 		}
 	}

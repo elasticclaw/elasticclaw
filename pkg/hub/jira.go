@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -271,7 +270,7 @@ func jiraWebhookDedupKey(payload jiraWebhookPayload) string {
 func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPayload) {
 	workspaces, err := loadExternalWorkflowsByIntegration("jira")
 	if err != nil {
-		log.Printf("[jira-webhook] failed to load workflows: %v", err)
+		logf("[jira-webhook] failed to load workflows: %v", err)
 		return
 	}
 	workspaces = filterWorkflowWorkspacesByName(workspaces, workspaceName)
@@ -305,7 +304,7 @@ func (s *Server) processJiraEvent(workspaceName string, payload jiraWebhookPaylo
 			if isFactoryTriggerAlreadyClaimed(err) {
 				continue
 			}
-			log.Printf("[factory:%s] failed to create claw for Jira issue %s: %v", factory.Name, payload.Issue.Key, err)
+			logf("[factory:%s] failed to create claw for Jira issue %s: %v", factory.Name, payload.Issue.Key, err)
 			s.trackFactoryCreationFailure(factory.Name, payload.Issue.Key, err.Error())
 		}
 	}
@@ -360,7 +359,7 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 				if isFactoryTriggerAlreadyClaimed(err) {
 					continue
 				}
-				log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
+				logf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
 			}
 		}
 		for _, workflow := range workspace.Workflows {
@@ -504,7 +503,7 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 	if !isPending && workflow.WorkingStatus != "" {
 		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow); ok {
 			if err := s.moveJiraIssue(tracker, issueID, workflow.WorkingStatus); err != nil {
-				log.Printf("[workflow:%s/%s] failed to move Jira issue %s to %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
+				logf("[workflow:%s/%s] failed to move Jira issue %s to %q: %v", workspace.Name, workflow.Name, issueID, workflow.WorkingStatus, err)
 			}
 		}
 	}
@@ -552,7 +551,7 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 	if !isPending && factory.WorkingStatus != "" {
 		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
 			if err := s.moveJiraIssue(tracker, issueID, factory.WorkingStatus); err != nil {
-				log.Printf("[factory:%s] failed to move Jira issue %s to %q: %v", factory.Name, issueID, factory.WorkingStatus, err)
+				logf("[factory:%s] failed to move Jira issue %s to %q: %v", factory.Name, issueID, factory.WorkingStatus, err)
 			}
 		}
 	}

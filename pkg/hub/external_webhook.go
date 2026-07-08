@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -122,7 +121,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 			} `json:"sender"`
 		}
 		if err := json.Unmarshal(body, &ghReleasePayload); err != nil {
-			log.Printf("[external-webhook] failed to parse release payload: %v", err)
+			logfCtx(r.Context(), "[external-webhook] failed to parse release payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
@@ -131,26 +130,26 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		payload.Release = &ghReleasePayload.Release
 		payload.Repository = ghReleasePayload.Repository
 		payload.Sender = ghReleasePayload.Sender
-		log.Printf("[external-webhook] release event: action=%q repo=%q tag=%q",
+		logfCtx(r.Context(), "[external-webhook] release event: action=%q repo=%q tag=%q",
 			ghReleasePayload.Action, ghReleasePayload.Repository.FullName, ghReleasePayload.Release.TagName)
 
 	case "ping":
-		log.Printf("[external-webhook] ping received — webhook configured correctly")
+		logfCtx(r.Context(), "[external-webhook] ping received — webhook configured correctly")
 		w.WriteHeader(http.StatusOK)
 		return
 
 	case "":
 		// Generic webhook - try to parse as our standard payload format
 		if err := json.Unmarshal(body, &payload); err != nil {
-			log.Printf("[external-webhook] failed to parse generic payload: %v", err)
+			logfCtx(r.Context(), "[external-webhook] failed to parse generic payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		log.Printf("[external-webhook] generic event: type=%q repo=%q",
+		logfCtx(r.Context(), "[external-webhook] generic event: type=%q repo=%q",
 			payload.EventType, payload.Repository.FullName)
 
 	default:
-		log.Printf("[external-webhook] unsupported event type %q — ignored", event)
+		logfCtx(r.Context(), "[external-webhook] unsupported event type %q — ignored", event)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -163,7 +162,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	if deliveryID != "" {
 		fingerprint := fmt.Sprintf("external:%s:%s:%s", deliveryID, payload.Repository.FullName, payload.EventType)
 		if s.isDuplicateWebhook(fingerprint) {
-			log.Printf("[external-webhook] dedup: skipping duplicate delivery %s", deliveryID)
+			logfCtx(r.Context(), "[external-webhook] dedup: skipping duplicate delivery %s", deliveryID)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -209,7 +208,7 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 		eventType = payload.Action
 	}
 
-	log.Printf("[external-webhook] processing event: type=%q repo=%q — checking %d factories",
+	logf("[external-webhook] processing event: type=%q repo=%q — checking %d factories",
 		eventType, repoFullName, len(factories))
 
 	for _, factory := range factories {
@@ -217,15 +216,15 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			continue
 		}
 		if factory.Enabled != nil && !*factory.Enabled {
-			log.Printf("[external-webhook] factory %q: skipped (disabled)", factory.Name)
+			logf("[external-webhook] factory %q: skipped (disabled)", factory.Name)
 			continue
 		}
 		if factory.ExternalTrigger == nil {
-			log.Printf("[external-webhook] factory %q: skipped (no external_trigger configured)", factory.Name)
+			logf("[external-webhook] factory %q: skipped (no external_trigger configured)", factory.Name)
 			continue
 		}
 		if !s.validateExternalSignatureForFactory(factory, body, sig) {
-			log.Printf("[external-webhook] factory %q: skipped (signature mismatch)", factory.Name)
+			logf("[external-webhook] factory %q: skipped (signature mismatch)", factory.Name)
 			continue
 		}
 
@@ -238,7 +237,7 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 				// Only trigger on actual releases, not drafts
 				// "created" fires when a draft is saved - exclude it to avoid premature triggers
 				if eventType != "released" && eventType != "published" {
-					log.Printf("[external-webhook] factory %q: skipped (event type %q not a published release)",
+					logf("[external-webhook] factory %q: skipped (event type %q not a published release)",
 						factory.Name, eventType)
 					continue
 				}
@@ -246,7 +245,7 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 				// Accept any event type for generic webhooks
 			default:
 				// Unknown source type - skip
-				log.Printf("[external-webhook] factory %q: skipped (unknown source %q)",
+				logf("[external-webhook] factory %q: skipped (unknown source %q)",
 					factory.Name, trigger.Source)
 				continue
 			}
@@ -258,14 +257,14 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 
 			// Repository filter
 			if f.Repository != "" && !strings.EqualFold(f.Repository, repoFullName) {
-				log.Printf("[external-webhook] factory %q: skipped (repo mismatch: want %q, got %q)",
+				logf("[external-webhook] factory %q: skipped (repo mismatch: want %q, got %q)",
 					factory.Name, f.Repository, repoFullName)
 				continue
 			}
 
 			// Event type filter
 			if f.EventType != "" && !strings.EqualFold(f.EventType, eventType) {
-				log.Printf("[external-webhook] factory %q: skipped (event type mismatch: want %q, got %q)",
+				logf("[external-webhook] factory %q: skipped (event type mismatch: want %q, got %q)",
 					factory.Name, f.EventType, eventType)
 				continue
 			}
@@ -273,7 +272,7 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			// Tag pattern filter (for releases)
 			if f.TagPattern != "" && payload.Release != nil {
 				if !matchGlob(f.TagPattern, payload.Release.TagName) {
-					log.Printf("[external-webhook] factory %q: skipped (tag pattern mismatch: want %q, got %q)",
+					logf("[external-webhook] factory %q: skipped (tag pattern mismatch: want %q, got %q)",
 						factory.Name, f.TagPattern, payload.Release.TagName)
 					continue
 				}
@@ -297,14 +296,14 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 		"event_type": eventType,
 	})
 	if err != nil {
-		log.Printf("[external-webhook] factory %q: failed to claim trigger for %s: %v",
+		logf("[external-webhook] factory %q: failed to claim trigger for %s: %v",
 			factory.Name, triggerKey, err)
 		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
 			"", eventType, "error", "", err.Error())
 		return
 	}
 	if !claimed {
-		log.Printf("[external-webhook] factory %q: trigger %s already claimed — treating as idempotent success",
+		logf("[external-webhook] factory %q: trigger %s already claimed — treating as idempotent success",
 			factory.Name, triggerKey)
 		return
 	}
@@ -316,11 +315,11 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 	}()
 
 	// Create claw
-	log.Printf("[external-webhook] factory %q: creating claw for %s (event=%s)",
+	logf("[external-webhook] factory %q: creating claw for %s (event=%s)",
 		factory.Name, triggerKey, eventType)
 	clawID, err := s.createClawForExternalEvent(factory, payload, triggerKey)
 	if err != nil {
-		log.Printf("[external-webhook] factory %q: failed to create claw for %s: %v",
+		logf("[external-webhook] factory %q: failed to create claw for %s: %v",
 			factory.Name, triggerKey, err)
 		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
 			"", eventType, "error", "", err.Error())
@@ -332,7 +331,7 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
 		}
-		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
+		logf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
 			factory.Name, triggerKey, err)
 		s.logFactoryEvent(factory.Name, triggerKey, fmt.Sprintf("External event: %s", eventType),
 			"", eventType, "error", "", err.Error())
@@ -488,13 +487,13 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 
 	// Resolve and inject template-requested secrets
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map",
+		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map",
 			factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := resolveSecretRefLocal(integrations, ref, factory)
 			if ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret %s as %s into claw env",
+				logf("[factory:%s] injected template secret %s as %s into claw env",
 					factory.Name, ref.Type, envName)
 			}
 		}
@@ -505,7 +504,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env",
+				logf("[factory:%s] injected template secret_ref %s as %s into claw env",
 					factory.Name, secretRef, envName)
 			}
 		}
@@ -516,7 +515,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env",
+				logf("[factory:%s] injected factory secret_ref %s as %s into claw env",
 					factory.Name, secretRef, envName)
 			}
 		}
@@ -603,7 +602,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for external trigger %s as pending",
+		logf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for external trigger %s as pending",
 			groupName, activeCount, groupLimit, triggerID)
 	}
 
@@ -625,7 +624,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		return "", fmt.Errorf("db insert: %w", err)
 	}
 
-	log.Printf("[factory] created claw %s (%s) for external trigger %s (status=%s)",
+	logf("[factory] created claw %s (%s) for external trigger %s (status=%s)",
 		clawName, clawID[:8], triggerID, initialStatus)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -642,7 +641,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
-			log.Printf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
+			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
 
@@ -682,7 +681,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
 		if provErr != nil {
-			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			logf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -199,7 +198,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 					storyFiltersByToken[token] = filterData
 				}
 				if filterData.loadErr != nil {
-					log.Printf("[factory:%s] skipping story %s: failed to load Shortcut story filters: %v", factory.Name, storyID, filterData.loadErr)
+					logf("[factory:%s] skipping story %s: failed to load Shortcut story filters: %v", factory.Name, storyID, filterData.loadErr)
 					continue
 				}
 
@@ -245,7 +244,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 				if len(stateMap) > 0 {
 					stateNameCache[token] = stateMap
 				} else {
-					log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
+					logf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", factory.Workspace)
 					continue
 				}
 			}
@@ -254,12 +253,12 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 
 			// Issue entering trigger status → create claw
 			if strings.EqualFold(newStateName, factory.TriggerStatus) && !strings.EqualFold(oldStateName, factory.TriggerStatus) {
-				log.Printf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
+				logf("[factory:%s] story %s entered '%s' — creating claw", factory.Name, storyID, factory.TriggerStatus)
 				if err := s.createClawForShortcutStory(factory, action, storyID, token, "shortcut webhook"); err != nil {
 					if isFactoryTriggerAlreadyClaimed(err) {
 						continue
 					}
-					log.Printf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
+					logf("[factory:%s] failed to create claw for %s: %v", factory.Name, storyID, err)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "error", "", err.Error())
 					s.trackFactoryCreationFailure(factory.Name, storyID, err.Error())
 				} else {
@@ -280,7 +279,7 @@ func (s *Server) processShortcutEvent(workspaceName string, payload shortcutWebh
 					storyID,
 				).Scan(&activeClaw)
 				if activeClaw != "" {
-					log.Printf("[factory:%s] story %s left trigger — terminating claw", factory.Name, storyID)
+					logf("[factory:%s] story %s left trigger — terminating claw", factory.Name, storyID)
 					s.terminateClawForIssue(storyID)
 					s.logFactoryEvent(factory.Name, storyID, action.Name, oldStateName, newStateName, "claw_terminated", activeClaw, "")
 				} else {
@@ -328,7 +327,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 
 				token := s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
 				if token == "" {
-					log.Printf("[workflow:%s/%s] no Shortcut token configured — skipping webhook story %s", workspace.Name, workflow.Name, storyID)
+					logf("[workflow:%s/%s] no Shortcut token configured — skipping webhook story %s", workspace.Name, workflow.Name, storyID)
 					continue
 				}
 
@@ -338,7 +337,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 					if len(stateMap) > 0 {
 						stateNameCache[token] = stateMap
 					} else {
-						log.Printf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", workflow.Workspace)
+						logf("[shortcut-webhook] failed to load workflow states for workspace %q (empty response) — not caching", workflow.Workspace)
 						continue
 					}
 				}
@@ -352,7 +351,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 						storyFiltersByToken[token] = filterData
 					}
 					if filterData.loadErr != nil {
-						log.Printf("[workflow:%s/%s] skipping story %s: failed to load Shortcut story filters: %v", workspace.Name, workflow.Name, storyID, filterData.loadErr)
+						logf("[workflow:%s/%s] skipping story %s: failed to load Shortcut story filters: %v", workspace.Name, workflow.Name, storyID, filterData.loadErr)
 						continue
 					}
 					if !labelSetAllowed(filterData.labels, workflow.Labels, workflow.ExcludeLabels) {
@@ -368,7 +367,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 					_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id = ? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&activeClaw)
 					if activeClaw != "" {
 						matched = true
-						log.Printf("[workflow:%s/%s] Shortcut story %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus, activeClaw[:8])
+						logf("[workflow:%s/%s] Shortcut story %s left trigger %q — terminating claw %s", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus, activeClaw[:8])
 						s.terminateClawForIssue(storyID)
 					}
 				}
@@ -378,12 +377,12 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 				}
 
 				matched = true
-				log.Printf("[workflow:%s/%s] Shortcut story %s entered %q — creating claw", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus)
+				logf("[workflow:%s/%s] Shortcut story %s entered %q — creating claw", workspace.Name, workflow.Name, storyID, workflow.TriggerStatus)
 				if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "shortcut webhook"); err != nil {
 					if isFactoryTriggerAlreadyClaimed(err) {
 						continue
 					}
-					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
+					logf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
 				}
 			}
 		}
@@ -543,7 +542,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	if !claimed {
 		if reason != "poll" {
-			log.Printf("[factory:%s] Shortcut story %s already has an active trigger claim — treating as idempotent success", factory.Name, storyID)
+			logf("[factory:%s] Shortcut story %s already has an active trigger claim — treating as idempotent success", factory.Name, storyID)
 		}
 		return errFactoryTriggerAlreadyClaimed
 	}
@@ -559,7 +558,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	if _, err := shortcutAPI(s.resolveShortcutBaseURL(), fmt.Sprintf("stories/%s", storyID), token); err != nil {
 		return fmt.Errorf("cannot read story %s from Shortcut (check token/workspace access): %w", storyID, err)
 	}
-	log.Printf("[factory:%s] verified story %s is readable", factory.Name, storyID)
+	logf("[factory:%s] verified story %s is readable", factory.Name, storyID)
 
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
 	if err != nil {
@@ -573,7 +572,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		var parseErr error
 		tmplCfg, parseErr = config.ParseTemplateConfig([]byte(cfgContent))
 		if parseErr != nil {
-			log.Printf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
+			logf("[factory:%s] warning: could not parse elasticclaw-config.yaml from template %q: %v", factory.Name, factory.Template, parseErr)
 			// Non-fatal — continue with defaults
 			tmplCfg = nil
 		}
@@ -615,14 +614,14 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	// Resolve and inject template-requested secrets (typed refs + legacy)
 	if tmplCfg != nil && len(tmplCfg.Secrets) > 0 {
-		log.Printf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
+		logf("[factory:%s] DEPRECATED: template %q uses 'secrets:' list — migrate to 'secret_refs:' map", factory.Name, factory.Template)
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
+				logf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
-				log.Printf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
+				logf("[factory:%s] warning: requested secret (type=%s name=%s workspace=%s) not found", factory.Name, ref.Type, ref.Name, ref.Workspace)
 			}
 		}
 	}
@@ -632,9 +631,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: template secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -644,9 +643,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
 				env[envName] = val
-				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
+				logf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
-				log.Printf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
+				logf("[factory:%s] WARNING: secret_ref %q not found in hub secrets", factory.Name, secretRef)
 			}
 		}
 	}
@@ -731,7 +730,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	isPending := false
 	if groupLimit > 0 && activeCount >= groupLimit {
 		isPending = true
-		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for Shortcut story %s as pending", groupName, activeCount, groupLimit, storyID)
+		logf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for Shortcut story %s as pending", groupName, activeCount, groupLimit, storyID)
 	}
 
 	clawID := uuid.New().String()
@@ -766,7 +765,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 	claimOpen = false
 
-	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
+	logf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": initialStatus},
@@ -777,9 +776,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	if !isPending && factory.WorkingStatus != "" {
 		if token != "" {
 			if err := moveShortcutStory(s.resolveShortcutBaseURL(), token, storyID, factory.WorkingStatus); err != nil {
-				log.Printf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
+				logf("[factory] failed to move story %s to working status '%s': %v", storyID, factory.WorkingStatus, err)
 			} else {
-				log.Printf("[factory] moved story %s to working status '%s'", storyID, factory.WorkingStatus)
+				logf("[factory] moved story %s to working status '%s'", storyID, factory.WorkingStatus)
 			}
 		}
 	}
@@ -819,7 +818,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
 		if provErr != nil {
-			log.Printf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
+			logf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()
@@ -831,7 +830,7 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') LIMIT 1`, storyID).Scan(&existing)
 	if existing != "" {
-		log.Printf("[workflow:%s/%s] Shortcut story %s already has active claw %s", workspace.Name, workflow.Name, storyID, existing[:8])
+		logf("[workflow:%s/%s] Shortcut story %s already has active claw %s", workspace.Name, workflow.Name, storyID, existing[:8])
 		return nil
 	}
 
@@ -847,7 +846,7 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 		return fmt.Errorf("claim workflow trigger: %w", err)
 	}
 	if !claimed {
-		log.Printf("[workflow:%s/%s] Shortcut story %s already has an active trigger claim", workspace.Name, workflow.Name, storyID)
+		logf("[workflow:%s/%s] Shortcut story %s already has an active trigger claim", workspace.Name, workflow.Name, storyID)
 		return nil
 	}
 	claimOpen := true
