@@ -2,8 +2,55 @@ version: "2"
 
 linters:
   enable:
+    - depguard
     - forbidigo
   settings:
+    depguard:
+      # Dependency direction between pkg/hub subpackages (re-arch phase 2.1):
+      #
+      #   httpserver -> (nothing but logger)   # router sees handlers via interfaces
+      #   services   -> store, pkg/types       # never each other's internals upward
+      #   integrations/workflows -> claws      # allowed (an event may create a claw)
+      #   claws      -> neither of them        # core stays at the bottom
+      #   store      -> pkg/types only         # rule active once store/ exists (2.4)
+      #
+      # Note: service packages currently import httpserver for the shared
+      # response helpers (JSONOK/JSONError/WriteErr). That is tolerated until
+      # the error-envelope mapping is centralized (phase 2.5); the rules below
+      # enforce the directions that must never regress.
+      rules:
+        hub-httpserver:
+          files:
+            - "**/pkg/hub/httpserver/**"
+          deny:
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/claws
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/integrations
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/workflows
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/checkpoints
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/analytics
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/settings
+              desc: httpserver must not know the services; the route table takes handlers via interfaces
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/store
+              desc: httpserver must not touch the data layer directly; go through a service
+        hub-claws:
+          files:
+            - "**/pkg/hub/claws/**"
+          deny:
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/integrations
+              desc: claws is the core; integrations may call claws, never the reverse
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub/workflows
+              desc: claws is the core; workflows may call claws, never the reverse
+        hub-store:
+          files:
+            - "**/pkg/hub/store/**"
+          deny:
+            - pkg: github.com/elasticclaw/elasticclaw/pkg/hub
+              desc: store only knows pkg/types; move shared types down instead of importing upward
     forbidigo:
       forbid:
         # Structured logging only in the hub: use logger.FromContext(ctx) /
