@@ -120,6 +120,83 @@ func TestWaitForWorkspaceReadyIfRequested(t *testing.T) {
 	}
 }
 
+func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(filepath.Join(stagedDir, "scripts"), 0700); err != nil {
+		t.Fatalf("mkdir staged workspace: %v", err)
+	}
+	if err := os.MkdirAll(activeDir, 0700); err != nil {
+		t.Fatalf("mkdir active workspace: %v", err)
+	}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write(filepath.Join(stagedDir, "elasticclaw-config.yaml"), "schema_version: v1\nname: lexipol\nprovider: docker\n")
+	write(filepath.Join(stagedDir, "AGENTS.md"), "You are the Lexipol factory agent.\n")
+	write(filepath.Join(stagedDir, "scripts", "bootstrap.sh"), "#!/bin/sh\n")
+	write(filepath.Join(stagedDir, ".elasticclaw-workspace-ready"), "ready\n")
+	write(filepath.Join(activeDir, "BOOTSTRAP.md"), "Who am I? Who are you?\n")
+	write(filepath.Join(activeDir, "MEMORY.md"), "blank slate\n")
+	if err := os.Symlink("/etc/passwd", filepath.Join(stagedDir, "passwd-link")); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		t.Fatalf("syncStagedWorkspaceToOpenClawWorkspace(): %v", err)
+	}
+
+	assertFile := func(rel, want string) {
+		t.Helper()
+		got, err := os.ReadFile(filepath.Join(activeDir, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", rel, string(got), want)
+		}
+	}
+	assertFile("elasticclaw-config.yaml", "schema_version: v1\nname: lexipol\nprovider: docker\n")
+	assertFile("AGENTS.md", "You are the Lexipol factory agent.\n")
+	assertFile(filepath.Join("scripts", "bootstrap.sh"), "#!/bin/sh\n")
+	if _, err := os.Stat(filepath.Join(activeDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
+		t.Fatalf("BOOTSTRAP.md should be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, "MEMORY.md")); !os.IsNotExist(err) {
+		t.Fatalf("MEMORY.md should be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, ".elasticclaw-workspace-ready")); !os.IsNotExist(err) {
+		t.Fatalf("ready marker should not be copied, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, "passwd-link")); !os.IsNotExist(err) {
+		t.Fatalf("symlink should not be copied, got err=%v", err)
+	}
+}
+
+func TestConfiguredGitHubReposParsesDockerBootstrapEnv(t *testing.T) {
+	t.Setenv("ELASTICCLAW_GITHUB_REPOS", `[{"repo":"praetoriandigital/accreditation-workbench-lambdas","permissions":"write"},{"repo":"  ","permissions":"read"}]`)
+
+	repos, err := configuredGitHubRepos()
+	if err != nil {
+		t.Fatalf("configuredGitHubRepos(): %v", err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("repo count = %d, want 1", len(repos))
+	}
+	if repos[0].Repo != "praetoriandigital/accreditation-workbench-lambdas" {
+		t.Fatalf("repo = %q", repos[0].Repo)
+	}
+	if got := repoDirectoryName(repos[0].Repo); got != "accreditation-workbench-lambdas" {
+		t.Fatalf("repoDirectoryName() = %q", got)
+	}
+}
+
 func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
 	tests := []struct {
 		name string

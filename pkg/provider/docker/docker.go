@@ -288,6 +288,9 @@ func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState boo
 		if strings.Contains(err.Error(), "No such") || strings.Contains(err.Error(), "not found") {
 			return nil // already gone
 		}
+		if strings.Contains(err.Error(), "removal of container") && strings.Contains(err.Error(), "is already in progress") {
+			return nil
+		}
 		return fmt.Errorf("docker rm: %w", err)
 	}
 	return nil
