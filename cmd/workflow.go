@@ -46,7 +46,7 @@ type workflowCLIView struct {
 	EnableManualTrigger  bool                     `json:"enableManualTrigger"`
 	SecretRefs           map[string]string        `json:"secretRefs"`
 	Inputs               []map[string]interface{} `json:"inputs"`
-	RawConfig            string                   `json:"rawConfig"`
+	RawConfig            string                   `json:"rawConfig,omitempty"`
 }
 
 func workflowListCmd() *cobra.Command {
