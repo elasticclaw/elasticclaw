@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { useWebSocket } from "@/hooks/use-websocket"
 import "@xterm/xterm/css/xterm.css"
 
 interface TerminalProps {
@@ -11,21 +12,46 @@ interface TerminalProps {
 
 /**
  * XTerminal — browser-only SSH terminal component.
- * Dynamically imports xterm.js to avoid SSR issues.
+ * Dynamically imports xterm.js to avoid SSR issues. The WebSocket lifecycle
+ * is owned by the shared useWebSocket hook (no auto-reconnect: an SSH session
+ * cannot be resumed transparently, so a dropped connection stays closed).
  */
 export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const stateRef = useRef<{
-    ws: WebSocket | null
-    term: import("@xterm/xterm").Terminal | null
-    fitAddon: import("@xterm/addon-fit").FitAddon | null
-    resizeObserver: ResizeObserver | null
-  }>({ ws: null, term: null, fitAddon: null, resizeObserver: null })
+  const termRef = useRef<import("@xterm/xterm").Terminal | null>(null)
+  const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null)
+  const [termReady, setTermReady] = useState(false)
+
+  const getUrl = useCallback(() => wsUrl, [wsUrl])
+
+  const { send } = useWebSocket({
+    getUrl,
+    enabled: termReady,
+    reconnect: false,
+    onOpen: (ws) => {
+      const term = termRef.current
+      if (!term) return
+      term.writeln("\r\n\x1b[32mConnected to SSH terminal\x1b[0m\r\n")
+      fitAddonRef.current?.fit()
+      // Send initial size
+      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }))
+    },
+    onMessage: (e) => {
+      termRef.current?.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data))
+    },
+    onError: () => {
+      termRef.current?.writeln("\r\n\x1b[31mWebSocket error — connection failed\x1b[0m\r\n")
+    },
+    onClose: () => {
+      termRef.current?.writeln("\r\n\x1b[33mConnection closed\x1b[0m\r\n")
+    },
+  })
 
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
     let mounted = true
+    let resizeObserver: ResizeObserver | null = null
 
     async function init() {
       const { Terminal } = await import("@xterm/xterm")
@@ -65,63 +91,38 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       term.open(containerRef.current)
       fitAddon.fit()
 
-      stateRef.current.term = term
-      stateRef.current.fitAddon = fitAddon
-
-      // Connect WebSocket
-      const ws = new WebSocket(wsUrl)
-      stateRef.current.ws = ws
-
-      ws.onopen = () => {
-        term.writeln("\r\n\x1b[32mConnected to SSH terminal\x1b[0m\r\n")
-        fitAddon.fit()
-        // Send initial size
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }))
-      }
-
-      ws.onmessage = (e) => {
-        term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data))
-      }
-
-      ws.onerror = () => {
-        term.writeln("\r\n\x1b[31mWebSocket error — connection failed\x1b[0m\r\n")
-      }
-
-      ws.onclose = () => {
-        term.writeln("\r\n\x1b[33mConnection closed\x1b[0m\r\n")
-      }
+      termRef.current = term
+      fitAddonRef.current = fitAddon
 
       term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data)
-        }
+        send(data)
       })
 
       term.onResize(({ cols, rows }) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols, rows }))
-        }
+        send(JSON.stringify({ type: "resize", cols, rows }))
       })
 
       // Observe container resize
-      const resizeObserver = new ResizeObserver(() => {
+      resizeObserver = new ResizeObserver(() => {
         if (mounted) fitAddon.fit()
       })
       resizeObserver.observe(el)
-      stateRef.current.resizeObserver = resizeObserver
+
+      // Terminal is ready — let useWebSocket open the connection
+      setTermReady(true)
     }
 
     init().catch(console.error)
 
     return () => {
       mounted = false
-      const { ws, term, fitAddon, resizeObserver } = stateRef.current
       resizeObserver?.disconnect()
-      ws?.close()
-      term?.dispose()
-      stateRef.current = { ws: null, term: null, fitAddon: null, resizeObserver: null }
+      termRef.current?.dispose()
+      termRef.current = null
+      fitAddonRef.current = null
+      setTermReady(false)
     }
-  }, [wsUrl]) // reconnect if wsUrl changes
+  }, [send])
 
   return (
     <div
