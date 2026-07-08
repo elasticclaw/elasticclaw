@@ -233,8 +233,11 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	if !strings.Contains(script, `GitHub credential helper did not output a password`) {
 		t.Fatalf("helper script should diagnose missing helper password:\n%s", script)
 	}
-	if !strings.Contains(script, `curl -fsS`) {
+	if !strings.Contains(script, `curl -sS`) {
 		t.Fatalf("helper script should show curl errors during diagnostics:\n%s", script)
+	}
+	if !strings.Contains(script, `printf '%s\n' "$response" >&2`) {
+		t.Fatalf("helper script should print token endpoint response when token is missing:\n%s", script)
 	}
 	if !strings.Contains(script, `git credential fill`) {
 		t.Fatalf("helper script should verify credential fill before cloning:\n%s", script)

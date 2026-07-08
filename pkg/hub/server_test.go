@@ -1952,3 +1952,16 @@ func TestInjectUserMessageQueuesWhenActivityOnlyTurnIsBusy(t *testing.T) {
 		t.Fatalf("expected persisted injected message, got count %d", count)
 	}
 }
+
+func TestInaccessibleGitHubReposMessage(t *testing.T) {
+	repos := sortedStringKeys(map[string]bool{
+		"praetoriandigital/ws-notification-lambdas":         true,
+		"praetoriandigital/accreditation-workbench-lambdas": true,
+	})
+
+	got := inaccessibleGitHubReposMessage(repos)
+	want := "GitHub App cannot access: praetoriandigital/accreditation-workbench-lambdas, praetoriandigital/ws-notification-lambdas"
+	if got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}

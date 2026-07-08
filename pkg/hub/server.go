@@ -6441,19 +6441,29 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no github apps configured", http.StatusNotImplemented)
 		return
 	}
+	providers := make([]githubTokenProviderCandidate, 0, len(githubApps))
 	for i, appCfg := range githubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
 			continue
 		}
+		providers = append(providers, githubTokenProviderCandidate{
+			index:    i,
+			appID:    appCfg.AppID,
+			url:      appCfg.URL,
+			provider: provider,
+		})
+	}
+	for _, candidate := range providers {
+		provider := candidate.provider
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", i, appCfg.AppID, err)
+			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", appCfg.AppID, clawID[:8])
+		log.Printf("github token issued via app_id=%d for claw %s", candidate.appID, clawID[:8])
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
@@ -6461,8 +6471,63 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	inaccessible := diagnoseGitHubRepoAccess(r.Context(), providers, repos)
+	if len(inaccessible) > 0 {
+		msg := inaccessibleGitHubReposMessage(inaccessible)
+		log.Printf("no github app found with installation for repos %v (claw %s): %s", repos, clawID[:8], msg)
+		http.Error(w, msg, http.StatusNotFound)
+		return
+	}
+
 	log.Printf("no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
 	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
+}
+
+func inaccessibleGitHubReposMessage(repos []string) string {
+	return fmt.Sprintf("GitHub App cannot access: %s", strings.Join(repos, ", "))
+}
+
+type githubTokenProviderCandidate struct {
+	index    int
+	appID    int64
+	url      string
+	provider *GitHubTokenProvider
+}
+
+func diagnoseGitHubRepoAccess(ctx context.Context, providers []githubTokenProviderCandidate, repos []RepoAccess) []string {
+	if len(providers) == 0 || len(repos) == 0 {
+		return nil
+	}
+	inaccessible := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.Repo) != "" {
+			inaccessible[repo.Repo] = true
+		}
+	}
+	for _, candidate := range providers {
+		provider := candidate.provider
+		for _, repo := range repos {
+			if !inaccessible[repo.Repo] {
+				continue
+			}
+			if _, _, err := provider.InstallationToken(ctx, 0, []RepoAccess{repo}); err == nil {
+				delete(inaccessible, repo.Repo)
+			}
+		}
+	}
+	return sortedStringKeys(inaccessible)
+}
+
+func sortedStringKeys(values map[string]bool) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // detectToolLoop returns true if the same class of tool error appears 3+ times
