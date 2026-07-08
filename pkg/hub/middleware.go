@@ -1,10 +1,14 @@
 package hub
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
 	"runtime/debug"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 )
 
 // apiError is the single JSON error envelope returned by API handlers.
@@ -24,10 +28,33 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	_ = json.NewEncoder(w).Encode(apiError{Error: msg, Code: code})
 }
 
+// newRequestID returns a short random hex ID, enough to correlate the log
+// lines of a single request.
+func newRequestID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "00000000"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// withRequestID generates a short request ID for every incoming request,
+// echoes it back in the X-Request-ID response header, and stores a logger
+// carrying request_id in the request context. Downstream code retrieves it
+// via logger.FromContext(ctx).
+func (s *Server) withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := newRequestID()
+		w.Header().Set("X-Request-ID", id)
+		l := s.logger.With("request_id", id)
+		next.ServeHTTP(w, r.WithContext(logger.NewContext(r.Context(), l)))
+	})
+}
+
 // withRecovery is the outermost middleware: it recovers from panics in any
 // downstream handler, logs the stack trace with the request context available
-// at this phase (method, path, remote addr — request IDs arrive in Phase 1),
-// and responds with a 500 JSON envelope.
+// at this phase (method, path, remote addr, request_id via the context
+// logger), and responds with a 500 JSON envelope.
 func withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {

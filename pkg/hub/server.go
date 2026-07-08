@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -43,6 +45,7 @@ import (
 type Server struct {
 	db        *sql.DB
 	addr      string
+	logger    *slog.Logger
 	hubCfg    *types.HubConfig
 	identity  *HubIdentity
 	mux       *http.ServeMux
@@ -209,6 +212,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv := &Server{
 		db:                db,
 		addr:              addr,
+		logger:            slog.Default(),
 		hubCfg:            hubCfg,
 		identity:          id,
 		artifacts:         artifacts,
@@ -268,7 +272,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, withRecovery(corsMiddleware(mux)))
+	return http.ListenAndServe(s.addr, withRecovery(s.withRequestID(corsMiddleware(mux))))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -427,6 +431,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		ctx = logger.NewContext(ctx, logger.FromContext(ctx).With("tenant_id", tenantID))
 		if githubLogin != "" {
 			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
 		}

@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 )
 
 func TestWithRecoveryPanic(t *testing.T) {
@@ -90,6 +93,67 @@ func TestWriteErr(t *testing.T) {
 	}
 	if envelope.Error != "claw not found" || envelope.Code != "not_found" {
 		t.Fatalf("envelope = %+v", envelope)
+	}
+}
+
+func TestWithRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Server{logger: slog.New(slog.NewJSONHandler(&buf, nil))}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger.FromContext(r.Context()).Info("first")
+		logger.FromContext(r.Context()).Info("second")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	s.withRequestID(inner).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/claws", nil))
+
+	id := rec.Header().Get("X-Request-ID")
+	if len(id) != 8 {
+		t.Fatalf("expected 8-char X-Request-ID header, got %q", id)
+	}
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 log lines, got %d: %q", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line is not JSON: %q", line)
+		}
+		if entry["request_id"] != id {
+			t.Fatalf("log line request_id=%v does not match header %q", entry["request_id"], id)
+		}
+	}
+}
+
+func TestLogfComponentExtraction(t *testing.T) {
+	var buf bytes.Buffer
+	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "[claw] instance %s started", "abc")
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log line is not JSON: %q", buf.String())
+	}
+	if entry["component"] != "claw" {
+		t.Fatalf("expected component=claw, got %v", entry["component"])
+	}
+	if entry["msg"] != "instance abc started" {
+		t.Fatalf("unexpected message: %v", entry["msg"])
+	}
+
+	buf.Reset()
+	entry = map[string]any{}
+	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "no tag here %d", 7)
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log line is not JSON: %q", buf.String())
+	}
+	if _, ok := entry["component"]; ok {
+		t.Fatalf("did not expect a component attribute: %v", entry)
+	}
+	if entry["msg"] != "no tag here 7" {
+		t.Fatalf("unexpected message: %v", entry["msg"])
 	}
 }
 

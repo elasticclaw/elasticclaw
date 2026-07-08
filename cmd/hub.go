@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -96,6 +98,10 @@ func runHub(cmd *cobra.Command, args []string) error {
 	if hubUIPassword != "" {
 		hubCfg.UIPassword = hubUIPassword
 	}
+
+	// Root structured logger: created once at boot and installed as the
+	// process default; the hub server picks it up via slog.Default().
+	slog.SetDefault(logger.New())
 
 	hub.Version = Version
 	hub.Commit = Commit
