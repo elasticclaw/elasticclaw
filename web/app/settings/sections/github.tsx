@@ -421,7 +421,7 @@ export default function GitHubSection({ settings, onSave, saving, workspace }: {
                   <h3 className="font-medium">Test Recommended</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  You haven't tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
+                  You haven&apos;t tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
                 </p>
               </>
             ) : (
