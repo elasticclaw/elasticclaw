@@ -16,7 +16,6 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/checkpoints"
@@ -81,7 +80,7 @@ func (s *Server) checkpointsSvc() *checkpoints.Service {
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
 			s.mu.Lock()
 			if cc, ok := s.claws[clawID]; ok {
-				cc.conn.Close(code, reason)
+				cc.WS.Close(code, reason)
 				delete(s.claws, clawID)
 			}
 			s.mu.Unlock()
@@ -108,43 +107,6 @@ func (s *Server) checkpointsSvc() *checkpoints.Service {
 		InjectFigmaAPIDocs: injectFigmaAPIDocs,
 		HubVersion:         func() string { return Version },
 	})
-}
-
-// checkpoints.Conn implementation on the hub's clawConn: thin accessors so
-// the extracted code keeps using the exact same mutex and fields. Methods
-// with the Locked suffix must be called with the connection lock held.
-
-func (cc *clawConn) ID() string { return cc.id }
-
-func (cc *clawConn) Lock()    { cc.mu.Lock() }
-func (cc *clawConn) Unlock()  { cc.mu.Unlock() }
-func (cc *clawConn) RLock()   { cc.mu.RLock() }
-func (cc *clawConn) RUnlock() { cc.mu.RUnlock() }
-
-func (cc *clawConn) LastUserMessageAtLocked() time.Time { return cc.lastUserMessageAt }
-
-func (cc *clawConn) StreamingLocked() bool { return cc.isBusyLocked() }
-
-func (cc *clawConn) CheckpointInProgressLocked() bool { return cc.checkpointInProgress }
-
-func (cc *clawConn) SetCheckpointInProgressLocked(v bool) { cc.checkpointInProgress = v }
-
-func (cc *clawConn) PendingCheckpointIDLocked() string { return cc.pendingCheckpointID }
-
-func (cc *clawConn) PendingCheckpointReasonLocked() string { return cc.pendingCheckpointReason }
-
-func (cc *clawConn) SetPendingCheckpointReasonLocked(reason string) {
-	cc.pendingCheckpointReason = reason
-}
-
-func (cc *clawConn) SetPendingCheckpointLocked(id, reason, by string) {
-	cc.pendingCheckpointID = id
-	cc.pendingCheckpointReason = reason
-	cc.pendingCheckpointBy = by
-}
-
-func (cc *clawConn) WriteWS(ctx context.Context, msg types.WSMessage) error {
-	return wsjson.Write(ctx, cc.conn, msg)
 }
 
 // Types and constants moved to pkg/hub/checkpoints.

@@ -42,7 +42,7 @@ func (s *Server) integrationsSvc() *integrations.Service {
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
 			s.mu.Lock()
 			if cc, ok := s.claws[clawID]; ok {
-				cc.conn.Close(code, reason)
+				cc.WS.Close(code, reason)
 				delete(s.claws, clawID)
 			}
 			s.mu.Unlock()
@@ -50,7 +50,7 @@ func (s *Server) integrationsSvc() *integrations.Service {
 		ClawGatewayReady: func(clawID string) bool {
 			s.mu.RLock()
 			cc, connected := s.claws[clawID]
-			ready := connected && cc.gatewayReady
+			ready := connected && cc.GatewayReady
 			s.mu.RUnlock()
 			return ready
 		},

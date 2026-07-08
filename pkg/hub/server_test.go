@@ -1093,13 +1093,13 @@ func TestStreamingSegmentsPersistAroundActivityForRefreshTimeline(t *testing.T) 
 		t.Fatal(err)
 	}
 	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
-	cc := &clawConn{id: "claw-1", tenantID: "test-tenant-id"}
+	cc := &clawConn{ClawID: "claw-1", TenantID: "test-tenant-id"}
 	persistSegment := func(id, content string, offsetSeconds int) {
 		t.Helper()
-		cc.mu.Lock()
-		cc.streamingMsgID = id
-		cc.streamingBuf.WriteString(content)
-		cc.mu.Unlock()
+		cc.Mu.Lock()
+		cc.StreamingMsgID = id
+		cc.StreamingBuf.WriteString(content)
+		cc.Mu.Unlock()
 		if err := s.flushStreamingSegment("claw-1", "test-tenant-id", cc); err != nil {
 			t.Fatal(err)
 		}
@@ -1834,7 +1834,7 @@ func TestBroadcastToUsersFiltersGitHubSessionsByClawTags(t *testing.T) {
 		tenantID:    "test-tenant-id",
 		githubLogin: "bob",
 	}
-	s.claws["claw-1"] = &clawConn{id: "claw-1", tenantID: "test-tenant-id", tags: []string{"owner=alice"}}
+	s.claws["claw-1"] = &clawConn{ClawID: "claw-1", TenantID: "test-tenant-id", Tags: []string{"owner=alice"}}
 
 	recipients := s.broadcastRecipients("test-tenant-id", types.WSMessage{
 		Type:    "chunk",
@@ -1896,22 +1896,22 @@ func TestBusyAgentActivitySignals(t *testing.T) {
 
 func TestFinishTurnClearsActivityOnlyBusyState(t *testing.T) {
 	cc := &clawConn{
-		id:                   "claw-1",
-		tenantID:             "test-tenant-id",
-		streamingStartedAt:   now(),
-		streamingTimeoutSent: true,
-		contextWarningSent:   true,
+		ClawID:               "claw-1",
+		TenantID:             "test-tenant-id",
+		StreamingStartedAt:   now(),
+		StreamingTimeoutSent: true,
+		ContextWarningSent:   true,
 	}
-	cc.mu.Lock()
-	defer cc.mu.Unlock()
-	if !cc.isBusyLocked() {
+	cc.Mu.Lock()
+	defer cc.Mu.Unlock()
+	if !cc.BusyLocked() {
 		t.Fatal("expected activity-only turn to be busy")
 	}
-	cc.finishTurnLocked()
-	if cc.isBusyLocked() {
+	cc.FinishTurnLocked()
+	if cc.BusyLocked() {
 		t.Fatal("expected finishTurnLocked to clear busy state")
 	}
-	if cc.streamingTimeoutSent || cc.contextWarningSent {
+	if cc.StreamingTimeoutSent || cc.ContextWarningSent {
 		t.Fatal("expected finishTurnLocked to clear turn warnings")
 	}
 }
@@ -1926,20 +1926,20 @@ func TestInjectUserMessageQueuesWhenActivityOnlyTurnIsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	cc := &clawConn{
-		id:                 "claw-1",
-		tenantID:           "test-tenant-id",
-		streamingStartedAt: now(),
+		ClawID:             "claw-1",
+		TenantID:           "test-tenant-id",
+		StreamingStartedAt: now(),
 	}
 	s.claws["claw-1"] = cc
 
 	s.injectUserMessage("claw-1", "New greptile review comment on PR #339")
 
-	cc.mu.Lock()
-	if len(cc.messageQueue) != 1 {
-		t.Fatalf("expected 1 queued message, got %d", len(cc.messageQueue))
+	cc.Mu.Lock()
+	if len(cc.MessageQueue) != 1 {
+		t.Fatalf("expected 1 queued message, got %d", len(cc.MessageQueue))
 	}
-	queued := cc.messageQueue[0]
-	cc.mu.Unlock()
+	queued := cc.MessageQueue[0]
+	cc.Mu.Unlock()
 	if queued.Role != "user" || queued.Content != "New greptile review comment on PR #339" {
 		t.Fatalf("queued message = %#v", queued)
 	}

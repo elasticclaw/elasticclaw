@@ -40,10 +40,10 @@ func seedCheckpointCompletionState(t *testing.T, s *Server) {
 		}
 	}
 	s.claws["claw"] = &clawConn{
-		id:                   "claw",
-		tenantID:             "tenant",
-		checkpointInProgress: true,
-		pendingCheckpointID:  "pending",
+		ClawID:               "claw",
+		TenantID:             "tenant",
+		CheckpointInProgress: true,
+		PendingCheckpointID:  "pending",
 	}
 }
 
@@ -103,10 +103,10 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 	_ = conn.Close(websocket.StatusNormalClosure, "closed before dispatch")
 
 	cc := &clawConn{
-		id:                   "claw",
-		tenantID:             "tenant",
-		conn:                 conn,
-		checkpointInProgress: true,
+		ClawID:               "claw",
+		TenantID:             "tenant",
+		WS:                   conn,
+		CheckpointInProgress: true,
 	}
 	s.claws["claw"] = cc
 
@@ -120,9 +120,9 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 	if ok {
 		t.Fatal("expected failed dispatch waiter to be removed")
 	}
-	cc.mu.RLock()
-	defer cc.mu.RUnlock()
-	if cc.checkpointInProgress {
+	cc.Mu.RLock()
+	defer cc.Mu.RUnlock()
+	if cc.CheckpointInProgress {
 		t.Fatal("expected failed dispatch to clear checkpoint in progress")
 	}
 }
@@ -130,12 +130,12 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 func assertPendingCheckpointDrained(t *testing.T, s *Server) {
 	t.Helper()
 	cc := s.claws["claw"]
-	cc.mu.RLock()
-	defer cc.mu.RUnlock()
-	if cc.checkpointInProgress {
+	cc.Mu.RLock()
+	defer cc.Mu.RUnlock()
+	if cc.CheckpointInProgress {
 		t.Fatal("expected current checkpoint to be marked no longer in progress")
 	}
-	if cc.pendingCheckpointID != "" {
-		t.Fatalf("expected pending checkpoint to be drained, got %q", cc.pendingCheckpointID)
+	if cc.PendingCheckpointID != "" {
+		t.Fatalf("expected pending checkpoint to be drained, got %q", cc.PendingCheckpointID)
 	}
 }

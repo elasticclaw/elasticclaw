@@ -193,7 +193,7 @@ func TestSyncWorkflowVolumesSkipsReleasedWritableLease(t *testing.T) {
 	}
 	s.releaseWorkflowVolumeLeases("claw-rw")
 	s.mu.Lock()
-	s.claws["claw-rw"] = &clawConn{id: "claw-rw", tenantID: "test-tenant-id"}
+	s.claws["claw-rw"] = &clawConn{ClawID: "claw-rw", TenantID: "test-tenant-id"}
 	s.mu.Unlock()
 
 	s.syncWorkflowVolumes("claw-rw")

@@ -1,4 +1,4 @@
-package hub
+package claws
 
 import (
 	"context"
@@ -45,7 +45,7 @@ type uploadedAttachment struct {
 // forwards each file to the claw-bridge over the existing WebSocket. It waits
 // for matching file_ack frames and returns the on-disk paths for use in the
 // subsequent message submission.
-func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -76,15 +76,15 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	cc := s.claws[clawID]
+	cc := s.claws()[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
 		http.Error(w, "claw not connected", http.StatusConflict)
 		return
 	}
 
-	tenantID := tenantFromCtx(r)
-	if cc.tenantID != tenantID {
+	tenantID := s.tenantFromCtx(r)
+	if cc.TenantID != tenantID {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -114,7 +114,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		reqID := uuid.New().String()
 		ch := make(chan types.FileAck, 1)
 		s.fileAckMu.Lock()
-		s.fileAckWaiters[reqID] = ch
+		s.fileAckWaiters()[reqID] = ch
 		s.fileAckMu.Unlock()
 
 		payload := filePayload{
@@ -125,10 +125,10 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			Data:      base64.StdEncoding.EncodeToString(data),
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), fileAckTimeout)
-		if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "file", Payload: payload}); err != nil {
+		if err := wsjson.Write(ctx, cc.WS, types.WSMessage{Type: "file", Payload: payload}); err != nil {
 			cancel()
 			s.fileAckMu.Lock()
-			delete(s.fileAckWaiters, reqID)
+			delete(s.fileAckWaiters(), reqID)
 			s.fileAckMu.Unlock()
 			http.Error(w, "send to claw failed", http.StatusBadGateway)
 			return
@@ -150,7 +150,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			cancel()
 			s.fileAckMu.Lock()
-			delete(s.fileAckWaiters, reqID)
+			delete(s.fileAckWaiters(), reqID)
 			s.fileAckMu.Unlock()
 			http.Error(w, "timeout waiting for claw ack", http.StatusGatewayTimeout)
 			return
@@ -181,7 +181,7 @@ func isActiveContentType(ct, ext string) bool {
 // browser so images can render inline in chat history. The bridge enforces
 // path containment within its uploads dir, so arbitrary filesystem reads are
 // rejected at the claw even if a caller crafts a malicious path query.
-func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -197,15 +197,15 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	cc := s.claws[clawID]
+	cc := s.claws()[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
 		http.Error(w, "claw not connected", http.StatusConflict)
 		return
 	}
 
-	tenantID := tenantFromCtx(r)
-	if cc.tenantID != tenantID {
+	tenantID := s.tenantFromCtx(r)
+	if cc.TenantID != tenantID {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -213,18 +213,18 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 	reqID := uuid.New().String()
 	ch := make(chan types.FileReadResp, 1)
 	s.fileAckMu.Lock()
-	s.fileReadWaiters[reqID] = ch
+	s.fileReadWaiters()[reqID] = ch
 	s.fileAckMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(r.Context(), fileAckTimeout)
 	defer cancel()
 
-	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{
+	if err := wsjson.Write(ctx, cc.WS, types.WSMessage{
 		Type:    "file_read",
 		Payload: map[string]string{"request_id": reqID, "path": path},
 	}); err != nil {
 		s.fileAckMu.Lock()
-		delete(s.fileReadWaiters, reqID)
+		delete(s.fileReadWaiters(), reqID)
 		s.fileAckMu.Unlock()
 		http.Error(w, "send to claw failed", http.StatusBadGateway)
 		return
@@ -260,7 +260,7 @@ func (s *Server) handleFileView(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(data)
 	case <-ctx.Done():
 		s.fileAckMu.Lock()
-		delete(s.fileReadWaiters, reqID)
+		delete(s.fileReadWaiters(), reqID)
 		s.fileAckMu.Unlock()
 		http.Error(w, "timeout waiting for claw", http.StatusGatewayTimeout)
 	}

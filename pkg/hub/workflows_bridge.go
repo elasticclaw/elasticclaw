@@ -50,14 +50,14 @@ func (s *Server) workflowsSvc() *workflows.Service {
 		ClawStreaming: func(clawID string) bool {
 			s.mu.RLock()
 			cc, connected := s.claws[clawID]
-			streaming := connected && cc.streamingBuf.Len() > 0
+			streaming := connected && cc.StreamingBuf.Len() > 0
 			s.mu.RUnlock()
 			return streaming
 		},
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
 			s.mu.Lock()
 			if cc, ok := s.claws[clawID]; ok {
-				cc.conn.Close(code, reason)
+				cc.WS.Close(code, reason)
 				delete(s.claws, clawID)
 			}
 			s.mu.Unlock()
@@ -183,26 +183,6 @@ func (a githubTokenProviderAdapter) InstallationToken(ctx context.Context, insta
 		}
 	}
 	return a.p.InstallationToken(ctx, installationID, converted)
-}
-
-// workflows.Conn implementation on the hub's clawConn: thin accessors so
-// the extracted PR-watcher message injection keeps using the exact same
-// mutex and fields. Lock/Unlock/WriteWS are shared with the checkpoints
-// bridge (checkpoints_bridge.go). Methods with the Locked suffix must be
-// called with the connection lock held.
-
-func (cc *clawConn) SetLastUserMessageAtLocked(t time.Time) { cc.lastUserMessageAt = t }
-
-func (cc *clawConn) BusyLocked() bool { return cc.isBusyLocked() }
-
-func (cc *clawConn) AppendMessageQueueLocked(msg types.HubMessage) int {
-	cc.messageQueue = append(cc.messageQueue, msg)
-	return len(cc.messageQueue)
-}
-
-func (cc *clawConn) PrependMessageQueueLocked(msg types.HubMessage) int {
-	cc.messageQueue = append([]types.HubMessage{msg}, cc.messageQueue...)
-	return len(cc.messageQueue)
 }
 
 // Types and constants moved to pkg/hub/workflows.
