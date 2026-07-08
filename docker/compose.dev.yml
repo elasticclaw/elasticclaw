@@ -50,6 +50,23 @@ services:
     depends_on:
       - hub
 
+  # Optional: local OpenTelemetry collector for inspecting hub traces.
+  # To use it:
+  #   1. Uncomment this service (and the otel config volume below).
+  #   2. Add ELASTICCLAW_OTLP_ENDPOINT=http://otel-collector:4318 to the hub
+  #      service's environment.
+  #   3. docker compose up otel-collector — spans are printed to its stdout
+  #      (docker compose logs -f otel-collector).
+  # otel-collector:
+  #   image: otel/opentelemetry-collector:0.103.0
+  #   command: ["--config=/etc/otel-collector.yaml"]
+  #   ports:
+  #     - "4318:4318" # OTLP/HTTP
+  #   networks:
+  #     - elasticclaw
+  #   volumes:
+  #     - ./otel-collector.yaml:/etc/otel-collector.yaml:ro
+
   ollama:
     image: ollama/ollama:0.6.5
     environment:

@@ -1,0 +1,18 @@
+# Minimal OpenTelemetry collector config for local development.
+# Used by the (commented-out) otel-collector service in compose.dev.yml:
+# it receives OTLP/HTTP spans from the hub and prints them to stdout.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
