@@ -1,4 +1,4 @@
-package hub
+package analytics
 
 import (
 	"database/sql"
@@ -14,91 +14,91 @@ import (
 )
 
 const (
-	taskRunKindCodeTask = "code_task"
-	taskRunKindPRTask   = "pr_task"
+	TaskRunKindCodeTask = "code_task"
+	TaskRunKindPRTask   = "pr_task"
 
-	taskRunStatusRunning        = "running"
-	taskRunStatusCleanSuccess   = "clean_success"
-	taskRunStatusWarningSuccess = "warning_success"
-	taskRunStatusFailed         = "failed"
+	TaskRunStatusRunning        = "running"
+	TaskRunStatusCleanSuccess   = "clean_success"
+	TaskRunStatusWarningSuccess = "warning_success"
+	TaskRunStatusFailed         = "failed"
 
-	taskRunPhaseClaimed         = "claimed"
-	taskRunPhaseQueued          = "queued"
-	taskRunPhaseProvisioning    = "provisioning"
-	taskRunPhaseAgentRunning    = "agent_running"
-	taskRunPhasePROpened        = "pr_opened"
-	taskRunPhaseWaitingForMerge = "waiting_for_merge"
-	taskRunPhaseTerminal        = "terminal"
+	TaskRunPhaseClaimed         = "claimed"
+	TaskRunPhaseQueued          = "queued"
+	TaskRunPhaseProvisioning    = "provisioning"
+	TaskRunPhaseAgentRunning    = "agent_running"
+	TaskRunPhasePROpened        = "pr_opened"
+	TaskRunPhaseWaitingForMerge = "waiting_for_merge"
+	TaskRunPhaseTerminal        = "terminal"
 
-	taskRunOwnerFactory  = "factory"
-	taskRunOwnerWorkflow = "workflow"
-	taskRunOwnerManual   = "manual"
+	TaskRunOwnerFactory  = "factory"
+	TaskRunOwnerWorkflow = "workflow"
+	TaskRunOwnerManual   = "manual"
 
-	taskRunWarningHumanPRComment        = "human_pr_comment"
-	taskRunWarningHumanReviewComment    = "human_review_comment"
-	taskRunWarningHumanRequestedChanges = "human_requested_changes"
-	taskRunWarningHumanManualCodePush   = "human_manual_code_push"
-	taskRunWarningHumanTrackerUpdate    = "human_tracker_update"
-	taskRunWarningHumanDashboardMessage = "human_dashboard_message"
-	taskRunWarningHumanManualStopResume = "human_manual_stop_or_resume"
-	taskRunWarningHumanSettingsChange   = "human_settings_or_status_change"
-	taskRunWarningUnknownHuman          = "unknown_human_interaction"
-	taskRunWarningPRReplaced            = "pr_replaced"
+	TaskRunWarningHumanPRComment        = "human_pr_comment"
+	TaskRunWarningHumanReviewComment    = "human_review_comment"
+	TaskRunWarningHumanRequestedChanges = "human_requested_changes"
+	TaskRunWarningHumanManualCodePush   = "human_manual_code_push"
+	TaskRunWarningHumanTrackerUpdate    = "human_tracker_update"
+	TaskRunWarningHumanDashboardMessage = "human_dashboard_message"
+	TaskRunWarningHumanManualStopResume = "human_manual_stop_or_resume"
+	TaskRunWarningHumanSettingsChange   = "human_settings_or_status_change"
+	TaskRunWarningUnknownHuman          = "unknown_human_interaction"
+	TaskRunWarningPRReplaced            = "pr_replaced"
 
-	taskRunFailureDoneWithoutPR      = "done_without_pr"
-	taskRunFailureNoPR               = "no_pr"
-	taskRunFailurePRClosedUnmerged   = "pr_closed_unmerged"
-	taskRunFailureManualStopDelivery = "manual_stop_before_delivery"
-	taskRunFailureAgentStopped       = "agent_stopped"
-	taskRunFailureTimeout            = "timeout"
-	taskRunFailureUnknown            = "unknown"
+	TaskRunFailureDoneWithoutPR      = "done_without_pr"
+	TaskRunFailureNoPR               = "no_pr"
+	TaskRunFailurePRClosedUnmerged   = "pr_closed_unmerged"
+	TaskRunFailureManualStopDelivery = "manual_stop_before_delivery"
+	TaskRunFailureAgentStopped       = "agent_stopped"
+	TaskRunFailureTimeout            = "timeout"
+	TaskRunFailureUnknown            = "unknown"
 
-	taskRunEventTaskStart                = "task_start"
-	taskRunEventTaskCompleted            = "task_completed"
-	taskRunEventRunQueued                = "run_queued"
-	taskRunEventProvisionStarted         = "provision_started"
-	taskRunEventAgentStarted             = "agent_started"
-	taskRunEventClawCreated              = "claw_created"
-	taskRunEventPRAssociated             = "pr_associated"
-	taskRunEventPROpened                 = "pr_opened"
-	taskRunEventPRMerged                 = "pr_merged"
-	taskRunEventPRClosedUnmerged         = "pr_closed_unmerged"
-	taskRunEventDoneWithoutPR            = "done_without_pr"
-	taskRunEventNoPR                     = "no_pr"
-	taskRunEventHumanPRComment           = "human_pr_comment"
-	taskRunEventHumanReviewComment       = "human_review_comment"
-	taskRunEventHumanRequestedChanges    = "human_requested_changes"
-	taskRunEventHumanDashboardMessage    = "human_dashboard_message"
-	taskRunEventManualStopBeforeDelivery = "manual_stop_before_delivery"
-	taskRunEventAgentStopped             = "agent_stopped"
-	taskRunEventManualResume             = "human_manual_stop_or_resume"
-	taskRunEventManualRetry              = "human_manual_stop_or_resume"
-	taskRunEventSettingsChanged          = "human_settings_or_status_change"
+	TaskRunEventTaskStart                = "task_start"
+	TaskRunEventTaskCompleted            = "task_completed"
+	TaskRunEventRunQueued                = "run_queued"
+	TaskRunEventProvisionStarted         = "provision_started"
+	TaskRunEventAgentStarted             = "agent_started"
+	TaskRunEventClawCreated              = "claw_created"
+	TaskRunEventPRAssociated             = "pr_associated"
+	TaskRunEventPROpened                 = "pr_opened"
+	TaskRunEventPRMerged                 = "pr_merged"
+	TaskRunEventPRClosedUnmerged         = "pr_closed_unmerged"
+	TaskRunEventDoneWithoutPR            = "done_without_pr"
+	TaskRunEventNoPR                     = "no_pr"
+	TaskRunEventHumanPRComment           = "human_pr_comment"
+	TaskRunEventHumanReviewComment       = "human_review_comment"
+	TaskRunEventHumanRequestedChanges    = "human_requested_changes"
+	TaskRunEventHumanDashboardMessage    = "human_dashboard_message"
+	TaskRunEventManualStopBeforeDelivery = "manual_stop_before_delivery"
+	TaskRunEventAgentStopped             = "agent_stopped"
+	TaskRunEventManualResume             = "human_manual_stop_or_resume"
+	TaskRunEventManualRetry              = "human_manual_stop_or_resume"
+	TaskRunEventSettingsChanged          = "human_settings_or_status_change"
 
-	taskRunActorSystem  = "system"
-	taskRunActorHuman   = "human"
-	taskRunActorAgent   = "agent"
-	taskRunActorBot     = "bot"
-	taskRunActorUnknown = "unknown"
+	TaskRunActorSystem  = "system"
+	TaskRunActorHuman   = "human"
+	TaskRunActorAgent   = "agent"
+	TaskRunActorBot     = "bot"
+	TaskRunActorUnknown = "unknown"
 
-	taskRunSourceHub         = "hub"
-	taskRunSourceGitHub      = "github"
-	taskRunSourceDashboard   = "elasticclaw"
-	taskRunSourceFactory     = "elasticclaw"
-	taskRunSourceWorkflow    = "elasticclaw"
-	taskRunSourceIntegration = "elasticclaw"
-	taskRunSourcePRWatcher   = "hub"
+	TaskRunSourceHub         = "hub"
+	TaskRunSourceGitHub      = "github"
+	TaskRunSourceDashboard   = "elasticclaw"
+	TaskRunSourceFactory     = "elasticclaw"
+	TaskRunSourceWorkflow    = "elasticclaw"
+	TaskRunSourceIntegration = "elasticclaw"
+	TaskRunSourcePRWatcher   = "hub"
 
-	taskRunInteractionAllowedStart    = "allowed_start"
-	taskRunInteractionAllowedApproval = "allowed_approval"
-	taskRunInteractionAllowedMerge    = "allowed_merge"
-	taskRunInteractionWarning         = "warning"
-	taskRunInteractionNeutral         = "neutral"
-	taskRunInteractionTerminal        = "terminal"
+	TaskRunInteractionAllowedStart    = "allowed_start"
+	TaskRunInteractionAllowedApproval = "allowed_approval"
+	TaskRunInteractionAllowedMerge    = "allowed_merge"
+	TaskRunInteractionWarning         = "warning"
+	TaskRunInteractionNeutral         = "neutral"
+	TaskRunInteractionTerminal        = "terminal"
 
-	taskRunPRStateOpen    = "open"
-	taskRunPRStateClosed  = "closed"
-	taskRunPRStateUnknown = "unknown"
+	TaskRunPRStateOpen    = "open"
+	TaskRunPRStateClosed  = "closed"
+	TaskRunPRStateUnknown = "unknown"
 
 	taskRunDetailSchemaVersion = 1
 	taskRunMaxDetailBytes      = 16 * 1024
@@ -185,7 +185,7 @@ func rfc3339FromEpochMillis(ms int64) string {
 	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
-func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string, string, error) {
+func (s *Service) EnsureTaskRunForClaw(clawID string, opts TaskRunStart) (string, string, error) {
 	if s == nil || s.db == nil {
 		return "", "", fmt.Errorf("ensure task run: missing server db")
 	}
@@ -228,12 +228,12 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 			RunID:           existingRunID,
 			AttemptID:       attemptID,
 			EventKey:        defaultString(opts.EventKey, "task_start:"+existingRunID),
-			Source:          defaultString(opts.Source, taskRunSourceHub),
-			EventType:       taskRunEventTaskStart,
+			Source:          defaultString(opts.Source, TaskRunSourceHub),
+			EventType:       TaskRunEventTaskStart,
 			EventTime:       opts.StartedAt,
 			ObservedAt:      opts.StartedAt,
-			ActorType:       taskRunActorSystem,
-			InteractionRole: taskRunInteractionAllowedStart,
+			ActorType:       TaskRunActorSystem,
+			InteractionRole: TaskRunInteractionAllowedStart,
 		}); err != nil {
 			return "", "", err
 		}
@@ -292,12 +292,12 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 		RunID:           runID,
 		AttemptID:       attemptID,
 		EventKey:        defaultString(opts.EventKey, "task_start:"+runID),
-		Source:          defaultString(opts.Source, taskRunSourceHub),
-		EventType:       taskRunEventTaskStart,
+		Source:          defaultString(opts.Source, TaskRunSourceHub),
+		EventType:       TaskRunEventTaskStart,
 		EventTime:       opts.StartedAt,
 		ObservedAt:      opts.StartedAt,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionAllowedStart,
+		ActorType:       TaskRunActorSystem,
+		InteractionRole: TaskRunInteractionAllowedStart,
 	}); err != nil {
 		return "", "", err
 	}
@@ -313,7 +313,7 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 	return runID, attemptID, nil
 }
 
-func (s *Server) recordTaskRunEvent(input TaskRunEvent) error {
+func (s *Service) RecordTaskRunEvent(input TaskRunEvent) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("record task run event: missing server db")
 	}
@@ -346,7 +346,7 @@ func (s *Server) recordTaskRunEvent(input TaskRunEvent) error {
 	return tx.Commit()
 }
 
-func (s *Server) associateTaskRunPR(input TaskRunPR) error {
+func (s *Service) AssociateTaskRunPR(input TaskRunPR) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("associate task run PR: missing server db")
 	}
@@ -369,17 +369,17 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
 	if input.State == "" {
-		input.State = taskRunPRStateOpen
+		input.State = TaskRunPRStateOpen
 	}
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = now()
 	}
 	at := epochMillis(input.OccurredAt)
 	openedAt, closedAt, mergedAt := int64(0), int64(0), int64(0)
-	if input.State == taskRunPRStateOpen {
+	if input.State == TaskRunPRStateOpen {
 		openedAt = at
 	}
-	if input.State == taskRunPRStateClosed {
+	if input.State == TaskRunPRStateClosed {
 		closedAt = at
 	}
 	if input.Merged {
@@ -415,29 +415,29 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		TenantID:        input.TenantID,
 		RunID:           input.RunID,
 		EventKey:        "pr_associated:" + keySuffix,
-		Source:          taskRunSourceHub,
-		EventType:       taskRunEventPRAssociated,
+		Source:          TaskRunSourceHub,
+		EventType:       TaskRunEventPRAssociated,
 		EventTime:       input.OccurredAt,
 		ObservedAt:      input.OccurredAt,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionNeutral,
+		ActorType:       TaskRunActorSystem,
+		InteractionRole: TaskRunInteractionNeutral,
 		TargetType:      "pull_request",
 		TargetURL:       input.URL,
 		Detail:          detail,
 	}); err != nil {
 		return err
 	}
-	if input.State == taskRunPRStateOpen {
+	if input.State == TaskRunPRStateOpen {
 		if err := recordTaskRunEventTx(tx, TaskRunEvent{
 			TenantID:        input.TenantID,
 			RunID:           input.RunID,
 			EventKey:        "pr_opened:" + keySuffix,
-			Source:          taskRunSourceGitHub,
-			EventType:       taskRunEventPROpened,
+			Source:          TaskRunSourceGitHub,
+			EventType:       TaskRunEventPROpened,
 			EventTime:       input.OccurredAt,
 			ObservedAt:      input.OccurredAt,
-			ActorType:       taskRunActorSystem,
-			InteractionRole: taskRunInteractionNeutral,
+			ActorType:       TaskRunActorSystem,
+			InteractionRole: TaskRunInteractionNeutral,
 			TargetType:      "pull_request",
 			TargetURL:       input.URL,
 			Detail:          detail,
@@ -451,7 +451,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	return tx.Commit()
 }
 
-func (s *Server) materializeTaskRun(runID string) error {
+func (s *Service) materializeTaskRun(runID string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("materialize task run: missing server db")
 	}
@@ -466,7 +466,7 @@ func (s *Server) materializeTaskRun(runID string) error {
 	return tx.Commit()
 }
 
-func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
+func (s *Service) TaskRunContextForClaw(clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
 	if s == nil || s.db == nil {
 		return "", "", "", false, fmt.Errorf("task run context: missing server db")
 	}
@@ -498,8 +498,8 @@ func loadTaskRunTenantTx(tx *sql.Tx, runID string) (string, error) {
 	return tenantID, nil
 }
 
-func (s *Server) recordTaskRunEventForClaw(clawID string, input TaskRunEvent) error {
-	tenantID, runID, attemptID, ok, err := s.taskRunContextForClaw(clawID)
+func (s *Service) RecordTaskRunEventForClaw(clawID string, input TaskRunEvent) error {
+	tenantID, runID, attemptID, ok, err := s.TaskRunContextForClaw(clawID)
 	if err != nil {
 		return err
 	}
@@ -513,94 +513,94 @@ func (s *Server) recordTaskRunEventForClaw(clawID string, input TaskRunEvent) er
 	if input.AttemptID == "" {
 		input.AttemptID = attemptID
 	}
-	return s.recordTaskRunEvent(input)
+	return s.RecordTaskRunEvent(input)
 }
 
-func (s *Server) recordTaskRunHumanEventForClaw(clawID, eventType, eventKey, actorLogin, targetURL string, detail map[string]any) {
+func (s *Service) RecordTaskRunHumanEventForClaw(clawID, eventType, eventKey, actorLogin, targetURL string, detail map[string]any) {
 	if strings.TrimSpace(clawID) == "" {
 		return
 	}
 	if eventKey == "" {
 		eventKey = eventType + ":" + sanitizeTaskRunEventKey(actorLogin) + ":" + sanitizeTaskRunEventKey(targetURL)
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+	if err := s.RecordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        eventKey,
-		Source:          taskRunSourceGitHub,
+		Source:          TaskRunSourceGitHub,
 		EventType:       eventType,
-		ActorType:       taskRunActorHuman,
+		ActorType:       TaskRunActorHuman,
 		ActorLogin:      actorLogin,
-		InteractionRole: taskRunInteractionWarning,
+		InteractionRole: TaskRunInteractionWarning,
 		TargetType:      "pull_request",
 		TargetURL:       targetURL,
 		WarningType:     warningTypeForTaskRunEventType(eventType),
 		Detail:          detail,
 		OccurredAt:      now(),
 	}); err != nil {
-		logf("[task-run-analytics] failed to record human event %s for claw %s: %v", eventType, clawID, err)
+		s.logf("[task-run-analytics] failed to record human event %s for claw %s: %v", eventType, clawID, err)
 	}
 }
 
-func (s *Server) recordTaskRunDashboardMessage(clawID, actorLogin, messageID string) {
+func (s *Service) RecordTaskRunDashboardMessage(clawID, actorLogin, messageID string) {
 	if strings.TrimSpace(clawID) == "" {
 		return
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+	if err := s.RecordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        "human_dashboard_message:" + defaultString(messageID, uuid.New().String()),
-		Source:          taskRunSourceDashboard,
-		EventType:       taskRunEventHumanDashboardMessage,
-		ActorType:       taskRunActorHuman,
+		Source:          TaskRunSourceDashboard,
+		EventType:       TaskRunEventHumanDashboardMessage,
+		ActorType:       TaskRunActorHuman,
 		ActorLogin:      actorLogin,
-		InteractionRole: taskRunInteractionWarning,
+		InteractionRole: TaskRunInteractionWarning,
 		TargetType:      "claw",
 		TargetID:        clawID,
-		WarningType:     taskRunWarningHumanDashboardMessage,
+		WarningType:     TaskRunWarningHumanDashboardMessage,
 		Detail:          map[string]any{"message_id": messageID},
 		OccurredAt:      now(),
 	}); err != nil {
-		logf("[task-run-analytics] failed to record dashboard message for claw %s: %v", clawID, err)
+		s.logf("[task-run-analytics] failed to record dashboard message for claw %s: %v", clawID, err)
 	}
 }
 
-func (s *Server) recordTaskRunManualStopBeforeDelivery(clawID, actorLogin string) {
+func (s *Service) RecordTaskRunManualStopBeforeDelivery(clawID, actorLogin string) {
 	if strings.TrimSpace(clawID) == "" {
 		return
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+	if err := s.RecordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        "manual_stop_before_delivery:" + clawID,
-		Source:          taskRunSourceDashboard,
-		EventType:       taskRunEventManualStopBeforeDelivery,
-		ActorType:       taskRunActorHuman,
+		Source:          TaskRunSourceDashboard,
+		EventType:       TaskRunEventManualStopBeforeDelivery,
+		ActorType:       TaskRunActorHuman,
 		ActorLogin:      actorLogin,
-		InteractionRole: taskRunInteractionTerminal,
+		InteractionRole: TaskRunInteractionTerminal,
 		TargetType:      "claw",
 		TargetID:        clawID,
-		WarningType:     taskRunWarningHumanManualStopResume,
-		FailureType:     taskRunFailureManualStopDelivery,
+		WarningType:     TaskRunWarningHumanManualStopResume,
+		FailureType:     TaskRunFailureManualStopDelivery,
 		Detail:          map[string]any{"reason": "dashboard_delete"},
 		OccurredAt:      now(),
 	}); err != nil {
-		logf("[task-run-analytics] failed to record manual stop for claw %s: %v", clawID, err)
+		s.logf("[task-run-analytics] failed to record manual stop for claw %s: %v", clawID, err)
 	}
 }
 
-func taskRunKindForFactory(factory *types.FactoryConfig) string {
+func TaskRunKindForFactory(factory *types.FactoryConfig) string {
 	if factory != nil && factory.RunKind != "" {
 		return factory.RunKind
 	}
 	if factory != nil && factory.Integration == "github" && factory.Trigger != nil && factory.Trigger.On == "pull_request" {
-		return taskRunKindPRTask
+		return TaskRunKindPRTask
 	}
-	return taskRunKindCodeTask
+	return TaskRunKindCodeTask
 }
 
-func taskRunKindForWorkflow(workflow *types.WorkflowConfig) string {
+func TaskRunKindForWorkflow(workflow *types.WorkflowConfig) string {
 	if workflow != nil && workflow.RunKind != "" {
 		return workflow.RunKind
 	}
-	return taskRunKindCodeTask
+	return TaskRunKindCodeTask
 }
 
-func taskRunAnalyticsContractForFactory(factory *types.FactoryConfig) (enabled bool, requiresPR bool, excludedReason string) {
+func TaskRunAnalyticsContractForFactory(factory *types.FactoryConfig) (enabled bool, requiresPR bool, excludedReason string) {
 	if factory != nil && factory.AnalyticsEnabled != nil {
 		enabled = *factory.AnalyticsEnabled
 	} else {
@@ -620,7 +620,7 @@ func taskRunAnalyticsContractForFactory(factory *types.FactoryConfig) (enabled b
 	return true, true, ""
 }
 
-func taskRunAnalyticsContractForWorkflow(workflow *types.WorkflowConfig) (enabled bool, requiresPR bool, excludedReason string) {
+func TaskRunAnalyticsContractForWorkflow(workflow *types.WorkflowConfig) (enabled bool, requiresPR bool, excludedReason string) {
 	if workflow != nil && workflow.AnalyticsEnabled != nil {
 		enabled = *workflow.AnalyticsEnabled
 	} else {
@@ -650,29 +650,29 @@ func recordTaskRunPhaseEventTx(tx *sql.Tx, tenantID, runID, attemptID, clawStatu
 		RunID:           runID,
 		AttemptID:       attemptID,
 		EventKey:        eventType + ":" + runID,
-		Source:          taskRunSourceHub,
+		Source:          TaskRunSourceHub,
 		EventType:       eventType,
 		EventTime:       eventTime,
 		ObservedAt:      eventTime,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionNeutral,
+		ActorType:       TaskRunActorSystem,
+		InteractionRole: TaskRunInteractionNeutral,
 	})
 }
 
 func taskRunPhaseEventForClawStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "pending":
-		return taskRunEventRunQueued
+		return TaskRunEventRunQueued
 	case "provisioning", "starting", "creating":
-		return taskRunEventProvisionStarted
+		return TaskRunEventProvisionStarted
 	case "running", "online", "offline", "idle", "watching":
-		return taskRunEventAgentStarted
+		return TaskRunEventAgentStarted
 	default:
 		return ""
 	}
 }
 
-func (s *Server) taskRunRequiresPRForClaw(clawID string) bool {
+func (s *Service) TaskRunRequiresPRForClaw(clawID string) bool {
 	if s == nil || s.db == nil || strings.TrimSpace(clawID) == "" {
 		return true
 	}
@@ -722,13 +722,13 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 		input.ObservedAt = now()
 	}
 	if input.ActorType == "" {
-		input.ActorType = taskRunActorSystem
+		input.ActorType = TaskRunActorSystem
 	}
 	if input.Source == "" {
-		input.Source = taskRunSourceHub
+		input.Source = TaskRunSourceHub
 	}
 	if input.InteractionRole == "" {
-		input.InteractionRole = taskRunInteractionNeutral
+		input.InteractionRole = TaskRunInteractionNeutral
 	}
 	if input.EventKey == "" {
 		input.EventKey = input.EventType + ":" + strconv.FormatInt(epochMillis(input.EventTime), 10) + ":" + uuid.New().String()[:8]
@@ -741,19 +741,19 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 	if isHumanWarningEvent(input) && input.WarningType == "" {
 		input.WarningType = warningTypeForTaskRunInput(input)
 	}
-	if input.EventType == taskRunEventDoneWithoutPR && input.FailureType == "" {
-		input.FailureType = taskRunFailureDoneWithoutPR
+	if input.EventType == TaskRunEventDoneWithoutPR && input.FailureType == "" {
+		input.FailureType = TaskRunFailureDoneWithoutPR
 	}
-	if input.EventType == taskRunEventNoPR && input.FailureType == "" {
-		input.FailureType = taskRunFailureNoPR
+	if input.EventType == TaskRunEventNoPR && input.FailureType == "" {
+		input.FailureType = TaskRunFailureNoPR
 	}
-	if input.EventType == taskRunEventManualStopBeforeDelivery && input.FailureType == "" {
-		input.FailureType = taskRunFailureManualStopDelivery
+	if input.EventType == TaskRunEventManualStopBeforeDelivery && input.FailureType == "" {
+		input.FailureType = TaskRunFailureManualStopDelivery
 	}
-	if input.EventType == taskRunEventAgentStopped && input.FailureType == "" {
-		input.FailureType = taskRunFailureAgentStopped
+	if input.EventType == TaskRunEventAgentStopped && input.FailureType == "" {
+		input.FailureType = TaskRunFailureAgentStopped
 	}
-	detail, err := sanitizeTaskRunDetail(input.Detail)
+	detail, err := SanitizeTaskRunDetail(input.Detail)
 	if err != nil {
 		return err
 	}
@@ -776,7 +776,7 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 }
 
 func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
-	if input.EventType != taskRunEventPRMerged && input.EventType != taskRunEventPRClosedUnmerged {
+	if input.EventType != TaskRunEventPRMerged && input.EventType != TaskRunEventPRClosedUnmerged {
 		return nil
 	}
 	repo, prNumber := detailPR(input.Detail)
@@ -784,7 +784,7 @@ func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
 		return nil
 	}
 	eventTime := epochMillis(firstNonZeroTime(input.EventTime, input.OccurredAt, now()))
-	if input.EventType == taskRunEventPRMerged {
+	if input.EventType == TaskRunEventPRMerged {
 		_, err := tx.Exec(`
 			INSERT INTO task_run_prs(id, tenant_id, run_id, repo, pr_number, state, merged, closed_at, merged_at, created_at, updated_at)
 			VALUES(?,?,?,?,?,'closed',1,?,?,?,?)
@@ -842,7 +842,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	counts := taskRunPRCounts(prs)
 	phaseTimes := taskRunPhaseTimes(events)
 	if counts.merged > 0 && counts.closed > 0 {
-		warnings[taskRunWarningPRReplaced] = true
+		warnings[TaskRunWarningPRReplaced] = true
 	}
 
 	definitiveFailure, definitiveFailureAt := definitiveFailure(events)
@@ -851,7 +851,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	status, phase, failureType, finishedAt := computeTaskRunStatus(
 		meta, counts, warnings, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
 	)
-	if finishedAt == 0 && phase == taskRunPhaseTerminal {
+	if finishedAt == 0 && phase == TaskRunPhaseTerminal {
 		finishedAt = epochMillis(now())
 	}
 	lastEventAt := meta.updatedAt
@@ -938,9 +938,9 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		return err
 	}
 	attemptStatus := "running"
-	if phase == taskRunPhaseTerminal {
+	if phase == TaskRunPhaseTerminal {
 		attemptStatus = "succeeded"
-		if status == taskRunStatusFailed {
+		if status == TaskRunStatusFailed {
 			attemptStatus = "failed"
 		}
 	}
@@ -970,38 +970,38 @@ func computeTaskRunStatus(
 	prePRFailure string,
 	prePRFailureAt int64,
 ) (status, phase, failureType string, finishedAt int64) {
-	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
+	status, phase = TaskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
 	if meta.analyticsEnabled == 0 {
 		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
-		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, meta.updatedAt
+		return TaskRunStatusFailed, TaskRunPhaseTerminal, TaskRunFailureUnknown, meta.updatedAt
 	} else if definitiveFailure != "" {
-		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
+		status, phase, failureType, finishedAt = TaskRunStatusFailed, TaskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
 	} else if meta.requiresPR == 0 && taskCompletedAt != 0 {
 		if len(warnings) > 0 {
-			status = taskRunStatusWarningSuccess
+			status = TaskRunStatusWarningSuccess
 		} else {
-			status = taskRunStatusCleanSuccess
+			status = TaskRunStatusCleanSuccess
 		}
-		phase = taskRunPhaseTerminal
+		phase = TaskRunPhaseTerminal
 		finishedAt = taskCompletedAt
 	} else if counts.merged > 0 && counts.open == 0 {
 		if len(warnings) > 0 {
-			status = taskRunStatusWarningSuccess
+			status = TaskRunStatusWarningSuccess
 		} else {
-			status = taskRunStatusCleanSuccess
+			status = TaskRunStatusCleanSuccess
 		}
-		phase = taskRunPhaseTerminal
+		phase = TaskRunPhaseTerminal
 		finishedAt = counts.latestTerminalAt
 	} else if counts.merged > 0 && counts.open > 0 {
-		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
+		status, phase = TaskRunStatusRunning, TaskRunPhaseWaitingForMerge
 	} else if prePRFailure != "" {
-		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, prePRFailure, prePRFailureAt
+		status, phase, failureType, finishedAt = TaskRunStatusFailed, TaskRunPhaseTerminal, prePRFailure, prePRFailureAt
 	} else if counts.total > 0 {
-		status = taskRunStatusRunning
+		status = TaskRunStatusRunning
 		if counts.open > 0 {
-			phase = taskRunPhaseWaitingForMerge
+			phase = TaskRunPhaseWaitingForMerge
 		} else {
-			status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailurePRClosedUnmerged, counts.latestTerminalAt
+			status, phase, failureType, finishedAt = TaskRunStatusFailed, TaskRunPhaseTerminal, TaskRunFailurePRClosedUnmerged, counts.latestTerminalAt
 		}
 	}
 	return status, phase, failureType, finishedAt
@@ -1009,23 +1009,23 @@ func computeTaskRunStatus(
 
 func initialTaskRunPhase(meta taskRunMeta, phaseTimes taskRunPhaseTimeSummary) string {
 	if phaseTimes.agentStartedAt != 0 {
-		return taskRunPhaseAgentRunning
+		return TaskRunPhaseAgentRunning
 	}
 	if phaseTimes.provisionStartedAt != 0 {
-		return taskRunPhaseProvisioning
+		return TaskRunPhaseProvisioning
 	}
 	if phaseTimes.queuedAt != 0 {
-		return taskRunPhaseQueued
+		return TaskRunPhaseQueued
 	}
 	switch strings.ToLower(strings.TrimSpace(meta.clawStatus)) {
 	case "pending":
-		return taskRunPhaseQueued
+		return TaskRunPhaseQueued
 	case "provisioning", "starting", "creating":
-		return taskRunPhaseProvisioning
+		return TaskRunPhaseProvisioning
 	case "running", "online", "offline", "idle", "watching":
-		return taskRunPhaseAgentRunning
+		return TaskRunPhaseAgentRunning
 	default:
-		return taskRunPhaseClaimed
+		return TaskRunPhaseClaimed
 	}
 }
 
@@ -1170,9 +1170,9 @@ func taskRunPRCounts(prs []taskRunPRProjection) prCountSummary {
 			continue
 		}
 		switch pr.state {
-		case taskRunPRStateOpen:
+		case TaskRunPRStateOpen:
 			counts.open++
-		case taskRunPRStateClosed:
+		case TaskRunPRStateClosed:
 			counts.closed++
 			if pr.closedAt > counts.latestTerminalAt {
 				counts.latestTerminalAt = pr.closedAt
@@ -1187,25 +1187,25 @@ func definitiveFailure(events []taskRunEventProjection) (string, int64) {
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		switch event.failureType {
-		case taskRunFailureManualStopDelivery, taskRunFailureTimeout:
+		case TaskRunFailureManualStopDelivery, TaskRunFailureTimeout:
 			return event.failureType, event.eventTime
-		case taskRunFailureAgentStopped:
+		case TaskRunFailureAgentStopped:
 			if agentStoppedAt == 0 {
 				agentStoppedAt = event.eventTime
 			}
-		case taskRunFailureDoneWithoutPR, taskRunFailureNoPR, taskRunFailurePRClosedUnmerged:
+		case TaskRunFailureDoneWithoutPR, TaskRunFailureNoPR, TaskRunFailurePRClosedUnmerged:
 			return "", 0
 		}
 	}
 	if agentStoppedAt > 0 {
-		return taskRunFailureAgentStopped, agentStoppedAt
+		return TaskRunFailureAgentStopped, agentStoppedAt
 	}
 	return "", 0
 }
 
 func taskCompletedAt(events []taskRunEventProjection) int64 {
 	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].eventType == taskRunEventTaskCompleted {
+		if events[i].eventType == TaskRunEventTaskCompleted {
 			return events[i].eventTime
 		}
 	}
@@ -1216,7 +1216,7 @@ func prePRFailure(events []taskRunEventProjection) (string, int64) {
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		switch event.failureType {
-		case taskRunFailureDoneWithoutPR, taskRunFailureNoPR, taskRunFailurePRClosedUnmerged:
+		case TaskRunFailureDoneWithoutPR, TaskRunFailureNoPR, TaskRunFailurePRClosedUnmerged:
 			return event.failureType, event.eventTime
 		}
 	}
@@ -1234,19 +1234,19 @@ func taskRunPhaseTimes(events []taskRunEventProjection) taskRunPhaseTimeSummary 
 	var summary taskRunPhaseTimeSummary
 	for _, event := range events {
 		switch event.eventType {
-		case taskRunEventRunQueued:
+		case TaskRunEventRunQueued:
 			if summary.queuedAt == 0 || event.eventTime < summary.queuedAt {
 				summary.queuedAt = event.eventTime
 			}
-		case taskRunEventProvisionStarted:
+		case TaskRunEventProvisionStarted:
 			if summary.provisionStartedAt == 0 || event.eventTime < summary.provisionStartedAt {
 				summary.provisionStartedAt = event.eventTime
 			}
-		case taskRunEventAgentStarted:
+		case TaskRunEventAgentStarted:
 			if summary.agentStartedAt == 0 || event.eventTime < summary.agentStartedAt {
 				summary.agentStartedAt = event.eventTime
 			}
-		case taskRunEventPROpened:
+		case TaskRunEventPROpened:
 			if summary.prOpenedAt == 0 || event.eventTime < summary.prOpenedAt {
 				summary.prOpenedAt = event.eventTime
 			}
@@ -1285,10 +1285,10 @@ func normalizeTaskRunStart(opts *TaskRunStart, tenantID, model, llmKey, factoryN
 		opts.TenantID = tenantID
 	}
 	if opts.RunKind == "" {
-		opts.RunKind = taskRunKindPRTask
+		opts.RunKind = TaskRunKindPRTask
 	}
 	if opts.OwnerType == "" {
-		opts.OwnerType = taskRunOwnerFactory
+		opts.OwnerType = TaskRunOwnerFactory
 	}
 	if opts.FactoryName == "" {
 		opts.FactoryName = factoryName
@@ -1316,7 +1316,7 @@ func normalizeTaskRunStart(opts *TaskRunStart, tenantID, model, llmKey, factoryN
 	}
 }
 
-func sanitizeTaskRunDetail(detail map[string]any) (string, error) {
+func SanitizeTaskRunDetail(detail map[string]any) (string, error) {
 	clean := make(map[string]any, len(detail)+1)
 	for k, v := range detail {
 		clean[k] = sanitizeTaskRunDetailValue(k, v)
@@ -1419,10 +1419,10 @@ func encodeWarningTypes(warnings map[string]bool) string {
 }
 
 func isHumanWarningEvent(input TaskRunEvent) bool {
-	return input.ActorType == taskRunActorHuman ||
-		input.EventType == taskRunEventHumanPRComment ||
-		input.EventType == taskRunEventHumanDashboardMessage ||
-		input.InteractionRole == taskRunInteractionWarning
+	return input.ActorType == TaskRunActorHuman ||
+		input.EventType == TaskRunEventHumanPRComment ||
+		input.EventType == TaskRunEventHumanDashboardMessage ||
+		input.InteractionRole == TaskRunInteractionWarning
 }
 
 func warningTypeForEvent(event taskRunEventProjection) string {
@@ -1430,27 +1430,27 @@ func warningTypeForEvent(event taskRunEventProjection) string {
 		return warning
 	}
 	switch event.eventType {
-	case taskRunEventHumanPRComment:
-		return taskRunWarningHumanPRComment
+	case TaskRunEventHumanPRComment:
+		return TaskRunWarningHumanPRComment
 	case "human_review_comment":
-		return taskRunWarningHumanReviewComment
+		return TaskRunWarningHumanReviewComment
 	case "human_requested_changes":
-		return taskRunWarningHumanRequestedChanges
+		return TaskRunWarningHumanRequestedChanges
 	case "human_manual_code_push":
-		return taskRunWarningHumanManualCodePush
+		return TaskRunWarningHumanManualCodePush
 	case "human_tracker_update":
-		return taskRunWarningHumanTrackerUpdate
-	case taskRunEventHumanDashboardMessage:
-		return taskRunWarningHumanDashboardMessage
+		return TaskRunWarningHumanTrackerUpdate
+	case TaskRunEventHumanDashboardMessage:
+		return TaskRunWarningHumanDashboardMessage
 	case "human_manual_stop_or_resume":
-		return taskRunWarningHumanManualStopResume
+		return TaskRunWarningHumanManualStopResume
 	case "human_settings_or_status_change":
-		return taskRunWarningHumanSettingsChange
+		return TaskRunWarningHumanSettingsChange
 	case "unknown_human_interaction":
-		return taskRunWarningUnknownHuman
+		return TaskRunWarningUnknownHuman
 	}
-	if event.actorType == taskRunActorHuman {
-		return taskRunWarningUnknownHuman
+	if event.actorType == TaskRunActorHuman {
+		return TaskRunWarningUnknownHuman
 	}
 	return ""
 }
@@ -1466,22 +1466,22 @@ func warningTypeForTaskRunInput(input TaskRunEvent) string {
 func warningTypeForTaskRunEventType(eventType string) string {
 	return warningTypeForEvent(taskRunEventProjection{
 		eventType: eventType,
-		actorType: taskRunActorHuman,
+		actorType: TaskRunActorHuman,
 	})
 }
 
 func normalizeTaskRunWarningType(value string) string {
 	switch value {
-	case taskRunWarningHumanPRComment,
-		taskRunWarningHumanReviewComment,
-		taskRunWarningHumanRequestedChanges,
-		taskRunWarningHumanManualCodePush,
-		taskRunWarningHumanTrackerUpdate,
-		taskRunWarningHumanDashboardMessage,
-		taskRunWarningHumanManualStopResume,
-		taskRunWarningHumanSettingsChange,
-		taskRunWarningUnknownHuman,
-		taskRunWarningPRReplaced:
+	case TaskRunWarningHumanPRComment,
+		TaskRunWarningHumanReviewComment,
+		TaskRunWarningHumanRequestedChanges,
+		TaskRunWarningHumanManualCodePush,
+		TaskRunWarningHumanTrackerUpdate,
+		TaskRunWarningHumanDashboardMessage,
+		TaskRunWarningHumanManualStopResume,
+		TaskRunWarningHumanSettingsChange,
+		TaskRunWarningUnknownHuman,
+		TaskRunWarningPRReplaced:
 		return value
 	default:
 		return ""

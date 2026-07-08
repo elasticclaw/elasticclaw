@@ -1,4 +1,4 @@
-package hub
+package analytics
 
 import (
 	"database/sql"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 )
 
 const taskRunAnalyticsDefaultLimit = 50
@@ -34,7 +36,7 @@ var allowedTaskRunAnalyticsJSONDistinctColumns = map[string]bool{
 	"warning_types": true,
 }
 
-type taskRunAnalyticsSummaryResponse struct {
+type TaskRunAnalyticsSummaryResponse struct {
 	TotalRuns         int                    `json:"totalRuns"`
 	ByStatus          map[string]int         `json:"byStatus"`
 	WarningBreakdown  map[string]int         `json:"warningBreakdown"`
@@ -51,29 +53,29 @@ type taskRunAnalyticsPRKPI struct {
 	Closed int `json:"closed"`
 }
 
-type taskRunAnalyticsRunsResponse struct {
+type TaskRunAnalyticsRunsResponse struct {
 	Runs       []taskRunAnalyticsRunView `json:"runs"`
 	NextCursor string                    `json:"nextCursor,omitempty"`
 	Limit      int                       `json:"limit"`
 }
 
-type taskRunAnalyticsRunDetailResponse struct {
+type TaskRunAnalyticsRunDetailResponse struct {
 	Run taskRunAnalyticsRunView `json:"run"`
 }
 
-type taskRunAnalyticsAttemptsResponse struct {
+type TaskRunAnalyticsAttemptsResponse struct {
 	Attempts []taskRunAnalyticsAttemptView `json:"attempts"`
 }
 
-type taskRunAnalyticsEventsResponse struct {
+type TaskRunAnalyticsEventsResponse struct {
 	Events []taskRunAnalyticsEventView `json:"events"`
 }
 
-type taskRunAnalyticsPRsResponse struct {
+type TaskRunAnalyticsPRsResponse struct {
 	PRs []taskRunAnalyticsPRView `json:"prs"`
 }
 
-type taskRunAnalyticsFilterOptionsResponse struct {
+type TaskRunAnalyticsFilterOptionsResponse struct {
 	Workspaces   []string `json:"workspaces"`
 	Workflows    []string `json:"workflows"`
 	Factories    []string `json:"factories"`
@@ -208,133 +210,133 @@ type taskRunAnalyticsFilters struct {
 	AnalyticsEnabled *bool
 }
 
-func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		httpserver.JSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	filters, err := parseTaskRunAnalyticsFilters(r)
+	filters, err := s.parseTaskRunAnalyticsFilters(r)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+		httpserver.JSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	response, err := s.readTaskRunAnalyticsSummary(filters)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
+		httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	jsonOK(w, response)
+	httpserver.JSONOK(w, response)
 }
 
-func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		httpserver.JSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if r.URL.Path != "/api/analytics/runs" && r.URL.Path != "/api/analytics/runs/" {
 		s.handleTaskRunAnalyticsRunSubresource(w, r)
 		return
 	}
-	filters, err := parseTaskRunAnalyticsFilters(r)
+	filters, err := s.parseTaskRunAnalyticsFilters(r)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+		httpserver.JSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
 	cursorStartedAt, cursorRunID, err := decodeTaskRunAnalyticsCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+		httpserver.JSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	runs, nextCursor, err := s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
+		httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	jsonOK(w, taskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
+	httpserver.JSONOK(w, TaskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
 }
 
-func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		httpserver.JSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	tenantID := tenantFromCtx(r)
+	tenantID := s.tenantFromRequest(r)
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/analytics/runs/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
-		jsonError(w, http.StatusNotFound, "not found")
+		httpserver.JSONError(w, http.StatusNotFound, "not found")
 		return
 	}
 	runID, err := url.PathUnescape(parts[0])
 	if err != nil || runID == "" {
-		jsonError(w, http.StatusBadRequest, "invalid run id")
+		httpserver.JSONError(w, http.StatusBadRequest, "invalid run id")
 		return
 	}
 	if len(parts) == 1 {
 		run, found, err := s.readTaskRunAnalyticsRun(tenantID, runID)
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "db error")
+			httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 			return
 		}
 		if !found {
-			jsonError(w, http.StatusNotFound, "not found")
+			httpserver.JSONError(w, http.StatusNotFound, "not found")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
+		httpserver.JSONOK(w, TaskRunAnalyticsRunDetailResponse{Run: run})
 		return
 	}
 	if len(parts) != 2 {
-		jsonError(w, http.StatusNotFound, "not found")
+		httpserver.JSONError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if !s.taskRunAnalyticsRunExists(tenantID, runID) {
-		jsonError(w, http.StatusNotFound, "not found")
+		httpserver.JSONError(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch parts[1] {
 	case "attempts":
 		attempts, err := s.readTaskRunAnalyticsAttempts(tenantID, runID)
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "db error")
+			httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsAttemptsResponse{Attempts: attempts})
+		httpserver.JSONOK(w, TaskRunAnalyticsAttemptsResponse{Attempts: attempts})
 	case "events":
 		events, err := s.readTaskRunAnalyticsEvents(tenantID, runID)
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "db error")
+			httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsEventsResponse{Events: events})
+		httpserver.JSONOK(w, TaskRunAnalyticsEventsResponse{Events: events})
 	case "prs":
 		prs, err := s.readTaskRunAnalyticsPRs(tenantID, runID)
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "db error")
+			httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsPRsResponse{PRs: prs})
+		httpserver.JSONOK(w, TaskRunAnalyticsPRsResponse{PRs: prs})
 	default:
-		jsonError(w, http.StatusNotFound, "not found")
+		httpserver.JSONError(w, http.StatusNotFound, "not found")
 	}
 }
 
-func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *http.Request) {
+func (s *Service) HandleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		httpserver.JSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	response, err := s.readTaskRunAnalyticsFilterOptions(tenantFromCtx(r))
+	response, err := s.readTaskRunAnalyticsFilterOptions(s.tenantFromRequest(r))
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
+		httpserver.JSONError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	jsonOK(w, response)
+	httpserver.JSONOK(w, response)
 }
 
-func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
+func (s *Service) parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
 	q := r.URL.Query()
 	filters := taskRunAnalyticsFilters{
-		TenantID:    tenantFromCtx(r),
+		TenantID:    s.tenantFromRequest(r),
 		Status:      splitTaskRunAnalyticsValues(q, "status"),
 		Owner:       splitTaskRunAnalyticsValues(q, "owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName"),
 		OwnerType:   splitTaskRunAnalyticsValues(q, "owner_type", "ownerType"),
@@ -369,9 +371,9 @@ func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, err
 	return filters, nil
 }
 
-func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (taskRunAnalyticsSummaryResponse, error) {
+func (s *Service) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (TaskRunAnalyticsSummaryResponse, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
-	response := taskRunAnalyticsSummaryResponse{
+	response := TaskRunAnalyticsSummaryResponse{
 		ByStatus:         map[string]int{},
 		WarningBreakdown: map[string]int{},
 		FailureBreakdown: map[string]int{},
@@ -408,7 +410,7 @@ func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (t
 	return response, warnings.Err()
 }
 
-func (s *Server) readTaskRunAnalyticsGroupedCounts(column, where string, args []any, into map[string]int) error {
+func (s *Service) readTaskRunAnalyticsGroupedCounts(column, where string, args []any, into map[string]int) error {
 	if !allowedTaskRunAnalyticsGroupColumns[column] {
 		return fmt.Errorf("invalid grouping column: %s", column)
 	}
@@ -430,7 +432,7 @@ func (s *Server) readTaskRunAnalyticsGroupedCounts(column, where string, args []
 	return rows.Err()
 }
 
-func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit int, cursorStartedAt int64, cursorRunID string) ([]taskRunAnalyticsRunView, string, error) {
+func (s *Service) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit int, cursorStartedAt int64, cursorRunID string) ([]taskRunAnalyticsRunView, string, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	if cursorStartedAt > 0 && cursorRunID != "" {
 		where += ` AND (started_at < ? OR (started_at = ? AND run_id < ?))`
@@ -446,7 +448,7 @@ func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit
 		return nil, "", err
 	}
 	defer rows.Close()
-	runs, err := scanTaskRunAnalyticsRuns(rows)
+	runs, err := s.scanTaskRunAnalyticsRuns(rows)
 	if err != nil {
 		return nil, "", err
 	}
@@ -462,7 +464,7 @@ func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit
 	return runs, nextCursor, nil
 }
 
-func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyticsRunView, bool, error) {
+func (s *Service) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyticsRunView, bool, error) {
 	rows, err := s.db.Query(`
 		SELECT `+taskRunAnalyticsRunColumns()+`
 		  FROM task_run_summaries
@@ -471,7 +473,7 @@ func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyti
 		return taskRunAnalyticsRunView{}, false, err
 	}
 	defer rows.Close()
-	runs, err := scanTaskRunAnalyticsRuns(rows)
+	runs, err := s.scanTaskRunAnalyticsRuns(rows)
 	if err != nil {
 		return taskRunAnalyticsRunView{}, false, err
 	}
@@ -481,7 +483,7 @@ func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyti
 	return runs[0], true, nil
 }
 
-func (s *Server) readTaskRunAnalyticsAttempts(tenantID, runID string) ([]taskRunAnalyticsAttemptView, error) {
+func (s *Service) readTaskRunAnalyticsAttempts(tenantID, runID string) ([]taskRunAnalyticsAttemptView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, attempt_id, attempt_number, trigger_id, claw_id, status, failure_type,
 		       started_at, finished_at, created_at, updated_at
@@ -503,7 +505,7 @@ func (s *Server) readTaskRunAnalyticsAttempts(tenantID, runID string) ([]taskRun
 	return attempts, rows.Err()
 }
 
-func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAnalyticsEventView, error) {
+func (s *Service) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAnalyticsEventView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
 		       event_time, observed_at, actor_type, actor_id, actor_login, actor_display_name,
@@ -526,7 +528,7 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 		event.Detail = map[string]any{}
 		if detailJSON != "" {
 			if err := json.Unmarshal([]byte(detailJSON), &event.Detail); err != nil {
-				logf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
+				s.logf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
 			}
 		}
 		events = append(events, event)
@@ -534,7 +536,7 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 	return events, rows.Err()
 }
 
-func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnalyticsPRView, error) {
+func (s *Service) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnalyticsPRView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
 		       state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
@@ -558,8 +560,8 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 	return prs, rows.Err()
 }
 
-func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnalyticsFilterOptionsResponse, error) {
-	response := taskRunAnalyticsFilterOptionsResponse{}
+func (s *Service) readTaskRunAnalyticsFilterOptions(tenantID string) (TaskRunAnalyticsFilterOptionsResponse, error) {
+	response := TaskRunAnalyticsFilterOptionsResponse{}
 	var err error
 	response.Workspaces, err = s.readDistinctTaskRunAnalyticsValues(tenantID, "workspace_name")
 	if err != nil {
@@ -597,7 +599,7 @@ func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnal
 	return response, err
 }
 
-func (s *Server) readDistinctTaskRunAnalyticsValues(tenantID, column string) ([]string, error) {
+func (s *Service) readDistinctTaskRunAnalyticsValues(tenantID, column string) ([]string, error) {
 	if !allowedTaskRunAnalyticsDistinctColumns[column] {
 		return nil, fmt.Errorf("invalid distinct column: %s", column)
 	}
@@ -621,7 +623,7 @@ func (s *Server) readDistinctTaskRunAnalyticsValues(tenantID, column string) ([]
 	return values, rows.Err()
 }
 
-func (s *Server) readDistinctTaskRunAnalyticsJSONValues(tenantID, column string) ([]string, error) {
+func (s *Service) readDistinctTaskRunAnalyticsJSONValues(tenantID, column string) ([]string, error) {
 	if !allowedTaskRunAnalyticsJSONDistinctColumns[column] {
 		return nil, fmt.Errorf("invalid JSON distinct column: %s", column)
 	}
@@ -645,7 +647,7 @@ func (s *Server) readDistinctTaskRunAnalyticsJSONValues(tenantID, column string)
 	return values, rows.Err()
 }
 
-func (s *Server) taskRunAnalyticsRunExists(tenantID, runID string) bool {
+func (s *Service) taskRunAnalyticsRunExists(tenantID, runID string) bool {
 	var exists int
 	err := s.db.QueryRow(`SELECT 1 FROM task_run_summaries WHERE tenant_id=? AND run_id=?`, tenantID, runID).Scan(&exists)
 	return err == nil
@@ -745,7 +747,7 @@ func taskRunAnalyticsRunColumns() string {
 		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason`
 }
 
-func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error) {
+func (s *Service) scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error) {
 	runs := []taskRunAnalyticsRunView{}
 	for rows.Next() {
 		var run taskRunAnalyticsRunView
@@ -768,7 +770,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 		run.WarningTypes = []string{}
 		if warningsJSON != "" {
 			if err := json.Unmarshal([]byte(warningsJSON), &run.WarningTypes); err != nil {
-				logf("[task-run-analytics] failed to unmarshal warning types for run %s: %v", run.RunID, err)
+				s.logf("[task-run-analytics] failed to unmarshal warning types for run %s: %v", run.RunID, err)
 			}
 		}
 		runs = append(runs, run)
