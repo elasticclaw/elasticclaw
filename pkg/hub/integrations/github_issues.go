@@ -3,9 +3,6 @@ package integrations
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,7 +127,7 @@ func (s *Service) validateGitHubIssuesSignatureReason(workspaceName string, body
 	workspaceSecretCount := 0
 	for _, secret := range s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "github-issues") {
 		workspaceSecretCount++
-		if verifyGitHubHMAC(body, sig, secret) {
+		if verifyHMACSHA256(body, secret, sig) {
 			return ""
 		}
 	}
@@ -154,7 +151,7 @@ func (s *Service) validateGitHubIssuesSignatureReason(workspaceName string, body
 				continue
 			}
 			factorySecretCount++
-			if verifyGitHubHMAC(body, sig, secret) {
+			if verifyHMACSHA256(body, secret, sig) {
 				return ""
 			}
 		}
@@ -164,18 +161,6 @@ func (s *Service) validateGitHubIssuesSignatureReason(workspaceName string, body
 		return "no configured factory webhook secret"
 	}
 	return ""
-}
-
-func verifyGitHubHMAC(body []byte, sig, secret string) bool {
-	if sig == "" || secret == "" {
-		return false
-	}
-	// Strip "sha256=" prefix if present
-	sig = strings.TrimPrefix(sig, "sha256=")
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(sig), []byte(expected))
 }
 
 func (s *Service) processGitHubIssuesEvent(workspaceName string, payload GitHubIssuesWebhookPayload) {

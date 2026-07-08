@@ -3,9 +3,6 @@ package integrations
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,10 +58,7 @@ func (s *Service) validateShortcutSignature(workspaceName string, body []byte, s
 	hasSecrets := false
 	for _, secret := range s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "shortcut") {
 		hasSecrets = true
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
+		if verifyHMACSHA256(body, secret, sig) {
 			return true
 		}
 	}
@@ -83,10 +77,7 @@ func (s *Service) validateShortcutSignature(workspaceName string, body []byte, s
 			continue
 		}
 		hasSecrets = true
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
+		if verifyHMACSHA256(body, secret, sig) {
 			return true
 		}
 	}

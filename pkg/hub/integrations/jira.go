@@ -2,7 +2,6 @@ package integrations
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -244,13 +243,6 @@ func (s *Service) globalJiraWebhookSecrets() []string {
 		}
 	}
 	return secrets
-}
-
-func constantTimeStringEqual(a, b string) bool {
-	if a == "" || b == "" || len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func jiraWebhookDedupKey(payload jiraWebhookPayload) string {

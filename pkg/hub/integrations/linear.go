@@ -2,17 +2,15 @@ package integrations
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/elasticclaw/elasticclaw/pkg/hub/analytics"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/analytics"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -152,10 +150,7 @@ func (s *Service) validateLinearSignature(workspaceName string, body []byte, sig
 
 	for _, secret := range s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "linear") {
 		hasAnySecret = true
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
+		if verifyHMACSHA256(body, secret, sig) {
 			return true
 		}
 	}
@@ -170,10 +165,7 @@ func (s *Service) validateLinearSignature(workspaceName string, body []byte, sig
 				continue
 			}
 			hasAnySecret = true
-			mac := hmac.New(sha256.New, []byte(li.WebhookSecret))
-			mac.Write(body)
-			expected := hex.EncodeToString(mac.Sum(nil))
-			if hmac.Equal([]byte(sig), []byte(expected)) {
+			if verifyHMACSHA256(body, li.WebhookSecret, sig) {
 				return true
 			}
 		}
@@ -193,10 +185,7 @@ func (s *Service) validateLinearSignature(workspaceName string, body []byte, sig
 			continue
 		}
 		hasAnySecret = true
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sig), []byte(expected)) {
+		if verifyHMACSHA256(body, secret, sig) {
 			return true
 		}
 	}
@@ -211,10 +200,7 @@ func (s *Service) validateLinearSignature(workspaceName string, body []byte, sig
 				continue
 			}
 			hasAnySecret = true
-			mac := hmac.New(sha256.New, []byte(secret))
-			mac.Write(body)
-			expected := hex.EncodeToString(mac.Sum(nil))
-			if hmac.Equal([]byte(sig), []byte(expected)) {
+			if verifyHMACSHA256(body, secret, sig) {
 				return true
 			}
 		}

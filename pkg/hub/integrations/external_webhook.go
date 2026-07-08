@@ -2,17 +2,15 @@ package integrations
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/elasticclaw/elasticclaw/pkg/hub/settings"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/settings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -187,13 +185,7 @@ func (s *Service) validateExternalSignatureForFactory(factory *types.FactoryConf
 	if secret == "" {
 		return sig == ""
 	}
-	if sig == "" {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(sig), []byte(expected))
+	return verifyHMACSHA256(body, secret, sig)
 }
 
 // processExternalEvent finds matching factories and creates claws for external events.
