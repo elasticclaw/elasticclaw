@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/telemetry"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -102,6 +105,21 @@ func runHub(cmd *cobra.Command, args []string) error {
 	// Root structured logger: created once at boot and installed as the
 	// process default; the hub server picks it up via slog.Default().
 	slog.SetDefault(logger.New())
+
+	// Optional OTel tracing: only active when ELASTICCLAW_OTLP_ENDPOINT is
+	// set; otherwise this is a no-op and the global tracer stays no-op.
+	shutdownTraces, err := telemetry.Setup(context.Background())
+	if err != nil {
+		return fmt.Errorf("otel tracing setup: %w", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTraces(ctx)
+	}()
+	if telemetry.Enabled() {
+		slog.Info("OTel tracing enabled", "endpoint", os.Getenv(telemetry.EndpointEnv))
+	}
 
 	hub.Version = Version
 	hub.Commit = Commit
