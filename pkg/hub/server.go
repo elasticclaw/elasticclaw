@@ -28,6 +28,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/logger"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/telemetry"
@@ -275,14 +276,17 @@ func (s *Server) Run(opts ...RunOptions) error {
 	if s.hubCfg.UIPassword == "" {
 		logf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	// withMetrics wraps the mux directly so it sees the matched route pattern;
-	// the otelhttp span (opt-in via ELASTICCLAW_OTLP_ENDPOINT) sits just
-	// outside it and is skipped entirely when tracing is disabled.
-	var handler http.Handler = s.withMetrics(mux)
+	// The metrics middleware wraps the mux directly so it sees the matched
+	// route pattern; the otelhttp span (opt-in via ELASTICCLAW_OTLP_ENDPOINT)
+	// sits just outside it and is skipped entirely when tracing is disabled.
+	var handler http.Handler = mux
+	if s.metrics != nil {
+		handler = httpserver.WithMetrics(s.metrics, handler)
+	}
 	if telemetry.Enabled() {
 		handler = otelhttp.NewHandler(handler, "hub")
 	}
-	return http.ListenAndServe(s.addr, withRecovery(s.withRequestID(corsMiddleware(handler))))
+	return http.ListenAndServe(s.addr, httpserver.WithRecovery(httpserver.WithRequestID(s.logger, httpserver.CORS(handler))))
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -412,21 +416,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		s.mu.RUnlock()
 		jsonOK(w, out)
 	}))
-}
-
-// corsMiddleware adds permissive CORS headers so the web UI can connect
-// from any origin (browser same-origin restrictions apply to REST + WS).
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -2863,13 +2852,21 @@ func mustJSONRaw(v interface{}) json.RawMessage {
 	return json.RawMessage(b)
 }
 
+// jsonOK, jsonError and writeErr are thin aliases over the httpserver
+// response helpers, kept so the ~250 existing call sites in this package do
+// not churn during the httpserver extraction. New code should call the
+// httpserver package directly; handlers drop the alias as they migrate to
+// their own subpackages.
 func jsonOK(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	httpserver.JSONOK(w, v)
 }
 
 func jsonError(w http.ResponseWriter, status int, msg string) {
-	writeErr(w, status, "", msg)
+	httpserver.JSONError(w, status, msg)
+}
+
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	httpserver.WriteErr(w, status, code, msg)
 }
 
 // Provision creates or updates the default tenant (for alpha single-user setup).

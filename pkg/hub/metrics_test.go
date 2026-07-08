@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 )
 
 func TestWithMetricsRecordsRequests(t *testing.T) {
@@ -18,7 +20,7 @@ func TestWithMetricsRecordsRequests(t *testing.T) {
 		writeErr(w, http.StatusBadRequest, "bad_signature", "bad signature")
 	})
 	mux.Handle("/metrics", s.metrics.handler())
-	h := s.withMetrics(mux)
+	h := httpserver.WithMetrics(s.metrics, mux)
 
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/claws/abc", nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/claws/def", nil))
@@ -47,7 +49,7 @@ func TestWithMetricsRecordsRequests(t *testing.T) {
 
 func TestWithMetricsNilSafe(t *testing.T) {
 	s := &Server{} // hand-built test servers have no metrics
-	h := s.withMetrics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := httpserver.WithMetrics(s.metrics, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	rec := httptest.NewRecorder()
@@ -57,24 +59,7 @@ func TestWithMetricsNilSafe(t *testing.T) {
 	}
 	// Recording methods must also be no-ops on a nil receiver.
 	s.metrics.wsMessage("in", "claw")
-	s.metrics.webhookError("linear")
-	s.metrics.observeRequest("/x", http.MethodGet, 200, 0)
+	s.metrics.WebhookError("linear")
+	s.metrics.ObserveRequest("/x", http.MethodGet, 200, 0)
 }
 
-func TestWebhookIntegration(t *testing.T) {
-	cases := map[string]string{
-		"/api/integrations/linear/webhook":            "linear",
-		"/api/integrations/github-issues/webhook":     "github-issues",
-		"/api/workspaces/{workspace}/webhooks/jira":   "jira",
-		"/api/workspaces/{workspace}/webhooks/github": "github",
-		"/api/claws":        "",
-		"/metrics":          "",
-		"unmatched":         "",
-		"/api/integrations": "",
-	}
-	for route, want := range cases {
-		if got := webhookIntegration(route); got != want {
-			t.Errorf("webhookIntegration(%q) = %q, want %q", route, got, want)
-		}
-	}
-}

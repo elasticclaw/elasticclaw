@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -107,8 +106,9 @@ func (m *serverMetrics) handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
-// observeRequest records one handled HTTP request.
-func (m *serverMetrics) observeRequest(route, method string, status int, elapsed time.Duration) {
+// ObserveRequest records one handled HTTP request. Exported so it satisfies
+// httpserver.MetricsRecorder.
+func (m *serverMetrics) ObserveRequest(route, method string, status int, elapsed time.Duration) {
 	if m == nil {
 		return
 	}
@@ -125,25 +125,12 @@ func (m *serverMetrics) wsMessage(direction, peer string) {
 	m.wsMessages.WithLabelValues(direction, peer).Inc()
 }
 
-// webhookError counts one failed integration webhook delivery.
-func (m *serverMetrics) webhookError(integration string) {
+// WebhookError counts one failed integration webhook delivery. Exported so
+// it satisfies httpserver.MetricsRecorder.
+func (m *serverMetrics) WebhookError(integration string) {
 	if m == nil {
 		return
 	}
 	m.webhookErrors.WithLabelValues(integration).Inc()
 }
 
-// webhookIntegration extracts the integration name from a webhook route
-// pattern ("/api/integrations/linear/webhook" or
-// "/api/workspaces/{workspace}/webhooks/linear"); it returns "" for
-// non-webhook routes.
-func webhookIntegration(route string) string {
-	parts := strings.Split(strings.Trim(route, "/"), "/")
-	switch {
-	case len(parts) == 4 && parts[0] == "api" && parts[1] == "integrations" && parts[3] == "webhook":
-		return parts[2]
-	case len(parts) == 5 && parts[0] == "api" && parts[1] == "workspaces" && parts[3] == "webhooks":
-		return parts[4]
-	}
-	return ""
-}

@@ -1,4 +1,4 @@
-package hub
+package httpserver
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ func TestWithRecoveryPanic(t *testing.T) {
 	log.SetOutput(&logBuf)
 	defer log.SetOutput(prev)
 
-	h := withRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := WithRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("boom")
 	}))
 
@@ -33,7 +33,7 @@ func TestWithRecoveryPanic(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
 	}
-	var envelope apiError
+	var envelope APIError
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("body is not valid JSON: %v (body: %q)", err, rec.Body.String())
 	}
@@ -54,7 +54,7 @@ func TestWithRecoveryPanic(t *testing.T) {
 }
 
 func TestWithRecoveryPassthrough(t *testing.T) {
-	h := withRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := WithRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -68,7 +68,7 @@ func TestWithRecoveryPassthrough(t *testing.T) {
 }
 
 func TestWithRecoveryRepanicsOnAbortHandler(t *testing.T) {
-	h := withRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := WithRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
 
@@ -82,12 +82,12 @@ func TestWithRecoveryRepanicsOnAbortHandler(t *testing.T) {
 
 func TestWriteErr(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeErr(rec, http.StatusNotFound, "not_found", "claw not found")
+	WriteErr(rec, http.StatusNotFound, "not_found", "claw not found")
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
-	var envelope apiError
+	var envelope APIError
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("body is not valid JSON: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestWriteErr(t *testing.T) {
 
 func TestWithRequestID(t *testing.T) {
 	var buf bytes.Buffer
-	s := &Server{logger: slog.New(slog.NewJSONHandler(&buf, nil))}
+	base := slog.New(slog.NewJSONHandler(&buf, nil))
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logger.FromContext(r.Context()).Info("first")
@@ -107,7 +107,7 @@ func TestWithRequestID(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	s.withRequestID(inner).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/claws", nil))
+	WithRequestID(base, inner).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/claws", nil))
 
 	id := rec.Header().Get("X-Request-ID")
 	if len(id) != 8 {
@@ -129,37 +129,27 @@ func TestWithRequestID(t *testing.T) {
 	}
 }
 
-func TestLogfComponentExtraction(t *testing.T) {
-	var buf bytes.Buffer
-	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "[claw] instance %s started", "abc")
-	var entry map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
-		t.Fatalf("log line is not JSON: %q", buf.String())
+func TestWebhookIntegration(t *testing.T) {
+	cases := map[string]string{
+		"/api/integrations/linear/webhook":            "linear",
+		"/api/integrations/github-issues/webhook":     "github-issues",
+		"/api/workspaces/{workspace}/webhooks/jira":   "jira",
+		"/api/workspaces/{workspace}/webhooks/github": "github",
+		"/api/claws":        "",
+		"/metrics":          "",
+		"unmatched":         "",
+		"/api/integrations": "",
 	}
-	if entry["component"] != "claw" {
-		t.Fatalf("expected component=claw, got %v", entry["component"])
-	}
-	if entry["msg"] != "instance abc started" {
-		t.Fatalf("unexpected message: %v", entry["msg"])
-	}
-
-	buf.Reset()
-	entry = map[string]any{}
-	logMsg(slog.New(slog.NewJSONHandler(&buf, nil)), "no tag here %d", 7)
-	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
-		t.Fatalf("log line is not JSON: %q", buf.String())
-	}
-	if _, ok := entry["component"]; ok {
-		t.Fatalf("did not expect a component attribute: %v", entry)
-	}
-	if entry["msg"] != "no tag here 7" {
-		t.Fatalf("unexpected message: %v", entry["msg"])
+	for route, want := range cases {
+		if got := webhookIntegration(route); got != want {
+			t.Errorf("webhookIntegration(%q) = %q, want %q", route, got, want)
+		}
 	}
 }
 
 func TestWriteErrOmitsEmptyCode(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeErr(rec, http.StatusBadRequest, "", "bad input")
+	WriteErr(rec, http.StatusBadRequest, "", "bad input")
 
 	if strings.Contains(rec.Body.String(), "code") {
 		t.Fatalf("empty code should be omitted from envelope: %q", rec.Body.String())
