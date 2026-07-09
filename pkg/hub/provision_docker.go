@@ -110,7 +110,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
 	homeDir, err := p.HomeDir(ctx, instance.ID)
 	if err != nil {
-		_ = p.Destroy(context.Background(), instance.ID, false)
+		_ = p.Destroy(s.base(), instance.ID, false) //nolint:contextcheck // cleanup must run even if the caller ctx is canceled
 		return fmt.Errorf("docker home dir: %w", err)
 	}
 	workspaceDir := path.Join(homeDir, "workspace")
@@ -120,22 +120,22 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	for relPath, content := range files {
 		dest := path.Join(workspaceDir, relPath)
 		if dest != workspaceDir && !strings.HasPrefix(dest, workspacePrefix) {
-			_ = p.Destroy(context.Background(), instance.ID, false)
+			_ = p.Destroy(s.base(), instance.ID, false) //nolint:contextcheck // cleanup must run even if the caller ctx is canceled
 			return fmt.Errorf("docker workspace file path escapes workspace: %s", relPath)
 		}
 		if err := p.CopyIn(ctx, instance.ID, dest, content); err != nil {
-			_ = p.Destroy(context.Background(), instance.ID, false)
+			_ = p.Destroy(s.base(), instance.ID, false) //nolint:contextcheck // cleanup must run even if the caller ctx is canceled
 			return fmt.Errorf("docker file copy failed: %s: %w", relPath, err)
 		}
 	}
 	if err := p.CopyIn(ctx, instance.ID, path.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n")); err != nil {
-		_ = p.Destroy(context.Background(), instance.ID, false)
+		_ = p.Destroy(s.base(), instance.ID, false) //nolint:contextcheck // cleanup must run even if the caller ctx is canceled
 		return fmt.Errorf("docker workspace ready marker: %w", err)
 	}
 	logfCtx(ctx, "[docker] workspace files copied for claw %.8s to %s", clawID, workspaceDir)
 	s.setBootstrapStatus(clawID, "Starting agent bridge")
 	if err := s.ensureDockerBridge(ctx, p, instance.ID, homeDir); err != nil {
-		_ = p.Destroy(context.Background(), instance.ID, false)
+		_ = p.Destroy(s.base(), instance.ID, false) //nolint:contextcheck // cleanup must run even if the caller ctx is canceled
 		return err
 	}
 
@@ -359,7 +359,7 @@ func (s *Server) terminateDockerVM(vmID string) {
 		logf("terminateDockerVM: provider init error: %v", err)
 		return
 	}
-	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "docker")
+	destroyCtx, endSpan := telemetry.StartProviderSpan(s.base(), "destroy", "docker")
 	err = p.Destroy(destroyCtx, vmID, false)
 	endSpan(err)
 	if err != nil {
@@ -383,7 +383,7 @@ func (s *Server) terminateLambdaMicroVM(vmID string) {
 		logf("terminateLambdaMicroVM: provider init error: %v", err)
 		return
 	}
-	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "lambda-microvms")
+	destroyCtx, endSpan := telemetry.StartProviderSpan(s.base(), "destroy", "lambda-microvms")
 	err = p.Destroy(destroyCtx, vmID, false)
 	endSpan(err)
 	if err != nil {

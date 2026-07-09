@@ -55,6 +55,11 @@ type dependencyStatusChecker interface {
 type dependencyStatusTargetProvider func() []dependencyStatusTarget
 
 type dependencyStatusService struct {
+	// baseCtx is the hub root context; the singleflight refresh is shared
+	// across requests, so it must not inherit any single request's
+	// cancellation. Nil falls back to context.Background() via base().
+	baseCtx context.Context
+
 	mu             sync.Mutex
 	hubCfg         *types.HubConfig
 	checkers       map[string]dependencyStatusChecker
@@ -62,6 +67,13 @@ type dependencyStatusService struct {
 	cache          *DependencyStatusResponse
 	cacheTTL       time.Duration
 	refresh        singleflight.Group
+}
+
+func (s *dependencyStatusService) base() context.Context {
+	if s.baseCtx != nil {
+		return s.baseCtx
+	}
+	return context.Background()
 }
 
 func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
@@ -96,7 +108,7 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 			return resp, nil
 		}
 
-		return s.refreshSnapshot(context.Background()), nil
+		return s.refreshSnapshot(s.base()), nil
 	})
 	if resp, ok := value.(DependencyStatusResponse); ok {
 		return cloneDependencyStatusResponse(resp)

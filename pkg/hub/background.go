@@ -4,7 +4,6 @@
 package hub
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -29,7 +28,7 @@ func (s *Server) pruneAnalytics() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := s.st().Analytics().PruneFactoryAnalytics(context.Background()); err != nil {
+		if err := s.st().Analytics().PruneFactoryAnalytics(s.base()); err != nil {
 			logf("[db] factory analytics prune error: %v", err)
 		}
 	}
@@ -80,7 +79,7 @@ func (s *Server) checkClawStatus() {
 			sc := cc.StatusConn
 			cc.Mu.RUnlock()
 			if sc != nil {
-				_ = wsjson.Write(context.Background(), sc, types.WSMessage{
+				_ = wsjson.Write(s.base(), sc, types.WSMessage{
 					Type: "status_ping",
 					Payload: mustJSONRaw(map[string]interface{}{
 						"claw_id": id,
@@ -90,7 +89,7 @@ func (s *Server) checkClawStatus() {
 			}
 		}
 
-		name := s.st().Claws().Name(context.Background(), id)
+		name := s.st().Claws().Name(s.base(), id)
 
 		// Detect silent death: no status response AND no user message for >5 min
 		// while the claw is supposedly connected and gateway was ready

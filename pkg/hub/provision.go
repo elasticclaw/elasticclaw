@@ -142,7 +142,7 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 	})
 	logf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
 	go s.requestBootstrapCheckpoint(clawID)
-	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
+	s.startWorkflowAfterVolumes(s.base(), cc, clawID)
 	return true
 }
 

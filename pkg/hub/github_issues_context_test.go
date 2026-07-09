@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -111,7 +112,7 @@ func TestFetchGitHubIssueCommentsFollowsPagination(t *testing.T) {
 	defer srv.Close()
 	srvURL = srv.URL
 
-	comments, err := fetchGitHubIssueComments(srv.URL, "testorg/testrepo", 42, "test-token")
+	comments, err := fetchGitHubIssueComments(context.Background(), srv.URL, "testorg/testrepo", 42, "test-token")
 	if err != nil {
 		t.Fatalf("fetch comments: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestFetchGitHubIssueCommentsIgnoresForeignNextPageHost(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	comments, err := fetchGitHubIssueComments(srv.URL, "testorg/testrepo", 42, "test-token")
+	comments, err := fetchGitHubIssueComments(context.Background(), srv.URL, "testorg/testrepo", 42, "test-token")
 	if err != nil {
 		t.Fatalf("fetch comments: %v", err)
 	}

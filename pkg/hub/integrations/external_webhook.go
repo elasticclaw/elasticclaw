@@ -1,7 +1,6 @@
 package integrations
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -638,7 +637,7 @@ func (s *Service) createClawForExternalEvent(factory *types.FactoryConfig, paylo
 			return
 		}
 
-		ctx := context.Background()
+		ctx := s.baseCtx()
 		req := types.CreateClawRequest{
 			Name:         clawName,
 			TemplateName: factory.Template,

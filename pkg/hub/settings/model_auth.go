@@ -136,7 +136,7 @@ func (s *Service) runModelAuthLoginJob(job *ModelAuthLoginJob) {
 	}
 	defer os.RemoveAll(authDir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Minute)
 	defer cancel()
 
 	if err := s.runModelAuthDeviceLogin(ctx, job, authDir); err != nil {

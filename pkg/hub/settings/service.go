@@ -31,6 +31,11 @@ type GitHubPermissionsChecker interface {
 // Deps carries the hub-owned state and helpers the settings service needs.
 // Everything is injected so the package does not depend on pkg/hub.
 type Deps struct {
+	// BaseCtx returns the hub's root context. Background work that must
+	// outlive an HTTP request (the model-auth login job) derives from it —
+	// never from a bare context.Background(). May be nil in hand-built
+	// test servers; use the service's baseCtx() accessor.
+	BaseCtx func() context.Context
 	// Mu is the hub's config mutex. It must be the same mutex the hub uses
 	// to guard its live *types.HubConfig so config reads/writes keep the
 	// exact same synchronization as before the extraction.
@@ -83,6 +88,7 @@ type Deps struct {
 // is cheap to construct; all mutable state lives on the hub side behind the
 // injected hooks.
 type Service struct {
+	baseCtxHook                 func() context.Context
 	mu                          *sync.RWMutex
 	db                          *sql.DB
 	hubCfg                      func() *types.HubConfig
@@ -121,6 +127,7 @@ func New(deps Deps) *Service {
 		}
 	}
 	return &Service{
+		baseCtxHook:                 deps.BaseCtx,
 		mu:                          deps.CfgMu,
 		db:                          deps.DB,
 		hubCfg:                      deps.HubCfg,
@@ -219,4 +226,13 @@ func ResolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types
 		}
 	}
 	return nil
+}
+
+// baseCtx returns the hub root context (context.Background() when the
+// hook is unset, e.g. hand-built test servers).
+func (s *Service) baseCtx() context.Context {
+	if s.baseCtxHook != nil {
+		return s.baseCtxHook()
+	}
+	return context.Background()
 }

@@ -59,6 +59,12 @@ type ConnEntry struct {
 type Deps struct {
 	// DB is the hub database.
 	DB *sql.DB
+	// BaseCtx returns the hub's root context. Background work that must
+	// outlive an HTTP request derives from it — never from a bare
+	// context.Background() — so cancellation propagates once graceful
+	// shutdown wires a cancelable root. May be nil in hand-built test
+	// servers; use the service's baseCtx() accessor.
+	BaseCtx func() context.Context
 	// Mu is the hub's config/claw-registry mutex. It must be the same
 	// mutex the hub uses so reads/writes keep the exact same
 	// synchronization as before the extraction.

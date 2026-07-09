@@ -263,7 +263,7 @@ func (s *Service) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 		if err != nil {
 			continue
 		}
-		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
+		token, _, err := provider.InstallationToken(s.baseCtx(), 0, repoAccess)
 		if err != nil {
 			continue
 		}
@@ -785,7 +785,7 @@ func (s *Service) injectMessage(clawID, content, role string) {
 		} else {
 			cc.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(s.baseCtx(), 5*time.Second)
 			err := cc.WriteWS(ctx, types.WSMessage{Type: "message", Payload: msg})
 			cancel()
 			if err != nil {

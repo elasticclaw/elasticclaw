@@ -31,9 +31,10 @@ import (
 // servers (&Server{...}) working without extra wiring.
 func (s *Server) checkpointsSvc() *checkpoints.Service {
 	return checkpoints.New(checkpoints.Deps{
-		DB:     s.db,
-		CfgMu:  &s.cfgMu,
-		HubCfg: func() *types.HubConfig { return s.hubCfg },
+		DB:      s.db,
+		BaseCtx: s.base,
+		CfgMu:   &s.cfgMu,
+		HubCfg:  func() *types.HubConfig { return s.hubCfg },
 
 		CheckpointMu: &s.checkpointMu,
 		CheckpointWaiters: func() map[string]chan error {

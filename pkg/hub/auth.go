@@ -158,15 +158,15 @@ func (s *Server) githubTenantID() (string, error) {
 			return tenantID, nil
 		}
 	}
-	return s.st().Tenants().FirstID(context.Background())
+	return s.st().Tenants().FirstID(s.base())
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
-	return s.st().Tenants().IDByToken(context.Background(), token)
+	return s.st().Tenants().IDByToken(s.base(), token)
 }
 
 func (s *Server) tenantByClawToken(token string) (string, error) {
-	return s.st().Tenants().IDByClawToken(context.Background(), token)
+	return s.st().Tenants().IDByClawToken(s.base(), token)
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────

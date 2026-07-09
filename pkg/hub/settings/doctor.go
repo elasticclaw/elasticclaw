@@ -466,7 +466,7 @@ func (s *Service) checkFactories(cfg *types.HubConfig, diskCfg *types.HubConfig)
 	}
 
 	// Legacy DB templates (for migration period)
-	dbTemplateNames, err := store.New(s.db).Settings().TemplateNames(context.Background())
+	dbTemplateNames, err := store.New(s.db).Settings().TemplateNames(s.baseCtx())
 	for _, name := range dbTemplateNames {
 		templateNames[name] = true
 	}

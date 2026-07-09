@@ -2,7 +2,6 @@ package integrations
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -911,7 +910,7 @@ func (s *Service) createClawForGitHubPR(factory *types.FactoryConfig, pr GitHubP
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
-		ctx := context.Background()
+		ctx := s.baseCtx()
 		req := types.CreateClawRequest{
 			Name:         clawName,
 			TemplateName: factory.Template,

@@ -58,11 +58,13 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 				logfCtx(ctx, "[daytona] full bootstrap retry for claw %s in 15s...", clawName)
 				time.Sleep(15 * time.Second)
 			}
-			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
+			// The async bootstrap must outlive the triggering request, so it
+			// derives from the hub root context, not the enclosing ctx.
+			lastErr = s.bootstrapDaytona(s.base(), clawID, clawName, instance.ID, p, env) //nolint:contextcheck
 			if lastErr == nil {
 				return
 			}
-			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
+			if s.daytonaBridgeRunning(s.base(), instance.ID, p) { //nolint:contextcheck
 				logfCtx(ctx, "[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 				return
 			}
@@ -926,7 +928,7 @@ func (s *Server) petDaytonaSandboxes() {
 	}
 
 	for _, c := range claws {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(s.base(), 30*time.Second)
 		_, err := p.ExecWithTimeout(ctx, c.providerID, []string{"bash", "-lc", "true"}, 20*time.Second)
 		cancel()
 		if err != nil {
@@ -950,7 +952,7 @@ func (s *Server) terminateDaytonaVM(workspaceID string) {
 		logf("terminateDaytonaVM: provider init error: %v", err)
 		return
 	}
-	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "daytona")
+	destroyCtx, endSpan := telemetry.StartProviderSpan(s.base(), "destroy", "daytona")
 	err = p.Destroy(destroyCtx, workspaceID, false)
 	endSpan(err)
 	if err != nil {

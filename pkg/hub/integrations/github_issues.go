@@ -902,7 +902,7 @@ func (s *Service) createClawForGitHubIssue(factory *types.FactoryConfig, payload
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
-		ctx := context.Background()
+		ctx := s.baseCtx()
 		req := types.CreateClawRequest{
 			Name:         clawName,
 			TemplateName: factory.Template,
@@ -1010,7 +1010,7 @@ func (s *Service) buildGitHubIssuesContextWithComments(payload GitHubIssuesWebho
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	comments, err := FetchGitHubIssueComments(base, payload.Repository.FullName, payload.Issue.Number, token)
+	comments, err := FetchGitHubIssueComments(s.baseCtx(), base, payload.Repository.FullName, payload.Issue.Number, token)
 	if err != nil {
 		logf("[github-issues] failed to fetch comments for %s#%d: %v", payload.Repository.FullName, payload.Issue.Number, err)
 		return BuildGitHubIssuesContext(payload, nil, "Issue comments could not be loaded automatically. Review the issue URL for additional context.")
@@ -1080,7 +1080,7 @@ func BuildGitHubIssuesContext(payload GitHubIssuesWebhookPayload, comments []Git
 	return b.String()
 }
 
-func FetchGitHubIssueComments(baseURL, repo string, issueNumber int, token string) ([]GitHubIssueComment, error) {
+func FetchGitHubIssueComments(ctx context.Context, baseURL, repo string, issueNumber int, token string) ([]GitHubIssueComment, error) {
 	if token == "" {
 		return nil, nil
 	}
@@ -1088,8 +1088,8 @@ func FetchGitHubIssueComments(baseURL, repo string, issueNumber int, token strin
 	var comments []GitHubIssueComment
 	pagesRemaining := 100
 	for path != "" && pagesRemaining > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		page, next, err := fetchGitHubIssueCommentsPage(ctx, baseURL, path, token)
+		pageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		page, next, err := fetchGitHubIssueCommentsPage(pageCtx, baseURL, path, token)
 		cancel()
 		if err != nil {
 			return nil, err

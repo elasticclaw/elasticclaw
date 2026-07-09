@@ -207,7 +207,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) broadcastToUsers(tenantID string, msg types.WSMessage) {
 	for _, uc := range s.broadcastRecipients(tenantID, msg) {
-		_ = wsjson.Write(context.Background(), uc.conn, msg)
+		_ = wsjson.Write(s.base(), uc.conn, msg)
 		s.metrics.wsMessage("out", "user")
 	}
 }
@@ -247,7 +247,7 @@ func (s *Server) clawTagsForBroadcast(tenantID, clawID string) []string {
 		return append([]string(nil), cc.Tags...)
 	}
 
-	tags, _ := s.st().Claws().Tags(context.Background(), clawID, tenantID)
+	tags, _ := s.st().Claws().Tags(s.base(), clawID, tenantID)
 	return tags
 }
 

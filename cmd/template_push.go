@@ -93,7 +93,7 @@ func runTemplatePush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	client := hub.NewClient(h.URL, h.Token)
-	if err := client.PushTemplate(templateName, fsFiles); err != nil {
+	if err := client.PushTemplate(cmd.Context(), templateName, fsFiles); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 

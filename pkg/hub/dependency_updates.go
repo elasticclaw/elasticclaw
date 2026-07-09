@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -270,7 +269,7 @@ func (s *Server) dependencyUpdatesCommandForClaw(clawID string, action pipeline.
 }
 
 func (s *Server) clawUsesNix(clawID string) (bool, error) {
-	nixEnabled, err := s.st().Claws().NixEnabled(context.Background(), clawID)
+	nixEnabled, err := s.st().Claws().NixEnabled(s.base(), clawID)
 	if err != nil {
 		return false, fmt.Errorf("load agent nix setting: %w", err)
 	}

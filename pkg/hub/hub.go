@@ -35,6 +35,14 @@ import (
 // lock, then act. Within the claw subsystem the order is registry lock
 // first, then Conn.Mu (only inside Registry.Do/DoRead callbacks).
 type Server struct {
+	// baseCtx is the hub's root context. Background work that must outlive
+	// an HTTP request (provisioning after a webhook, disconnect cleanup,
+	// pollers) derives from it — never from a bare context.Background() —
+	// so cancellation propagates once graceful shutdown wires a cancelable
+	// root here. Use base() to read it (nil-safe for hand-built test
+	// servers).
+	baseCtx context.Context
+
 	db        *sql.DB
 	addr      string
 	logger    *slog.Logger
@@ -104,6 +112,10 @@ type Server struct {
 // NewServer creates a hub server backed by a SQLite database at dbPath.
 // identityDir is the directory where the hub's SSH keypair is stored (created if absent).
 func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Server, error) {
+	// The hub's root context. Today it is never canceled (Run blocks on
+	// ListenAndServe); the graceful-shutdown work replaces it with a
+	// cancelable one, and everything already derived from it will stop.
+	baseCtx := context.Background()
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
@@ -111,7 +123,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if hubCfg == nil {
 		hubCfg = &types.HubConfig{}
 	}
-	artifacts, err := artifact.NewStoreFromHubConfig(context.Background(), identityDir, hubCfg.ArtifactStorage)
+	artifacts, err := artifact.NewStoreFromHubConfig(baseCtx, identityDir, hubCfg.ArtifactStorage)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("artifact storage: %w", err)
@@ -123,13 +135,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	logf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
+		baseCtx:           baseCtx,
 		db:                db,
 		addr:              addr,
 		logger:            slog.Default(),
 		hubCfg:            hubCfg,
 		identity:          id,
 		artifacts:         artifacts,
-		metrics:           newServerMetrics(db),
+		metrics:           newServerMetrics(baseCtx, db),
 		dependencyStatus:  newDependencyStatusService(hubCfg),
 		fileAckWaiters:    make(map[string]chan types.FileAck),
 		fileReadWaiters:   make(map[string]chan types.FileReadResp),
@@ -137,6 +150,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		webhookDedup:      make(map[string]time.Time),
 	}
 	srv.wsPool.Limit = int64(hubCfg.WSWorkerLimit)
+	srv.dependencyStatus.baseCtx = baseCtx
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()
@@ -285,6 +299,17 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 		DebugClaws: s.handleDebugClaws,
 	})
+}
+
+// base returns the hub's root context. Background work that must outlive
+// a request derives from it (usually with an explicit timeout) instead of
+// calling context.Background() directly, so a future cancelable root stops
+// everything. Nil-safe so hand-built test servers (&Server{...}) work.
+func (s *Server) base() context.Context {
+	if s.baseCtx != nil {
+		return s.baseCtx
+	}
+	return context.Background()
 }
 
 // serverAuth adapts the Server's unexported auth middlewares to the

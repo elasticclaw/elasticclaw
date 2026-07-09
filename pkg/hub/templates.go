@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -152,7 +151,7 @@ func (s *Server) loadHubTemplate(name string) (map[string]string, error) {
 		return files, nil
 	}
 	// Legacy DB fallback
-	filesJSON, err := s.st().Settings().TemplateFiles(context.Background(), name)
+	filesJSON, err := s.st().Settings().TemplateFiles(s.base(), name)
 	if err != nil {
 		return nil, err
 	}

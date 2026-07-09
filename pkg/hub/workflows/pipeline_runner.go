@@ -364,7 +364,7 @@ func (s *Service) executePipelineCommand(clawID, command string, timeout time.Du
 	}
 
 	workspaceCommand := `cd "$HOME/.openclaw/workspace" && ` + command
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+30*time.Second)
+	ctx, cancel := context.WithTimeout(s.baseCtx(), timeout+30*time.Second)
 	defer cancel()
 
 	// One span around the whole exec dispatch, whichever provider serves it.
@@ -637,7 +637,7 @@ Do not include any markdown formatting, code fences, or explanatory text outside
 	}
 
 	msgs := []aiChatMessage{{Role: "user", Content: userContent.String()}}
-	ctx2, cancel := context.WithTimeout(context.Background(), judgeTimeout(action.Timeout))
+	ctx2, cancel := context.WithTimeout(s.baseCtx(), judgeTimeout(action.Timeout))
 	defer cancel()
 
 	var rawResponse string

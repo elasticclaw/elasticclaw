@@ -236,12 +236,12 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 }
 
 // PushTemplate uploads a template to the hub's template store.
-func (c *Client) PushTemplate(name string, files map[string]string) error {
+func (c *Client) PushTemplate(ctx context.Context, name string, files map[string]string) error {
 	body := map[string]interface{}{
 		"name":  name,
 		"files": files,
 	}
-	_, err := c.do(context.Background(), "POST", "/api/templates", body)
+	_, err := c.do(ctx, "POST", "/api/templates", body)
 	return err
 }
 

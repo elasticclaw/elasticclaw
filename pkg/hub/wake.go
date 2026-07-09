@@ -4,7 +4,6 @@
 package hub
 
 import (
-	"context"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -48,9 +47,9 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		Content:   wakeMessageMarker,
 		CreatedAt: now(),
 	}
-	_ = s.st().Messages().Insert(context.Background(), wakeMsg)
+	_ = s.st().Messages().Insert(s.base(), wakeMsg)
 	wakeMsg.Content = wakeContent
-	_ = wsjson.Write(context.Background(), cc.WS, types.WSMessage{Type: "message", Payload: wakeMsg})
+	_ = wsjson.Write(s.base(), cc.WS, types.WSMessage{Type: "message", Payload: wakeMsg})
 
 	// Note: We don't call sendNextQueuedMessage here because sendWakeMessage is launched
 	// with 'go' (asynchronously). The normal end-of-turn path in handleClawWS read loop
@@ -73,7 +72,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 		Content:   initialPlanWakeContent,
 		CreatedAt: now(),
 	}
-	_ = wsjson.Write(context.Background(), cc.WS, types.WSMessage{Type: "message", Payload: msg})
+	_ = wsjson.Write(s.base(), cc.WS, types.WSMessage{Type: "message", Payload: msg})
 }
 
 func (s *Server) clawNeedsInitialPlan(clawID string) bool {
@@ -90,11 +89,11 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 }
 
 func (s *Server) tenantIDForClaw(clawID string) string {
-	return s.st().Claws().TenantID(context.Background(), clawID)
+	return s.st().Claws().TenantID(s.base(), clawID)
 }
 
 func (s *Server) hasSystemMarker(clawID, marker string) bool {
-	has, _ := s.st().Messages().HasSystemMarker(context.Background(), clawID, marker)
+	has, _ := s.st().Messages().HasSystemMarker(s.base(), clawID, marker)
 	return has
 }
 
@@ -107,7 +106,7 @@ func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
 	if s.hasSystemMarker(clawID, marker) {
 		return false
 	}
-	err := s.st().Messages().Insert(context.Background(), types.HubMessage{
+	err := s.st().Messages().Insert(s.base(), types.HubMessage{
 		ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 		Role: "system", Content: marker, CreatedAt: now(),
 	})
@@ -172,6 +171,6 @@ func isValidInitialPlan(content string) bool {
 // clawHasMessages returns true if the claw already has message history.
 // Used to suppress the intro wake message on reconnect.
 func (s *Server) clawHasMessages(clawID string) bool {
-	count, _ := s.st().Messages().CountByClaw(context.Background(), clawID)
+	count, _ := s.st().Messages().CountByClaw(s.base(), clawID)
 	return count > 0
 }

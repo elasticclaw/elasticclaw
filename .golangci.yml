@@ -2,6 +2,11 @@ version: "2"
 
 linters:
   enable:
+    # contextcheck prevents regressions of the phase-2.3 sweep: HTTP
+    # handlers must propagate r.Context(); work that outlives a request
+    # derives from the hub root context (Server.baseCtx), never from a
+    # bare context.Background() inside a call chain that already has one.
+    - contextcheck
     - depguard
     - forbidigo
   settings:
@@ -61,6 +66,16 @@ linters:
           msg: use log/slog instead of printing to stdout
   exclusions:
     rules:
+      # contextcheck: these sinks intentionally run on the hub root context
+      # (Server.baseCtx) because their work outlives any single request —
+      # user-WS fanout, queued message delivery, checkpoints, shared
+      # singleflight refreshes, cleanup after provisioning failures.
+      # Threading request contexts through the bridge hooks they sit behind
+      # is part of the remaining phase-2 extraction steps; new bare
+      # context.Background() call sites are still flagged.
+      - linters:
+          - contextcheck
+        text: "(sendNextQueuedMessage|clawTagsForBroadcast|tenantByToken|hasSystemMarker|clawHasMessages|CheckpointBeforeTermination|provisionStoredClaw|DrainPendingCheckpoint|snapshot\\$1|checkFactories|runModelAuthLoginJob|loadHubTemplate|handleTroubleshootStream|createClawFromFactory|cleanupClaw|HandleClawWS\\$|flushStreamingSegment|createClawForExternalEvent|buildGitHubIssuesContextWithComments|createClawForGitHubPR|ProvisionPendingClaw|setReady|checkGateway)"
       # The structured-logging rule applies to the hub only (for now); the CLI
       # under cmd/ legitimately prints to stdout.
       - path-except: ^pkg/hub/

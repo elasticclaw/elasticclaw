@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestWithMetricsRecordsRequests(t *testing.T) {
-	s := &Server{metrics: newServerMetrics(nil)}
+	s := &Server{metrics: newServerMetrics(context.Background(), nil)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/claws/{id}", func(w http.ResponseWriter, r *http.Request) {

@@ -199,7 +199,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 		})
 		if partialContent != "" {
 			interruptedAt := now()
-			_ = s.st.Messages().Upsert(context.Background(), types.HubMessage{
+			_ = s.st.Messages().Upsert(s.baseCtx(), types.HubMessage{
 				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
 				Content: partialContent, CreatedAt: interruptedAt,
 			})
@@ -217,11 +217,11 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				"status":  "idle",
 			},
 		})
-		currentStatus := s.st.Claws().Status(context.Background(), clawID)
+		currentStatus := s.st.Claws().Status(s.baseCtx(), clawID)
 		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
 		// and is watching for PR merge; deleted means it's being cleaned up.
 		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" {
-			_ = s.st.Claws().MarkOffline(context.Background(), clawID, now())
+			_ = s.st.Claws().MarkOffline(s.baseCtx(), clawID, now())
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
 		logfCtx(r.Context(), "[bridge] ✗ disconnected: %s (%s)", rp.Name, clawID[:8])
@@ -470,7 +470,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
 					if !submit(func() {
-						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, s.deps.CheckpointRequestTimeout); err != nil {
+						if _, err := s.requestCheckpoint(s.baseCtx(), clawID, "done", "hub", false, s.deps.CheckpointRequestTimeout); err != nil {
 							logfCtx(r.Context(), "[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					}) {
@@ -582,18 +582,18 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 							Header map[string]string `json:"header"`
 						}
 						if err := json.Unmarshal(rawPayload, &req); err != nil {
-							logfCtx(r.Context(), "[hub-proxy] bad req payload: %v", err)
+							logfCtx(ctx, "[hub-proxy] bad req payload: %v", err)
 							return
 						}
-						logfCtx(r.Context(), "[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
+						logfCtx(ctx, "[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
 						// Build an internal HTTP request
 						urls := req.Path
 						if req.Query != "" {
 							urls += "?" + req.Query
 						}
-						httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
+						httpReq, err := http.NewRequestWithContext(ctx, req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 						if err != nil {
-							logfCtx(r.Context(), "[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
+							logfCtx(ctx, "[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
 							s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 							return
 						}
@@ -611,7 +611,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						if w.status == 0 {
 							w.status = 200
 						}
-						logfCtx(r.Context(), "[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
+						logfCtx(ctx, "[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
 						s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
 					}
 				}

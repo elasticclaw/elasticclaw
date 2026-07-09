@@ -1,8 +1,6 @@
 package claws
 
 import (
-	"context"
-
 	"github.com/google/uuid"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -27,7 +25,7 @@ func (s *Service) flushStreamingSegment(clawID, tenantID string, cc *Conn) error
 	cc.StreamingSplit = true
 	cc.Mu.Unlock()
 
-	return s.st.Messages().Upsert(context.Background(), types.HubMessage{
+	return s.st.Messages().Upsert(s.baseCtx(), types.HubMessage{
 		ID: msgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
 		Content: content, CreatedAt: now(),
 	})

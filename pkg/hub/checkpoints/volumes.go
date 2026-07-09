@@ -330,7 +330,7 @@ func (s *Service) SyncWorkflowVolumes(clawID string) {
 		if !s.workflowVolumeLeaseActive(volume.LeaseID) {
 			continue
 		}
-		if err := s.dispatchVolumeSync(context.Background(), cc, volume); err != nil {
+		if err := s.dispatchVolumeSync(s.baseCtx(), cc, volume); err != nil {
 			logf("[volume] sync %s/%s failed: %v", clawID, volume.Name, err)
 			syncFailed = true
 		}

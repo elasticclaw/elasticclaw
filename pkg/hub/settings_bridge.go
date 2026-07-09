@@ -27,6 +27,7 @@ func (s *Server) settingsSvc() *settings.Service {
 	return settings.New(settings.Deps{
 		CfgMu:                 &s.cfgMu,
 		DB:                    s.db,
+		BaseCtx:               s.base,
 		HubCfg:                func() *types.HubConfig { return s.hubCfg },
 		SetHubCfg:             func(cfg *types.HubConfig) { s.hubCfg = cfg },
 		Logf:                  logf,

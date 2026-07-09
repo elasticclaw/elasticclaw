@@ -209,7 +209,7 @@ func (s *Server) buildAgentStopComment(clawID, reason string) string {
 	defaultModel := s.hubCfg.DefaultModel
 	s.cfgMu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(s.base(), 20*time.Second)
 	defer cancel()
 
 	if summary, err := summarizeFailureWithLLM(ctx, sanitized, llmKeys, defaultModel); err == nil {

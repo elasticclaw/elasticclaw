@@ -4,7 +4,6 @@
 package hub
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -283,7 +282,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.ProviderName = providerNamePrefix + clawID[:8]
 	go func() {
 		logfCtx(r.Context(), "Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
-		ctx := context.Background()
+		ctx := s.base()
 		var provErr error
 
 		switch req.Provider {
@@ -487,7 +486,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if providerID != "" {
 				s.terminateVM(provider, providerID)
 			}
-			if err := s.st().Claws().PurgeConversation(context.Background(), clawID); err != nil {
+			if err := s.st().Claws().PurgeConversation(s.base(), clawID); err != nil {
 				logf("[kill] purge conversation for claw %s: %v", clawID, err)
 			}
 		}()

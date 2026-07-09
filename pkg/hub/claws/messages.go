@@ -65,7 +65,7 @@ func (s *Service) sendNextQueuedMessage(cc *Conn) {
 	cc.Mu.Unlock()
 
 	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(s.baseCtx(), 5*time.Second)
 	defer cancel()
 	err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 	if err == nil {

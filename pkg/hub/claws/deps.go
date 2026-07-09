@@ -19,6 +19,12 @@ import (
 type Deps struct {
 	// DB is the hub database.
 	DB *sql.DB
+	// BaseCtx returns the hub's root context. Background work that must
+	// outlive an HTTP request derives from it — never from a bare
+	// context.Background() — so cancellation propagates once graceful
+	// shutdown wires a cancelable root. May be nil in hand-built test
+	// servers; use the service's baseCtx() accessor.
+	BaseCtx func() context.Context
 	// Registry is the hub-owned claw-connection registry. It carries its
 	// own RWMutex (per-subsystem locking, phase-2 item 2.3).
 	Registry *Registry
@@ -110,6 +116,15 @@ func (m metricsHook) wsMessage(direction, peer string) {
 // shape.
 
 func (s *Service) hubCfg() *types.HubConfig { return s.deps.HubCfg() }
+
+// baseCtx returns the hub root context (context.Background() when the
+// hook is unset, e.g. hand-built test servers).
+func (s *Service) baseCtx() context.Context {
+	if s.deps.BaseCtx != nil {
+		return s.deps.BaseCtx()
+	}
+	return context.Background()
+}
 
 func (s *Service) mux() http.Handler { return s.deps.Mux() }
 

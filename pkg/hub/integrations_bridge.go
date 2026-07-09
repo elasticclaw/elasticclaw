@@ -27,6 +27,7 @@ import (
 func (s *Server) integrationsSvc() *integrations.Service {
 	return integrations.New(integrations.Deps{
 		DB:        s.db,
+		BaseCtx:   s.base,
 		CfgMu:     &s.cfgMu,
 		HubCfg:    func() *types.HubConfig { return s.hubCfg },
 		PromoteMu: &s.promoteMu,

@@ -151,7 +151,7 @@ func (s *Service) requestIdleCheckpoints() {
 			continue
 		}
 		go func(clawID string) {
-			if _, err := s.RequestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
+			if _, err := s.RequestCheckpoint(s.baseCtx(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
 				logf("[checkpoint] idle request for %s failed: %v", ShortID(clawID), err)
 			}
 		}(item.ID)
@@ -174,7 +174,7 @@ func (s *Service) RequestBootstrapCheckpoint(clawID string) {
 	if s.hasRecentCheckpointReason(clawID, "bootstrap", time.Hour) {
 		return
 	}
-	if _, err := s.RequestCheckpoint(context.Background(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
+	if _, err := s.RequestCheckpoint(s.baseCtx(), clawID, "bootstrap", "hub", false, checkpointRequestTimeout); err != nil {
 		logf("[checkpoint] bootstrap request for %s failed: %v", ShortID(clawID), err)
 	}
 }
@@ -363,7 +363,7 @@ func (s *Service) provisionStoredClaw(clawID string) {
 		req.Snapshot = tmplCfg.Snapshot
 		req.TTL = tmplCfg.TTL
 	}
-	ctx := context.Background()
+	ctx := s.baseCtx()
 	var provErr error
 	switch provider {
 	case "daytona":
@@ -522,14 +522,14 @@ func (s *Service) DrainPendingCheckpoint(clawID string) {
 		return
 	}
 	go func() {
-		if _, err := s.DispatchCheckpoint(context.Background(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
+		if _, err := s.DispatchCheckpoint(s.baseCtx(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
 			logf("[checkpoint] queued request for %s failed: %v", ShortID(clawID), err)
 		}
 	}()
 }
 
 func (s *Service) CheckpointBeforeTermination(clawID, reason string) {
-	if _, err := s.RequestCheckpoint(context.Background(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
+	if _, err := s.RequestCheckpoint(s.baseCtx(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
 		logf("[checkpoint] termination checkpoint for %s failed: %v", ShortID(clawID), err)
 	}
 }

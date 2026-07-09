@@ -191,14 +191,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 
 	limit := parsePositiveLimit(r, 50, 100)
 	before := r.URL.Query().Get("before")
-	rows, err := s.queryConversationMessages(clawID, tenantID, before, limit)
+	rows, err := s.queryConversationMessages(r.Context(), clawID, tenantID, before, limit)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 
 	if len(rows) == 0 {
-		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
+		summary, err := s.activitySummary(r.Context(), clawID, tenantID, nil, parseTimeCursor(before), "", before)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
@@ -213,14 +213,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 
 	timeline := make([]types.HubMessage, 0, len(rows)*2)
 	firstCreated := rows[0].CreatedAt
-	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
+	hasOlderConversation, err := s.hasConversationBefore(r.Context(), clawID, tenantID, firstCreated)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 	if !hasOlderConversation {
 		firstCursor := firstCreated.Format(time.RFC3339Nano)
-		summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
+		summary, err := s.activitySummary(r.Context(), clawID, tenantID, nil, &firstCreated, "", firstCursor)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
@@ -243,7 +243,7 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 			upper = parseTimeCursor(before)
 			upperCursor = before
 		}
-		summary, err := s.activitySummary(clawID, tenantID, &lower, upper, lowerCursor, upperCursor)
+		summary, err := s.activitySummary(r.Context(), clawID, tenantID, &lower, upper, lowerCursor, upperCursor)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", "db error")
 			return
@@ -331,8 +331,8 @@ func cursorValue(raw string) any {
 	return raw
 }
 
-func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
-	msgs, err := s.st().Messages().ListConversation(context.Background(), clawID, tenantID, cursorValue(before), limit, hiddenSystemMessagesContents())
+func (s *Server) queryConversationMessages(ctx context.Context, clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
+	msgs, err := s.st().Messages().ListConversation(ctx, clawID, tenantID, cursorValue(before), limit, hiddenSystemMessagesContents())
 	if err != nil {
 		return nil, err
 	}
@@ -342,12 +342,12 @@ func (s *Server) queryConversationMessages(clawID, tenantID, before string, limi
 	return msgs, nil
 }
 
-func (s *Server) hasConversationBefore(clawID, tenantID string, before time.Time) (bool, error) {
-	return s.st().Messages().HasConversationBefore(context.Background(), clawID, tenantID, before, hiddenSystemMessagesContents())
+func (s *Server) hasConversationBefore(ctx context.Context, clawID, tenantID string, before time.Time) (bool, error) {
+	return s.st().Messages().HasConversationBefore(ctx, clawID, tenantID, before, hiddenSystemMessagesContents())
 }
 
-func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {
-	count, _, maxCreated, err := s.st().Messages().ActivityStats(context.Background(), clawID, tenantID, from, to)
+func (s *Server) activitySummary(ctx context.Context, clawID, tenantID string, from, to *time.Time, fromCursor, toCursor string) (*types.HubMessage, error) {
+	count, _, maxCreated, err := s.st().Messages().ActivityStats(ctx, clawID, tenantID, from, to)
 	if err != nil {
 		return nil, err
 	}

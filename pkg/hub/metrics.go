@@ -29,8 +29,11 @@ type serverMetrics struct {
 // clawStatusCollector exports elasticclaw_claws{status} gauges computed from
 // the claws table at scrape time (a cheap GROUP BY on SQLite).
 type clawStatusCollector struct {
-	db   *sql.DB
-	desc *prometheus.Desc
+	// baseCtx is the hub root context; scrapes are server-lifetime work,
+	// not tied to any HTTP request.
+	baseCtx context.Context
+	db      *sql.DB
+	desc    *prometheus.Desc
 }
 
 // knownClawStatuses is the baseline set always exported (as zero when no claw
@@ -45,7 +48,7 @@ func (c *clawStatusCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, status := range knownClawStatuses {
 		counts[status] = 0
 	}
-	statusCounts, err := store.New(c.db).Claws().StatusCounts(context.Background())
+	statusCounts, err := store.New(c.db).Claws().StatusCounts(c.baseCtx)
 	if err != nil {
 		return
 	}
@@ -57,7 +60,7 @@ func (c *clawStatusCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func newServerMetrics(db *sql.DB) *serverMetrics {
+func newServerMetrics(baseCtx context.Context, db *sql.DB) *serverMetrics {
 	m := &serverMetrics{
 		registry: prometheus.NewRegistry(),
 		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -89,7 +92,8 @@ func newServerMetrics(db *sql.DB) *serverMetrics {
 	if db != nil {
 		m.registry.MustRegister(collectors.NewDBStatsCollector(db, "hub"))
 		m.registry.MustRegister(&clawStatusCollector{
-			db: db,
+			baseCtx: baseCtx,
+			db:      db,
 			desc: prometheus.NewDesc("elasticclaw_claws",
 				"Number of claws by status.", []string{"status"}, nil),
 		})

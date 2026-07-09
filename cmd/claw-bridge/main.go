@@ -1637,8 +1637,10 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			return "", ctxErr
 		}
 
-		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resetErr := gs.createFreshSession(recoveryCtx, err.Error())
+		// Recovery runs after the turn context already failed; it must not
+		// inherit that canceled context.
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //nolint:contextcheck
+		resetErr := gs.createFreshSession(recoveryCtx, err.Error()) //nolint:contextcheck // recovery must not inherit the canceled turn ctx
 		cancel()
 		if resetErr != nil {
 			return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
@@ -1689,7 +1691,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 				return "", result.err
 			}
 			// Refresh context usage after each turn (best-effort)
-			go gs.refreshContextUsage(context.Background())
+			go gs.refreshContextUsage(context.Background()) //nolint:contextcheck // best-effort, detached from the finished turn
 			return result.text, nil
 		case <-ticker.C:
 			if pulse, ok := inf.toolProgressPulse(); ok {
@@ -3026,7 +3028,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			go func(c string) {
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer agentCancel()
-				reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
+				reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) { //nolint:contextcheck // chunk writes ride the connection ctx, not the turn ctx
 					_ = wsjson.Write(connCtx, conn, hubMsg{
 						Type:    "chunk",
 						Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
@@ -3113,7 +3115,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
 
-				reply, agentErr := gwSession.SendMessage(agentCtx, content, func(chunk string) {
+				reply, agentErr := gwSession.SendMessage(agentCtx, content, func(chunk string) { //nolint:contextcheck // chunk writes ride the connection ctx, not the turn ctx
 					_ = wsjson.Write(connCtx, conn, hubMsg{
 						Type: "chunk",
 						Payload: mustJSON(map[string]interface{}{

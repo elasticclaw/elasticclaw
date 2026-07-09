@@ -35,6 +35,7 @@ type clawConn = claws.Conn
 func (s *Server) clawsSvc() *claws.Service {
 	return claws.New(claws.Deps{
 		DB:              s.db,
+		BaseCtx:         s.base,
 		Registry:        &s.clawReg,
 		Pool:            &s.wsPool,
 		CfgMu:           &s.cfgMu,

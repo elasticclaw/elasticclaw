@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,7 +58,7 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 }
 
 func (s *Server) triggerActorForClaw(clawID string) triggerActor {
-	actorJSON, err := s.st().Claws().TriggerActorJSON(context.Background(), clawID)
+	actorJSON, err := s.st().Claws().TriggerActorJSON(s.base(), clawID)
 	if err != nil {
 		return triggerActor{}
 	}

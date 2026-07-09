@@ -30,6 +30,7 @@ import (
 func (s *Server) workflowsSvc() *workflows.Service {
 	return workflows.New(workflows.Deps{
 		DB:            s.db,
+		BaseCtx:       s.base,
 		CfgMu:         &s.cfgMu,
 		HubCfg:        func() *types.HubConfig { return s.hubCfg },
 		GithubBaseURL: func() string { return s.githubBaseURL },

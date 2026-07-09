@@ -2,7 +2,6 @@ package integrations
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -798,13 +797,13 @@ func (s *Service) createClawForShortcutStory(factory *types.FactoryConfig, actio
 		var provErr error
 		switch provider {
 		case "replicated":
-			provErr = s.provisionReplicated(context.Background(), clawID, req, provCfg, env)
+			provErr = s.provisionReplicated(s.baseCtx(), clawID, req, provCfg, env)
 		case "daytona":
-			provErr = s.provisionDaytona(context.Background(), clawID, req, provCfg, fileBytes, env)
+			provErr = s.provisionDaytona(s.baseCtx(), clawID, req, provCfg, fileBytes, env)
 		case "exedev":
-			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
+			provErr = s.provisionExedev(s.baseCtx(), clawID, req, provCfg, fileBytes, env)
 		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(context.Background(), clawID, req, provCfg, fileBytes)
+			provErr = s.provisionLambdaMicroVMs(s.baseCtx(), clawID, req, provCfg, fileBytes)
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}

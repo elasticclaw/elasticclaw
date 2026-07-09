@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -313,7 +312,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if currentStatus == "deleted" {
 			return
 		}
-		ctx := context.Background()
+		ctx := s.base()
 		var provErr error
 		switch provider {
 		case "replicated":

@@ -202,7 +202,7 @@ func (s *Server) syncReplicatedVMs() {
 	}
 
 	for _, c := range pending {
-		vm, err := p.GetVM(context.Background(), c.providerID)
+		vm, err := p.GetVM(s.base(), c.providerID)
 		if err != nil {
 			// 404 means VM was deleted externally — clean up the claw
 			if strings.Contains(err.Error(), "HTTP 404") {
@@ -288,7 +288,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		logf("[bootstrap] claw %s deleted before bootstrap, destroying VM %s", clawID[:8], vmID)
 		p, _ := newReplicatedProvider(cfg)
 		if p != nil {
-			_ = p.DeleteVM(context.Background(), vmID)
+			_ = p.DeleteVM(s.base(), vmID)
 		}
 		return
 	}
@@ -346,7 +346,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		logf("bootstrap: provider init error: %v", err)
 		return
 	}
-	vm, err := cp.GetVM(context.Background(), vmID)
+	vm, err := cp.GetVM(s.base(), vmID)
 	if err != nil || vm.DirectSSHEndpoint == "" || vm.DirectSSHPort == 0 {
 		logf("bootstrap: could not get direct SSH endpoint for VM %s: %v", vmID, err)
 		return
@@ -549,7 +549,7 @@ func (s *Server) terminateReplicatedVM(vmID string) {
 		logf("terminateReplicatedVM: provider init error: %v", err)
 		return
 	}
-	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "replicated")
+	destroyCtx, endSpan := telemetry.StartProviderSpan(s.base(), "destroy", "replicated")
 	err = p.DeleteVM(destroyCtx, vmID)
 	endSpan(err)
 	if err != nil {

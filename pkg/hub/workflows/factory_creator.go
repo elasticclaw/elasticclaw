@@ -1,7 +1,6 @@
 package workflows
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -417,7 +416,7 @@ func (s *Service) createClawFromFactory(factory *types.FactoryConfig, issueID st
 			logf("[factory] claw %s already deleted before provisioning, aborting", clawID[:8])
 			return
 		}
-		ctx := context.Background()
+		ctx := s.baseCtx()
 		req := types.CreateClawRequest{
 			Name:         clawName,
 			TemplateName: factory.Template,

@@ -1,7 +1,6 @@
 package integrations
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1060,7 +1059,7 @@ func (s *Service) ProvisionPendingClaw(clawID string) {
 	}
 	templateFiles = s.deps.InjectFigmaAPIDocs(templateFiles, env)
 
-	ctx := context.Background()
+	ctx := s.baseCtx()
 	req := types.CreateClawRequest{
 		Name:         name,
 		TemplateName: template,

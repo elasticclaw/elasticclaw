@@ -38,7 +38,9 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 
 	// Bootstrap asynchronously
 	go func() {
-		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
+		// The async bootstrap must outlive the triggering request, so it
+		// derives from the hub root context, not the enclosing ctx.
+		if err := s.bootstrapExedev(s.base(), clawID, instance.ID, p, files); err != nil { //nolint:contextcheck
 			logfCtx(ctx, "exedev bootstrap failed for claw %s: %v", clawID, err)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
@@ -195,7 +197,7 @@ func (s *Server) terminateExedevVM(vmID string) {
 		logf("terminateExedevVM: provider init error: %v", err)
 		return
 	}
-	destroyCtx, endSpan := telemetry.StartProviderSpan(context.Background(), "destroy", "exedev")
+	destroyCtx, endSpan := telemetry.StartProviderSpan(s.base(), "destroy", "exedev")
 	err = p.Destroy(destroyCtx, vmID, false)
 	endSpan(err)
 	if err != nil {

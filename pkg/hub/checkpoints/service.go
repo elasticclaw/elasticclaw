@@ -13,6 +13,8 @@
 // pkg/hub/artifact, which this package consumes for volume storage.
 package checkpoints
 
+import "context"
+
 // Service hosts the checkpoint, volume and external-storage logic. It is
 // stateless: all mutable state stays on the hub's Server behind the
 // injected Deps hooks, so it can be rebuilt per call cheaply.
@@ -23,4 +25,14 @@ type Service struct {
 // New builds a Service bound to the given hub state.
 func New(deps Deps) *Service {
 	return &Service{deps: deps}
+}
+
+// baseCtx returns the hub root context (context.Background() when the
+// hook is unset, e.g. hand-built test servers). Background work that must
+// outlive a request derives from it.
+func (s *Service) baseCtx() context.Context {
+	if s.deps.BaseCtx != nil {
+		return s.deps.BaseCtx()
+	}
+	return context.Background()
 }
