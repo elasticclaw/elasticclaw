@@ -140,11 +140,15 @@ func runClaw(ctx context.Context, wsURL, token string, i int, stop <-chan struct
 		return fmt.Errorf("registration ack: type=%q err=%v", ack.Type, err)
 	}
 
-	// Drain server pushes so the connection does not stall.
+	// Drain server pushes so the connection does not stall. A read error
+	// means the connection died; report it so the claw is not counted as
+	// connected for the whole run.
+	readErr := make(chan error, 1)
 	go func() {
 		for {
 			var msg wsMessage
 			if err := wsjson.Read(ctx, conn, &msg); err != nil {
+				readErr <- err
 				return
 			}
 		}
@@ -161,27 +165,39 @@ func runClaw(ctx context.Context, wsURL, token string, i int, stop <-chan struct
 			return nil
 		case <-ctx.Done():
 			return nil
+		case err := <-readErr:
+			return fmt.Errorf("read: %w", err)
 		case <-heartbeat.C:
-			_ = wsjson.Write(ctx, conn, wsMessage{Type: "heartbeat", Payload: map[string]interface{}{
+			if err := wsjson.Write(ctx, conn, wsMessage{Type: "heartbeat", Payload: map[string]interface{}{
 				"gateway_healthy": true, "context_usage": rand.Intn(50),
-			}})
+			}}); err != nil {
+				return fmt.Errorf("heartbeat write: %w", err)
+			}
 		case <-chatter.C:
 			// One short streamed turn: a few chunks, then the final message.
 			for c := 0; c < 3; c++ {
-				_ = wsjson.Write(ctx, conn, wsMessage{Type: "chunk", Payload: map[string]string{
+				if err := wsjson.Write(ctx, conn, wsMessage{Type: "chunk", Payload: map[string]string{
 					"content": fmt.Sprintf("chunk %d of turn %d from claw %03d ", c, turn, i),
-				}})
+				}}); err != nil {
+					return fmt.Errorf("chunk write: %w", err)
+				}
 			}
-			_ = wsjson.Write(ctx, conn, wsMessage{Type: "message", Payload: map[string]string{
+			if err := wsjson.Write(ctx, conn, wsMessage{Type: "message", Payload: map[string]string{
 				"content": fmt.Sprintf("turn %d complete from claw %03d", turn, i),
-			}})
+			}}); err != nil {
+				return fmt.Errorf("message write: %w", err)
+			}
 			turn++
 		}
 	}
 }
 
+// metricsClient bounds the /metrics scrape so a stalled hub yields a sample
+// failure instead of hanging the load test.
+var metricsClient = &http.Client{Timeout: 10 * time.Second}
+
 func scrapeGoroutines(hubURL string) (float64, error) {
-	resp, err := http.Get(strings.TrimRight(hubURL, "/") + "/metrics")
+	resp, err := metricsClient.Get(strings.TrimRight(hubURL, "/") + "/metrics")
 	if err != nil {
 		return 0, err
 	}
