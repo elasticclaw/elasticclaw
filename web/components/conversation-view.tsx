@@ -794,7 +794,7 @@ function ClawBoardCard({
           <div className="flex-1 min-h-0">
             <XTerminal
               clawId={claw.id}
-              wsUrl={getTerminalWsUrl(claw.id)}
+              getWsUrl={() => getTerminalWsUrl(claw.id)}
               className="h-full w-full"
             />
           </div>
@@ -1633,7 +1633,7 @@ function ClawChatView({
               {terminalOpen && (
                 <XTerminal
                   clawId={claw.id}
-                  wsUrl={getTerminalWsUrl(claw.id)}
+                  getWsUrl={() => getTerminalWsUrl(claw.id)}
                   className="h-full w-full"
                 />
               )}

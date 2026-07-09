@@ -11,6 +11,11 @@ import (
 type Auth interface {
 	// WithAuth requires a valid API token (tenant or web session).
 	WithAuth(next http.HandlerFunc) http.HandlerFunc
+	// WithAuthOrTicket is WithAuth plus acceptance of a single-use
+	// ?ticket= query parameter (issued by POST /api/auth/ticket) for
+	// browser-only endpoints that cannot send headers: WebSocket
+	// upgrades and <img src> resources.
+	WithAuthOrTicket(next http.HandlerFunc) http.HandlerFunc
 	// WithWebAuth requires a valid web UI session.
 	WithWebAuth(next http.HandlerFunc) http.HandlerFunc
 	// WithWebAdminAuth requires a web UI session with admin rights.
@@ -35,6 +40,7 @@ type Handlers struct {
 
 	// Auth + branding
 	Login               http.HandlerFunc
+	AuthTicket          http.HandlerFunc
 	WebLogin            http.HandlerFunc
 	WebLogout           http.HandlerFunc
 	WebMe               http.HandlerFunc
@@ -130,11 +136,13 @@ func RegisterRoutes(mux *http.ServeMux, auth Auth, h Handlers) {
 	// Claw WebSocket
 	mux.HandleFunc("/claw/ws", h.ClawWS)
 
-	// Browser WebSocket
-	mux.HandleFunc("/api/ws", auth.WithAuth(h.UserWS))
+	// Browser WebSocket (browsers cannot set Authorization on the WS
+	// upgrade, so a single-use ticket is accepted as well)
+	mux.HandleFunc("/api/ws", auth.WithAuthOrTicket(h.UserWS))
 
 	// REST API
 	mux.HandleFunc("/api/login", h.Login)
+	mux.HandleFunc("/api/auth/ticket", auth.WithAuth(h.AuthTicket))
 	mux.HandleFunc("/api/auth/login", h.WebLogin)
 	mux.HandleFunc("/api/auth/logout", h.WebLogout)
 	mux.HandleFunc("/api/auth/me", auth.WithWebAuth(h.WebMe))
@@ -197,7 +205,9 @@ func RegisterRoutes(mux *http.ServeMux, auth Auth, h Handlers) {
 	mux.HandleFunc("/api/github/token/", h.GitHubToken) // credential helper endpoint (claw-token auth)
 	mux.HandleFunc("/api/messages/", auth.WithAuth(h.Messages))
 	mux.HandleFunc("/api/files/", auth.WithAuth(h.FileUpload))
-	mux.HandleFunc("/api/files/view/", auth.WithAuth(h.FileView))
+	// File preview is loaded via <img src>, which cannot set headers —
+	// accept a single-use ticket as well.
+	mux.HandleFunc("/api/files/view/", auth.WithAuthOrTicket(h.FileView))
 	mux.HandleFunc("/api/claws/", auth.WithAuth(h.ClawSubresource)) // /api/claws/:id/prs, /api/claws/:id/settings
 
 	// AI Config

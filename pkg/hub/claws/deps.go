@@ -54,6 +54,11 @@ type Deps struct {
 	TenantByClawToken func(token string) (string, error)
 	TenantByToken     func(token string) (string, error)
 	TenantFromRequest func(r *http.Request) string
+	// RedeemAuthTicket resolves a single-use ?ticket= (issued by
+	// POST /api/auth/ticket) to a tenant. Browser WS upgrades cannot set
+	// an Authorization header, so the terminal handler authenticates with
+	// a ticket instead. May be nil in hand-built test servers.
+	RedeemAuthTicket func(ticket string) (tenantID string, ok bool)
 
 	// FileAckMu guards the file/volume ack waiter maps below; the
 	// accessors return the hub-owned maps and must be called with
@@ -163,6 +168,13 @@ func (s *Service) tenantByClawToken(token string) (string, error) {
 
 func (s *Service) tenantByToken(token string) (string, error) {
 	return s.deps.TenantByToken(token)
+}
+
+func (s *Service) redeemAuthTicket(ticket string) (string, bool) {
+	if s.deps.RedeemAuthTicket == nil {
+		return "", false
+	}
+	return s.deps.RedeemAuthTicket(ticket)
 }
 
 func (s *Service) broadcastToUsers(tenantID string, msg types.WSMessage) {

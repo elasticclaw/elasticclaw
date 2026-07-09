@@ -43,7 +43,8 @@ func decodeAPIError(t *testing.T, body []byte) (code, msg string) {
 func TestHandleTerminalUnauthorizedEnvelope(t *testing.T) {
 	s := newTerminalTestServer(t)
 
-	r := httptest.NewRequest("GET", "/api/terminal/some-claw?token=wrong", nil)
+	r := httptest.NewRequest("GET", "/api/terminal/some-claw", nil)
+	r.Header.Set("Authorization", "Bearer wrong")
 	w := httptest.NewRecorder()
 	s.handleTerminal(w, r)
 
@@ -58,7 +59,8 @@ func TestHandleTerminalUnauthorizedEnvelope(t *testing.T) {
 func TestHandleTerminalClawNotFoundEnvelope(t *testing.T) {
 	s := newTerminalTestServer(t)
 
-	r := httptest.NewRequest("GET", "/api/terminal/missing-claw?token=token", nil)
+	r := httptest.NewRequest("GET", "/api/terminal/missing-claw", nil)
+	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	s.handleTerminal(w, r)
 

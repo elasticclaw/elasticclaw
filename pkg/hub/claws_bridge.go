@@ -50,6 +50,7 @@ func (s *Server) clawsSvc() *claws.Service {
 		TenantByClawToken: s.tenantByClawToken,
 		TenantByToken:     s.tenantByToken,
 		TenantFromRequest: tenantFromCtx,
+		RedeemAuthTicket:  s.redeemAuthTicket,
 
 		FileAckMu: &s.fileAckMu,
 		FileAckWaiters: func() map[string]chan types.FileAck {

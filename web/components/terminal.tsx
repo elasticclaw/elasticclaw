@@ -5,7 +5,9 @@ import "@xterm/xterm/css/xterm.css"
 
 interface TerminalProps {
   clawId: string
-  wsUrl: string
+  // Async provider so each (re)connection can fetch a fresh single-use
+  // auth ticket — WS URLs are not reusable across connections.
+  getWsUrl: () => Promise<string>
   className?: string
 }
 
@@ -13,8 +15,14 @@ interface TerminalProps {
  * XTerminal — browser-only SSH terminal component.
  * Dynamically imports xterm.js to avoid SSR issues.
  */
-export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
+export function XTerminal({ clawId, getWsUrl, className }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  // Keep the latest provider in a ref so an inline arrow prop does not
+  // retrigger the connect effect on every parent render.
+  const getWsUrlRef = useRef(getWsUrl)
+  useEffect(() => {
+    getWsUrlRef.current = getWsUrl
+  }, [getWsUrl])
   const stateRef = useRef<{
     ws: WebSocket | null
     term: import("@xterm/xterm").Terminal | null
@@ -68,7 +76,9 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       stateRef.current.term = term
       stateRef.current.fitAddon = fitAddon
 
-      // Connect WebSocket
+      // Connect WebSocket (fresh single-use ticket per connection)
+      const wsUrl = await getWsUrlRef.current()
+      if (!mounted) return
       const ws = new WebSocket(wsUrl)
       stateRef.current.ws = ws
 
@@ -121,7 +131,7 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       term?.dispose()
       stateRef.current = { ws: null, term: null, fitAddon: null, resizeObserver: null }
     }
-  }, [wsUrl]) // reconnect if wsUrl changes
+  }, [clawId]) // reconnect if the target claw changes
 
   return (
     <div

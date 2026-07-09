@@ -42,12 +42,14 @@ const ORDER_KEY = "elasticclaw_claw_order"
 function describeWsUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl)
-    if (url.searchParams.has("token")) {
-      url.searchParams.set("token", "[redacted]")
+    for (const param of ["token", "ticket"]) {
+      if (url.searchParams.has(param)) {
+        url.searchParams.set(param, "[redacted]")
+      }
     }
     return url.toString()
   } catch {
-    return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
+    return rawUrl.replace(/token=[^&]+/, "token=[redacted]").replace(/ticket=[^&]+/, "ticket=[redacted]")
   }
 }
 
@@ -306,14 +308,27 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [persistMessages])
 
-  const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(async () => {
     if (!shouldReconnectRef.current) return
     if (wsRef.current) {
       wsRef.current.onclose = null
       wsRef.current.onerror = null
       wsRef.current.close()
     }
-    const wsUrl = getHubWsUrl()
+    // Each connection attempt needs a fresh single-use ticket.
+    let wsUrl: string
+    try {
+      wsUrl = await getHubWsUrl()
+    } catch (err) {
+      console.warn("WS ticket request failed; retrying:", err)
+      const attempt = reconnectAttemptRef.current
+      reconnectAttemptRef.current += 1
+      const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5))
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = window.setTimeout(() => void connectWebSocket(), delayMs)
+      return
+    }
+    if (!shouldReconnectRef.current) return
     const safeWsUrl = describeWsUrl(wsUrl)
     let ws: WebSocket
     try {

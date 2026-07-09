@@ -162,14 +162,23 @@ export interface UploadedAttachment {
   mimetype: string
 }
 
+// issueAuthTicket requests a single-use, short-TTL ticket for endpoints the
+// browser cannot send Authorization headers to (WebSocket upgrades and
+// <img src> resources). Each URL needs its own fresh ticket: tickets are
+// redeemable exactly once.
+async function issueAuthTicket(): Promise<string> {
+  const res = await apiFetch<{ ticket: string }>("/api/auth/ticket", { method: "POST" })
+  return res.ticket
+}
+
 // getFileViewUrl returns the hub URL that serves the bytes of an uploaded
-// file back to the browser. Suitable for <img src>. Auth is via ?token query
-// since browsers can't set Authorization on <img>.
-export function getFileViewUrl(clawId: string, path: string): string {
-  const token = getTokenSync()
+// file back to the browser. Suitable for <img src>. Auth is via a single-use
+// ?ticket query since browsers can't set Authorization on <img>.
+export async function getFileViewUrl(clawId: string, path: string): Promise<string> {
+  const ticket = await issueAuthTicket()
   const hubBase = getHubUrl()
   const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/api/files/view/${clawId}`
-  const qs = new URLSearchParams({ path, token }).toString()
+  const qs = new URLSearchParams({ path, ticket }).toString()
   return `${base}?${qs}`
 }
 
@@ -205,18 +214,18 @@ export async function killClaw(id: string): Promise<void> {
   return apiFetch<void>(`/api/claws/${id}`, { method: "DELETE" })
 }
 
-export function getHubWsUrl(): string {
-  const token = getTokenSync()
+export async function getHubWsUrl(): Promise<string> {
+  const ticket = await issueAuthTicket()
   const hub = getHubUrl() || window.location.origin
   const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/api/ws?token=${encodeURIComponent(token)}`
+  return `${wsBase}/api/ws?ticket=${encodeURIComponent(ticket)}`
 }
 
-export function getTerminalWsUrl(clawId: string): string {
-  const token = getTokenSync()
+export async function getTerminalWsUrl(clawId: string): Promise<string> {
+  const ticket = await issueAuthTicket()
   const hub = getHubUrl() || window.location.origin
   const wsBase = hub.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-  return `${wsBase}/api/terminal/${clawId}?token=${encodeURIComponent(token)}`
+  return `${wsBase}/api/terminal/${clawId}?ticket=${encodeURIComponent(ticket)}`
 }
 
 export function isConfigured(): boolean {

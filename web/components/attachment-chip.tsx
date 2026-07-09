@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertCircle, File as FileIcon, Loader2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { getFileViewUrl } from "@/lib/api"
@@ -43,12 +43,34 @@ export function AttachmentChip({
   const [broken, setBroken] = useState(false)
   const isImage = mimetype.startsWith("image/") && !broken && !!source
 
-  const imgSrc =
-    source?.kind === "preview"
-      ? source.url
-      : source?.kind === "history"
-        ? getFileViewUrl(source.clawId, source.path)
-        : undefined
+  // History files are served by the hub behind a single-use auth ticket, so
+  // the <img> URL must be resolved asynchronously (one fresh ticket per URL).
+  const historyClawId = source?.kind === "history" ? source.clawId : undefined
+  const historyPath = source?.kind === "history" ? source.path : undefined
+  const [historySrc, setHistorySrc] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (!historyClawId || !historyPath) return
+    let cancelled = false
+    getFileViewUrl(historyClawId, historyPath)
+      .then((url) => { if (!cancelled) setHistorySrc(url) })
+      .catch(() => { if (!cancelled) setBroken(true) })
+    return () => { cancelled = true }
+  }, [historyClawId, historyPath])
+
+  const imgSrc = source?.kind === "preview" ? source.url : historySrc
+
+  // Opening the full image in a new tab needs its own fresh ticket — the
+  // ticket in imgSrc was already redeemed by the <img> load.
+  const openHistoryFile = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    if (!historyClawId || !historyPath) return
+    try {
+      const url = await getFileViewUrl(historyClawId, historyPath)
+      window.open(url, "_blank", "noreferrer")
+    } catch {
+      /* hub unreachable — keep the chip as-is */
+    }
+  }
 
   const thumbCls = size === "sm"
     ? "max-h-16 max-w-[6rem]"
@@ -57,7 +79,7 @@ export function AttachmentChip({
   if (isImage && imgSrc) {
     const Wrap = source?.kind === "history" ? "a" : "div"
     const wrapProps = source?.kind === "history"
-      ? { href: imgSrc, target: "_blank", rel: "noreferrer", className: "relative block" }
+      ? { href: "#", onClick: openHistoryFile, className: "relative block" }
       : { className: "relative" }
     return (
       <Wrap {...wrapProps as object} title={`${name} (${sizeLabel})`}>

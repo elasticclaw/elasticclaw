@@ -15,20 +15,33 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 // HandleTerminal upgrades the request to a WebSocket and bridges it to an
 // SSH PTY session on the claw's VM.
 func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
-	// Auth: Authorization header only. The deprecated ?token= query fallback
-	// was removed (Phase 2.6); browser clients that cannot set headers on a
-	// WebSocket upgrade authenticate with a single-use ticket.
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	tenantID, err := s.tenantByToken(token)
-	if err != nil {
-		s.writeDomainErr(w, types.ErrUnauthorized)
-		return
+	// Auth: Authorization header, or a single-use ?ticket= (issued by
+	// POST /api/auth/ticket) for browsers, which cannot set headers on a
+	// WebSocket upgrade. The deprecated ?token= query fallback was removed
+	// (Phase 2.6).
+	var tenantID string
+	if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+		var ok bool
+		tenantID, ok = s.redeemAuthTicket(ticket)
+		if !ok {
+			s.writeDomainErr(w, types.ErrUnauthorized)
+			return
+		}
+	} else {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		var err error
+		tenantID, err = s.tenantByToken(token)
+		if err != nil {
+			s.writeDomainErr(w, types.ErrUnauthorized)
+			return
+		}
 	}
 
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/terminal/")

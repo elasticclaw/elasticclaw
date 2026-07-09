@@ -62,6 +62,9 @@ type Server struct {
 	wsPool claws.WorkerPool
 	// userReg is the user-session registry (own lock, zero value ready).
 	userReg userRegistry
+	// authTickets holds single-use tickets for browser-only endpoints that
+	// cannot send Authorization headers (own lock, zero value ready).
+	authTickets authTicketStore
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
@@ -227,6 +230,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		UserWS: s.handleUserWS,
 
 		Login:               s.handleLogin,
+		AuthTicket:          s.handleAuthTicket,
 		WebLogin:            s.handleWebLogin,
 		WebLogout:           s.handleWebLogout,
 		WebMe:               s.handleWebMe,
@@ -317,6 +321,10 @@ func (s *Server) base() context.Context {
 type serverAuth struct{ s *Server }
 
 func (a serverAuth) WithAuth(next http.HandlerFunc) http.HandlerFunc { return a.s.withAuth(next) }
+
+func (a serverAuth) WithAuthOrTicket(next http.HandlerFunc) http.HandlerFunc {
+	return a.s.withAuthOrTicket(next)
+}
 
 func (a serverAuth) WithWebAuth(next http.HandlerFunc) http.HandlerFunc {
 	return a.s.withWebAuth(next)
