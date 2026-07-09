@@ -418,12 +418,12 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.URL.Query().Get("token")
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		tenantID, githubLogin, ok := s.resolveAuthToken(token)
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
@@ -463,7 +463,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			queryToken = token != ""
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 
@@ -480,7 +480,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			return
 		}
 		if queryToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 
@@ -488,7 +488,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
 				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
+					writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 					return
 				}
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
@@ -498,7 +498,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -594,7 +594,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		s.mu.RLock()
@@ -619,7 +619,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -642,7 +642,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		s.mu.RLock()
@@ -663,7 +663,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
 				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
+					writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 					return
 				}
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
@@ -673,7 +673,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -1970,17 +1970,17 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 	var tagsJSONMsg string
 	err := s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&tagsJSONMsg)
 	if err == sql.ErrNoRows {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return false
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return false
 	}
 	var clawTagsMsg []string
 	_ = json.Unmarshal([]byte(tagsJSONMsg), &clawTagsMsg)
 	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return false
 	}
 	return true

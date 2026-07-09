@@ -116,7 +116,7 @@ func (s *Server) handleModelAuthLoginStatus(w http.ResponseWriter, r *http.Reque
 	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 	if job == nil {
-		http.NotFound(w, r)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	jsonOK(w, snapshot)
