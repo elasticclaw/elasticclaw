@@ -1,12 +1,48 @@
 package hub
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/robfig/cron/v3"
 )
+
+// TestCronStopBoundedByDrainContext verifies that a stuck cron job cannot
+// hold up hub shutdown: stop returns once the drain context expires even if
+// running jobs never finish.
+func TestCronStopBoundedByDrainContext(t *testing.T) {
+	cs := newCronScheduler(nil)
+	cs.cron = cron.New(cron.WithSeconds())
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	var once sync.Once
+	cs.cron.Schedule(cron.Every(time.Second), cron.FuncJob(func() {
+		once.Do(func() { close(started) })
+		<-block
+	}))
+	cs.cron.Start()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cron job never started")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { cs.stop(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cron stop blocked past the drain window on a stuck job")
+	}
+}
 
 func TestParseCronSchedule(t *testing.T) {
 	tests := []struct {

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -281,7 +282,7 @@ func TestCronSchedulerStartLoadsExternalWorkflows(t *testing.T) {
 	if err := s.cronScheduler.start(); err != nil {
 		t.Fatalf("start cron scheduler: %v", err)
 	}
-	t.Cleanup(s.cronScheduler.stop)
+	t.Cleanup(func() { s.cronScheduler.stop(context.Background()) })
 
 	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
 		t.Fatalf("cron workflow was not registered on startup: %#v", s.cronScheduler.entries)

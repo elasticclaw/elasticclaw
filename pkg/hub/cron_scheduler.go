@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -75,15 +76,22 @@ func (cs *cronScheduler) start() error {
 	return nil
 }
 
-// stop gracefully shuts down the cron scheduler.
-func (cs *cronScheduler) stop() {
+// stop gracefully shuts down the cron scheduler. It waits for running jobs to
+// finish, but no longer than the drain context allows: a stuck job must not
+// hold up the rest of the hub shutdown sequence.
+func (cs *cronScheduler) stop(ctx context.Context) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	if cs.cron != nil {
-		ctx := cs.cron.Stop()
-		<-ctx.Done()
+	if cs.cron == nil {
+		return
+	}
+	stopped := cs.cron.Stop()
+	select {
+	case <-stopped.Done():
 		log.Println("[cron] scheduler stopped")
+	case <-ctx.Done():
+		log.Printf("[cron] scheduler stop timed out with jobs still running: %v", ctx.Err())
 	}
 }
 

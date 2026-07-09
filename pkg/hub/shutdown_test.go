@@ -2,14 +2,48 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket"
 )
+
+// newTestWSPair returns both ends of a live WebSocket connection: the
+// server-accepted conn (what the hub stores in s.claws) and the dialing
+// client conn (what a claw bridge would hold).
+func newTestWSPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
+	t.Helper()
+	connCh := make(chan *websocket.Conn, 1)
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		connCh <- c
+		<-done // keep the handler (and thus the conn) alive until test cleanup
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(done) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	t.Cleanup(func() { _ = client.CloseNow() })
+	server := <-connCh
+	t.Cleanup(func() { _ = server.CloseNow() })
+	return server, client
+}
 
 // TestGracefulShutdown boots a full server (background goroutines included)
 // and verifies Shutdown cancels the root context, waits for all background
@@ -94,6 +128,99 @@ func TestHealthzReturns503WhileDraining(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("healthz during drain: got %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
+// TestShutdownBoundedByDrainWindow verifies that a background goroutine that
+// never observes cancellation cannot hold Shutdown past the drain context:
+// Shutdown must return once the drain window expires (Phase 0.1 acceptance:
+// SIGTERM exits within the drain window).
+func TestShutdownBoundedByDrainWindow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+
+	s, err := NewServer("127.0.0.1:0", filepath.Join(dir, "hub.db"), dir, &types.HubConfig{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// A stuck goroutine that ignores the root context.
+	block := make(chan struct{})
+	s.bg.Go(func() error { <-block; return nil })
+	t.Cleanup(func() { close(block) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Shutdown(ctx) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown blocked past the drain window on a stuck goroutine")
+	}
+}
+
+// TestShutdownClosesClawsBeforeHTTPDrainCompletes verifies the Phase 0.1
+// shutdown order: claw WebSocket close frames must be sent as soon as the
+// listener stops accepting, not after in-flight HTTP requests finish draining.
+func TestShutdownClosesClawsBeforeHTTPDrainCompletes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+
+	s, err := NewServer("127.0.0.1:0", filepath.Join(dir, "hub.db"), dir, &types.HubConfig{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	serverConn, clientConn := newTestWSPair(t)
+	s.mu.Lock()
+	s.claws["claw-1"] = &clawConn{id: "claw-1", conn: serverConn}
+	s.mu.Unlock()
+
+	// HTTP server with one in-flight request that hangs until released.
+	handlerStarted := make(chan struct{})
+	release := make(chan struct{})
+	s.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		<-release
+	})}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = s.httpSrv.Serve(ln) }()
+	go func() { _, _ = http.Get("http://" + ln.Addr().String() + "/hang") }()
+	<-handlerStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		shutdownDone <- s.Shutdown(ctx)
+	}()
+
+	// The claw must see the close frame while the HTTP request is still draining.
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := clientConn.Read(context.Background())
+		readErr <- err
+	}()
+	select {
+	case err := <-readErr:
+		if websocket.CloseStatus(err) != websocket.StatusGoingAway {
+			t.Fatalf("claw close status = %v, want StatusGoingAway", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claw connection was not closed while HTTP drain was still in flight")
+	}
+
+	close(release)
+	if err := <-shutdownDone; err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 

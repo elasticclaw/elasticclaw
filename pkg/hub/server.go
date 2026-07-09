@@ -344,12 +344,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		s.draining.Store(true)
 
+		// Stop accepting new connections and drain in-flight HTTP requests in
+		// the background: http.Server.Shutdown closes the listeners immediately
+		// but blocks until active handlers finish (or ctx expires), and claw
+		// close frames must go out before the drain window is spent.
+		httpDone := make(chan error, 1)
 		if s.httpSrv != nil {
 			log.Printf("[hub] draining HTTP connections")
-			if shutdownErr := s.httpSrv.Shutdown(ctx); shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
-				log.Printf("[hub] HTTP drain incomplete: %v", shutdownErr)
-				err = shutdownErr
-			}
+			go func() { httpDone <- s.httpSrv.Shutdown(ctx) }()
+		} else {
+			httpDone <- nil
 		}
 
 		log.Printf("[hub] closing claw connections")
@@ -357,10 +361,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 		log.Printf("[hub] stopping background goroutines")
 		s.bgCancel()
-		_ = s.bg.Wait()
+		bgDone := make(chan struct{})
+		go func() { _ = s.bg.Wait(); close(bgDone) }()
+		select {
+		case <-bgDone:
+		case <-ctx.Done():
+			log.Printf("[hub] background goroutines did not finish within drain window: %v", ctx.Err())
+			err = ctx.Err()
+		}
+
+		// http.Server.Shutdown returns ctx.Err() itself once the drain
+		// context expires, so this wait is bounded by the drain window.
+		if shutdownErr := <-httpDone; shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
+			log.Printf("[hub] HTTP drain incomplete: %v", shutdownErr)
+			if err == nil {
+				err = shutdownErr
+			}
+		}
 
 		if s.cronScheduler != nil {
-			s.cronScheduler.stop()
+			s.cronScheduler.stop(ctx)
 		}
 
 		log.Printf("[hub] closing database")
