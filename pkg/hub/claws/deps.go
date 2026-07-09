@@ -86,7 +86,11 @@ type Deps struct {
 	// pipeline explicitly handled the [DONE] signal. The body (previously
 	// inline in handleClawWS) stays in pkg/hub because it builds
 	// workflows-package pipeline contexts, which claws must not import.
-	EvaluatePipelineMessageTriggers func(clawID, content string) bool
+	// The returned job, if non-nil, is the async pipeline work (stage
+	// transition or message-trigger check); the caller runs it through the
+	// bounded WS worker pool so a chatty bridge cannot spawn unbounded
+	// goroutines around the semaphore.
+	EvaluatePipelineMessageTriggers func(clawID, content string) (handledDone bool, job func())
 
 	// Done/terminate signal handling (pkg/hub bridge over integrations/
 	// workflows).

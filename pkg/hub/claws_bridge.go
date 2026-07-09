@@ -98,21 +98,26 @@ func (s *Server) clawsSvc() *claws.Service {
 // the [DONE] signal. The body is the exact block that lived inline in
 // handleClawWS before the claws extraction; it stays in pkg/hub because it
 // builds workflows-package pipeline contexts, which claws must not import.
-func (s *Server) evaluatePipelineMessageTriggers(clawID, content string) bool {
+// The async pipeline work is returned as a job instead of spawned with a
+// raw go statement so the caller (the claw WS read loop) runs it through
+// the bounded worker pool.
+func (s *Server) evaluatePipelineMessageTriggers(clawID, content string) (bool, func()) {
 	pipelineHandledDone := false
 	var pipelineDoneCtx pipelineContext
 	var pipelineDoneStage *pipeline.Stage
 	if strings.Contains(content, "[DONE]") {
 		pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, content)
 	}
+	var job func()
 	if pipelineHandledDone {
 		prURLs := extractDonePRURLs(content)
 		s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-		go s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+		stage := *pipelineDoneStage
+		job = func() { s.transitionPipelineStageWithContext(clawID, stage, pipelineDoneCtx) }
 	} else if !strings.Contains(content, "[DONE]") {
-		go s.checkPipelineMessageTriggers(clawID, content)
+		job = func() { s.checkPipelineMessageTriggers(clawID, content) }
 	}
-	return pipelineHandledDone
+	return pipelineHandledDone, job
 }
 
 // Package-level helpers moved to pkg/hub/claws.
