@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -407,8 +408,15 @@ func (s *Service) HandleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	manifestDigest, err := s.volumeLeaseManifest(r.Context(), leaseID, clawID, accessToken)
+	if errors.Is(err, errVolumeLeaseNotFound) {
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", errVolumeLeaseNotFound.Error())
+		return
+	}
 	if err != nil {
-		httpserver.WriteErr(w, http.StatusNotFound, "not_found", err.Error())
+		// DB/backend failure — not a missing lease. Log the detail; do not
+		// leak raw backend errors to the client.
+		logfCtx(r.Context(), "[volume] lease %s: manifest lookup failed: %v", leaseID, err)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "volume lease lookup failed")
 		return
 	}
 	data, err := s.artifacts().GetManifest(r.Context(), manifestDigest)
@@ -434,16 +442,23 @@ func (s *Service) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request,
 func (s *Service) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	var repo, tag, mode, attachedDigest string
 	if err := s.deps.DB.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
-		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "active lease not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			httpserver.WriteErr(w, http.StatusNotFound, "not_found", "active lease not found")
+			return
+		}
+		logfCtx(r.Context(), "[volume] lease %s: lease lookup failed: %v", leaseID, err)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "volume lease lookup failed")
 		return
 	}
 	if mode != volumeModeRW {
 		httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "volume is read-only")
 		return
 	}
+	// A ref-resolution failure is an internal lookup error; 409 conflict is
+	// reserved for the digest-mismatch case below.
 	currentDigest, err := s.artifacts().ResolveRef(r.Context(), repo, tag)
 	if err != nil {
-		httpserver.WriteErr(w, http.StatusConflict, "conflict", "resolve volume ref: "+err.Error())
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "resolve volume ref: "+err.Error())
 		return
 	}
 	if currentDigest != attachedDigest {
@@ -481,11 +496,15 @@ func (s *Service) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request,
 	httpserver.JSONOK(w, map[string]string{"manifest_digest": manifestDigest})
 }
 
+// errVolumeLeaseNotFound distinguishes a missing/expired lease (client 404)
+// from DB/backend failures (server 500) in the archive handlers.
+var errVolumeLeaseNotFound = errors.New("active lease not found")
+
 func (s *Service) volumeLeaseManifest(ctx context.Context, leaseID, clawID, accessToken string) (string, error) {
 	var digest string
 	err := s.deps.DB.QueryRowContext(ctx, `SELECT manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&digest)
-	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("active lease not found")
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errVolumeLeaseNotFound
 	}
 	return digest, err
 }

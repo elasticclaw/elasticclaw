@@ -143,6 +143,46 @@ func TestVolumeArchiveRejectsWrongLeaseCredentials(t *testing.T) {
 	}
 }
 
+func TestVolumeArchiveDBFailureIsInternalNotNotFound(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	volumes := []workflowVolumeRuntime{{
+		WorkflowVolume: types.WorkflowVolume{Name: "scratch", Source: "hub://volumes/scratch", Mount: "/mnt/elasticclaw/scratch", Mode: "rw"},
+		Repo:           "volumes/scratch",
+		Tag:            "latest",
+	}}
+	acquired, err := s.acquireWorkflowVolumeLeases(context.Background(), "claw-rw", volumes)
+	if err != nil {
+		t.Fatalf("acquire rw lease: %v", err)
+	}
+
+	// Break the lease table so the lookup fails for a reason other than a
+	// missing row: operational DB failures must surface as 500, not 404.
+	if _, err := db.Exec(`ALTER TABLE volume_leases RENAME TO volume_leases_broken`); err != nil {
+		t.Fatalf("rename volume_leases: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", nil)
+	getReq.SetPathValue("lease", acquired[0].LeaseID)
+	setVolumeArchiveAuth(getReq, "claw-token", "claw-rw", acquired[0].AccessToken)
+	getRec := httptest.NewRecorder()
+	s.handleVolumeArchive(getRec, getReq)
+	if getRec.Code != http.StatusInternalServerError {
+		t.Fatalf("get with broken DB status = %d, want %d", getRec.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(getRec.Body.String(), "volume_leases") {
+		t.Fatalf("get error body leaks backend detail: %s", getRec.Body.String())
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/api/volumes/leases/"+acquired[0].LeaseID+"/archive", bytes.NewReader([]byte("data")))
+	putReq.SetPathValue("lease", acquired[0].LeaseID)
+	setVolumeArchiveAuth(putReq, "claw-token", "claw-rw", acquired[0].AccessToken)
+	putRec := httptest.NewRecorder()
+	s.handleVolumeArchive(putRec, putReq)
+	if putRec.Code != http.StatusInternalServerError {
+		t.Fatalf("put with broken DB status = %d, want %d", putRec.Code, http.StatusInternalServerError)
+	}
+}
+
 func TestSyncWorkflowVolumesKeepsWritableLeaseWhenDisconnected(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	volumes := []workflowVolumeRuntime{{
