@@ -27,7 +27,7 @@ import (
 func (s *Server) integrationsSvc() *integrations.Service {
 	return integrations.New(integrations.Deps{
 		DB:        s.db,
-		Mu:        &s.mu,
+		CfgMu:     &s.cfgMu,
 		HubCfg:    func() *types.HubConfig { return s.hubCfg },
 		PromoteMu: &s.promoteMu,
 
@@ -40,19 +40,16 @@ func (s *Server) integrationsSvc() *integrations.Service {
 		},
 
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
-			s.mu.Lock()
-			if cc, ok := s.claws[clawID]; ok {
-				cc.WS.Close(code, reason)
-				delete(s.claws, clawID)
-			}
-			s.mu.Unlock()
+			s.clawReg.Do(func(conns map[string]*clawConn) {
+				if cc, ok := conns[clawID]; ok {
+					cc.WS.Close(code, reason)
+					delete(conns, clawID)
+				}
+			})
 		},
 		ClawGatewayReady: func(clawID string) bool {
-			s.mu.RLock()
-			cc, connected := s.claws[clawID]
-			ready := connected && cc.GatewayReady
-			s.mu.RUnlock()
-			return ready
+			cc, connected := s.clawReg.Get(clawID)
+			return connected && cc.GatewayReady
 		},
 
 		GithubBaseURL:   func() string { return s.githubBaseURL },

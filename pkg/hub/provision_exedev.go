@@ -86,12 +86,12 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 	templateFiles = workspaceTemplateFiles(templateFiles)
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
 	defaultModel := templateDefaultModel
@@ -181,9 +181,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 
 // terminateExedevVM destroys an exedev VM by ID.
 func (s *Server) terminateExedevVM(vmID string) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["exedev"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		logf("terminateExedevVM: no exedev provider configured")
 		return

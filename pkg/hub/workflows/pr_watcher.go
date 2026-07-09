@@ -252,9 +252,9 @@ func (s *Service) pollAllPRs() {
 // resolveGitHubTokenWithRepos is a shared helper that resolves a GitHub App installation token
 // with optional repo-scoped access.
 func (s *Service) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	cfg := s.hubCfg()
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if len(cfg.GitHubApps) == 0 {
 		return ""
 	}
@@ -921,12 +921,12 @@ func (s *Service) handleClawSubresource(w http.ResponseWriter, r *http.Request) 
 
 	ghLogin := s.deps.GithubLoginFromContext(r.Context())
 	if ghLogin != "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		var accessCfg *types.AccessConfig
 		if s.hubCfg().Auth != nil {
 			accessCfg = s.hubCfg().Auth.Access
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 
 		var tagsJSON string
 		if err := s.deps.DB.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, s.deps.TenantFromRequest(r)).Scan(&tagsJSON); err != nil {

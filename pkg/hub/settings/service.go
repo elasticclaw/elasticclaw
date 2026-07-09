@@ -34,7 +34,7 @@ type Deps struct {
 	// Mu is the hub's config mutex. It must be the same mutex the hub uses
 	// to guard its live *types.HubConfig so config reads/writes keep the
 	// exact same synchronization as before the extraction.
-	Mu *sync.RWMutex
+	CfgMu *sync.RWMutex
 	// DB is the hub database (used by doctor's legacy template lookup).
 	DB *sql.DB
 	// HubCfg reads the hub's live config; SetHubCfg replaces it. Both are
@@ -121,7 +121,7 @@ func New(deps Deps) *Service {
 		}
 	}
 	return &Service{
-		mu:                          deps.Mu,
+		mu:                          deps.CfgMu,
 		db:                          deps.DB,
 		hubCfg:                      deps.HubCfg,
 		setHubCfg:                   deps.SetHubCfg,

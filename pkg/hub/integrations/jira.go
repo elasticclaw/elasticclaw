@@ -200,10 +200,10 @@ func (s *Service) validateJiraWebhookSecret(workspaceName string, r *http.Reques
 }
 
 func (s *Service) globalJiraWebhookSecrets() []string {
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	integrations := s.hubCfg().Integrations
 	secretRefs := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	var secrets []string
 	if integrations != nil {

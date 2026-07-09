@@ -70,7 +70,7 @@ type Deps struct {
 	// Mu is the hub's config/claw-registry mutex. It must be the same
 	// mutex the hub uses so reads/writes keep the exact same
 	// synchronization as before the extraction.
-	Mu *sync.RWMutex
+	CfgMu *sync.RWMutex
 	// HubCfg reads the hub's live config. Called with Mu held where the
 	// pre-extraction code held it.
 	HubCfg func() *types.HubConfig

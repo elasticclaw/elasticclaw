@@ -293,19 +293,19 @@ func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	service := s.dependencyStatus
 	cfg := s.hubCfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if service == nil {
 		service = newDependencyStatusService(cfg)
-		s.mu.Lock()
+		s.cfgMu.Lock()
 		if s.dependencyStatus == nil {
 			s.dependencyStatus = service
 		} else {
 			service = s.dependencyStatus
 		}
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 	}
 	jsonOK(w, service.snapshot(r.Context()))
 }

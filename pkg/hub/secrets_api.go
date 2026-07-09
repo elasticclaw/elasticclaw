@@ -60,7 +60,7 @@ func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.cfgMu.Lock()
 	cfgCopy := *s.hubCfg
 	newSecrets := make(map[string]string, len(cfgCopy.Secrets)+1)
 	for k, v := range cfgCopy.Secrets {
@@ -69,7 +69,7 @@ func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 	newSecrets[req.Name] = req.Value
 	cfgCopy.Secrets = newSecrets
 	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
+	s.cfgMu.Unlock()
 
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
@@ -86,14 +86,14 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name
 		return
 	}
 
-	s.mu.Lock()
+	s.cfgMu.Lock()
 	_, inMemory := s.hubCfg.Secrets[name]
 	onDisk := false
 	if diskCfg != nil {
 		_, onDisk = diskCfg.Secrets[name]
 	}
 	if !inMemory && !onDisk {
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 		http.Error(w, "secret not found", http.StatusNotFound)
 		return
 	}
@@ -106,7 +106,7 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name
 	}
 	cfgCopy.Secrets = newSecrets
 	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
+	s.cfgMu.Unlock()
 
 	cfgToSave := cfgCopy
 	if diskCfg != nil {

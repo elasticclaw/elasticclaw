@@ -86,12 +86,12 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		return "", false, fmt.Errorf("no provider configured")
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	hubSecrets := s.hubCfg.Secrets
 	defaultModel := s.hubCfg.DefaultModel
 	provCfg, ok := s.hubCfg.Providers[provider]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		return "", false, fmt.Errorf("provider %q is not configured on this hub", provider)
 	}
@@ -189,9 +189,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			linearWorkspace = tmplCfg.Linear.Workspace
 		}
 	}
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	defaultModel, llmKey = resolveModelAndLLMKey(s.hubCfg, llmKey, defaultModel)
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
@@ -350,8 +350,8 @@ func (s *Server) resolveWorkflowGroupLimit(workflow *types.WorkflowConfig) (stri
 	if groupName == "" {
 		groupName = "global"
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
 	for _, g := range s.hubCfg.ConcurrencyGroups {
 		if g.Name == groupName {
 			return groupName, g.Limit

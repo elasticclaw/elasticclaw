@@ -30,7 +30,7 @@ import (
 func (s *Server) workflowsSvc() *workflows.Service {
 	return workflows.New(workflows.Deps{
 		DB:            s.db,
-		Mu:            &s.mu,
+		CfgMu:         &s.cfgMu,
 		HubCfg:        func() *types.HubConfig { return s.hubCfg },
 		GithubBaseURL: func() string { return s.githubBaseURL },
 		PromoteMu:     &s.promoteMu,
@@ -39,28 +39,23 @@ func (s *Server) workflowsSvc() *workflows.Service {
 		},
 
 		ClawConn: func(clawID string) workflows.Conn {
-			s.mu.RLock()
-			cc := s.claws[clawID]
-			s.mu.RUnlock()
+			cc := s.clawReg.Lookup(clawID)
 			if cc == nil {
 				return nil
 			}
 			return cc
 		},
 		ClawStreaming: func(clawID string) bool {
-			s.mu.RLock()
-			cc, connected := s.claws[clawID]
-			streaming := connected && cc.StreamingBuf.Len() > 0
-			s.mu.RUnlock()
-			return streaming
+			cc, connected := s.clawReg.Get(clawID)
+			return connected && cc.StreamingBuf.Len() > 0
 		},
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
-			s.mu.Lock()
-			if cc, ok := s.claws[clawID]; ok {
-				cc.WS.Close(code, reason)
-				delete(s.claws, clawID)
-			}
-			s.mu.Unlock()
+			s.clawReg.Do(func(conns map[string]*clawConn) {
+				if cc, ok := conns[clawID]; ok {
+					cc.WS.Close(code, reason)
+					delete(conns, clawID)
+				}
+			})
 		},
 		SendNextQueuedMessage: func(cc workflows.Conn) {
 			s.sendNextQueuedMessage(cc.(*clawConn))

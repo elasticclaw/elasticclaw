@@ -224,7 +224,7 @@ docker --version`); err != nil {
 	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
 	activeKeyNameDaytona := ""
 	activeKeyProviderDaytona := ""
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
@@ -236,7 +236,7 @@ docker --version`); err != nil {
 		activeKeyNameDaytona = activeKeyDaytona.Name
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	logfCtx(ctx, "[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
 		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
@@ -371,9 +371,9 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		return err
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	clawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	// Write template files (SOUL.md, AGENTS.md, etc.) to the workspace before
 	// the bridge starts so BOOTSTRAP.md and friends are present for the first turn.
@@ -411,9 +411,9 @@ ELASTICCLAW_EOF`,
 	var repositoriesJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(template,''), COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&workspaceName, &repositoriesJSON)
 	_ = json.Unmarshal([]byte(repositoriesJSON), &repositories)
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hasHubGitHubApps := len(s.hubCfg.GitHubApps) > 0
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	hasWorkspaceGitHubApps := false
 	if workspaceName != "" {
 		if workspaceApps, err := loadWorkspaceGitHubAppConfigs(workspaceName); err == nil && len(workspaceApps) > 0 {
@@ -912,9 +912,9 @@ func (s *Server) petDaytonaSandboxes() {
 		return
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["daytona"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		logf("keepAliveDaytonaSandboxes: no daytona provider configured")
 		return
@@ -939,9 +939,9 @@ func (s *Server) petDaytonaSandboxes() {
 
 // terminateDaytonaVM destroys a Daytona workspace by ID.
 func (s *Server) terminateDaytonaVM(workspaceID string) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["daytona"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		return
 	}

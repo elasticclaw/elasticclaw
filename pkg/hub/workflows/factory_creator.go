@@ -279,19 +279,19 @@ func (s *Service) createClawFromFactory(factory *types.FactoryConfig, issueID st
 
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
 				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		defaultModel = s.hubCfg().DefaultModel
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 
 	// Build tags
@@ -323,9 +323,9 @@ func (s *Service) createClawFromFactory(factory *types.FactoryConfig, issueID st
 	// Check concurrency limit (group-aware)
 	s.deps.PromoteMu.Lock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	groupName, groupLimit := s.resolveGroupLimit(factory)
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false

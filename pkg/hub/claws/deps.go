@@ -19,15 +19,14 @@ import (
 type Deps struct {
 	// DB is the hub database.
 	DB *sql.DB
-	// Mu is the hub's config/claw-registry mutex. It must be the same
-	// mutex the hub uses so reads/writes keep the exact same
-	// synchronization as before the extraction.
-	Mu *sync.RWMutex
-	// Claws returns the hub-owned claw registry map (claw_id -> conn).
-	// Callers must hold Mu, exactly as the pre-extraction code did.
-	Claws func() map[string]*Conn
-	// HubCfg reads the hub's live config. Called with Mu held where the
-	// pre-extraction code held it.
+	// Registry is the hub-owned claw-connection registry. It carries its
+	// own RWMutex (per-subsystem locking, phase-2 item 2.3).
+	Registry *Registry
+	// CfgMu guards the hub's live config pointer (the settings-subsystem
+	// lock). It must be the same mutex the hub's config writers use.
+	CfgMu *sync.RWMutex
+	// HubCfg reads the hub's live config. Called with CfgMu held where
+	// concurrent config hot-reloads are possible.
 	HubCfg func() *types.HubConfig
 	// Mux reads the hub's HTTP mux (set in Run) for the bridge HTTP proxy.
 	Mux func() http.Handler
@@ -106,8 +105,6 @@ func (m metricsHook) wsMessage(direction, peer string) {
 
 // Convenience accessors so the mechanically-moved code keeps its original
 // shape.
-
-func (s *Service) claws() map[string]*Conn { return s.deps.Claws() }
 
 func (s *Service) hubCfg() *types.HubConfig { return s.deps.HubCfg() }
 

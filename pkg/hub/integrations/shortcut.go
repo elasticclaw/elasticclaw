@@ -51,9 +51,9 @@ type shortcutChange struct {
 func (s *Service) validateShortcutSignature(workspaceName string, body []byte, sig string) bool {
 	// Strip sha256= prefix if present
 	sig = strings.TrimPrefix(sig, "sha256=")
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	secrets := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	factories := s.resolveFactories()
 	hasSecrets := false
 	for _, secret := range s.deps.WorkspaceIssueTrackerWebhookSecrets(workspaceName, "shortcut") {
@@ -86,8 +86,8 @@ func (s *Service) validateShortcutSignature(workspaceName string, body []byte, s
 }
 
 func (s *Service) validateShortcutWebhook() bool {
-	s.deps.Mu.RLock()
-	defer s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
 
 	if s.hubCfg().Integrations == nil {
 		return false
@@ -482,9 +482,9 @@ func collectShortcutAssigneeIdentifiers(set map[string]bool, member map[string]i
 
 // ResolveShortcutToken finds the API token for the given workspace label.
 func (s *Service) ResolveShortcutToken(workspace string) string {
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	cfg := s.hubCfg()
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if cfg.Integrations == nil {
 		return ""
 	}
@@ -590,10 +590,10 @@ func (s *Service) createClawForShortcutStory(factory *types.FactoryConfig, actio
 		return err
 	}
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	provCfg, _ := s.hubCfg().Providers[provider]
 	clawToken := s.hubCfg().ClawToken
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
@@ -672,19 +672,19 @@ func (s *Service) createClawForShortcutStory(factory *types.FactoryConfig, actio
 	}
 	// Resolve default model: template > llm_key lookup > hub default
 	if defaultModel == "" && llmKey != "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
 				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		defaultModel = s.hubCfg().DefaultModel
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 
 	tags := s.deps.MergeTags(factory.Template, factory.Tags, nil)
@@ -713,9 +713,9 @@ func (s *Service) createClawForShortcutStory(factory *types.FactoryConfig, actio
 	// insert as provisioning, exceeding the limit.
 	s.deps.PromoteMu.Lock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	groupName, groupLimit := s.ResolveGroupLimit(factory)
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false

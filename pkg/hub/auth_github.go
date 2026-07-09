@@ -105,8 +105,8 @@ func (s *Server) ghBaseURL() string {
 
 // webSessionSecret returns the HMAC key used to sign/verify web session tokens.
 func (s *Server) webSessionSecret() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
 
 	if s.hubCfg.Auth != nil && s.hubCfg.Auth.SessionSecret != "" {
 		return s.hubCfg.Auth.SessionSecret
@@ -119,9 +119,9 @@ func (s *Server) webSessionSecret() string {
 // handleGitHubClientID returns just the OAuth client_id (public, no secret).
 // The frontend needs this to build the GitHub authorize URL client-side.
 func (s *Server) handleGitHubClientID(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.hubCfg.Auth
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if cfg == nil || cfg.GitHubOAuth == nil || cfg.GitHubOAuth.ClientID == "" {
 		writeErr(w, http.StatusNotFound, "not_found", "GitHub OAuth not configured")
 		return
@@ -147,9 +147,9 @@ func (s *Server) handleGitHubOAuthExchange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.hubCfg.Auth
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	if cfg == nil || cfg.GitHubOAuth == nil {
 		writeErr(w, http.StatusNotFound, "not_found", "GitHub OAuth not configured")

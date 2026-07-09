@@ -1073,15 +1073,15 @@ func TestBroadcastToUsersFiltersGitHubSessionsByClawTags(t *testing.T) {
 		},
 	}, "", "", "")
 
-	s.users["allowed"] = &userConn{
+	s.userReg.set("allowed", &userConn{
 		tenantID:    "test-tenant-id",
 		githubLogin: "alice",
-	}
-	s.users["denied"] = &userConn{
+	})
+	s.userReg.set("denied", &userConn{
 		tenantID:    "test-tenant-id",
 		githubLogin: "bob",
-	}
-	s.claws["claw-1"] = &clawConn{ClawID: "claw-1", TenantID: "test-tenant-id", Tags: []string{"owner=alice"}}
+	})
+	s.clawReg.Set("claw-1", &clawConn{ClawID: "claw-1", TenantID: "test-tenant-id", Tags: []string{"owner=alice"}})
 
 	recipients := s.broadcastRecipients("test-tenant-id", types.WSMessage{
 		Type:    "chunk",
@@ -1177,7 +1177,7 @@ func TestInjectUserMessageQueuesWhenActivityOnlyTurnIsBusy(t *testing.T) {
 		TenantID:           "test-tenant-id",
 		StreamingStartedAt: now(),
 	}
-	s.claws["claw-1"] = cc
+	s.clawReg.Set("claw-1", cc)
 
 	s.injectUserMessage("claw-1", "New greptile review comment on PR #339")
 

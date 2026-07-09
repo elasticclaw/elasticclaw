@@ -174,9 +174,9 @@ func (s *Service) HandleExternalWebhook(w http.ResponseWriter, r *http.Request) 
 func (s *Service) validateExternalSignatureForFactory(factory *types.FactoryConfig, body []byte, sig string) bool {
 	sig = strings.TrimPrefix(sig, "sha256=")
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	secrets := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	secret := factory.WebhookSecret
 	if secret == "" && factory.WebhookSecretRef != "" && secrets != nil {
@@ -436,7 +436,7 @@ func (s *Service) createClawForExternalEvent(factory *types.FactoryConfig, paylo
 	}
 
 	// Read all hub config values under lock to avoid data races
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	clawToken := s.hubCfg().ClawToken
 	secrets := s.hubCfg().Secrets
 	providers := s.hubCfg().Providers
@@ -458,7 +458,7 @@ func (s *Service) createClawForExternalEvent(factory *types.FactoryConfig, paylo
 			}
 		}
 	}
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	if provider == "" {
 		return "", fmt.Errorf("no provider configured")
@@ -587,9 +587,9 @@ func (s *Service) createClawForExternalEvent(factory *types.FactoryConfig, paylo
 	// Check concurrency limit
 	s.deps.PromoteMu.Lock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	groupName, groupLimit := s.ResolveGroupLimit(factory)
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false

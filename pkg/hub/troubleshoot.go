@@ -88,10 +88,10 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 	}()
 	wg.Wait()
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	llmKeys := s.hubCfg.LLMKeys
 	defaultModel := s.hubCfg.DefaultModel
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	systemPrompt := buildTroubleshootPrompt(sanitizedCfg, logs, sources)
 	msgs := []aiChatMessage{{Role: "user", Content: buildTroubleshootUserMsg(req)}}

@@ -34,21 +34,19 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve access config and GitHub login for tag-based filtering
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	var accessCfg *types.AccessConfig
 	if s.hubCfg.Auth != nil {
 		accessCfg = s.hubCfg.Auth.Access
 	}
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	ghLogin := githubLoginFromContext(r.Context())
 
 	var out []types.Claw
 	for _, c := range dbClaws {
 		c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
 		c.TenantID = tenantID
-		s.mu.RLock()
-		cc, online := s.claws[c.ID]
-		s.mu.RUnlock()
+		cc, online := s.clawReg.Get(c.ID)
 		if online {
 			// Claw is currently connected — show live status
 			if cc.GatewayReady {
@@ -99,9 +97,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 
 	// Check provider is configured
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	provCfg, ok := s.hubCfg.Providers[req.Provider]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		writeErr(w, http.StatusUnprocessableEntity, "unprocessable", fmt.Sprintf("provider %q is not configured on this hub", req.Provider))
 		return
@@ -111,10 +109,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	clawID := uuid.New().String()
 
 	// Build env to inject: hub connection info so the claw can register back
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	hubSecrets := s.hubCfg.Secrets
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":    clawID,
@@ -161,7 +159,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Resolve default model: explicit > llm_key lookup > default key > hub default
 	defaultModel := req.DefaultModel
 	if defaultModel == "" {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		var activeKey *types.LLMKeyConfig
 		for _, k := range s.hubCfg.LLMKeys {
 			if k.Name == req.LLMKey {
@@ -183,7 +181,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		} else {
 			defaultModel = s.hubCfg.DefaultModel
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 	}
 	req.DefaultModel = defaultModel
 
@@ -210,10 +208,10 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	// Resolve MCP server configs from template + hub config
 	var mcpConfigs []*types.MCPConfig
 	if len(req.MCPs) > 0 {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		hubMCPServers := s.hubCfg.MCPServers
 		hubSecrets := s.hubCfg.Secrets
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		for _, mcpRef := range req.MCPs {
 			var hubMCP *types.MCPServerHubConfig
 			for _, hm := range hubMCPServers {
@@ -326,11 +324,11 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	ghLogin := githubLoginFromContext(r.Context())
 	var accessCfg *types.AccessConfig
 	if ghLogin != "" {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		if s.hubCfg.Auth != nil {
 			accessCfg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 	}
 
 	if r.Method == http.MethodPatch {
@@ -377,11 +375,11 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = s.st().Claws().SetTags(r.Context(), clawID, tenantID, normalized)
 			// Update in-memory cache so WS broadcast filtering stays current
-			s.mu.Lock()
-			if cc, ok := s.claws[clawID]; ok {
+			if cc, ok := s.clawReg.Get(clawID); ok {
+				cc.Mu.Lock()
 				cc.Tags = normalized
+				cc.Mu.Unlock()
 			}
-			s.mu.Unlock()
 		}
 		if body.Color != nil {
 			color := resolveColor(*body.Color, clawID)
@@ -478,12 +476,12 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
 		})
 		// Disconnect WebSocket if online
-		s.mu.Lock()
-		if cc, ok := s.claws[clawID]; ok {
-			cc.WS.Close(websocket.StatusNormalClosure, "killed")
-			delete(s.claws, clawID)
-		}
-		s.mu.Unlock()
+		s.clawReg.Do(func(conns map[string]*clawConn) {
+			if cc, ok := conns[clawID]; ok {
+				cc.WS.Close(websocket.StatusNormalClosure, "killed")
+				delete(conns, clawID)
+			}
+		})
 		go func() {
 			s.checkpointBeforeTermination(clawID, "manual-kill")
 			if providerID != "" {
@@ -514,9 +512,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	c.TenantID = tenantID
 	c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
-	s.mu.RLock()
-	cc, online := s.claws[c.ID]
-	s.mu.RUnlock()
+	cc, online := s.clawReg.Get(c.ID)
 	if online {
 		if cc.GatewayReady {
 			c.Status = "connected"

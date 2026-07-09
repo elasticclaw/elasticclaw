@@ -72,13 +72,13 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			return
 		}
 
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		hubToken := s.hubCfg.Token
 		var accessCfg *types.AccessConfig
 		if s.hubCfg.Auth != nil {
 			accessCfg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 
 		if token == hubToken && hubToken != "" {
 			next(w, r)
@@ -122,9 +122,9 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 	}
 	// Accept the hub config token directly — this means a token change in hub.yaml
 	// takes effect immediately without requiring a DB migration.
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hubCfgToken := s.hubCfg.Token
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if token == hubCfgToken && hubCfgToken != "" {
 		if tid, err := s.githubTenantID(); err == nil {
 			return tid, "", true
@@ -150,9 +150,9 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 
 // githubTenantID resolves the tenant backing GitHub OAuth sessions.
 func (s *Server) githubTenantID() (string, error) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hubToken := s.hubCfg.Token
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if hubToken != "" {
 		if tenantID, err := s.tenantByToken(hubToken); err == nil {
 			return tenantID, nil
@@ -178,8 +178,8 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 const webSessionHeader = "X-Elasticclaw-Session"
 
 func (s *Server) resolveUIPassword() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
 	if s.hubCfg.UIPassword != "" {
 		return s.hubCfg.UIPassword
 	}
@@ -196,9 +196,9 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		hubToken := s.hubCfg.Token
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		sessionSecret := s.webSessionSecret()
 
 		// Accept shared hub token (existing behavior)
@@ -244,13 +244,13 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		hubToken := s.hubCfg.Token
 		var accessCfg *types.AccessConfig
 		if s.hubCfg.Auth != nil {
 			accessCfg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		sessionSecret := s.webSessionSecret()
 
 		// Password-authenticated sessions keep existing admin access.
@@ -281,9 +281,9 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	disablePassword := s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if disablePassword {
 		writeErr(w, http.StatusForbidden, "forbidden", "password login disabled")
 		return
@@ -299,9 +299,9 @@ func (s *Server) handleWebLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid password")
 		return
 	}
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hubToken := s.hubCfg.Token
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	jsonOK(w, map[string]interface{}{
 		"ok":       true,
 		"hubToken": hubToken, // hub API token — browser uses for all hub calls
@@ -314,12 +314,12 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 	if payload := githubSessionPayloadFromContext(r.Context()); payload != nil {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		var accessCfg *types.AccessConfig
 		if s.hubCfg.Auth != nil {
 			accessCfg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		jsonOK(w, map[string]interface{}{
 			"login":       payload.Login,
 			"name":        payload.Name,
@@ -334,10 +334,10 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthConfig returns public auth config (no auth required).
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	githubOAuthEnabled := s.hubCfg.Auth != nil && s.hubCfg.Auth.GitHubOAuth != nil && s.hubCfg.Auth.GitHubOAuth.ClientID != ""
 	passwordAuthEnabled := s.hubCfg.Token != "" && !(s.hubCfg.Auth != nil && s.hubCfg.Auth.DisablePasswordAuth)
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	jsonOK(w, map[string]bool{
 		"github_oauth_enabled":  githubOAuthEnabled,
 		"password_auth_enabled": passwordAuthEnabled,
@@ -376,9 +376,9 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
 	// Single-tenant: validate against hub's claw_token directly
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hubClawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if clawToken != hubClawToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -428,9 +428,9 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	githubApps := append([]*types.GitHubAppConfig(nil), s.hubCfg.GitHubApps...)
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if workspaceApps, err := loadWorkspaceGitHubAppConfigs(workspaceName); err == nil && len(workspaceApps) > 0 {
 		githubApps = append(workspaceApps, githubApps...)
 	}

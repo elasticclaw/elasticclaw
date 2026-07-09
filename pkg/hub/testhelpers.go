@@ -54,8 +54,6 @@ func NewTestServerWithConfig(t interface {
 		db:               db,
 		hubCfg:           cfg,
 		artifacts:        artifacts,
-		claws:            make(map[string]*clawConn),
-		users:            make(map[string]*userConn),
 		dependencyStatus: newDependencyStatusService(cfg),
 		webhookDedup:     make(map[string]time.Time),
 		githubBaseURL:    githubBaseURL,

@@ -156,9 +156,9 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 }
 
 func (s *Server) syncReplicatedVMs() {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok || replicatedCfg.Token == "" {
 		return
 	}
@@ -212,12 +212,12 @@ func (s *Server) syncReplicatedVMs() {
 					c.id)
 				if execErr == nil {
 					if n, _ := res.RowsAffected(); n > 0 {
-						s.mu.Lock()
-						if cc, ok := s.claws[c.id]; ok {
-							cc.WS.Close(websocket.StatusGoingAway, "VM not found")
-							delete(s.claws, c.id)
-						}
-						s.mu.Unlock()
+						s.clawReg.Do(func(conns map[string]*clawConn) {
+							if cc, ok := conns[c.id]; ok {
+								cc.WS.Close(websocket.StatusGoingAway, "VM not found")
+								delete(conns, c.id)
+							}
+						})
 						s.broadcastToUsers(c.tenantID, types.WSMessage{
 							Type:    "claw_status",
 							Payload: map[string]string{"claw_id": c.id, "status": "offline"},
@@ -378,13 +378,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	// Inject all configured LLM keys, prioritizing the selected key if specified
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
@@ -407,9 +407,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hasGitHubApps2 := len(s.hubCfg.GitHubApps) > 0
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if hasGitHubApps2 && len(githubRepos) > 0 {
 		repoLines := ""
 		for _, r := range githubRepos {
@@ -537,9 +537,9 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.
 func (s *Server) terminateReplicatedVM(vmID string) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["replicated"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		logf("terminateReplicatedVM: no replicated provider configured")
 		return

@@ -75,9 +75,7 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	cc := s.claws()[clawID]
-	s.mu.RUnlock()
+	cc := s.reg.Lookup(clawID)
 	if cc == nil {
 		http.Error(w, "claw not connected", http.StatusConflict)
 		return
@@ -196,9 +194,7 @@ func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	cc := s.claws()[clawID]
-	s.mu.RUnlock()
+	cc := s.reg.Lookup(clawID)
 	if cc == nil {
 		http.Error(w, "claw not connected", http.StatusConflict)
 		return

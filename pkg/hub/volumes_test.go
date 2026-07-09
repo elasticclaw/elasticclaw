@@ -192,9 +192,7 @@ func TestSyncWorkflowVolumesSkipsReleasedWritableLease(t *testing.T) {
 		t.Fatalf("store workflow volumes: %v", err)
 	}
 	s.releaseWorkflowVolumeLeases("claw-rw")
-	s.mu.Lock()
-	s.claws["claw-rw"] = &clawConn{ClawID: "claw-rw", TenantID: "test-tenant-id"}
-	s.mu.Unlock()
+	s.clawReg.Set("claw-rw", &clawConn{ClawID: "claw-rw", TenantID: "test-tenant-id"})
 
 	s.syncWorkflowVolumes("claw-rw")
 

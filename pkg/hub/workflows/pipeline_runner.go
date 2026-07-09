@@ -371,9 +371,9 @@ func (s *Service) executePipelineCommand(clawID, command string, timeout time.Du
 	ctx, endSpan := telemetry.StartProviderSpan(ctx, "exec", providerName)
 	defer func() { endSpan(err) }()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	provCfg, ok := s.hubCfg().Providers[providerName]
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if !ok && providerName != "noop" {
 		return nil, fmt.Errorf("provider %q is not configured", providerName)
 	}

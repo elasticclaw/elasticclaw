@@ -56,9 +56,9 @@ func (s *Service) PollTick() {
 		return
 	}
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	integrations := s.hubCfg().Integrations
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	// === LINEAR ===
 	if integrations != nil && len(integrations.Linear) > 0 {

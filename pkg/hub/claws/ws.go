@@ -90,61 +90,55 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	if isStatusChannel {
 		// Status channel connects to existing claw
-		s.mu.Lock()
-		if existing, ok := s.claws()[clawID]; ok {
+		if existing, ok := s.reg.Get(clawID); ok {
 			existing.Mu.Lock()
 			existing.StatusConn = conn
 			existing.Mu.Unlock()
-			s.mu.Unlock()
 			logfCtx(r.Context(), "[bridge] ✓ status channel connected: %s (%s)", rp.Name, clawID[:8])
 			_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID, "channel": "status"}})
 			// Simple read loop for status channel — just keepalive
 			for {
 				var msg types.WSMessage
 				if err := wsjson.Read(ctx, conn, &msg); err != nil {
-					s.mu.Lock()
-					if existing2, ok2 := s.claws()[clawID]; ok2 {
+					if existing2, ok2 := s.reg.Get(clawID); ok2 {
 						existing2.Mu.Lock()
 						existing2.StatusConn = nil
 						existing2.Mu.Unlock()
 					}
-					s.mu.Unlock()
 					return
 				}
 				s.metrics.wsMessage("in", "claw")
 				if msg.Type == "status_pong" {
-					s.mu.Lock()
-					if existing2, ok2 := s.claws()[clawID]; ok2 {
+					if existing2, ok2 := s.reg.Get(clawID); ok2 {
 						existing2.Mu.Lock()
 						existing2.LastStatusAt = time.Now()
 						existing2.Mu.Unlock()
 					}
-					s.mu.Unlock()
 				}
 			}
 		}
-		s.mu.Unlock()
 		conn.Close(websocket.StatusPolicyViolation, "main channel not connected")
 		return
 	}
 
 	cc := &Conn{ClawID: clawID, TenantID: tenantID, WS: conn, GatewayReady: gatewayReadyBool(rp.GatewayReady), Tags: registrationTags, LastUserMessageAt: time.Now(), LastStatusAt: time.Now()}
-	s.mu.Lock()
-	if old, ok := s.claws()[clawID]; ok {
-		old.Mu.RLock()
-		cc.StatusConn = old.StatusConn
-		cc.LastStatusAt = old.LastStatusAt
-		// Copy message queue from old connection to preserve queued messages
-		if len(old.MessageQueue) > 0 {
-			cc.MessageQueue = make([]types.HubMessage, len(old.MessageQueue))
-			copy(cc.MessageQueue, old.MessageQueue)
+	var hasQueuedMessages bool
+	s.reg.Do(func(conns map[string]*Conn) {
+		if old, ok := conns[clawID]; ok {
+			old.Mu.RLock()
+			cc.StatusConn = old.StatusConn
+			cc.LastStatusAt = old.LastStatusAt
+			// Copy message queue from old connection to preserve queued messages
+			if len(old.MessageQueue) > 0 {
+				cc.MessageQueue = make([]types.HubMessage, len(old.MessageQueue))
+				copy(cc.MessageQueue, old.MessageQueue)
+			}
+			old.Mu.RUnlock()
 		}
-		old.Mu.RUnlock()
-	}
-	// Capture whether we have queued messages before unlocking
-	hasQueuedMessages := len(cc.MessageQueue) > 0
-	s.claws()[clawID] = cc
-	s.mu.Unlock()
+		// Capture whether we have queued messages before unlocking
+		hasQueuedMessages = len(cc.MessageQueue) > 0
+		conns[clawID] = cc
+	})
 
 	logfCtx(r.Context(), "[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.GatewayReady)
 
@@ -172,21 +166,21 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Read loop — claw sends messages back to users
 	defer func() {
-		s.mu.Lock()
 		var partialContent string
 		var partialMsgID string
-		// Flush any partial streaming buffer as an interrupted message
-		if partialCC, ok := s.claws()[clawID]; ok && partialCC.StreamingBuf.Len() > 0 {
-			partialContent = partialCC.StreamingBuf.String() + " [interrupted]"
-			partialMsgID = partialCC.StreamingMsgID
-			if partialMsgID == "" {
-				partialMsgID = uuid.New().String()
+		s.reg.Do(func(conns map[string]*Conn) {
+			// Flush any partial streaming buffer as an interrupted message
+			if partialCC, ok := conns[clawID]; ok && partialCC.StreamingBuf.Len() > 0 {
+				partialContent = partialCC.StreamingBuf.String() + " [interrupted]"
+				partialMsgID = partialCC.StreamingMsgID
+				if partialMsgID == "" {
+					partialMsgID = uuid.New().String()
+				}
+				partialCC.StreamingBuf.Reset()
+				partialCC.StreamingMsgID = ""
 			}
-			partialCC.StreamingBuf.Reset()
-			partialCC.StreamingMsgID = ""
-		}
-		delete(s.claws(), clawID)
-		s.mu.Unlock()
+			delete(conns, clawID)
+		})
 		if partialContent != "" {
 			interruptedAt := now()
 			_ = s.st.Messages().Upsert(context.Background(), types.HubMessage{
@@ -245,8 +239,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 					var shouldWake bool
 					var shouldWarnContext bool
 					var prevUsage int
-					s.mu.Lock()
-					if cc, ok := s.claws()[clawID]; ok {
+					if cc, ok := s.reg.Get(clawID); ok {
 						cc.Mu.Lock()
 						// Log only on status changes, not every heartbeat
 						prevUsage = cc.ContextUsage
@@ -296,12 +289,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 						cc.Mu.Unlock()
 					}
-					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldWarnContext {
-						s.mu.RLock()
-						warnCC := s.claws()[clawID]
-						s.mu.RUnlock()
+						warnCC := s.reg.Lookup(clawID)
 						if warnCC != nil {
 							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
 						}
@@ -310,9 +300,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
 					}
 					// Check for streaming turn timeout (12 minutes)
-					s.mu.RLock()
-					cc, ok := s.claws()[clawID]
-					s.mu.RUnlock()
+					cc, ok := s.reg.Get(clawID)
 					if ok {
 						cc.Mu.Lock()
 						if !cc.StreamingStartedAt.IsZero() &&
@@ -369,9 +357,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						Payload: map[string]string{"claw_id": clawID, "content": chunk.Content},
 					})
 					// Buffer chunk and upsert partial message to DB so refreshes don't lose it
-					s.mu.RLock()
-					cc, ok := s.claws()[clawID]
-					s.mu.RUnlock()
+					cc, ok := s.reg.Get(clawID)
 					if ok {
 						cc.Mu.Lock()
 						if cc.StreamingMsgID == "" {
@@ -478,9 +464,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				go s.scanMessageForPRs(clawID, hm.Content)
 				// Detect tool error loops and inject a corrective message
 				if DetectToolLoop(hm.Content) {
-					s.mu.RLock()
-					loopCC := s.claws()[clawID]
-					s.mu.RUnlock()
+					loopCC := s.reg.Lookup(clawID)
 					if loopCC != nil {
 						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
 					}
@@ -582,9 +566,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						httpReq.Header.Set(k, v)
 					}
 					// Inject claw_token auth so withAuth middleware passes
-					s.mu.RLock()
+					s.cfgMu.RLock()
 					clawToken := s.hubCfg().ClawToken
-					s.mu.RUnlock()
+					s.cfgMu.RUnlock()
 					httpReq.Header.Set("X-Claw-Token", clawToken)
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}

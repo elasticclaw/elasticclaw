@@ -189,12 +189,12 @@ func (s *Service) HandleClawCheckpoints(w http.ResponseWriter, r *http.Request, 
 		}
 		var tags []string
 		_ = json.Unmarshal([]byte(tagsJSON), &tags)
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		var accessCfg *types.AccessConfig
 		if s.hubCfg().Auth != nil {
 			accessCfg = s.hubCfg().Auth.Access
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 		if !s.deps.CanModifyClaw(accessCfg, s.deps.GithubLoginFromContext(r.Context()), tags) {
 			httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
@@ -316,11 +316,11 @@ func (s *Service) provisionStoredClaw(clawID string) {
 	}
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	clawToken := s.hubCfg().ClawToken
 	provCfg, ok := s.hubCfg().Providers[provider]
 	hubSecrets := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if !ok {
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", provider), false)
 		return
@@ -475,9 +475,9 @@ func (s *Service) DispatchCheckpoint(ctx context.Context, cc Conn, clawID, check
 	s.deps.CheckpointWaiters()[checkpointID] = ch
 	s.deps.CheckpointMu.Unlock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	clawToken := s.hubCfg().ClawToken
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	payload := types.CheckpointCreatePayload{
 		CheckpointID: checkpointID,
 		Reason:       reason,

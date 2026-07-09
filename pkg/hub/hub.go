@@ -12,6 +12,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/claws"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/telemetry"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -19,6 +20,20 @@ import (
 )
 
 // Server is the ElasticClaw hub.
+//
+// Locking (phase-2 item 2.3 — one mutex per subsystem, no global lock):
+//
+//   - cfgMu guards the hubCfg pointer (config hot-reload swaps the whole
+//     struct; readers snapshot the fields they need under RLock).
+//   - clawReg (claws.Registry) owns the claw-connection map with its own
+//     RWMutex; per-connection mutable state is behind each Conn's Mu.
+//   - userReg owns the user-session map with its own RWMutex.
+//   - The remaining named mutexes (fileAckMu, checkpointMu, markerMu, …)
+//     each guard exactly the fields declared next to them.
+//
+// Lock order: never hold two subsystem locks at once — snapshot under one
+// lock, then act. Within the claw subsystem the order is registry lock
+// first, then Conn.Mu (only inside Registry.Do/DoRead callbacks).
 type Server struct {
 	db        *sql.DB
 	addr      string
@@ -29,9 +44,13 @@ type Server struct {
 	artifacts artifact.Store
 	metrics   *serverMetrics
 
-	mu    sync.RWMutex
-	claws map[string]*clawConn // claw_id -> conn
-	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	// cfgMu guards hubCfg (the settings-subsystem cache lock).
+	cfgMu sync.RWMutex
+
+	// clawReg is the claw-connection registry (own lock, zero value ready).
+	clawReg claws.Registry
+	// userReg is the user-session registry (own lock, zero value ready).
+	userReg userRegistry
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
@@ -71,6 +90,10 @@ type Server struct {
 	// multiple terminating claws each read active < max and promote, exceeding limit.
 	promoteMu sync.Mutex
 
+	// markerMu makes the system-marker check+insert atomic (wake.go);
+	// formerly a job of the global mutex.
+	markerMu sync.Mutex
+
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
 }
@@ -104,8 +127,6 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		identity:          id,
 		artifacts:         artifacts,
 		metrics:           newServerMetrics(db),
-		claws:             make(map[string]*clawConn),
-		users:             make(map[string]*userConn),
 		dependencyStatus:  newDependencyStatusService(hubCfg),
 		fileAckWaiters:    make(map[string]chan types.FileAck),
 		fileReadWaiters:   make(map[string]chan types.FileReadResp),

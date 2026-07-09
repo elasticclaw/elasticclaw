@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -22,19 +23,55 @@ type userConn struct {
 	githubLogin string
 }
 
+// userRegistry is the user-session registry: conn_id -> *userConn, guarded
+// by its own RWMutex (per-subsystem locking, phase-2 item 2.3). The zero
+// value is ready to use; write paths lazily initialize the map. Its lock is
+// a leaf lock: no other subsystem lock is acquired while holding it.
+type userRegistry struct {
+	mu    sync.RWMutex
+	conns map[string]*userConn
+}
+
+func (r *userRegistry) set(id string, uc *userConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conns == nil {
+		r.conns = make(map[string]*userConn)
+	}
+	r.conns[id] = uc
+}
+
+func (r *userRegistry) delete(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.conns, id)
+}
+
+// snapshot returns a copy of the current user connections.
+func (r *userRegistry) snapshot() []*userConn {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*userConn, 0, len(r.conns))
+	for _, uc := range r.conns {
+		out = append(out, uc)
+	}
+	return out
+}
+
 // handleDebugClaws dumps the in-memory claw state (auth required).
 func (s *Server) handleDebugClaws(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
 	type debugClaw struct {
 		ID           string `json:"id"`
 		GatewayReady bool   `json:"gateway_ready"`
 		ContextUsage int    `json:"context_usage"`
 	}
-	out := make([]debugClaw, 0, len(s.claws))
-	for id, cc := range s.claws {
-		out = append(out, debugClaw{ID: id, GatewayReady: cc.GatewayReady, ContextUsage: cc.ContextUsage})
-	}
-	s.mu.RUnlock()
+	var out []debugClaw
+	s.clawReg.DoRead(func(conns map[string]*clawConn) {
+		out = make([]debugClaw, 0, len(conns))
+		for id, cc := range conns {
+			out = append(out, debugClaw{ID: id, GatewayReady: cc.GatewayReady, ContextUsage: cc.ContextUsage})
+		}
+	})
 	jsonOK(w, out)
 }
 
@@ -47,11 +84,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	ghLogin := githubLoginFromContext(r.Context())
 	var accessCfg *types.AccessConfig
 	if ghLogin != "" {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		if s.hubCfg.Auth != nil {
 			accessCfg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -66,45 +103,39 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 	}
 	connID := uuid.New().String()
 
-	s.mu.Lock()
-	s.users[connID] = uc
-	s.mu.Unlock()
+	s.userReg.set(connID, uc)
 
 	ctx := r.Context()
-	defer func() {
-		s.mu.Lock()
-		delete(s.users, connID)
-		s.mu.Unlock()
-	}()
+	defer s.userReg.delete(connID)
 
 	// Send current claw statuses immediately on connect.
 	// First, emit DB rows for claws not yet bridge-connected (provisioning/starting/error).
 	dbClaws := s.st().Claws().ListStatusRows(ctx, tenantID)
-	s.mu.RLock()
 	connectedIDs := make(map[string]bool)
-	for _, cc := range s.claws {
-		if cc.TenantID != tenantID {
-			continue
+	s.clawReg.DoRead(func(conns map[string]*clawConn) {
+		for _, cc := range conns {
+			if cc.TenantID != tenantID {
+				continue
+			}
+			// Apply tag-based view filter for GitHub OAuth users
+			if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, cc.Tags) {
+				continue
+			}
+			connectedIDs[cc.ClawID] = true
+			status := "connected"
+			if !cc.GatewayReady {
+				status = "starting"
+			}
+			_ = wsjson.Write(ctx, conn, types.WSMessage{
+				Type: "claw_status",
+				Payload: map[string]interface{}{
+					"claw_id":       cc.ClawID,
+					"status":        status,
+					"context_usage": cc.ContextUsage,
+				},
+			})
 		}
-		// Apply tag-based view filter for GitHub OAuth users
-		if ghLogin != "" && !canViewClaw(accessCfg, ghLogin, cc.Tags) {
-			continue
-		}
-		connectedIDs[cc.ClawID] = true
-		status := "connected"
-		if !cc.GatewayReady {
-			status = "starting"
-		}
-		_ = wsjson.Write(ctx, conn, types.WSMessage{
-			Type: "claw_status",
-			Payload: map[string]interface{}{
-				"claw_id":       cc.ClawID,
-				"status":        status,
-				"context_usage": cc.ContextUsage,
-			},
-		})
-	}
-	s.mu.RUnlock()
+	})
 	// Emit DB-only claws (still bootstrapping, not yet bridge-connected)
 	for _, c := range dbClaws {
 		if connectedIDs[c.ID] {
@@ -150,11 +181,11 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			if ghLogin != "" {
 				clawTags, _ := s.st().Claws().Tags(ctx, hm.ClawID, tenantID)
 				var currentAccessCfg *types.AccessConfig
-				s.mu.RLock()
+				s.cfgMu.RLock()
 				if s.hubCfg.Auth != nil {
 					currentAccessCfg = s.hubCfg.Auth.Access
 				}
-				s.mu.RUnlock()
+				s.cfgMu.RUnlock()
 				if !canInteractWithClaw(currentAccessCfg, ghLogin, clawTags) {
 					continue
 				}
@@ -165,9 +196,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.CreatedAt = now()
 			_ = s.st().Messages().Insert(ctx, hm)
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
-			s.mu.RLock()
-			cc := s.claws[hm.ClawID]
-			s.mu.RUnlock()
+			cc := s.clawReg.Lookup(hm.ClawID)
 			if cc != nil {
 				_ = wsjson.Write(ctx, cc.WS, types.WSMessage{Type: "message", Payload: hm})
 				s.metrics.wsMessage("out", "claw")
@@ -190,18 +219,20 @@ func (s *Server) broadcastRecipients(tenantID string, msg types.WSMessage) []*us
 		clawTags = s.clawTagsForBroadcast(tenantID, clawID)
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	recipients := make([]*userConn, 0, len(s.users))
-	for _, uc := range s.users {
+	s.cfgMu.RLock()
+	var accessCfg *types.AccessConfig
+	if s.hubCfg.Auth != nil {
+		accessCfg = s.hubCfg.Auth.Access
+	}
+	s.cfgMu.RUnlock()
+
+	conns := s.userReg.snapshot()
+	recipients := make([]*userConn, 0, len(conns))
+	for _, uc := range conns {
 		if uc.tenantID != tenantID {
 			continue
 		}
 		if uc.githubLogin != "" && clawID != "" {
-			var accessCfg *types.AccessConfig
-			if s.hubCfg.Auth != nil {
-				accessCfg = s.hubCfg.Auth.Access
-			}
 			if !canViewClaw(accessCfg, uc.githubLogin, clawTags) {
 				continue
 			}
@@ -212,13 +243,9 @@ func (s *Server) broadcastRecipients(tenantID string, msg types.WSMessage) []*us
 }
 
 func (s *Server) clawTagsForBroadcast(tenantID, clawID string) []string {
-	s.mu.RLock()
-	if cc := s.claws[clawID]; cc != nil && cc.TenantID == tenantID {
-		tags := append([]string(nil), cc.Tags...)
-		s.mu.RUnlock()
-		return tags
+	if cc := s.clawReg.Lookup(clawID); cc != nil && cc.TenantID == tenantID {
+		return append([]string(nil), cc.Tags...)
 	}
-	s.mu.RUnlock()
 
 	tags, _ := s.st().Claws().Tags(context.Background(), clawID, tenantID)
 	return tags

@@ -75,14 +75,12 @@ func (s *Service) sendNextQueuedMessage(cc *Conn) {
 	if err != nil {
 		// Write failed - re-enqueue the message at the front so it can be retried
 		logf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
-		s.mu.RLock()
-		if currentCC, ok := s.claws()[clawID]; ok {
+		if currentCC, ok := s.reg.Get(clawID); ok {
 			currentCC.Mu.Lock()
 			// Prepend the message back to the front of the queue
 			currentCC.MessageQueue = append([]types.HubMessage{msg}, currentCC.MessageQueue...)
 			currentCC.Mu.Unlock()
 		}
-		s.mu.RUnlock()
 		return
 	}
 

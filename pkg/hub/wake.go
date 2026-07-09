@@ -102,8 +102,8 @@ func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
 	if clawID == "" || tenantID == "" || marker == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.markerMu.Lock()
+	defer s.markerMu.Unlock()
 	if s.hasSystemMarker(clawID, marker) {
 		return false
 	}

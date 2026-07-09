@@ -138,10 +138,10 @@ func (s *Service) isDuplicateWebhook(key string) bool {
 }
 
 func (s *Service) validateLinearSignature(workspaceName string, body []byte, sig string) bool {
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	integrations := s.hubCfg().Integrations
 	secrets := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	factories := s.resolveFactories()
 	workflowWorkspaces, _ := s.deps.LoadExternalWorkflowsByIntegration("linear")
@@ -829,7 +829,7 @@ func (s *Service) CountActiveClawsInGroup(groupName string) int {
 // the limit from hub config. A limit of 0 means unlimited.
 // The deprecated MaxConcurrentClaws field is only used as a fallback when the
 // "global" group is not explicitly configured in ConcurrencyGroups.
-// Must be called with s.deps.Mu held (at least RLock).
+// Must be called with s.deps.CfgMu held (at least RLock).
 func (s *Service) ResolveGroupLimit(factory *types.FactoryConfig) (groupName string, limit int) {
 	groupName = factory.ConcurrencyGroup
 	if groupName == "" {
@@ -881,7 +881,7 @@ func (s *Service) PromotePendingClaws() {
 			groupName = "global"
 		}
 
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		groupLimit := 0
 		found := false
 		for _, g := range s.hubCfg().ConcurrencyGroups {
@@ -894,7 +894,7 @@ func (s *Service) PromotePendingClaws() {
 		if !found && groupName == "global" && s.hubCfg().MaxConcurrentClaws > 0 {
 			groupLimit = s.hubCfg().MaxConcurrentClaws
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 
 		active := s.CountActiveClawsInGroup(groupName)
 
@@ -979,9 +979,9 @@ func (s *Service) ProvisionPendingClaw(clawID string) {
 		jiraTracker, hasJiraTracker = s.ResolveJiraTrackerForFactory(factory)
 	}
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	clawToken := s.hubCfg().ClawToken
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
@@ -1074,9 +1074,9 @@ func (s *Service) ProvisionPendingClaw(clawID string) {
 	}
 
 	// Find provider config
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	provCfg, _ := s.hubCfg().Providers[provider]
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	// Convert string files to []byte for providers that need it
 	fileBytes := make(map[string][]byte, len(templateFiles))

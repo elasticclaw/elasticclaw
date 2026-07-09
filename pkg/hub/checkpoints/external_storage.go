@@ -188,9 +188,9 @@ func (s *Service) ResolveFactories() []*types.FactoryConfig {
 		fmt.Fprintf(os.Stderr, "[hub] loadExternalFactories: %v\n", err)
 	}
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	mem := s.hubCfg().Factories
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	merged := make(map[string]*types.FactoryConfig, len(mem)+len(external))
 	for _, f := range mem {

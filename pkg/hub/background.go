@@ -50,17 +50,10 @@ func (s *Server) statusWatchdog() {
 func (s *Server) checkClawStatus() {
 	now := time.Now()
 
-	s.mu.RLock()
-	var clawIDs []string
-	for id := range s.claws {
-		clawIDs = append(clawIDs, id)
-	}
-	s.mu.RUnlock()
+	clawIDs := s.clawReg.IDs()
 
 	for _, id := range clawIDs {
-		s.mu.RLock()
-		cc, ok := s.claws[id]
-		s.mu.RUnlock()
+		cc, ok := s.clawReg.Get(id)
 		if !ok {
 			continue
 		}

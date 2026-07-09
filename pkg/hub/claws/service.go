@@ -26,13 +26,16 @@ import (
 type Service struct {
 	deps Deps
 
-	// db, mu and fileAckMu mirror the hub Server fields of the same names
-	// so the mechanically-moved method bodies keep their original shape.
-	// st wraps the same database with the store repositories (phase-2
-	// item 2.4); the claw/message persistence goes through it.
+	// db, cfgMu and fileAckMu mirror the hub Server fields of the same
+	// names so the mechanically-moved method bodies keep their original
+	// shape. st wraps the same database with the store repositories
+	// (phase-2 item 2.4); the claw/message persistence goes through it.
+	// reg is the claw-connection registry, which owns its own lock
+	// (phase-2 item 2.3).
 	db        *sql.DB
 	st        *store.Store
-	mu        *sync.RWMutex
+	reg       *Registry
+	cfgMu     *sync.RWMutex
 	fileAckMu *sync.Mutex
 
 	// metrics keeps the moved bodies' s.metrics.wsMessage(...) call sites
@@ -46,7 +49,8 @@ func New(deps Deps) *Service {
 		deps:      deps,
 		db:        deps.DB,
 		st:        store.New(deps.DB),
-		mu:        deps.Mu,
+		reg:       deps.Registry,
+		cfgMu:     deps.CfgMu,
 		fileAckMu: deps.FileAckMu,
 		metrics:   metricsHook{ws: deps.WSMessageMetric},
 	}

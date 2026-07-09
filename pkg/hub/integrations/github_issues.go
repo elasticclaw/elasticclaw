@@ -136,9 +136,9 @@ func (s *Service) validateGitHubIssuesSignatureReason(workspaceName string, body
 	}
 	if workspaceName == "" {
 		factorySecretCount := 0
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		secrets := s.hubCfg().Secrets
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 		for _, factory := range s.resolveFactories() {
 			if factory.Integration != "github-issues" {
 				continue
@@ -813,9 +813,9 @@ func (s *Service) createClawForGitHubIssue(factory *types.FactoryConfig, payload
 	// Check concurrency limit (group-aware)
 	s.deps.PromoteMu.Lock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	groupName, groupLimit := s.ResolveGroupLimit(factory)
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false
@@ -1332,9 +1332,9 @@ func (s *Service) ResolveGitHubIssuesTokenForRepo(repoFullName string) string {
 	}
 
 	// Fallback: return any global token.
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	integrations := s.hubCfg().Integrations
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if integrations != nil {
 		for _, gi := range integrations.GitHubIssues {
 			if gi.Token != "" {

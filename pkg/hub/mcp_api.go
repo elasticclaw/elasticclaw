@@ -109,7 +109,7 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.cfgMu.Lock()
 	cfgCopy := *s.hubCfg
 
 	// Preserve existing secrets if the request omits them (partial update)
@@ -158,18 +158,18 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 	cfgCopy.MCPServers = mcps
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
+	s.cfgMu.Unlock()
 
 	jsonOK(w, map[string]string{"upserted": req.Name})
 }
 
 func (s *Server) handleMCPDelete(w http.ResponseWriter, _ *http.Request, name string) {
-	s.mu.Lock()
+	s.cfgMu.Lock()
 	cfgCopy := *s.hubCfg
 	var mcps []*types.MCPServerHubConfig
 	found := false
@@ -181,18 +181,18 @@ func (s *Server) handleMCPDelete(w http.ResponseWriter, _ *http.Request, name st
 		mcps = append(mcps, existing)
 	}
 	if !found {
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 		http.Error(w, "mcp server not found", http.StatusNotFound)
 		return
 	}
 	cfgCopy.MCPServers = mcps
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.hubCfg = &cfgCopy
-	s.mu.Unlock()
+	s.cfgMu.Unlock()
 
 	jsonOK(w, map[string]string{"deleted": name})
 }

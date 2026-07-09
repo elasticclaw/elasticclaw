@@ -495,9 +495,9 @@ func (s *Service) authenticateClawToken(w http.ResponseWriter, r *http.Request) 
 	if token == "" {
 		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	want := s.hubCfg().ClawToken
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	if token == "" || want == "" || token != want {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false

@@ -12,13 +12,13 @@ import (
 )
 
 func (s *Server) handleBranding(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	var appName, logoURL string
 	if s.hubCfg.Branding != nil {
 		appName = s.hubCfg.Branding.AppName
 		logoURL = s.hubCfg.Branding.LogoURL
 	}
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	jsonOK(w, map[string]string{
 		"appName": appName,
 		"logoUrl": logoURL,
@@ -163,7 +163,7 @@ func settingsStaticSection(section string) bool {
 }
 
 func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	hubURL := s.hubCfg.URL
 	if s.hubCfg.PublicURL != "" {
 		hubURL = s.hubCfg.PublicURL
@@ -174,7 +174,7 @@ func (s *Server) handleHubConfig(w http.ResponseWriter, r *http.Request) {
 		appName = s.hubCfg.Branding.AppName
 		logoURL = s.hubCfg.Branding.LogoURL
 	}
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if hubURL == "" {
 		hubURL = "http://localhost:8080"
 	}

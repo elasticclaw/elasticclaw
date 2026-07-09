@@ -35,8 +35,8 @@ type clawConn = claws.Conn
 func (s *Server) clawsSvc() *claws.Service {
 	return claws.New(claws.Deps{
 		DB:              s.db,
-		Mu:              &s.mu,
-		Claws:           func() map[string]*clawConn { return s.claws },
+		Registry:        &s.clawReg,
+		CfgMu:           &s.cfgMu,
 		HubCfg:          func() *types.HubConfig { return s.hubCfg },
 		Mux:             func() http.Handler { return s.mux },
 		WSMessageMetric: s.metrics.wsMessage,

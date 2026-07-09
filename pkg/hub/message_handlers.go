@@ -42,11 +42,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ghLoginMsg := githubLoginFromContext(r.Context())
 	var accessCfgMsg *types.AccessConfig
 	if ghLoginMsg != "" {
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		if s.hubCfg.Auth != nil {
 			accessCfgMsg = s.hubCfg.Auth.Access
 		}
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 	}
 
 	if r.Method == http.MethodPost {
@@ -86,9 +86,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
 		// Forward to claw if connected (or queue if busy)
-		s.mu.RLock()
-		cc := s.claws[clawID]
-		s.mu.RUnlock()
+		cc := s.clawReg.Lookup(clawID)
 		if cc != nil {
 			cc.Mu.Lock()
 			cc.LastUserMessageAt = time.Now()
@@ -384,11 +382,11 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 		return true
 	}
 	var accessCfgMsg *types.AccessConfig
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	if s.hubCfg.Auth != nil {
 		accessCfgMsg = s.hubCfg.Auth.Access
 	}
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	clawTagsMsg, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {

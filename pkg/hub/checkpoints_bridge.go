@@ -32,7 +32,7 @@ import (
 func (s *Server) checkpointsSvc() *checkpoints.Service {
 	return checkpoints.New(checkpoints.Deps{
 		DB:     s.db,
-		Mu:     &s.mu,
+		CfgMu:  &s.cfgMu,
 		HubCfg: func() *types.HubConfig { return s.hubCfg },
 
 		CheckpointMu: &s.checkpointMu,
@@ -60,30 +60,29 @@ func (s *Server) checkpointsSvc() *checkpoints.Service {
 		Artifacts: func() artifact.Store { return s.artifacts },
 
 		ClawConn: func(clawID string) checkpoints.Conn {
-			s.mu.RLock()
-			cc := s.claws[clawID]
-			s.mu.RUnlock()
+			cc := s.clawReg.Lookup(clawID)
 			if cc == nil {
 				return nil
 			}
 			return cc
 		},
 		ConnectedClaws: func() []checkpoints.ConnEntry {
-			s.mu.RLock()
-			items := make([]checkpoints.ConnEntry, 0, len(s.claws))
-			for id, cc := range s.claws {
-				items = append(items, checkpoints.ConnEntry{ID: id, Conn: cc})
-			}
-			s.mu.RUnlock()
+			var items []checkpoints.ConnEntry
+			s.clawReg.DoRead(func(conns map[string]*clawConn) {
+				items = make([]checkpoints.ConnEntry, 0, len(conns))
+				for id, cc := range conns {
+					items = append(items, checkpoints.ConnEntry{ID: id, Conn: cc})
+				}
+			})
 			return items
 		},
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
-			s.mu.Lock()
-			if cc, ok := s.claws[clawID]; ok {
-				cc.WS.Close(code, reason)
-				delete(s.claws, clawID)
-			}
-			s.mu.Unlock()
+			s.clawReg.Do(func(conns map[string]*clawConn) {
+				if cc, ok := conns[clawID]; ok {
+					cc.WS.Close(code, reason)
+					delete(conns, clawID)
+				}
+			})
 		},
 
 		BroadcastToUsers:        s.broadcastToUsers,

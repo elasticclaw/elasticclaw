@@ -114,9 +114,7 @@ func (s *Server) markBootstrapReady(clawID string) {
 }
 
 func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
+	cc := s.clawReg.Lookup(clawID)
 	if cc == nil {
 		return false
 	}
@@ -344,8 +342,8 @@ func templateFlakeFiles(files map[string]string) map[string]string {
 // clawHubURL returns the URL claws should use to connect back.
 // Uses public_url if set, otherwise falls back to url.
 func (s *Server) clawHubURL() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
 	if s.hubCfg.PublicURL != "" {
 		return s.hubCfg.PublicURL
 	}

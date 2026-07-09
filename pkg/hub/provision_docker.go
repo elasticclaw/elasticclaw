@@ -34,12 +34,12 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		return fmt.Errorf("load claw config: %w", err)
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
 	defaultModel := templateDefaultModel
@@ -261,12 +261,12 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		return fmt.Errorf("load claw config: %w", err)
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	llmKeyEnv := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyName)
 	modelAuthEnv := buildModelAuthEnv(s.hubCfg, llmKeyName)
 	clawToken := s.hubCfg.ClawToken
 	hubCfg := s.hubCfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	linearToken := resolveLinearToken(hubCfg, linearWorkspace)
 	defaultModel := templateDefaultModel
@@ -347,9 +347,9 @@ func boolEnv(v bool) string {
 
 // terminateDockerVM destroys a Docker agent container by name/ID.
 func (s *Server) terminateDockerVM(vmID string) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["docker"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		logf("terminateDockerVM: no docker provider configured")
 		return
@@ -371,9 +371,9 @@ func (s *Server) terminateDockerVM(vmID string) {
 
 // terminateLambdaMicroVM destroys an AWS Lambda MicroVM by ID.
 func (s *Server) terminateLambdaMicroVM(vmID string) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg, ok := s.hubCfg.Providers["lambda-microvms"]
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if !ok {
 		logf("terminateLambdaMicroVM: no lambda-microvms provider configured")
 		return

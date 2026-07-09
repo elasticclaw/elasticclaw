@@ -204,10 +204,10 @@ func agentFailureSafeDetail(sanitized string) string {
 func (s *Server) buildAgentStopComment(clawID, reason string) string {
 	sanitized := sanitizeFailureDetails(reason)
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	llmKeys := cloneLLMKeys(s.hubCfg.LLMKeys)
 	defaultModel := s.hubCfg.DefaultModel
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

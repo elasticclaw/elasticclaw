@@ -22,8 +22,6 @@ func newDoneTestServer(t *testing.T, githubBase string) *Server {
 	s := &Server{
 		db:            db,
 		hubCfg:        &types.HubConfig{},
-		claws:         map[string]*clawConn{},
-		users:         map[string]*userConn{},
 		githubBaseURL: githubBase,
 	}
 	return s

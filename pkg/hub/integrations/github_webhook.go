@@ -146,9 +146,9 @@ func (s *Service) validateGitHubSignature(body []byte, sig string) bool {
 		return false
 	}
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	secrets := s.hubCfg().Secrets
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	factories := s.resolveFactories()
 	for _, factory := range factories {
@@ -632,9 +632,9 @@ func (s *Service) IsOwnAppBot(login string) bool {
 	if !strings.HasSuffix(login, "[bot]") {
 		return false
 	}
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	apps := s.hubCfg().GitHubApps
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 	for _, app := range apps {
 		if app.URL == "" {
 			continue
@@ -805,19 +805,19 @@ func (s *Service) createClawForGitHubPR(factory *types.FactoryConfig, pr GitHubP
 	}
 	// Resolve default model
 	if defaultModel == "" && llmKey != "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		for _, k := range s.hubCfg().LLMKeys {
 			if k.Name == llmKey {
 				defaultModel = s.deps.ResolveDefaultModelForKey(s.hubCfg(), k)
 				break
 			}
 		}
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 	if defaultModel == "" {
-		s.deps.Mu.RLock()
+		s.deps.CfgMu.RLock()
 		defaultModel = s.hubCfg().DefaultModel
-		s.deps.Mu.RUnlock()
+		s.deps.CfgMu.RUnlock()
 	}
 
 	// Build tags — include template:<name>, factory:<name>, and github_pr:<url>
@@ -853,9 +853,9 @@ func (s *Service) createClawForGitHubPR(factory *types.FactoryConfig, pr GitHubP
 	// insert as provisioning, exceeding the limit.
 	s.deps.PromoteMu.Lock()
 
-	s.deps.Mu.RLock()
+	s.deps.CfgMu.RLock()
 	groupName, groupLimit := s.ResolveGroupLimit(factory)
-	s.deps.Mu.RUnlock()
+	s.deps.CfgMu.RUnlock()
 
 	activeCount := s.CountActiveClawsInGroup(groupName)
 	isPending := false

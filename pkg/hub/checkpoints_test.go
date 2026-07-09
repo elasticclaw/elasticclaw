@@ -27,7 +27,6 @@ func newCheckpointCompletionTestServer(t *testing.T) *Server {
 	return &Server{
 		db:                db,
 		hubCfg:            &types.HubConfig{},
-		claws:             map[string]*clawConn{},
 		checkpointWaiters: map[string]chan error{},
 	}
 }
@@ -39,12 +38,12 @@ func seedCheckpointCompletionState(t *testing.T, s *Server) {
 			t.Fatalf("insert checkpoint %s: %v", id, err)
 		}
 	}
-	s.claws["claw"] = &clawConn{
+	s.clawReg.Set("claw", &clawConn{
 		ClawID:               "claw",
 		TenantID:             "tenant",
 		CheckpointInProgress: true,
 		PendingCheckpointID:  "pending",
-	}
+	})
 }
 
 func completeCheckpoint(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
@@ -108,7 +107,7 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 		WS:                   conn,
 		CheckpointInProgress: true,
 	}
-	s.claws["claw"] = cc
+	s.clawReg.Set("claw", cc)
 
 	if _, err := s.dispatchCheckpoint(context.Background(), cc, "claw", "write-fail", "manual", false, checkpointRequestTimeout); err == nil {
 		t.Fatal("expected dispatch write failure")
@@ -129,7 +128,7 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 
 func assertPendingCheckpointDrained(t *testing.T, s *Server) {
 	t.Helper()
-	cc := s.claws["claw"]
+	cc := s.clawReg.Lookup("claw")
 	cc.Mu.RLock()
 	defer cc.Mu.RUnlock()
 	if cc.CheckpointInProgress {
