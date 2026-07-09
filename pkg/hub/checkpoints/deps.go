@@ -65,12 +65,12 @@ type Deps struct {
 	// shutdown wires a cancelable root. May be nil in hand-built test
 	// servers; use the service's baseCtx() accessor.
 	BaseCtx func() context.Context
-	// Mu is the hub's config/claw-registry mutex. It must be the same
-	// mutex the hub uses so reads/writes keep the exact same
-	// synchronization as before the extraction.
+	// CfgMu guards the hub's live config pointer (the settings-subsystem
+	// lock, split off the former global Server mutex). It must be the same
+	// mutex the hub's config writers use.
 	CfgMu *sync.RWMutex
-	// HubCfg reads the hub's live config. Called with Mu held where the
-	// pre-extraction code held it.
+	// HubCfg reads the hub's live config. Called with CfgMu held where
+	// concurrent config hot-reloads are possible.
 	HubCfg func() *types.HubConfig
 
 	// CheckpointMu guards the checkpoint waiter map; CheckpointWaiters
