@@ -75,6 +75,10 @@ jobs:
         run: npm install
         working-directory: web
 
+      - name: Unit tests
+        run: npm test
+        working-directory: web
+
       - name: Lint (smoke check — tolerates rule violations, still fails on tool/config errors)
         run: |
           set +e
