@@ -75,7 +75,7 @@ linters:
       # context.Background() call sites are still flagged.
       - linters:
           - contextcheck
-        text: "(sendNextQueuedMessage|clawTagsForBroadcast|tenantByToken|hasSystemMarker|clawHasMessages|CheckpointBeforeTermination|provisionStoredClaw|DrainPendingCheckpoint|snapshot\\$1|checkFactories|runModelAuthLoginJob|loadHubTemplate|handleTroubleshootStream|createClawFromFactory|cleanupClaw|HandleClawWS\\$|flushStreamingSegment|createClawForExternalEvent|buildGitHubIssuesContextWithComments|createClawForGitHubPR|ProvisionPendingClaw|setReady|checkGateway)"
+        text: "(sendNextQueuedMessage|clawTagsForBroadcast|tenantByToken|hasSystemMarker|clawHasMessages|CheckpointBeforeTermination|provisionStoredClaw|DrainPendingCheckpoint|snapshot\\$1|checkFactories|runModelAuthLoginJob|loadHubTemplate|handleTroubleshootStream|createClawFromFactory|cleanupClaw|flushStreamingSegment|createClawForExternalEvent|buildGitHubIssuesContextWithComments|createClawForGitHubPR|ProvisionPendingClaw|setReady|checkGateway)"
       # The structured-logging rule applies to the hub only (for now); the CLI
       # under cmd/ legitimately prints to stdout.
       - path-except: ^pkg/hub/
