@@ -392,13 +392,28 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 						cc.StreamingBuf.WriteString(chunk.Content)
 						msgID := cc.StreamingMsgID
-						bufContent := cc.StreamingBuf.String()
+						// Periodic partial commit: persist the buffer on the
+						// first chunk and then every streamingFlushBytes /
+						// streamingFlushInterval, so a mid-stream disconnect
+						// or hub crash keeps everything up to the last window
+						// without one DB write per chunk.
+						var bufContent string
+						flush := cc.StreamingFlushedLen == 0 ||
+							cc.StreamingBuf.Len()-cc.StreamingFlushedLen >= streamingFlushBytes ||
+							time.Since(cc.StreamingFlushedAt) >= streamingFlushInterval
+						if flush {
+							bufContent = cc.StreamingBuf.String()
+							cc.StreamingFlushedLen = cc.StreamingBuf.Len()
+							cc.StreamingFlushedAt = time.Now()
+						}
 						cc.Mu.Unlock()
-						// Upsert — insert on first chunk, update content on subsequent
-						_ = s.st.Messages().Upsert(ctx, types.HubMessage{
-							ID: msgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
-							Content: bufContent, CreatedAt: now(),
-						})
+						if flush {
+							// Upsert — insert on first commit, update content after
+							_ = s.st.Messages().Upsert(ctx, types.HubMessage{
+								ID: msgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
+								Content: bufContent, CreatedAt: now(),
+							})
+						}
 					}
 				}
 			} else if msg.Type == "message" {

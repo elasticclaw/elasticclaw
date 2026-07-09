@@ -36,6 +36,8 @@ type Conn struct {
 	StreamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	StreamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	ContextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
+	StreamingFlushedLen   int             // buffer length already persisted by the periodic partial commit
+	StreamingFlushedAt    time.Time       // when the partial buffer was last persisted
 
 	// Message queue for when claw is busy processing
 	MessageQueue []types.HubMessage // queued messages waiting to be sent
@@ -80,6 +82,8 @@ func (cc *Conn) FinishTurnLocked() {
 	cc.StreamingStartedAt = time.Time{}
 	cc.StreamingTimeoutSent = false
 	cc.ContextWarningSent = false
+	cc.StreamingFlushedLen = 0
+	cc.StreamingFlushedAt = time.Time{}
 }
 
 // AllowWakeBeforeBootstrap reports whether a claw on the given provider may
