@@ -43,3 +43,6 @@ bootopt
 # Docker dev environment (contains secrets — never commit)
 docker/hub.dev.yaml
 tmp/
+
+# ws-load-test binary (built from hack/ws-load-test)
+/ws-load-test
