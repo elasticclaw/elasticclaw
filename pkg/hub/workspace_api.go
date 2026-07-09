@@ -51,6 +51,7 @@ type WorkflowView struct {
 	SecretRefs           map[string]string      `json:"secretRefs,omitempty"`
 	Volumes              []types.WorkflowVolume `json:"volumes,omitempty"`
 	Inputs               []types.FactoryInput   `json:"inputs,omitempty"`
+	RawConfig            string                 `json:"rawConfig,omitempty"`
 }
 
 func (s *Server) handleWorkspacesList(w http.ResponseWriter, _ *http.Request) {
@@ -210,12 +211,18 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
 		return
 	}
-	workflow, ok := s.findWorkflowView(workspaceName, workflowName)
+	workspace, workflow, ok, err := s.resolveWorkflowConfig(workspaceName, workflowName)
+	if err != nil {
+		http.Error(w, "failed to load workflow: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, workflow)
+	view := workflowToView(workspace.Name, workflow)
+	view.RawConfig = workflow.RawConfig
+	jsonOK(w, view)
 }
 
 type WorkflowPatchRequest struct {
@@ -413,20 +420,6 @@ func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (gi
 		return githubIssuesPollItem{}, fmt.Errorf("GitHub issue %s/%d not found or unreadable", repo, issueNumber)
 	}
 	return issue, nil
-}
-
-func (s *Server) findWorkflowView(workspaceName, workflowName string) (WorkflowView, bool) {
-	for _, workspace := range s.workspaceViews() {
-		if !strings.EqualFold(workspace.Name, workspaceName) {
-			continue
-		}
-		for _, workflow := range workspace.Workflows {
-			if strings.EqualFold(workflow.Name, workflowName) {
-				return workflow, true
-			}
-		}
-	}
-	return WorkflowView{}, false
 }
 
 func (s *Server) workspaceViews() []WorkspaceView {
