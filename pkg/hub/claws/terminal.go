@@ -21,11 +21,10 @@ import (
 // HandleTerminal upgrades the request to a WebSocket and bridges it to an
 // SSH PTY session on the claw's VM.
 func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
-	// Auth via token query param
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	}
+	// Auth: Authorization header only. The deprecated ?token= query fallback
+	// was removed (Phase 2.6); browser clients that cannot set headers on a
+	// WebSocket upgrade authenticate with a single-use ticket.
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	tenantID, err := s.tenantByToken(token)
 	if err != nil {
 		s.writeDomainErr(w, types.ErrUnauthorized)

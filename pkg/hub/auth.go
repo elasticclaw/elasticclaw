@@ -17,17 +17,18 @@ import (
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Authorization header only. The deprecated ?token= query fallback was
+		// removed (Phase 2.6): tokens in URLs leak into access logs, proxy logs,
+		// and browser history. Endpoints that cannot set headers (WS upgrades,
+		// <img src>) authenticate with a single-use ticket instead.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
-		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		tenantID, githubLogin, ok := s.resolveAuthToken(token)
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
@@ -58,17 +59,14 @@ func (s *Server) withAdminForMethods(next http.HandlerFunc, methods ...string) h
 
 func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Authorization header or web session header only. The deprecated
+		// ?token= query fallback was removed (Phase 2.6).
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
 			token = r.Header.Get(webSessionHeader)
 		}
-		queryToken := false
 		if token == "" {
-			token = r.URL.Query().Get("token")
-			queryToken = token != ""
-		}
-		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 
@@ -82,10 +80,6 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 
 		if token == hubToken && hubToken != "" {
 			next(w, r)
-			return
-		}
-		if queryToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 

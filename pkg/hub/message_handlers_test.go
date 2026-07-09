@@ -419,7 +419,9 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 
 	userCtx, cancelUser := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelUser()
-	userWS, _, err := websocket.Dial(userCtx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws?token=test-token", nil)
+	userWS, _, err := websocket.Dial(userCtx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer test-token"}},
+	})
 	if err != nil {
 		t.Fatalf("dial user ws: %v", err)
 	}

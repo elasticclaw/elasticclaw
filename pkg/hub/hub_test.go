@@ -910,14 +910,16 @@ func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
 		t.Fatalf("expected handler to be called for hub-token mutation, got %d calls", calls)
 	}
 
+	// The deprecated ?token= query fallback was removed (Phase 2.6): even a
+	// valid hub token in the query string is rejected.
 	req = httptest.NewRequest(http.MethodPost, "/api/config?token=hub-token", nil)
 	rec = httptest.NewRecorder()
 	handler(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected mutation method to allow hub query token, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected mutation method to reject hub query token with %d, got %d", http.StatusUnauthorized, rec.Code)
 	}
-	if calls != 4 {
-		t.Fatalf("expected handler to be called for hub query-token mutation, got %d calls", calls)
+	if calls != 3 {
+		t.Fatalf("expected handler not to be called for hub query-token mutation, got %d calls", calls)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/config?token=test-token", nil)
@@ -926,7 +928,7 @@ func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected mutation method to reject tenant query token with %d, got %d", http.StatusUnauthorized, rec.Code)
 	}
-	if calls != 4 {
+	if calls != 3 {
 		t.Fatalf("expected handler not to be called for tenant query-token mutation, got %d calls", calls)
 	}
 }

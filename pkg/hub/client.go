@@ -141,9 +141,13 @@ func (c *Client) WatchMessages(ctx context.Context, clawID string, onMessage fun
 	} else if strings.HasPrefix(wsURL, "https://") {
 		wsURL = "wss://" + wsURL[8:]
 	}
-	wsURL += "/api/ws?token=" + c.token
+	// The deprecated ?token= query auth was removed (Phase 2.6); Go clients
+	// can set headers on the upgrade request, so send the Bearer token there.
+	wsURL += "/api/ws"
 
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.token}},
+	})
 	if err != nil {
 		return fmt.Errorf("ws connect: %w", err)
 	}
@@ -178,9 +182,13 @@ func (c *Client) WatchStream(ctx context.Context, clawID string, onChunk func(ch
 	} else if strings.HasPrefix(wsURL, "https://") {
 		wsURL = "wss://" + wsURL[8:]
 	}
-	wsURL += "/api/ws?token=" + c.token
+	// The deprecated ?token= query auth was removed (Phase 2.6); Go clients
+	// can set headers on the upgrade request, so send the Bearer token there.
+	wsURL += "/api/ws"
 
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.token}},
+	})
 	if err != nil {
 		return fmt.Errorf("ws connect: %w", err)
 	}

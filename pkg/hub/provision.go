@@ -353,7 +353,8 @@ func (s *Server) clawHubURL() string {
 // ─── Terminal WebSocket ───────────────────────────────────────────────────────
 
 // handleTerminal proxies a WebSocket connection to an SSH PTY on the claw's VM.
-// Route: GET /api/terminal/{clawID}?token=...
+// Route: GET /api/terminal/{clawID} (Authorization header auth; the deprecated
+// ?token= query fallback was removed in Phase 2.6).
 // terminateVM terminates a provider VM by type and ID.
 func (s *Server) terminateVM(provider, vmID string) {
 	if vmID == "" {
