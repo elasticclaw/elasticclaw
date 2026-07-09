@@ -50,7 +50,12 @@ func (s *Server) integrationsSvc() *integrations.Service {
 		},
 		ClawGatewayReady: func(clawID string) bool {
 			cc, connected := s.clawReg.Get(clawID)
-			return connected && cc.GatewayReady
+			if !connected {
+				return false
+			}
+			cc.Mu.RLock()
+			defer cc.Mu.RUnlock()
+			return cc.GatewayReady
 		},
 
 		GithubBaseURL:   func() string { return s.githubBaseURL },

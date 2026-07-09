@@ -69,7 +69,9 @@ func (s *Server) handleDebugClaws(w http.ResponseWriter, r *http.Request) {
 	s.clawReg.DoRead(func(conns map[string]*clawConn) {
 		out = make([]debugClaw, 0, len(conns))
 		for id, cc := range conns {
+			cc.Mu.RLock()
 			out = append(out, debugClaw{ID: id, GatewayReady: cc.GatewayReady, ContextUsage: cc.ContextUsage})
+			cc.Mu.RUnlock()
 		}
 	})
 	jsonOK(w, out)
@@ -122,8 +124,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			connectedIDs[cc.ClawID] = true
+			// Snapshot live fields under the per-connection lock
+			// (heartbeats mutate them); don't hold it during the write.
+			cc.Mu.RLock()
+			gatewayReady := cc.GatewayReady
+			contextUsage := cc.ContextUsage
+			cc.Mu.RUnlock()
 			status := "connected"
-			if !cc.GatewayReady {
+			if !gatewayReady {
 				status = "starting"
 			}
 			_ = wsjson.Write(ctx, conn, types.WSMessage{
@@ -131,7 +139,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				Payload: map[string]interface{}{
 					"claw_id":       cc.ClawID,
 					"status":        status,
-					"context_usage": cc.ContextUsage,
+					"context_usage": contextUsage,
 				},
 			})
 		}

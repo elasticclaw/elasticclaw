@@ -102,7 +102,12 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := wsjson.Read(ctx, conn, &msg); err != nil {
 					if existing2, ok2 := s.reg.Get(clawID); ok2 {
 						existing2.Mu.Lock()
-						existing2.StatusConn = nil
+						// Only clear the slot if it still holds this
+						// connection — a reconnected status channel may
+						// have replaced it already.
+						if existing2.StatusConn == conn {
+							existing2.StatusConn = nil
+						}
 						existing2.Mu.Unlock()
 					}
 					return
@@ -147,6 +152,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 	// connection with StatusOverloaded so a malicious or looping client
 	// cannot exhaust the hub; callers must stop handling the connection
 	// when it returns false.
+	//nolint:contextcheck // logs on the request context by design; the submitted fn picks its own context (pool work outlives the request)
 	submit := func(fn func()) bool {
 		if s.pool.TrySubmit(fn) {
 			return true
@@ -181,19 +187,28 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read loop — claw sends messages back to users
+	//nolint:contextcheck // disconnect cleanup runs after the request context is canceled; persistence uses the hub root context on purpose
 	defer func() {
 		var partialContent string
 		var partialMsgID string
 		s.reg.Do(func(conns map[string]*Conn) {
-			// Flush any partial streaming buffer as an interrupted message
-			if partialCC, ok := conns[clawID]; ok && partialCC.StreamingBuf.Len() > 0 {
-				partialContent = partialCC.StreamingBuf.String() + " [interrupted]"
-				partialMsgID = partialCC.StreamingMsgID
-				if partialMsgID == "" {
-					partialMsgID = uuid.New().String()
+			// Flush any partial streaming buffer as an interrupted message.
+			// The registry lock only guards the map; the streaming fields
+			// are mutated under the per-connection lock by the chunk and
+			// finalization paths, so take Conn.Mu here too (registry lock
+			// -> Conn.Mu is the documented order).
+			if partialCC, ok := conns[clawID]; ok {
+				partialCC.Mu.Lock()
+				if partialCC.StreamingBuf.Len() > 0 {
+					partialContent = partialCC.StreamingBuf.String() + " [interrupted]"
+					partialMsgID = partialCC.StreamingMsgID
+					if partialMsgID == "" {
+						partialMsgID = uuid.New().String()
+					}
+					partialCC.StreamingBuf.Reset()
+					partialCC.StreamingMsgID = ""
 				}
-				partialCC.StreamingBuf.Reset()
-				partialCC.StreamingMsgID = ""
+				partialCC.Mu.Unlock()
 			}
 			delete(conns, clawID)
 		})
@@ -473,7 +488,10 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				// legacy factory PR-URL completion path below. The block lives
 				// behind a hub hook because it builds workflows-package
 				// pipeline contexts.
-				pipelineHandledDone := s.deps.EvaluatePipelineMessageTriggers(clawID, hm.Content)
+				pipelineHandledDone, pipelineJob := s.deps.EvaluatePipelineMessageTriggers(clawID, hm.Content)
+				if pipelineJob != nil && !submit(pipelineJob) {
+					return
+				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
@@ -484,6 +502,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
+					//nolint:contextcheck // the done-checkpoint outlives this request; it derives from the hub root context on purpose
 					if !submit(func() {
 						if _, err := s.requestCheckpoint(s.baseCtx(), clawID, "done", "hub", false, s.deps.CheckpointRequestTimeout); err != nil {
 							logfCtx(r.Context(), "[checkpoint] done request for %s failed: %v", shortID(clawID), err)

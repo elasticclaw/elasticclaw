@@ -47,13 +47,17 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		c.TenantID = tenantID
 		cc, online := s.clawReg.Get(c.ID)
 		if online {
-			// Claw is currently connected — show live status
-			if cc.GatewayReady {
+			// Claw is currently connected — snapshot live status under the
+			// per-connection lock (heartbeats mutate these fields).
+			cc.Mu.RLock()
+			gatewayReady := cc.GatewayReady
+			c.ContextUsage = cc.ContextUsage
+			cc.Mu.RUnlock()
+			if gatewayReady {
 				c.Status = "connected"
 			} else {
 				c.Status = "starting"
 			}
-			c.ContextUsage = cc.ContextUsage
 		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
@@ -513,12 +517,15 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
 	cc, online := s.clawReg.Get(c.ID)
 	if online {
-		if cc.GatewayReady {
+		cc.Mu.RLock()
+		gatewayReady := cc.GatewayReady
+		c.ContextUsage = cc.ContextUsage
+		cc.Mu.RUnlock()
+		if gatewayReady {
 			c.Status = "connected"
 		} else {
 			c.Status = "starting"
 		}
-		c.ContextUsage = cc.ContextUsage
 	} else if c.Status != "provisioning" && c.Status != "error" {
 		c.Status = "offline"
 	}
