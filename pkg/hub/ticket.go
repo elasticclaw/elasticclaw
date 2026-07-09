@@ -19,6 +19,16 @@ import (
 
 const authTicketTTL = 30 * time.Second
 
+// ticketAuthAllowed reports whether a path may authenticate via ?ticket=.
+// Tickets exist only for endpoints where the browser cannot set the
+// Authorization header: WebSocket upgrades and <img src> resource loads.
+// Accepting them on arbitrary REST routes would widen the authority of a
+// leaked ticket beyond its purpose. (/api/terminal/ handles its own auth
+// outside withAuth.)
+func ticketAuthAllowed(path string) bool {
+	return path == "/api/ws" || strings.HasPrefix(path, "/api/files/view/")
+}
+
 type authTicket struct {
 	tenantID    string
 	githubLogin string

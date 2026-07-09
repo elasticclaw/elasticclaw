@@ -422,8 +422,9 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
 			// Single-use ticket (see ticket.go) — the only supported query-string
-			// auth. Used by WS upgrades and <img src> loads that cannot set headers.
-			if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+			// auth. Only honored on WS upgrades and <img src> loads that cannot
+			// set headers; on any other route the ticket is ignored.
+			if ticket := r.URL.Query().Get("ticket"); ticket != "" && ticketAuthAllowed(r.URL.Path) {
 				tenantID, githubLogin, ok := s.redeemAuthTicket(ticket)
 				if !ok {
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -6129,21 +6130,23 @@ func remoteWriteFileCommand(dir, name, content string) string {
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	// Auth: Authorization header, or a single-use ticket (browsers cannot set
 	// headers on WebSocket upgrades). The raw ?token= fallback is deprecated.
-	var tenantID string
+	// The GitHub login (when present) is preserved so the same per-claw access
+	// checks as the REST/WS paths apply below.
+	var tenantID, ghLogin string
 	if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != "" {
-		tid, err := s.tenantByToken(token)
-		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		tenantID = tid
-	} else if ticket := r.URL.Query().Get("ticket"); ticket != "" {
-		tid, _, ok := s.redeemAuthTicket(ticket)
+		tid, login, ok := s.resolveAuthToken(token)
 		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tenantID = tid
+		tenantID, ghLogin = tid, login
+	} else if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+		tid, login, ok := s.redeemAuthTicket(ticket)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID, ghLogin = tid, login
 	} else {
 		// Deprecated: raw token in the query string leaks into access logs and
 		// URL history. Kept for one release; removal planned for Phase 2.
@@ -6169,10 +6172,11 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	var sshHost string
 	var sshPort int
 	var sshUser string
+	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT ssh_host, ssh_port, ssh_user FROM claws WHERE id = ? AND tenant_id = ?`,
+		`SELECT ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]') FROM claws WHERE id = ? AND tenant_id = ?`,
 		clawID, tenantID,
-	).Scan(&sshHost, &sshPort, &sshUser)
+	).Scan(&sshHost, &sshPort, &sshUser, &tagsJSON)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -6181,6 +6185,26 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+
+	// Terminal access grants shell control over the claw, so require the same
+	// permission as mutating endpoints (canModifyClaw), not just tenant
+	// ownership. Token-based auth (no login) keeps full access, matching the
+	// other handlers.
+	if ghLogin != "" {
+		var clawTags []string
+		_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		if !canModifyClaw(accessCfg, ghLogin, clawTags) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	if sshHost == "" || sshPort == 0 {
 		http.Error(w, "ssh not available for this claw", http.StatusServiceUnavailable)
 		return
