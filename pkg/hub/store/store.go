@@ -3,11 +3,16 @@
 // Tenants, Analytics), migrations, transactions for multi-step writes
 // (WithTx) and SQLITE_BUSY retry centralized in the store wrapper.
 //
-// The package only knows pkg/types; services and handlers talk to the
-// repositories and never issue raw SQL. All SQLite-specific SQL lives
-// here, keeping the door open for an optional Postgres backend later:
-// repositories build dynamic queries with the Placeholder constant and
-// no SQLite-exclusive syntax leaks outside this package.
+// The package only knows pkg/types. The phase-2.4 target contract is
+// that services and handlers talk to the repositories and never issue
+// raw SQL, with all SQLite-specific SQL living here (repositories build
+// dynamic queries with the Placeholder constant, keeping the door open
+// for an optional Postgres backend later). The migration is incremental:
+// this PR moves the claw, message, tenant, template and pruning call
+// sites; the remaining raw-SQL call sites in pkg/hub (provisioning,
+// workflow creation/state, analytics, ...) still hold the *sql.DB
+// directly and are moved by the follow-up PRs in the phase-2 stack,
+// after which the acceptance grep from the re-arch doc must be empty.
 package store
 
 import (
@@ -81,12 +86,24 @@ func (s *Store) Tenants() *TenantsRepo { return &TenantsRepo{st: s} }
 // Analytics returns the analytics-aggregate repository.
 func (s *Store) Analytics() *AnalyticsRepo { return &AnalyticsRepo{st: s} }
 
+// commitTx commits the transaction. Indirection so tests can force a
+// busy error on the commit path.
+var commitTx = func(tx *sql.Tx) error { return tx.Commit() }
+
 // WithTx runs fn inside a transaction. The transaction is committed when
 // fn returns nil and rolled back otherwise. The whole transaction is
-// retried (with backoff) when SQLite reports the database is busy, so
-// multi-step writes never hand SQLITE_BUSY handling to callers.
+// retried (with backoff) when SQLite reports the database is busy while
+// fn runs, so multi-step writes never hand SQLITE_BUSY handling to
+// callers.
+//
+// A busy error from the commit itself is NOT retried: database/sql
+// finalizes the Tx on the first Commit call, so the commit cannot be
+// reissued on the same transaction, and blindly replaying fn in a new
+// transaction after a failed commit is unsafe (the closure may carry
+// non-idempotent side effects and the outcome at the caller boundary is
+// ambiguous). Such errors are returned to the caller as-is.
 func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	return retryBusy(ctx, func() error {
+	err := retryBusy(ctx, func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -95,9 +112,25 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 			_ = tx.Rollback()
 			return err
 		}
-		return tx.Commit()
+		if err := commitTx(tx); err != nil {
+			_ = tx.Rollback()
+			return nonRetryableError{err}
+		}
+		return nil
 	})
+	var nr nonRetryableError
+	if errors.As(err, &nr) {
+		return nr.err
+	}
+	return err
 }
+
+// nonRetryableError marks an error that must not trigger a busy retry
+// even when the underlying cause is SQLITE_BUSY (e.g. a failed commit).
+type nonRetryableError struct{ err error }
+
+func (e nonRetryableError) Error() string { return e.err.Error() }
+func (e nonRetryableError) Unwrap() error { return e.err }
 
 // exec runs a write statement with busy retry.
 func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -118,15 +151,24 @@ func (s *Store) queryRowScan(ctx context.Context, query string, args []any, dest
 	})
 }
 
-// query runs a multi-row query with busy retry. The caller owns rows.
-func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	var rows *sql.Rows
-	err := retryBusy(ctx, func() error {
-		var queryErr error
-		rows, queryErr = s.db.QueryContext(ctx, query, args...)
-		return queryErr
+// queryScan runs a multi-row query and drives scan inside the busy-retry
+// loop, so SQLITE_BUSY surfaced while iterating rows (rows.Next /
+// rows.Err) is retried just like a busy error from the initial query.
+// scan may run more than once and must reset any accumulated state at
+// the start of each invocation. rows.Err() is checked after scan
+// returns; scan does not need to check it.
+func (s *Store) queryScan(ctx context.Context, query string, args []any, scan func(rows *sql.Rows) error) error {
+	return retryBusy(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if err := scan(rows); err != nil {
+			return err
+		}
+		return rows.Err()
 	})
-	return rows, err
 }
 
 // retryBusy retries fn with exponential backoff while it fails with
@@ -152,9 +194,14 @@ func retryBusy(ctx context.Context, fn func() error) error {
 
 // isBusy reports whether err is SQLite's "database is busy/locked"
 // condition. modernc.org/sqlite surfaces it in the error text with the
-// SQLITE_BUSY/SQLITE_LOCKED code names.
+// SQLITE_BUSY/SQLITE_LOCKED code names. Errors wrapped as
+// nonRetryableError are never busy, whatever their cause.
 func isBusy(err error) bool {
 	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	var nr nonRetryableError
+	if errors.As(err, &nr) {
 		return false
 	}
 	msg := err.Error()

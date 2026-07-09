@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -15,20 +16,22 @@ type SettingsRepo struct {
 
 // TemplateNames returns the names of the legacy DB templates.
 func (r *SettingsRepo) TemplateNames(ctx context.Context) ([]string, error) {
-	rows, err := r.st.query(ctx, `SELECT name FROM hub_templates`)
+	var names []string
+	err := r.st.queryScan(ctx, `SELECT name FROM hub_templates`, nil, func(rows *sql.Rows) error {
+		names = names[:0]
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				continue
+			}
+			names = append(names, name)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			continue
-		}
-		names = append(names, name)
-	}
-	return names, rows.Err()
+	return names, nil
 }
 
 // TemplateInfo is one legacy DB template row in the list projection.
@@ -40,20 +43,22 @@ type TemplateInfo struct {
 // ListTemplates returns the legacy DB templates ordered by name. Rows
 // that fail to scan are skipped (pre-extraction behavior).
 func (r *SettingsRepo) ListTemplates(ctx context.Context) ([]TemplateInfo, error) {
-	rows, err := r.st.query(ctx, `SELECT name, updated_at FROM hub_templates ORDER BY name ASC`)
+	var out []TemplateInfo
+	err := r.st.queryScan(ctx, `SELECT name, updated_at FROM hub_templates ORDER BY name ASC`, nil, func(rows *sql.Rows) error {
+		out = out[:0]
+		for rows.Next() {
+			var t TemplateInfo
+			if err := rows.Scan(&t.Name, &t.UpdatedAt); err != nil {
+				continue
+			}
+			out = append(out, t)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []TemplateInfo
-	for rows.Next() {
-		var t TemplateInfo
-		if err := rows.Scan(&t.Name, &t.UpdatedAt); err != nil {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // TemplateFiles returns the raw files JSON of a legacy DB template.

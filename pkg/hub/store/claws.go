@@ -35,23 +35,26 @@ func scanClaw(scan func(dest ...any) error, c *types.Claw) error {
 // List returns the tenant's non-deleted claws, newest first. Rows that
 // fail to scan are skipped (pre-extraction behavior).
 func (r *ClawsRepo) List(ctx context.Context, tenantID string) ([]types.Claw, error) {
-	rows, err := r.st.query(ctx,
+	var out []types.Claw
+	err := r.st.queryScan(ctx,
 		`SELECT `+clawColumns+` FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
-		tenantID,
+		[]any{tenantID},
+		func(rows *sql.Rows) error {
+			out = out[:0]
+			for rows.Next() {
+				var c types.Claw
+				if err := scanClaw(rows.Scan, &c); err != nil {
+					continue
+				}
+				out = append(out, c)
+			}
+			return nil
+		},
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []types.Claw
-	for rows.Next() {
-		var c types.Claw
-		if err := scanClaw(rows.Scan, &c); err != nil {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Get returns a single non-deleted claw. Returns sql.ErrNoRows when the
@@ -289,19 +292,22 @@ type StatusRow struct {
 // user-WS initial snapshot). Scan errors on individual rows are ignored
 // (pre-extraction behavior).
 func (r *ClawsRepo) ListStatusRows(ctx context.Context, tenantID string) []StatusRow {
-	rows, err := r.st.query(ctx,
-		`SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`,
-		tenantID,
-	)
-	if err != nil || rows == nil {
-		return nil
-	}
-	defer rows.Close()
 	var out []StatusRow
-	for rows.Next() {
-		var c StatusRow
-		_ = rows.Scan(&c.ID, &c.Name, &c.Status, &c.TagsJSON, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
-		out = append(out, c)
+	err := r.st.queryScan(ctx,
+		`SELECT id, name, status, COALESCE(tags,'[]'), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id=? AND status NOT IN ('offline')`,
+		[]any{tenantID},
+		func(rows *sql.Rows) error {
+			out = out[:0]
+			for rows.Next() {
+				var c StatusRow
+				_ = rows.Scan(&c.ID, &c.Name, &c.Status, &c.TagsJSON, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
+				out = append(out, c)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil
 	}
 	return out
 }
@@ -345,19 +351,23 @@ func (r *ClawsRepo) TriggerActorJSON(ctx context.Context, clawID string) (string
 // StatusCounts returns the number of claws per status (the Prometheus
 // claw-status gauge).
 func (r *ClawsRepo) StatusCounts(ctx context.Context) (map[string]float64, error) {
-	rows, err := r.st.query(ctx, `SELECT status, COUNT(*) FROM claws GROUP BY status`)
+	var counts map[string]float64
+	err := r.st.queryScan(ctx, `SELECT status, COUNT(*) FROM claws GROUP BY status`, nil,
+		func(rows *sql.Rows) error {
+			counts = make(map[string]float64)
+			for rows.Next() {
+				var status string
+				var count float64
+				if err := rows.Scan(&status, &count); err != nil {
+					continue
+				}
+				counts[status] = count
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	counts := make(map[string]float64)
-	for rows.Next() {
-		var status string
-		var count float64
-		if err := rows.Scan(&status, &count); err != nil {
-			continue
-		}
-		counts[status] = count
-	}
-	return counts, rows.Err()
+	return counts, nil
 }

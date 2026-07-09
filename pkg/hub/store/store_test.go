@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,67 @@ func TestWithTxRollsBackOnError(t *testing.T) {
 	_ = st.DB().QueryRow(`SELECT name FROM claws WHERE id='claw-f'`).Scan(&name)
 	if name != "claw-claw-f" {
 		t.Fatalf("rollback failed: name=%q", name)
+	}
+}
+
+func TestWithTxDoesNotReplayFnOnBusyCommit(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	mustCreateClaw(t, st, "claw-g")
+
+	busyErr := errors.New("database is locked (5) (SQLITE_BUSY)")
+	origCommit := commitTx
+	commitTx = func(tx *sql.Tx) error {
+		_ = tx.Rollback() // leave the connection clean; the fake commit never ran
+		return busyErr
+	}
+	defer func() { commitTx = origCommit }()
+
+	fnRuns := 0
+	err := st.WithTx(ctx, func(tx *sql.Tx) error {
+		fnRuns++
+		_, err := tx.ExecContext(ctx, `UPDATE claws SET name='replayed' WHERE id='claw-g'`)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+		t.Fatalf("expected the busy commit error to reach the caller, got %v", err)
+	}
+	if fnRuns != 1 {
+		t.Fatalf("fn replayed after failed commit: runs=%d", fnRuns)
+	}
+}
+
+func TestQueryScanRetriesBusyDuringScan(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	mustCreateClaw(t, st, "claw-h")
+
+	scans := 0
+	var ids []string
+	err := st.queryScan(ctx, `SELECT id FROM claws`, nil, func(rows *sql.Rows) error {
+		scans++
+		if scans == 1 {
+			// Simulate SQLITE_BUSY surfacing mid-iteration (rows.Err()).
+			return errors.New("database is locked (5) (SQLITE_BUSY)")
+		}
+		ids = ids[:0]
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("queryScan: %v", err)
+	}
+	if scans != 2 {
+		t.Fatalf("expected a retry after busy scan, got %d attempts", scans)
+	}
+	if len(ids) != 1 || ids[0] != "claw-h" {
+		t.Fatalf("unexpected rows after retry: %v", ids)
 	}
 }
 

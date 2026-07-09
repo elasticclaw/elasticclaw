@@ -62,6 +62,21 @@ func scanMessages(rows *sql.Rows) ([]types.HubMessage, error) {
 	return msgs, rows.Err()
 }
 
+// queryMessages runs a message query through the store's busy-retrying
+// scan helper.
+func (r *MessagesRepo) queryMessages(ctx context.Context, query string, args []any) ([]types.HubMessage, error) {
+	var msgs []types.HubMessage
+	err := r.st.queryScan(ctx, query, args, func(rows *sql.Rows) error {
+		var scanErr error
+		msgs, scanErr = scanMessages(rows)
+		return scanErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
 // VisibleWindow selects a page of user-visible messages (all roles,
 // system markers excluded). Exactly one of Before/After may be set; the
 // zero filter returns the newest Limit messages.
@@ -106,20 +121,22 @@ func (r *MessagesRepo) ListVisible(ctx context.Context, w VisibleWindow) ([]type
 	}
 	args = append(args, w.Limit)
 
-	rows, err := r.st.query(ctx, query, args...)
+	var msgs []types.HubMessage
+	err := r.st.queryScan(ctx, query, args, func(rows *sql.Rows) error {
+		msgs = msgs[:0]
+		for rows.Next() {
+			var m types.HubMessage
+			if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+				continue
+			}
+			msgs = append(msgs, m)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var msgs []types.HubMessage
-	for rows.Next() {
-		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
-			continue
-		}
-		msgs = append(msgs, m)
-	}
-	return msgs, rows.Err()
+	return msgs, nil
 }
 
 // ListConversation returns up to limit conversation messages (role !=
@@ -139,12 +156,7 @@ func (r *MessagesRepo) ListConversation(ctx context.Context, clawID, tenantID st
 	query += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := r.st.query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
+	return r.queryMessages(ctx, query, args)
 }
 
 // HasConversationBefore reports whether any conversation message (role
@@ -201,12 +213,7 @@ func (r *MessagesRepo) ListActivity(ctx context.Context, w ActivityWindow) ([]ty
 	}
 	args = append(args, w.Limit)
 
-	rows, err := r.st.query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
+	return r.queryMessages(ctx, query, args)
 }
 
 // ActivityStats returns the count and created_at bounds of activity-role
