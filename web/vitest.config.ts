@@ -11,6 +11,6 @@ export default defineConfig({
     // Pure-function tests run in node; DOM-dependent suites opt into jsdom
     // with a `// @vitest-environment jsdom` docblock.
     environment: "node",
-    include: ["**/__tests__/**/*.test.ts"],
+    include: ["**/__tests__/**/*.{test,spec}.{ts,tsx}"],
   },
 })
