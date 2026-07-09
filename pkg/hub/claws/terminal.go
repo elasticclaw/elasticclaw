@@ -33,7 +33,7 @@ func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/terminal/")
 	if clawID == "" {
-		http.Error(w, "missing claw id", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "missing claw id")
 		return
 	}
 
@@ -44,11 +44,11 @@ func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 	if sshHost == "" || sshPort == 0 {
-		http.Error(w, "ssh not available for this claw", http.StatusServiceUnavailable)
+		httpserver.WriteErr(w, http.StatusServiceUnavailable, "unavailable", "ssh not available for this claw")
 		return
 	}
 

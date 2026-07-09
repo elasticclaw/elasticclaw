@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -23,12 +24,12 @@ func (s *Service) handleFactoriesCRUD(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		s.handleFactoryDelete(w, r, name)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -78,7 +79,7 @@ func (s *Service) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
 
 	factories, err := loadExternalFactories()
 	if err != nil {
-		http.Error(w, "fs error: "+err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "fs error: "+err.Error())
 		return
 	}
 
@@ -103,22 +104,22 @@ type FactoryPushRequest struct {
 func (s *Service) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 	var req FactoryPushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if len(req.Factories) == 0 {
-		http.Error(w, "no factories provided", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "no factories provided")
 		return
 	}
 
 	// Validate all factories before saving
 	for _, f := range req.Factories {
 		if f == nil {
-			http.Error(w, "factory cannot be nil", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "factory cannot be nil")
 			return
 		}
 		if err := f.Validate(); err != nil {
-			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "validation error: "+err.Error())
 			return
 		}
 	}
@@ -148,7 +149,7 @@ func (s *Service) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(saveErrs) > 0 {
-		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", strings.Join(saveErrs, "; "))
 		return
 	}
 
@@ -167,7 +168,7 @@ func (s *Service) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, name string) {
 	if err := deleteExternalFactory(name); err != nil {
-		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "delete error: "+err.Error())
 		return
 	}
 	jsonOK(w, map[string]string{"deleted": name})

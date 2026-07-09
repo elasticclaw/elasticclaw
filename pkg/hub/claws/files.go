@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
@@ -47,7 +48,7 @@ type uploadedAttachment struct {
 // subsequent message submission.
 func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	clawID := r.PathValue("clawID")
@@ -55,53 +56,53 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 		clawID = strings.TrimPrefix(r.URL.Path, "/api/files/")
 	}
 	if clawID == "" {
-		http.Error(w, "missing claw id", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "missing claw id")
 		return
 	}
 
 	// Bound the request body before parsing multipart.
 	r.Body = http.MaxBytesReader(w, r.Body, maxTotalBytes+(1<<20))
 	if err := r.ParseMultipartForm(maxTotalBytes); err != nil {
-		http.Error(w, "upload too large or malformed", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "upload too large or malformed")
 		return
 	}
 	files := r.MultipartForm.File[uploadFormField]
 	if len(files) == 0 {
-		http.Error(w, "no files", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "no files")
 		return
 	}
 	if len(files) > maxFilesPerReq {
-		http.Error(w, "too many files", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "too many files")
 		return
 	}
 
 	cc := s.reg.Lookup(clawID)
 	if cc == nil {
-		http.Error(w, "claw not connected", http.StatusConflict)
+		httpserver.WriteErr(w, http.StatusConflict, "conflict", "claw not connected")
 		return
 	}
 
 	tenantID := s.tenantFromCtx(r)
 	if cc.TenantID != tenantID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return
 	}
 
 	out := make([]uploadedAttachment, 0, len(files))
 	for _, fh := range files {
 		if fh.Size > maxFileBytes {
-			http.Error(w, "file too large: "+fh.Filename, http.StatusRequestEntityTooLarge)
+			httpserver.WriteErr(w, http.StatusRequestEntityTooLarge, "request_too_large", "file too large: "+fh.Filename)
 			return
 		}
 		f, err := fh.Open()
 		if err != nil {
-			http.Error(w, "open: "+fh.Filename, http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "open: "+fh.Filename)
 			return
 		}
 		data, err := io.ReadAll(f)
 		_ = f.Close()
 		if err != nil {
-			http.Error(w, "read: "+fh.Filename, http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read: "+fh.Filename)
 			return
 		}
 		mime := fh.Header.Get("Content-Type")
@@ -128,7 +129,7 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 			s.fileAckMu.Lock()
 			delete(s.fileAckWaiters(), reqID)
 			s.fileAckMu.Unlock()
-			http.Error(w, "send to claw failed", http.StatusBadGateway)
+			httpserver.WriteErr(w, http.StatusBadGateway, "bad_gateway", "send to claw failed")
 			return
 		}
 
@@ -136,7 +137,7 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 		case ack := <-ch:
 			cancel()
 			if !ack.OK {
-				http.Error(w, "claw rejected file: "+ack.Error, http.StatusBadGateway)
+				httpserver.WriteErr(w, http.StatusBadGateway, "bad_gateway", "claw rejected file: "+ack.Error)
 				return
 			}
 			out = append(out, uploadedAttachment{
@@ -150,7 +151,7 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 			s.fileAckMu.Lock()
 			delete(s.fileAckWaiters(), reqID)
 			s.fileAckMu.Unlock()
-			http.Error(w, "timeout waiting for claw ack", http.StatusGatewayTimeout)
+			httpserver.WriteErr(w, http.StatusGatewayTimeout, "gateway_timeout", "timeout waiting for claw ack")
 			return
 		}
 	}
@@ -181,7 +182,7 @@ func isActiveContentType(ct, ext string) bool {
 // rejected at the claw even if a caller crafts a malicious path query.
 func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	clawID := r.PathValue("clawID")
@@ -190,19 +191,19 @@ func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 	}
 	path := r.URL.Query().Get("path")
 	if clawID == "" || path == "" {
-		http.Error(w, "missing claw id or path", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "missing claw id or path")
 		return
 	}
 
 	cc := s.reg.Lookup(clawID)
 	if cc == nil {
-		http.Error(w, "claw not connected", http.StatusConflict)
+		httpserver.WriteErr(w, http.StatusConflict, "conflict", "claw not connected")
 		return
 	}
 
 	tenantID := s.tenantFromCtx(r)
 	if cc.TenantID != tenantID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return
 	}
 
@@ -222,19 +223,19 @@ func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 		s.fileAckMu.Lock()
 		delete(s.fileReadWaiters(), reqID)
 		s.fileAckMu.Unlock()
-		http.Error(w, "send to claw failed", http.StatusBadGateway)
+		httpserver.WriteErr(w, http.StatusBadGateway, "bad_gateway", "send to claw failed")
 		return
 	}
 
 	select {
 	case resp := <-ch:
 		if !resp.OK {
-			http.Error(w, "claw read failed: "+resp.Error, http.StatusBadGateway)
+			httpserver.WriteErr(w, http.StatusBadGateway, "bad_gateway", "claw read failed: "+resp.Error)
 			return
 		}
 		data, err := base64.StdEncoding.DecodeString(resp.Data)
 		if err != nil {
-			http.Error(w, "decode failed", http.StatusBadGateway)
+			httpserver.WriteErr(w, http.StatusBadGateway, "bad_gateway", "decode failed")
 			return
 		}
 		ext := strings.ToLower(filepath.Ext(path))
@@ -258,6 +259,6 @@ func (s *Service) HandleFileView(w http.ResponseWriter, r *http.Request) {
 		s.fileAckMu.Lock()
 		delete(s.fileReadWaiters(), reqID)
 		s.fileAckMu.Unlock()
-		http.Error(w, "timeout waiting for claw", http.StatusGatewayTimeout)
+		httpserver.WriteErr(w, http.StatusGatewayTimeout, "gateway_timeout", "timeout waiting for claw")
 	}
 }

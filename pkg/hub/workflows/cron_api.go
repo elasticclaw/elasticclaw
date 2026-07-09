@@ -6,13 +6,15 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 )
 
 // handleCronWorkflowTrigger handles POST /api/workspaces/{workspace}/workflows/{workflow}/cron/trigger
 // Manually triggers a cron workflow run.
 func (s *Service) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
 
@@ -20,20 +22,20 @@ func (s *Service) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reque
 	workflow := r.PathValue("workflow")
 
 	if s.cronScheduler() == nil {
-		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
+		httpserver.WriteErr(w, http.StatusServiceUnavailable, "unavailable", "Cron scheduler not available")
 		return
 	}
 
 	key, err := s.cronScheduler().manualTrigger(workspace, workflow)
 	if err != nil {
 		if _, ok := err.(*cronTriggerNotFoundError); ok {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			httpserver.WriteErr(w, http.StatusNotFound, "not_found", err.Error())
 		} else if _, ok := err.(*cronTriggerDisabledError); ok {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			httpserver.WriteErr(w, http.StatusForbidden, "forbidden", err.Error())
 		} else if _, ok := err.(*cronTriggerSkippedError); ok {
-			http.Error(w, err.Error(), http.StatusConflict)
+			httpserver.WriteErr(w, http.StatusConflict, "conflict", err.Error())
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			httpserver.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 		}
 		return
 	}
@@ -49,7 +51,7 @@ func (s *Service) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reque
 // Returns the run history for a cron workflow.
 func (s *Service) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
 
@@ -57,7 +59,7 @@ func (s *Service) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request)
 	workflow := r.PathValue("workflow")
 
 	if s.cronScheduler() == nil {
-		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
+		httpserver.WriteErr(w, http.StatusServiceUnavailable, "unavailable", "Cron scheduler not available")
 		return
 	}
 
@@ -71,7 +73,7 @@ func (s *Service) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request)
 
 	runs, err := s.cronScheduler().getRunHistory(workspace, workflow, limit)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get run history: %v", err), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", fmt.Sprintf("Failed to get run history: %v", err))
 		return
 	}
 
@@ -86,7 +88,7 @@ func (s *Service) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request)
 // Returns the next scheduled run time for a cron workflow.
 func (s *Service) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
 
@@ -94,7 +96,7 @@ func (s *Service) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Reque
 	workflow := r.PathValue("workflow")
 
 	if s.cronScheduler() == nil {
-		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
+		httpserver.WriteErr(w, http.StatusServiceUnavailable, "unavailable", "Cron scheduler not available")
 		return
 	}
 
@@ -103,7 +105,7 @@ func (s *Service) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Reque
 
 	nextRun, ok := nextRuns[key]
 	if !ok {
-		http.Error(w, "Workflow not found or not cron-triggered", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "Workflow not found or not cron-triggered")
 		return
 	}
 

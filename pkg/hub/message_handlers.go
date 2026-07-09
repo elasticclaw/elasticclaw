@@ -395,11 +395,11 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 		return false
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return false
 	}
 	if !canViewClaw(accessCfgMsg, ghLoginMsg, clawTagsMsg) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return false
 	}
 	return true

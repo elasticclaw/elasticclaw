@@ -21,12 +21,12 @@ func (s *Server) handleSecretsCRUD(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		s.handleSecretDelete(w, r, name)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -52,11 +52,11 @@ type secretUpsertRequest struct {
 func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 	var req secretUpsertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, "name required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 		return
 	}
 
@@ -72,7 +72,7 @@ func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Unlock()
 
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
 		return
 	}
 
@@ -82,7 +82,7 @@ func (s *Server) handleSecretUpsert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name string) {
 	diskCfg, err := config.LoadHubConfig()
 	if err != nil {
-		http.Error(w, "failed to load config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load config: "+err.Error())
 		return
 	}
 
@@ -94,7 +94,7 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name
 	}
 	if !inMemory && !onDisk {
 		s.cfgMu.Unlock()
-		http.Error(w, "secret not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "secret not found")
 		return
 	}
 	cfgCopy := *s.hubCfg
@@ -128,7 +128,7 @@ func (s *Server) handleSecretDelete(w http.ResponseWriter, _ *http.Request, name
 		cfgToSave.Secrets = mergedSecrets
 	}
 	if err := config.SaveHubConfigNoSecretMerge(&cfgToSave); err != nil {
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
 		return
 	}
 

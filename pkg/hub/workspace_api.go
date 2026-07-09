@@ -66,12 +66,12 @@ func (s *Server) handleWorkspacesCRUD(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		s.handleWorkspaceDelete(w, r, name)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -82,11 +82,11 @@ type WorkspacePushRequest struct {
 func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 	var req WorkspacePushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if len(req.Workspaces) == 0 {
-		http.Error(w, "no workspaces provided", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "no workspaces provided")
 		return
 	}
 
@@ -101,7 +101,7 @@ func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(saveErrs) > 0 {
-		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", strings.Join(saveErrs, "; "))
 		return
 	}
 
@@ -117,7 +117,7 @@ func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWorkspaceDelete(w http.ResponseWriter, _ *http.Request, name string) {
 	if err := deleteExternalWorkspace(name); err != nil {
-		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "delete error: "+err.Error())
 		return
 	}
 	jsonOK(w, map[string]string{"deleted": name})
@@ -129,12 +129,12 @@ func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
-		http.Error(w, "workspace name required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace name required")
 		return
 	}
 	for _, workspace := range s.workspaceViews() {
@@ -153,34 +153,34 @@ type WorkflowPushRequest struct {
 func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
-		http.Error(w, "workspace name required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace name required")
 		return
 	}
 	var req WorkflowPushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if len(req.Workflows) == 0 {
-		http.Error(w, "no workflows provided", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "no workflows provided")
 		return
 	}
 	for _, workflow := range req.Workflows {
 		if workflow == nil {
-			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "workflow cannot be nil")
 			return
 		}
 		if err := types.NormalizeWorkflowConfig(workflow); err != nil {
-			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid workflow: "+err.Error())
 			return
 		}
 		if err := workflow.Validate(); err != nil {
-			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid workflow: "+err.Error())
 			return
 		}
 	}
 	if err := saveExternalWorkflows(name, req.Workflows); err != nil {
-		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "save workflows: "+err.Error())
 		return
 	}
 	if s.cronScheduler != nil {
@@ -201,13 +201,13 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
 	workflowName := strings.TrimSpace(r.PathValue("workflow"))
 	if workspaceName == "" || workflowName == "" {
-		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace and workflow names required")
 		return
 	}
 	workflow, ok := s.findWorkflowView(workspaceName, workflowName)
@@ -228,26 +228,26 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
 	workflowName := strings.TrimSpace(r.PathValue("workflow"))
 	if workspaceName == "" || workflowName == "" {
-		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace and workflow names required")
 		return
 	}
 	var req WorkflowPatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
-		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "no workflow fields provided")
 		return
 	}
 	if req.EnableManualTrigger != nil && req.EnableManualTriggerSnake != nil {
-		http.Error(w, "provide only one of enableManualTrigger or enable_manual_trigger", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "provide only one of enableManualTrigger or enable_manual_trigger")
 		return
 	}
 
 	workspace, workflow, ok, err := s.resolveWorkflowConfig(workspaceName, workflowName)
 	if err != nil {
-		http.Error(w, "failed to load workflow: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to load workflow: "+err.Error())
 		return
 	}
 	if !ok {
@@ -265,7 +265,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	}
 	workflow.RawConfig = ""
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
-		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "save workflow: "+err.Error())
 		return
 	}
 	if s.cronScheduler != nil {

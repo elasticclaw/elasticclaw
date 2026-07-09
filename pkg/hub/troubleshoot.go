@@ -27,16 +27,16 @@ const maxProblemLen = 4000
 
 func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req troubleshootRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	if req.Problem == "" {
-		http.Error(w, "problem required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "problem required")
 		return
 	}
 	if len(req.Problem) > maxProblemLen {
@@ -55,7 +55,7 @@ func (s *Server) handleTroubleshootStream(w http.ResponseWriter, r *http.Request
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "streaming not supported")
 		return
 	}
 	flusher.Flush()

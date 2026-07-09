@@ -62,7 +62,7 @@ var (
 // HandleDoctor handles GET /api/doctor.
 func (s *Service) HandleDoctor(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 

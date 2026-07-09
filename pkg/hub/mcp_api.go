@@ -22,12 +22,12 @@ func (s *Server) handleMCPCrud(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		s.handleMCPDelete(w, r, name)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -77,35 +77,35 @@ type mcpUpsertRequest struct {
 func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 	var req mcpUpsertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, "name required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 		return
 	}
 	if req.Source == "" {
-		http.Error(w, "source required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "source required")
 		return
 	}
 	switch types.MCPSource(req.Source) {
 	case types.MCPSourceNpx, types.MCPSourceUvx, types.MCPSourceSmithery:
 		if req.Package == "" {
-			http.Error(w, "package required for source "+req.Source, http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "package required for source "+req.Source)
 			return
 		}
 	case types.MCPSourceDocker:
 		if req.Image == "" {
-			http.Error(w, "image required for source docker", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "image required for source docker")
 			return
 		}
 	case types.MCPSourceSSE:
 		if req.URL == "" {
-			http.Error(w, "url required for source sse", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "url required for source sse")
 			return
 		}
 	default:
-		http.Error(w, "invalid source: must be npx, uvx, smithery, docker, or sse", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid source: must be npx, uvx, smithery, docker, or sse")
 		return
 	}
 
@@ -159,7 +159,7 @@ func (s *Server) handleMCPUpsert(w http.ResponseWriter, r *http.Request) {
 	cfgCopy.MCPServers = mcps
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		s.cfgMu.Unlock()
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
 		return
 	}
 	s.hubCfg = &cfgCopy
@@ -182,13 +182,13 @@ func (s *Server) handleMCPDelete(w http.ResponseWriter, _ *http.Request, name st
 	}
 	if !found {
 		s.cfgMu.Unlock()
-		http.Error(w, "mcp server not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "mcp server not found")
 		return
 	}
 	cfgCopy.MCPServers = mcps
 	if err := config.SaveHubConfig(&cfgCopy); err != nil {
 		s.cfgMu.Unlock()
-		http.Error(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "failed to save config: "+err.Error())
 		return
 	}
 	s.hubCfg = &cfgCopy

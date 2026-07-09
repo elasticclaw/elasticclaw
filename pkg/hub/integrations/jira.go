@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -99,24 +100,24 @@ type jiraPollIssue = jiraIssue
 
 func (s *Service) HandleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 	if !s.validateJiraWebhookSecret(workspaceName, r) {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "invalid signature")
 		return
 	}
 
 	payload, err := parseJiraWebhookPayload(body)
 	if err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 		return
 	}
 	if payload.Issue.Key == "" {

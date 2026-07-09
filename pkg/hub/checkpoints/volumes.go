@@ -383,7 +383,7 @@ func (s *Service) dispatchVolumeSync(ctx context.Context, cc Conn, volume Workfl
 func (s *Service) HandleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	leaseID := strings.TrimSpace(r.PathValue("lease"))
 	if leaseID == "" {
-		http.Error(w, "lease required", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "lease required")
 		return
 	}
 	if !s.authenticateClawToken(w, r) {
@@ -392,7 +392,7 @@ func (s *Service) HandleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	clawID := strings.TrimSpace(r.Header.Get("X-Claw-ID"))
 	accessToken := strings.TrimSpace(r.Header.Get("X-Volume-Token"))
 	if clawID == "" || accessToken == "" {
-		http.Error(w, "volume lease credentials required", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "volume lease credentials required")
 		return
 	}
 	switch r.Method {
@@ -401,29 +401,29 @@ func (s *Service) HandleVolumeArchive(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		s.handleVolumeArchivePut(w, r, leaseID, clawID, accessToken)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
 func (s *Service) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	manifestDigest, err := s.volumeLeaseManifest(r.Context(), leaseID, clawID, accessToken)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
 	data, err := s.artifacts().GetManifest(r.Context(), manifestDigest)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	var manifest volumeManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	body, err := s.artifacts().GetBlob(r.Context(), manifest.Layer.Digest)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	defer body.Close()
@@ -434,25 +434,25 @@ func (s *Service) handleVolumeArchiveGet(w http.ResponseWriter, r *http.Request,
 func (s *Service) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request, leaseID, clawID, accessToken string) {
 	var repo, tag, mode, attachedDigest string
 	if err := s.deps.DB.QueryRow(`SELECT repo, tag, mode, manifest_digest FROM volume_leases WHERE id=? AND claw_id=? AND access_token=? AND released_at IS NULL AND expires_at > ?`, leaseID, clawID, accessToken, time.Now().UTC()).Scan(&repo, &tag, &mode, &attachedDigest); err != nil {
-		http.Error(w, "active lease not found", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "active lease not found")
 		return
 	}
 	if mode != volumeModeRW {
-		http.Error(w, "volume is read-only", http.StatusForbidden)
+		httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "volume is read-only")
 		return
 	}
 	currentDigest, err := s.artifacts().ResolveRef(r.Context(), repo, tag)
 	if err != nil {
-		http.Error(w, "resolve volume ref: "+err.Error(), http.StatusConflict)
+		httpserver.WriteErr(w, http.StatusConflict, "conflict", "resolve volume ref: "+err.Error())
 		return
 	}
 	if currentDigest != attachedDigest {
-		http.Error(w, "volume changed since lease was acquired", http.StatusConflict)
+		httpserver.WriteErr(w, http.StatusConflict, "conflict", "volume changed since lease was acquired")
 		return
 	}
 	layerDigest, size, err := s.artifacts().PutBlob(r.Context(), r.Body)
 	if err != nil {
-		http.Error(w, "store volume layer: "+err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "store volume layer: "+err.Error())
 		return
 	}
 	manifest := volumeManifest{
@@ -468,11 +468,11 @@ func (s *Service) handleVolumeArchivePut(w http.ResponseWriter, r *http.Request,
 	data, _ := json.Marshal(manifest)
 	manifestDigest, err := s.artifacts().PutManifest(r.Context(), data)
 	if err != nil {
-		http.Error(w, "store volume manifest: "+err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "store volume manifest: "+err.Error())
 		return
 	}
 	if err := s.artifacts().Tag(r.Context(), repo, tag, manifestDigest); err != nil {
-		http.Error(w, "tag volume: "+err.Error(), http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "tag volume: "+err.Error())
 		return
 	}
 	if _, err := s.deps.DB.Exec(`UPDATE volume_leases SET manifest_digest=?, heartbeat_at=? WHERE id=? AND claw_id=? AND access_token=?`, manifestDigest, time.Now().UTC(), leaseID, clawID, accessToken); err != nil {
@@ -499,7 +499,7 @@ func (s *Service) authenticateClawToken(w http.ResponseWriter, r *http.Request) 
 	want := s.hubCfg().ClawToken
 	s.deps.CfgMu.RUnlock()
 	if token == "" || want == "" || token != want {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return false
 	}
 	return true

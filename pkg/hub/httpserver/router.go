@@ -225,7 +225,7 @@ func RegisterRoutes(mux *http.ServeMux, auth Auth, h Handlers) {
 				return
 			}
 			if r.URL.Query().Get("token") != bridgeToken {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				WriteErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 				return
 			}
 			http.ServeFile(w, r, bridgePath)

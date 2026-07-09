@@ -17,7 +17,7 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.pushTemplate(w, r)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -25,14 +25,14 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
-		http.Error(w, "missing template name", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "missing template name")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		files, err := s.loadHubTemplate(name)
 		if err != nil {
-			http.Error(w, "template not found", http.StatusNotFound)
+			writeErr(w, http.StatusNotFound, "not_found", "template not found")
 			return
 		}
 		jsonOK(w, map[string]interface{}{
@@ -41,14 +41,14 @@ func (s *Server) handleTemplateDetail(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodDelete:
 		if err := deleteExternalTemplate(name); err != nil {
-			http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "delete error: "+err.Error())
 			return
 		}
 		// Also clean up legacy DB row if present
 		_ = s.st().Settings().DeleteTemplate(r.Context(), name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -56,7 +56,7 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	// List from external storage first
 	names, err := listExternalTemplates()
 	if err != nil {
-		http.Error(w, "fs error: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "fs error: "+err.Error())
 		return
 	}
 
@@ -104,34 +104,34 @@ func (s *Server) pushTemplate(w http.ResponseWriter, r *http.Request) {
 		Files map[string]string `json:"files"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		http.Error(w, "invalid request: name and files required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request: name and files required")
 		return
 	}
 	// Validate name
 	if strings.ContainsAny(body.Name, "/\\") || strings.Contains(body.Name, "..") {
-		http.Error(w, "invalid template name", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid template name")
 		return
 	}
 
 	// Validate template configuration (required)
 	configData, ok := body.Files["elasticclaw-config.yaml"]
 	if !ok {
-		http.Error(w, "elasticclaw-config.yaml is required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "elasticclaw-config.yaml is required")
 		return
 	}
 	cfg, err := config.ParseTemplateConfig([]byte(configData))
 	if err != nil {
-		http.Error(w, "invalid elasticclaw-config.yaml: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid elasticclaw-config.yaml: "+err.Error())
 		return
 	}
 	if err := cfg.Validate(); err != nil {
-		http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "validation error: "+err.Error())
 		return
 	}
 
 	// Write to external storage
 	if err := saveExternalTemplate(body.Name, body.Files); err != nil {
-		http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "save error: "+err.Error())
 		return
 	}
 

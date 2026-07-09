@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/settings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -62,13 +63,13 @@ type ExternalWebhookPayload struct {
 // This endpoint accepts generic webhooks and GitHub release events.
 func (s *Service) HandleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 
@@ -120,7 +121,7 @@ func (s *Service) HandleExternalWebhook(w http.ResponseWriter, r *http.Request) 
 		}
 		if err := json.Unmarshal(body, &ghReleasePayload); err != nil {
 			logfCtx(r.Context(), "[external-webhook] failed to parse release payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		payload.EventType = ghReleasePayload.Action
@@ -140,7 +141,7 @@ func (s *Service) HandleExternalWebhook(w http.ResponseWriter, r *http.Request) 
 		// Generic webhook - try to parse as our standard payload format
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[external-webhook] failed to parse generic payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		logfCtx(r.Context(), "[external-webhook] generic event: type=%q repo=%q",

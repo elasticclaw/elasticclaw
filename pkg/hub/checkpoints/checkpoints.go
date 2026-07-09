@@ -576,7 +576,7 @@ func (s *Service) InsertCheckpoint(id, tenantID, clawID, reason, createdBy, prov
 func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/checkpoints/"), "/")
 	if len(parts) != 2 {
-		http.Error(w, "not found", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	checkpointID, action := parts[0], parts[1]
@@ -587,12 +587,12 @@ func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Reques
 	switch action {
 	case "plan":
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 			return
 		}
 		var plan types.CheckpointPlan
 		if err := json.NewDecoder(r.Body).Decode(&plan); err != nil {
-			http.Error(w, "invalid plan", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid plan")
 			return
 		}
 		plan.CheckpointID = checkpointID
@@ -608,12 +608,12 @@ func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Reques
 		httpserver.JSONOK(w, types.CheckpointPlanAck{Upload: missing})
 	case "complete":
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 			return
 		}
 		var complete types.CheckpointComplete
 		if err := json.NewDecoder(r.Body).Decode(&complete); err != nil {
-			http.Error(w, "invalid complete", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid complete")
 			return
 		}
 		if complete.Error != "" {
@@ -629,7 +629,7 @@ func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Reques
 			s.notifyCheckpointWaiter(checkpointID, err)
 			s.finishCheckpointRequest(clawID, checkpointID)
 			s.DrainPendingCheckpoint(clawID)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			httpserver.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
 		s.notifyCheckpointWaiter(checkpointID, nil)
@@ -637,18 +637,18 @@ func (s *Service) HandleCheckpointInternal(w http.ResponseWriter, r *http.Reques
 		s.DrainPendingCheckpoint(clawID)
 		httpserver.JSONOK(w, map[string]string{"status": "ready"})
 	default:
-		http.Error(w, "not found", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "not found")
 	}
 }
 
 func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	sha := strings.TrimPrefix(r.URL.Path, "/api/checkpoints/blob/")
 	if !validSHA256(sha) {
-		http.Error(w, "bad sha", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "bad sha")
 		return
 	}
 	token := r.Header.Get("X-Claw-Token")
@@ -656,7 +656,7 @@ func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Requ
 		token = r.URL.Query().Get("claw_token")
 	}
 	if _, err := s.tenantByClawToken(token); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCheckpointBlobBytes)
@@ -666,13 +666,13 @@ func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "storage error")
 		return
 	}
 	tmp := path + ".tmp-" + uuid.New().String()
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
 	if err != nil {
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "storage error")
 		return
 	}
 	h := sha256.New()
@@ -682,15 +682,15 @@ func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Requ
 		_ = os.Remove(tmp)
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(copyErr, &maxBytesErr) {
-			http.Error(w, "blob too large", http.StatusRequestEntityTooLarge)
+			httpserver.WriteErr(w, http.StatusRequestEntityTooLarge, "request_too_large", "blob too large")
 			return
 		}
-		http.Error(w, "write error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "write error")
 		return
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != sha {
 		_ = os.Remove(tmp)
-		http.Error(w, "sha mismatch", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "sha mismatch")
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -699,7 +699,7 @@ func (s *Service) HandleCheckpointBlobUpload(w http.ResponseWriter, r *http.Requ
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		http.Error(w, "storage error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "storage error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -712,20 +712,20 @@ func (s *Service) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Requ
 	}
 	resolvedTenant, err := s.tenantByClawToken(token)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return "", "", false
 	}
 	err = s.deps.DB.QueryRow(`SELECT tenant_id, claw_id FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&tenantID, &clawID)
 	if err == sql.ErrNoRows {
-		http.Error(w, "not found", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "not found")
 		return "", "", false
 	}
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "db error")
 		return "", "", false
 	}
 	if tenantID != resolvedTenant {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		httpserver.WriteErr(w, http.StatusForbidden, "forbidden", "forbidden")
 		return "", "", false
 	}
 	return tenantID, clawID, true

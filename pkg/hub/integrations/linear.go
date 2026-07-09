@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/analytics"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -59,26 +60,26 @@ type LinearWebhookPayload struct {
 
 func (s *Service) HandleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 
 	// Validate signature if any Linear integration has a webhook_secret
 	sig := r.Header.Get("Linear-Signature")
 	if !s.validateLinearSignature(r.PathValue("workspace"), body, sig) {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "invalid signature")
 		return
 	}
 
 	var payload LinearWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 		return
 	}
 
@@ -1813,13 +1814,13 @@ func (s *Service) logFactoryEvent(factoryName, issueID, issueTitle, prevStatus, 
 // HandleFactoryEvents serves GET /api/factories/:name/events
 func (s *Service) HandleFactoryEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	// Path: /api/factories/:name/events
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
 	if len(parts) < 2 || parts[1] != "events" {
-		http.Error(w, "not found", http.StatusNotFound)
+		httpserver.WriteErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	factoryName := parts[0]
@@ -1830,7 +1831,7 @@ func (s *Service) HandleFactoryEvents(w http.ResponseWriter, r *http.Request) {
 		factoryName,
 	)
 	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
+		httpserver.WriteErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 	defer rows.Close()

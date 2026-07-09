@@ -302,7 +302,7 @@ func (s *dependencyStatusService) checkTargets(ctx context.Context, targets []de
 
 func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	s.cfgMu.RLock()

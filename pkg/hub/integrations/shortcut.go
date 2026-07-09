@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
@@ -104,19 +105,19 @@ func (s *Service) validateShortcutWebhook() bool {
 
 func (s *Service) HandleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	// Validate that at least one Shortcut integration is configured
 	if !s.validateShortcutWebhook() {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 
@@ -124,13 +125,13 @@ func (s *Service) HandleShortcutWebhook(w http.ResponseWriter, r *http.Request) 
 	// Shortcut sends: Payload-Signature: sha256=<hex>
 	sig := r.Header.Get("Payload-Signature")
 	if !s.validateShortcutSignature(r.PathValue("workspace"), body, sig) {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "invalid signature")
 		return
 	}
 
 	var payload shortcutWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 		return
 	}
 

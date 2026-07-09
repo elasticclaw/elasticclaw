@@ -52,13 +52,13 @@ type AnalyticsEvent struct {
 // handleFactoryAnalytics serves GET /api/factories/:name/analytics
 func (s *Server) handleFactoryAnalytics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	// Path: /api/factories/:name/analytics
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/factories/"), "/")
 	if len(parts) < 2 || parts[1] != "analytics" {
-		http.Error(w, "not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	factoryName := parts[0]
@@ -79,7 +79,7 @@ func (s *Server) handleFactoryAnalytics(w http.ResponseWriter, r *http.Request) 
 	summary, err := s.computeFactoryAnalytics(factoryName, since)
 	if err != nil {
 		logfCtx(r.Context(), "[analytics] error computing analytics for %s: %v", factoryName, err)
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 
@@ -89,7 +89,7 @@ func (s *Server) handleFactoryAnalytics(w http.ResponseWriter, r *http.Request) 
 // handleAllFactoriesAnalytics serves GET /api/analytics/factories
 func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
@@ -113,7 +113,7 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 	)
 	if err != nil {
 		logfCtx(r.Context(), "[analytics] error listing factories: %v", err)
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 	defer rows.Close()
@@ -128,7 +128,7 @@ func (s *Server) handleAllFactoriesAnalytics(w http.ResponseWriter, r *http.Requ
 	}
 	if err := rows.Err(); err != nil {
 		logfCtx(r.Context(), "[analytics] error iterating factory names: %v", err)
-		http.Error(w, "db error", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
 	var summaries []AnalyticsSummary

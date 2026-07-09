@@ -17,46 +17,46 @@ type workspaceSecretUpsertRequest struct {
 func (s *Server) handleWorkspaceSecretsCRUD(w http.ResponseWriter, r *http.Request) {
 	workspace := strings.TrimSpace(r.PathValue("workspace"))
 	if workspace == "" {
-		http.Error(w, "workspace required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace required")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		names, err := workspaceSecretNames(workspace)
 		if err != nil {
-			http.Error(w, "list secrets: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "list secrets: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string][]string{"secrets": names})
 	case http.MethodPut, http.MethodPost:
 		var req workspaceSecretUpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 			return
 		}
 		req.Name = strings.TrimSpace(req.Name)
 		if req.Name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		if err := saveWorkspaceSecret(workspace, req.Name, req.Value); err != nil {
-			http.Error(w, "save secret: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "save secret: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"upserted": req.Name})
 	case http.MethodDelete:
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		if err := deleteWorkspaceSecret(workspace, name); err != nil {
-			http.Error(w, "delete secret: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "delete secret: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"deleted": name})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -71,14 +71,14 @@ type workspaceGitHubAppUpsertRequest struct {
 func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Request) {
 	workspace := strings.TrimSpace(r.PathValue("workspace"))
 	if workspace == "" {
-		http.Error(w, "workspace required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace required")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		apps, err := workspaceGitHubAppViews(workspace)
 		if err != nil {
-			http.Error(w, "list github apps: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "list github apps: "+err.Error())
 			return
 		}
 		enrichWorkspaceGitHubAppInstallations(r, apps, workspace)
@@ -86,16 +86,16 @@ func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Re
 	case http.MethodPut, http.MethodPost:
 		var req workspaceGitHubAppUpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 			return
 		}
 		req.Name = strings.TrimSpace(req.Name)
 		if req.Name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		if req.AppID == 0 {
-			http.Error(w, "appId required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "appId required")
 			return
 		}
 		app := workspaceGitHubApp{
@@ -111,23 +111,23 @@ func (s *Server) handleWorkspaceGitHubAppsCRUD(w http.ResponseWriter, r *http.Re
 			}
 		}
 		if err := saveWorkspaceGitHubApp(workspace, req.Name, app); err != nil {
-			http.Error(w, "save github app: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "save github app: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"upserted": req.Name})
 	case http.MethodDelete:
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
 		if name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "name required")
 			return
 		}
 		if err := deleteWorkspaceGitHubApp(workspace, name); err != nil {
-			http.Error(w, "delete github app: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "delete github app: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"deleted": name})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
 
@@ -181,21 +181,21 @@ type workspaceIssueTrackerUpsertRequest struct {
 func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http.Request) {
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
 	if workspaceName == "" {
-		http.Error(w, "workspace required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "workspace required")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		trackers, err := workspaceIssueTrackerViews(workspaceName)
 		if err != nil {
-			http.Error(w, "list issue trackers: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "list issue trackers: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string][]workspaceIssueTrackerView{"issueTrackers": trackers})
 	case http.MethodPut, http.MethodPost:
 		var req workspaceIssueTrackerUpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
 			return
 		}
 		req.Type = strings.TrimSpace(req.Type)
@@ -206,7 +206,7 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 			req.Workspace = workspaceName
 		}
 		if req.Type == "" {
-			http.Error(w, "type required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "type required")
 			return
 		}
 		if req.Token == "" {
@@ -228,16 +228,16 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 			}
 		}
 		if req.Token == "" {
-			http.Error(w, "token required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "token required")
 			return
 		}
 		if req.Type == "jira" && req.BaseURL == "" {
-			http.Error(w, "baseUrl required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "baseUrl required")
 			return
 		}
 		if req.OriginalWorkspace != "" && !strings.EqualFold(req.OriginalWorkspace, req.Workspace) {
 			if err := deleteWorkspaceIssueTracker(workspaceName, req.Type, req.OriginalWorkspace); err != nil {
-				http.Error(w, "rename issue tracker: "+err.Error(), http.StatusInternalServerError)
+				writeErr(w, http.StatusInternalServerError, "internal", "rename issue tracker: "+err.Error())
 				return
 			}
 		}
@@ -247,7 +247,7 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 			Token:         req.Token,
 			WebhookSecret: req.WebhookSecret,
 		}); err != nil {
-			http.Error(w, "save issue tracker: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "save issue tracker: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"upserted": req.Workspace})
@@ -255,15 +255,15 @@ func (s *Server) handleWorkspaceIssueTrackersCRUD(w http.ResponseWriter, r *http
 		trackerType := strings.TrimSpace(r.URL.Query().Get("type"))
 		name := strings.TrimSpace(r.URL.Query().Get("workspace"))
 		if trackerType == "" || name == "" {
-			http.Error(w, "type and workspace required", http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, "bad_request", "type and workspace required")
 			return
 		}
 		if err := deleteWorkspaceIssueTracker(workspaceName, trackerType, name); err != nil {
-			http.Error(w, "delete issue tracker: "+err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "internal", "delete issue tracker: "+err.Error())
 			return
 		}
 		jsonOK(w, map[string]string{"deleted": name})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
@@ -44,13 +45,13 @@ type GitHubPRPayload struct {
 // HandleGitHubWebhook processes incoming GitHub webhook events.
 func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 
@@ -59,12 +60,12 @@ func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	sig := r.Header.Get("X-Hub-Signature-256")
 	if !s.validateGitHubSignature(body, sig) {
 		logfCtx(r.Context(), "[github-webhook] signature validation failed for event=%q — check webhook secret", event)
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "invalid signature")
 		return
 	}
 
 	if event == "" {
-		http.Error(w, "missing X-GitHub-Event", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "missing X-GitHub-Event")
 		return
 	}
 
@@ -73,7 +74,7 @@ func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		var payload GitHubIssuesWebhookPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse issues payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		logfCtx(r.Context(), "[github-webhook] issues action=%q repo=%q issue=#%d author=%q",
@@ -83,7 +84,7 @@ func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		var payload GitHubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		logfCtx(r.Context(), "[github-webhook] pull_request action=%q repo=%q pr=#%d author=%q base=%q",
@@ -94,7 +95,7 @@ func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		var payload githubPRReviewCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request_review_comment payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		logfCtx(r.Context(), "[github-webhook] pull_request_review_comment action=%q repo=%q pr=#%d author=%q",
@@ -104,7 +105,7 @@ func (s *Service) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		var payload githubPRReviewPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
 			logfCtx(r.Context(), "[github-webhook] failed to parse pull_request_review payload: %v", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+			httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 			return
 		}
 		logfCtx(r.Context(), "[github-webhook] pull_request_review action=%q state=%q repo=%q pr=#%d author=%q",

@@ -87,7 +87,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
 				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
+					writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 					return
 				}
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
@@ -97,7 +97,7 @@ func (s *Server) withConfigMutationAuth(next http.HandlerFunc) http.HandlerFunc 
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -187,7 +187,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		s.cfgMu.RLock()
@@ -212,7 +212,7 @@ func (s *Server) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -235,7 +235,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get(webSessionHeader)
 		}
 		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		s.cfgMu.RLock()
@@ -256,7 +256,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 		if sessionSecret != "" {
 			if payload, ok := verifyGitHubSession(sessionSecret, token); ok {
 				if !isAccessAdmin(accessCfg, payload.Login) {
-					http.Error(w, "forbidden", http.StatusForbidden)
+					writeErr(w, http.StatusForbidden, "forbidden", "forbidden")
 					return
 				}
 				ctx := context.WithValue(r.Context(), ctxGitHubLoginKey{}, payload.Login)
@@ -266,7 +266,7 @@ func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	}
 }
 
@@ -340,19 +340,19 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var body struct {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid request")
 		return
 	}
 	tenantID, err := s.tenantByToken(body.Token)
 	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid token")
 		return
 	}
 	jsonOK(w, map[string]string{"tenant_id": tenantID, "token": body.Token})
@@ -374,19 +374,19 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	hubClawToken := s.hubCfg.ClawToken
 	s.cfgMu.RUnlock()
 	if clawToken != hubClawToken {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 
 	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
 	if clawID == "" {
-		http.Error(w, "missing claw id", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "bad_request", "missing claw id")
 		return
 	}
 
 	workspaceName, reposJSON, err := s.st().Claws().WorkspaceRepos(r.Context(), clawID)
 	if err != nil {
-		http.Error(w, "claw not found", http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, "not_found", "claw not found")
 		return
 	}
 
@@ -429,7 +429,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		githubApps = append(workspaceApps, githubApps...)
 	}
 	if len(githubApps) == 0 {
-		http.Error(w, "no github apps configured", http.StatusNotImplemented)
+		writeErr(w, http.StatusNotImplemented, "not_implemented", "no github apps configured")
 		return
 	}
 	for i, appCfg := range githubApps {
@@ -453,5 +453,5 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logfCtx(r.Context(), "no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
-	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
+	writeErr(w, http.StatusNotFound, "not_found", "no github installation found for the requested repos")
 }

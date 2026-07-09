@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
@@ -75,7 +76,7 @@ type GitHubIssueComment struct {
 func (s *Service) HandleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 405 method not allowed", r.Method, r.URL.Path)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpserver.WriteErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
@@ -83,7 +84,7 @@ func (s *Service) HandleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reque
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 400 read error: %v", r.Method, r.URL.Path, err)
-		http.Error(w, "read error", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "read error")
 		return
 	}
 
@@ -92,13 +93,13 @@ func (s *Service) HandleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reque
 	reason := s.validateGitHubIssuesSignatureReason(workspaceName, body, sig)
 	if reason != "" {
 		logfCtx(r.Context(), "[github-issues-webhook] %s %s → 401 %s (sig present=%v)", r.Method, r.URL.Path, reason, sig != "")
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		httpserver.WriteErr(w, http.StatusUnauthorized, "unauthorized", "invalid signature")
 		return
 	}
 
 	var payload GitHubIssuesWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
+		httpserver.WriteErr(w, http.StatusBadRequest, "bad_request", "invalid payload")
 		return
 	}
 
