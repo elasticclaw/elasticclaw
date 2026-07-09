@@ -54,3 +54,31 @@ func TestWorkerPoolZeroValueUsesDefaultLimit(t *testing.T) {
 		t.Fatal("submitted work never ran")
 	}
 }
+
+func TestWorkerPoolContainsPanics(t *testing.T) {
+	p := &WorkerPool{Limit: 1}
+	panicked := make(chan struct{})
+	if !p.TrySubmit(func() { close(panicked); panic("boom") }) {
+		t.Fatal("pool rejected work below its limit")
+	}
+	select {
+	case <-panicked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("submitted work never ran")
+	}
+
+	// The permit must be released even though the worker panicked.
+	deadline := time.After(2 * time.Second)
+	for {
+		done := make(chan struct{})
+		if p.TrySubmit(func() { close(done) }) {
+			<-done
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("pool never regained capacity after a panicking worker")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}

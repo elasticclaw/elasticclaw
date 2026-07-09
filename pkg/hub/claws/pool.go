@@ -1,6 +1,7 @@
 package claws
 
 import (
+	"runtime/debug"
 	"sync"
 
 	"golang.org/x/sync/semaphore"
@@ -45,6 +46,10 @@ func (p *WorkerPool) init() {
 // reports whether it did. A false return means the pool is saturated —
 // the queue overflowed — and the caller should apply backpressure (the WS
 // read loop closes the connection with StatusOverloaded).
+//
+// A panic in fn is contained to its worker: it is logged with a stack
+// trace and the permit is released, so one misbehaving WS handler cannot
+// bring down the hub process.
 func (p *WorkerPool) TrySubmit(fn func()) bool {
 	p.init()
 	if !p.sem.TryAcquire(1) {
@@ -52,6 +57,11 @@ func (p *WorkerPool) TrySubmit(fn func()) bool {
 	}
 	go func() {
 		defer p.sem.Release(1)
+		defer func() {
+			if r := recover(); r != nil {
+				logf("[ws pool] recovered panic in WS worker: %v\n%s", r, debug.Stack())
+			}
+		}()
 		fn()
 	}()
 	return true
