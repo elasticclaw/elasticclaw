@@ -125,15 +125,31 @@ func TestAllowedCORSOriginsFromConfig(t *testing.T) {
 func TestAllowedCORSOriginsDefaultsToHubOrigin(t *testing.T) {
 	s := &Server{hubCfg: &types.HubConfig{
 		URL:       "http://localhost:8080/some/path",
-		PublicURL: "https://hub.example.com",
+		PublicURL: "http://hub:8080",
 	}}
 	got := s.allowedCORSOrigins()
-	for _, want := range []string{"http://localhost:8080", "https://hub.example.com"} {
-		if _, ok := got[want]; !ok {
-			t.Errorf("allowedCORSOrigins missing default %q (got %v)", want, got)
-		}
+	if _, ok := got["http://localhost:8080"]; !ok {
+		t.Errorf("allowedCORSOrigins missing default hub origin (got %v)", got)
 	}
-	if len(got) != 2 {
-		t.Errorf("allowedCORSOrigins has %d entries, want 2: %v", len(got), got)
+	if _, ok := got["http://hub:8080"]; ok {
+		t.Error("public_url (claw callback URL) must not be implicitly allowed as a browser origin")
+	}
+	if len(got) != 1 {
+		t.Errorf("allowedCORSOrigins has %d entries, want 1: %v", len(got), got)
+	}
+}
+
+func TestAllowedCORSOriginsPublicURLRequiresExplicitListing(t *testing.T) {
+	s := &Server{hubCfg: &types.HubConfig{
+		URL:            "http://localhost:8080",
+		PublicURL:      "https://hub.example.com",
+		AllowedOrigins: []string{"https://hub.example.com"},
+	}}
+	got := s.allowedCORSOrigins()
+	if _, ok := got["https://hub.example.com"]; !ok {
+		t.Errorf("explicitly listed public_url origin must be allowed (got %v)", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("allowedCORSOrigins has %d entries, want 1: %v", len(got), got)
 	}
 }

@@ -512,7 +512,9 @@ type HubConfig struct {
 
 	// AllowedOrigins lists the browser origins permitted by the hub's CORS
 	// policy (e.g. "http://localhost:3000"). If empty, only the hub's own
-	// origin (derived from url/public_url) is allowed.
+	// browser-facing origin (derived from url) is allowed; public_url is a
+	// claw callback URL and must be listed explicitly if it is also used as
+	// a browser origin.
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
 
 	// Branding allows white-labeling the web UI.

@@ -10,7 +10,8 @@ public_url: http://hub:8080
 
 # Browser origins allowed by the hub's CORS policy. In dev the Next.js UI
 # runs on :3000 and calls the hub on :8080, so it must be listed here.
-# If omitted, only the hub's own origin (url/public_url) is allowed.
+# If omitted, only the hub's own browser-facing origin (url) is allowed;
+# public_url is the agent callback URL and is never allowed implicitly.
 allowed_origins:
   - http://localhost:3000
 

@@ -424,7 +424,10 @@ func normalizeOrigin(origin string) string {
 
 // allowedCORSOrigins builds the set of origins permitted by the CORS policy:
 // the origins listed in hub.yaml allowed_origins, or — when the list is empty
-// — the hub's own origin derived from url/public_url.
+// — the hub's own browser-facing origin derived from url. public_url is the
+// claw/agent callback URL, not a browser origin, so it is never allowed
+// implicitly; list it in allowed_origins if it is intentionally also a
+// browser origin.
 func (s *Server) allowedCORSOrigins() map[string]struct{} {
 	allowed := make(map[string]struct{})
 	add := func(raw string) {
@@ -443,9 +446,8 @@ func (s *Server) allowedCORSOrigins() map[string]struct{} {
 		}
 		return allowed
 	}
-	// Default: only the hub's own origin.
+	// Default: only the hub's own browser-facing origin.
 	add(s.hubCfg.URL)
-	add(s.hubCfg.PublicURL)
 	return allowed
 }
 
