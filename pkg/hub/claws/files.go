@@ -155,7 +155,7 @@ func (s *Service) HandleFileUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonOK(w, map[string]interface{}{"files": out})
+	s.jsonOK(w, map[string]interface{}{"files": out})
 }
 
 // isActiveContentType returns true if the content type or extension could

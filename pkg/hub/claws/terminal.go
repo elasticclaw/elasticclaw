@@ -15,7 +15,6 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
 
-	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -29,7 +28,7 @@ func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantID, err := s.tenantByToken(token)
 	if err != nil {
-		httpserver.WriteDomainErr(w, types.ErrUnauthorized)
+		s.writeDomainErr(w, types.ErrUnauthorized)
 		return
 	}
 
@@ -42,7 +41,7 @@ func (s *Service) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	// Look up SSH details, verify tenant owns the claw
 	sshHost, sshPort, sshUser, err := s.st.Claws().SSHEndpoint(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
-		httpserver.WriteDomainErr(w, types.ErrClawNotFound)
+		s.writeDomainErr(w, types.ErrClawNotFound)
 		return
 	}
 	if err != nil {

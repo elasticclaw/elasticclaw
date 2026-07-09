@@ -43,6 +43,13 @@ type Deps struct {
 	// serverMetrics.wsMessage, which is nil-receiver-safe).
 	WSMessageMetric func(direction, peer string)
 
+	// HTTP response writers injected by the composition root
+	// (httpserver.JSONOK / httpserver.WriteDomainErr) so claws never
+	// imports httpserver — the phase-2 dependency rule says httpserver
+	// knows the services, never the reverse.
+	JSONOK         func(w http.ResponseWriter, v interface{})
+	WriteDomainErr func(w http.ResponseWriter, err error)
+
 	// Auth helpers still owned by pkg/hub.
 	TenantByClawToken func(token string) (string, error)
 	TenantByToken     func(token string) (string, error)

@@ -17,6 +17,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/claws"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -42,6 +43,9 @@ func (s *Server) clawsSvc() *claws.Service {
 		HubCfg:          func() *types.HubConfig { return s.hubCfg },
 		Mux:             func() http.Handler { return s.mux },
 		WSMessageMetric: s.metrics.wsMessage,
+
+		JSONOK:         httpserver.JSONOK,
+		WriteDomainErr: httpserver.WriteDomainErr,
 
 		TenantByClawToken: s.tenantByClawToken,
 		TenantByToken:     s.tenantByToken,
