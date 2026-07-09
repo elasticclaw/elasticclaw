@@ -99,7 +99,9 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
       if (typeof parsed.error === "string") message = parsed.error
     } catch { /* not JSON */ }
     if (!message) message = `API error ${res.status}`
-    throw new Error(message)
+    const err: Error & { status?: number } = new Error(message)
+    err.status = res.status
+    throw err
   }
   if (res.status === 204) return undefined as T
   return res.json()
@@ -172,17 +174,28 @@ export async function fetchAuthTicket(): Promise<string> {
   return data.ticket
 }
 
+// isTicketEndpointMissing reports whether the error means the hub predates
+// POST /api/auth/ticket (its mux answers 404/405). Only that case may fall
+// back to the deprecated ?token= query param — a transient ticket failure must
+// not leak the long-lived token into query strings and proxy/access logs.
+function isTicketEndpointMissing(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status
+  return status === 404 || status === 405
+}
+
 // getFileViewUrl returns the hub URL that serves the bytes of an uploaded
 // file back to the browser. Suitable for <img src>. Auth is via a single-use
 // ?ticket query param since browsers can't set Authorization on <img>.
-// Falls back to the deprecated ?token param when the hub predates tickets.
+// Falls back to the deprecated ?token param only when the hub predates
+// tickets; any other ticket failure propagates to the caller.
 export async function getFileViewUrl(clawId: string, path: string): Promise<string> {
   const hubBase = getHubUrl()
   const base = hubBase ? `${hubBase}/api/files/view/${clawId}` : `/api/files/view/${clawId}`
   try {
     const ticket = await fetchAuthTicket()
     return `${base}?${new URLSearchParams({ path, ticket }).toString()}`
-  } catch {
+  } catch (err) {
+    if (!isTicketEndpointMissing(err)) throw err
     // Deprecated fallback for hubs without POST /api/auth/ticket.
     const token = await resolveToken()
     return `${base}?${new URLSearchParams({ path, token }).toString()}`
@@ -228,13 +241,15 @@ function wsBaseUrl(): string {
 
 // buildWsUrl authenticates a WebSocket URL with a single-use ticket. Browsers
 // can't set the Authorization header on WS upgrades, so the ticket goes in the
-// query string. Falls back to the deprecated ?token param when the hub
-// predates tickets.
+// query string. Falls back to the deprecated ?token param only when the hub
+// predates tickets; any other ticket failure propagates so callers retry
+// instead of leaking the long-lived token into the query string.
 async function buildWsUrl(path: string): Promise<string> {
   try {
     const ticket = await fetchAuthTicket()
     return `${wsBaseUrl()}${path}?ticket=${encodeURIComponent(ticket)}`
-  } catch {
+  } catch (err) {
+    if (!isTicketEndpointMissing(err)) throw err
     // Deprecated fallback for hubs without POST /api/auth/ticket.
     const token = await resolveToken()
     return `${wsBaseUrl()}${path}?token=${encodeURIComponent(token)}`
