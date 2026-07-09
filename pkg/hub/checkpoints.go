@@ -130,12 +130,16 @@ func (s *Server) checkpointScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.requestIdleCheckpoints()
+			s.requestIdleCheckpoints(ctx)
 		}
 	}
 }
 
-func (s *Server) requestIdleCheckpoints() {
+// requestIdleCheckpoints asks idle claws for a checkpoint. Each request runs in
+// its own goroutine tracked by s.bg and receives the scheduler's context, so
+// shutdown both cancels in-flight requests and waits for them before closing
+// the database.
+func (s *Server) requestIdleCheckpoints(ctx context.Context) {
 	now := time.Now()
 	s.mu.RLock()
 	items := make([]struct {
@@ -162,11 +166,13 @@ func (s *Server) requestIdleCheckpoints() {
 		if s.hasRecentCheckpoint(item.id, checkpointMinInterval) {
 			continue
 		}
-		go func(clawID string) {
-			if _, err := s.requestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
+		clawID := item.id
+		s.bg.Go(func() error {
+			if _, err := s.requestCheckpoint(ctx, clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
 				log.Printf("[checkpoint] idle request for %s failed: %v", shortID(clawID), err)
 			}
-		}(item.id)
+			return nil
+		})
 	}
 }
 

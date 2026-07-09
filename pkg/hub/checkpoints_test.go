@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"golang.org/x/sync/errgroup"
 	"nhooyr.io/websocket"
 )
 
@@ -29,6 +31,65 @@ func newCheckpointCompletionTestServer(t *testing.T) *Server {
 		hubCfg:            &types.HubConfig{},
 		claws:             map[string]*clawConn{},
 		checkpointWaiters: map[string]chan error{},
+	}
+}
+
+// TestIdleCheckpointRequestTracked verifies that idle checkpoint requests are
+// spawned under the server errgroup: bg.Wait() only returns after the request
+// finished, so Shutdown cannot close the DB underneath an idle checkpoint.
+func TestIdleCheckpointRequestTracked(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	s.bg = &errgroup.Group{}
+	serverConn, _ := newTestWSPair(t)
+	s.claws["claw"] = &clawConn{
+		id:                "claw",
+		tenantID:          "tenant",
+		conn:              serverConn,
+		lastUserMessageAt: time.Now().Add(-time.Hour),
+	}
+
+	s.requestIdleCheckpoints(context.Background())
+	if err := s.bg.Wait(); err != nil {
+		t.Fatalf("bg.Wait: %v", err)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE claw_id='claw' AND reason='idle-timer'`).Scan(&status); err != nil {
+		t.Fatalf("idle checkpoint row not found: %v", err)
+	}
+	if status != "creating" {
+		t.Fatalf("idle checkpoint status = %q, want creating", status)
+	}
+}
+
+// TestIdleCheckpointRequestUsesSchedulerContext verifies the scheduler context
+// is propagated into the checkpoint request, so shutdown cancellation unblocks
+// in-flight idle checkpoint dispatches instead of leaving them running on
+// context.Background().
+func TestIdleCheckpointRequestUsesSchedulerContext(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	s.bg = &errgroup.Group{}
+	serverConn, _ := newTestWSPair(t)
+	s.claws["claw"] = &clawConn{
+		id:                "claw",
+		tenantID:          "tenant",
+		conn:              serverConn,
+		lastUserMessageAt: time.Now().Add(-time.Hour),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate shutdown already in progress
+	s.requestIdleCheckpoints(ctx)
+	if err := s.bg.Wait(); err != nil {
+		t.Fatalf("bg.Wait: %v", err)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE claw_id='claw' AND reason='idle-timer'`).Scan(&status); err != nil {
+		t.Fatalf("idle checkpoint row not found: %v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("idle checkpoint status with cancelled context = %q, want failed", status)
 	}
 }
 
