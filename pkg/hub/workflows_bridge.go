@@ -48,7 +48,12 @@ func (s *Server) workflowsSvc() *workflows.Service {
 		},
 		ClawStreaming: func(clawID string) bool {
 			cc, connected := s.clawReg.Get(clawID)
-			return connected && cc.StreamingBuf.Len() > 0
+			if !connected {
+				return false
+			}
+			cc.Mu.RLock()
+			defer cc.Mu.RUnlock()
+			return cc.StreamingBuf.Len() > 0
 		},
 		CloseClawConn: func(clawID string, code websocket.StatusCode, reason string) {
 			s.clawReg.Do(func(conns map[string]*clawConn) {
