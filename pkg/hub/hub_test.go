@@ -1100,7 +1100,7 @@ func TestNormalizeAgentActivityPayloadRejectsNull(t *testing.T) {
 	if activity, raw, ok := normalizeAgentActivityPayload(nil); ok || activity != nil || raw != nil {
 		t.Fatalf("nil payload normalized to activity=%v raw=%q ok=%v", activity, raw, ok)
 	}
-	if activity, raw, ok := normalizeAgentActivityPayload(map[string]interface{}{"kind": "tool", "tool": "exec"}); !ok || activity["tool"] != "exec" || len(raw) == 0 {
+	if activity, raw, ok := normalizeAgentActivityPayload(json.RawMessage(`{"kind":"tool","tool":"exec"}`)); !ok || activity["tool"] != "exec" || len(raw) == 0 {
 		t.Fatalf("valid payload normalized to activity=%v raw=%q ok=%v", activity, raw, ok)
 	}
 }

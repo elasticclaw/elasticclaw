@@ -150,7 +150,7 @@ func (c *Client) WatchMessages(ctx context.Context, clawID string, onMessage fun
 	defer conn.CloseNow()
 
 	for {
-		var msg types.WSMessage
+		var msg types.WSEnvelope
 		if err := wsjson.Read(ctx, conn, &msg); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -160,11 +160,9 @@ func (c *Client) WatchMessages(ctx context.Context, clawID string, onMessage fun
 		switch msg.Type {
 		case "message":
 			var hm types.HubMessage
-			if b, err := json.Marshal(msg.Payload); err == nil {
-				if err := json.Unmarshal(b, &hm); err == nil {
-					if hm.ClawID == clawID && hm.Role == "claw" {
-						onMessage(hm)
-					}
+			if err := json.Unmarshal(msg.Payload, &hm); err == nil {
+				if hm.ClawID == clawID && hm.Role == "claw" {
+					onMessage(hm)
 				}
 			}
 		}
@@ -189,7 +187,7 @@ func (c *Client) WatchStream(ctx context.Context, clawID string, onChunk func(ch
 	defer conn.CloseNow()
 
 	for {
-		var msg types.WSMessage
+		var msg types.WSEnvelope
 		if err := wsjson.Read(ctx, conn, &msg); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -203,19 +201,15 @@ func (c *Client) WatchStream(ctx context.Context, clawID string, onChunk func(ch
 					ClawID  string `json:"claw_id"`
 					Content string `json:"content"`
 				}
-				if b, err := json.Marshal(msg.Payload); err == nil {
-					if err := json.Unmarshal(b, &c); err == nil && c.ClawID == clawID {
-						onChunk(c.Content)
-					}
+				if err := json.Unmarshal(msg.Payload, &c); err == nil && c.ClawID == clawID {
+					onChunk(c.Content)
 				}
 			}
 		case "message":
 			if onMessage != nil {
 				var hm types.HubMessage
-				if b, err := json.Marshal(msg.Payload); err == nil {
-					if err := json.Unmarshal(b, &hm); err == nil && hm.ClawID == clawID && hm.Role == "claw" {
-						onMessage(hm)
-					}
+				if err := json.Unmarshal(msg.Payload, &hm); err == nil && hm.ClawID == clawID && hm.Role == "claw" {
+					onMessage(hm)
 				}
 			}
 		}

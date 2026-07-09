@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Claw represents an agent instance registered with the hub.
 type Claw struct {
@@ -46,6 +49,29 @@ type HubMessage struct {
 type WSMessage struct {
 	Type    string      `json:"type"`
 	Payload interface{} `json:"payload,omitempty"`
+}
+
+// WSEnvelope is the read side of WSMessage: the same {type, payload} wire
+// frame, but with the payload kept as raw JSON so receivers unmarshal it
+// straight into the concrete type registered for Type (phase-2 item 2.5)
+// instead of round-tripping through interface{}. The wire format is
+// identical to WSMessage; only the in-memory representation differs.
+type WSEnvelope struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// HeartbeatPayload is sent periodically by the claw bridge (type "heartbeat").
+type HeartbeatPayload struct {
+	GatewayHealthy bool  `json:"gateway_healthy"`
+	GatewayReady   *bool `json:"gateway_ready,omitempty"` // nil means field absent (old bridge) — treat as ready
+	ContextUsage   int   `json:"context_usage"`
+}
+
+// ChunkPayload is one streaming chunk of an in-progress claw response
+// (type "chunk").
+type ChunkPayload struct {
+	Content string `json:"content"`
 }
 
 // FileAck is the claw-bridge's response after writing an uploaded file.

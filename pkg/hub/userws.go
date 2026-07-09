@@ -173,16 +173,18 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 
 	// Read loop (user sends messages via REST, but we keep WS open for server-push)
 	for {
-		var msg types.WSMessage
-		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+		var env types.WSEnvelope
+		if err := wsjson.Read(ctx, conn, &env); err != nil {
 			return
 		}
 		s.metrics.wsMessage("in", "user")
 		// Forward user messages to the specified claw
-		if msg.Type == "message" {
-			payload, _ := json.Marshal(msg.Payload)
+		if env.Type == "message" {
 			var hm types.HubMessage
-			if err := json.Unmarshal(payload, &hm); err != nil {
+			if err := json.Unmarshal(env.Payload, &hm); err != nil {
+				// Malformed payload for a known type: a protocol error to
+				// log and skip, never a panic.
+				logfCtx(ctx, "[user ws] protocol error: bad \"message\" payload: %v", err)
 				continue
 			}
 			// Apply tag-based interact filter for GitHub OAuth users

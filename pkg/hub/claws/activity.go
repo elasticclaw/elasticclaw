@@ -29,11 +29,11 @@ func activityContent(activity map[string]interface{}) string {
 	return "Activity"
 }
 
-func NormalizeAgentActivityPayload(payload interface{}) (map[string]interface{}, []byte, bool) {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return nil, nil, false
-	}
+// NormalizeAgentActivityPayload unmarshals a raw "agent_activity" WS payload
+// into a generic activity map. It returns the wire bytes untouched (they are
+// persisted verbatim in the message format column). ok is false when the
+// payload is absent, null, or not a JSON object.
+func NormalizeAgentActivityPayload(raw json.RawMessage) (map[string]interface{}, []byte, bool) {
 	var activity map[string]interface{}
 	if err := json.Unmarshal(raw, &activity); err != nil || activity == nil {
 		return nil, nil, false
