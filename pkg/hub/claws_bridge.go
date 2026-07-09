@@ -36,6 +36,7 @@ func (s *Server) clawsSvc() *claws.Service {
 	return claws.New(claws.Deps{
 		DB:              s.db,
 		Registry:        &s.clawReg,
+		Pool:            &s.wsPool,
 		CfgMu:           &s.cfgMu,
 		HubCfg:          func() *types.HubConfig { return s.hubCfg },
 		Mux:             func() http.Handler { return s.mux },

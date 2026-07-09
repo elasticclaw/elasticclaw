@@ -35,6 +35,7 @@ type Service struct {
 	db        *sql.DB
 	st        *store.Store
 	reg       *Registry
+	pool      *WorkerPool
 	cfgMu     *sync.RWMutex
 	fileAckMu *sync.Mutex
 
@@ -50,6 +51,7 @@ func New(deps Deps) *Service {
 		db:        deps.DB,
 		st:        store.New(deps.DB),
 		reg:       deps.Registry,
+		pool:      deps.Pool,
 		cfgMu:     deps.CfgMu,
 		fileAckMu: deps.FileAckMu,
 		metrics:   metricsHook{ws: deps.WSMessageMetric},

@@ -542,6 +542,12 @@ type HubConfig struct {
 	// and are promoted to 'provisioning' when a running claw terminates.
 	// 0 means unlimited (default).
 	MaxConcurrentClaws int `yaml:"max_concurrent_claws,omitempty" json:"maxConcurrentClaws"`
+
+	// WSWorkerLimit caps how many claw WebSocket messages the hub processes
+	// concurrently (worker-pool bound). When a connection submits work while
+	// the pool is saturated, the hub closes it with a dedicated close code.
+	// 0 means the default (64).
+	WSWorkerLimit int `yaml:"ws_worker_limit,omitempty" json:"wsWorkerLimit,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

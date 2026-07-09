@@ -142,6 +142,20 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	logfCtx(r.Context(), "[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.GatewayReady)
 
+	// submit runs fn on the hub's bounded WS worker pool (phase-2 item 2.3:
+	// the former unbounded go-per-message spawn). On overflow it closes the
+	// connection with StatusOverloaded so a malicious or looping client
+	// cannot exhaust the hub; callers must stop handling the connection
+	// when it returns false.
+	submit := func(fn func()) bool {
+		if s.pool.TrySubmit(fn) {
+			return true
+		}
+		logfCtx(r.Context(), "[claw ws] worker pool exhausted; closing %s (%s)", rp.Name, clawID[:8])
+		conn.Close(StatusOverloaded, "hub worker pool exhausted")
+		return false
+	}
+
 	// Ack
 	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
 
@@ -161,7 +175,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.startWorkflowAfterVolumes(ctx, cc, clawID)
 	}
 	if allowWake && cc.GatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
-		go s.requestBootstrapCheckpoint(clawID)
+		if !submit(func() { s.requestBootstrapCheckpoint(clawID) }) {
+			return
+		}
 	}
 
 	// Read loop — claw sends messages back to users
@@ -257,7 +273,7 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 								logfCtx(r.Context(), "[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
 								shouldWake = true
 								wakeConn = cc
-								go s.requestBootstrapCheckpoint(clawID)
+								submit(func() { s.requestBootstrapCheckpoint(clawID) })
 							}
 						}
 						if !hb.GatewayHealthy {
@@ -268,7 +284,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 								logfCtx(r.Context(), "[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.GatewayUnhealthyCount)
 							}
 							if cc.GatewayUnhealthyCount == 4 && !cc.StreamingStartedAt.IsZero() {
-								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
+								submit(func() {
+									s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
+								})
 							}
 						}
 						// Log context usage on every heartbeat when it crosses the 80% threshold,
@@ -293,7 +311,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 					if shouldWarnContext {
 						warnCC := s.reg.Lookup(clawID)
 						if warnCC != nil {
-							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+							submit(func() {
+								s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+							})
 						}
 					}
 					if shouldWake {
@@ -308,7 +328,9 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 							time.Since(cc.StreamingStartedAt) > 12*time.Minute {
 							cc.StreamingTimeoutSent = true
 							cc.Mu.Unlock()
-							go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+							submit(func() {
+								s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+							})
 						} else {
 							cc.Mu.Unlock()
 						}
@@ -447,26 +469,38 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
-					go func() {
+					if !submit(func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, s.deps.CheckpointRequestTimeout); err != nil {
 							logfCtx(r.Context(), "[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
-					}()
+					}) {
+						return
+					}
 					if !pipelineHandledDone {
-						go s.handleClawDoneSignal(clawID, hm.Content)
+						if !submit(func() { s.handleClawDoneSignal(clawID, hm.Content) }) {
+							return
+						}
 					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
 				if strings.Contains(hm.Content, "[TERMINATE]") {
-					go s.handleClawTerminateSignal(clawID, hm.Content)
+					if !submit(func() { s.handleClawTerminateSignal(clawID, hm.Content) }) {
+						return
+					}
 				}
 				// Detect and store any PR URLs mentioned by the agent
-				go s.scanMessageForPRs(clawID, hm.Content)
+				if !submit(func() { s.scanMessageForPRs(clawID, hm.Content) }) {
+					return
+				}
 				// Detect tool error loops and inject a corrective message
 				if DetectToolLoop(hm.Content) {
 					loopCC := s.reg.Lookup(clawID)
 					if loopCC != nil {
-						go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+						if !submit(func() {
+							s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+						}) {
+							return
+						}
 					}
 				}
 				// Check for queued messages and send the next one.
@@ -537,48 +571,53 @@ func (s *Service) HandleClawWS(w http.ResponseWriter, r *http.Request) {
 			} else if msg.Type == "http_proxy_req" {
 				// Proxy an HTTP request from the bridge to the hub's internal API.
 				// This allows tools in the sandbox to reach hub APIs without a public URL.
-				go func(rawPayload json.RawMessage, conn *websocket.Conn) {
-					var req struct {
-						ReqID  string            `json:"req_id"`
-						Method string            `json:"method"`
-						Path   string            `json:"path"`
-						Query  string            `json:"query"`
-						Body   string            `json:"body"`
-						Header map[string]string `json:"header"`
+				proxyFn := func(rawPayload json.RawMessage, conn *websocket.Conn) func() {
+					return func() {
+						var req struct {
+							ReqID  string            `json:"req_id"`
+							Method string            `json:"method"`
+							Path   string            `json:"path"`
+							Query  string            `json:"query"`
+							Body   string            `json:"body"`
+							Header map[string]string `json:"header"`
+						}
+						if err := json.Unmarshal(rawPayload, &req); err != nil {
+							logfCtx(r.Context(), "[hub-proxy] bad req payload: %v", err)
+							return
+						}
+						logfCtx(r.Context(), "[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
+						// Build an internal HTTP request
+						urls := req.Path
+						if req.Query != "" {
+							urls += "?" + req.Query
+						}
+						httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
+						if err != nil {
+							logfCtx(r.Context(), "[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
+							s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
+							return
+						}
+						for k, v := range req.Header {
+							httpReq.Header.Set(k, v)
+						}
+						// Inject claw_token auth so withAuth middleware passes
+						s.cfgMu.RLock()
+						clawToken := s.hubCfg().ClawToken
+						s.cfgMu.RUnlock()
+						httpReq.Header.Set("X-Claw-Token", clawToken)
+						// Execute against internal mux
+						w := &proxyResponseWriter{header: make(http.Header)}
+						s.mux().ServeHTTP(w, httpReq)
+						if w.status == 0 {
+							w.status = 200
+						}
+						logfCtx(r.Context(), "[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
+						s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
 					}
-					if err := json.Unmarshal(rawPayload, &req); err != nil {
-						logfCtx(r.Context(), "[hub-proxy] bad req payload: %v", err)
-						return
-					}
-					logfCtx(r.Context(), "[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
-					// Build an internal HTTP request
-					urls := req.Path
-					if req.Query != "" {
-						urls += "?" + req.Query
-					}
-					httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
-					if err != nil {
-						logfCtx(r.Context(), "[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
-						s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
-						return
-					}
-					for k, v := range req.Header {
-						httpReq.Header.Set(k, v)
-					}
-					// Inject claw_token auth so withAuth middleware passes
-					s.cfgMu.RLock()
-					clawToken := s.hubCfg().ClawToken
-					s.cfgMu.RUnlock()
-					httpReq.Header.Set("X-Claw-Token", clawToken)
-					// Execute against internal mux
-					w := &proxyResponseWriter{header: make(http.Header)}
-					s.mux().ServeHTTP(w, httpReq)
-					if w.status == 0 {
-						w.status = 200
-					}
-					logfCtx(r.Context(), "[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
-					s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
-				}(mustJSONRaw(msg.Payload), conn)
+				}
+				if !submit(proxyFn(mustJSONRaw(msg.Payload), conn)) {
+					return
+				}
 			}
 		}
 	}

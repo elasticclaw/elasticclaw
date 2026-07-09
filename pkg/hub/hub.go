@@ -49,6 +49,9 @@ type Server struct {
 
 	// clawReg is the claw-connection registry (own lock, zero value ready).
 	clawReg claws.Registry
+	// wsPool bounds concurrent WS message handlers (zero value ready,
+	// default limit; NewServer applies hubCfg.WSWorkerLimit).
+	wsPool claws.WorkerPool
 	// userReg is the user-session registry (own lock, zero value ready).
 	userReg userRegistry
 	// one-time oauth_code -> signed GitHub session token
@@ -133,6 +136,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		checkpointWaiters: make(map[string]chan error),
 		webhookDedup:      make(map[string]time.Time),
 	}
+	srv.wsPool.Limit = int64(hubCfg.WSWorkerLimit)
 
 	// Start background poller to keep provider VM status fresh
 	go srv.pollProviderStatus()

@@ -22,6 +22,9 @@ type Deps struct {
 	// Registry is the hub-owned claw-connection registry. It carries its
 	// own RWMutex (per-subsystem locking, phase-2 item 2.3).
 	Registry *Registry
+	// Pool bounds the goroutines spawned per WS message (nil is not
+	// allowed; the hub owns one WorkerPool for its lifetime).
+	Pool *WorkerPool
 	// CfgMu guards the hub's live config pointer (the settings-subsystem
 	// lock). It must be the same mutex the hub's config writers use.
 	CfgMu *sync.RWMutex
