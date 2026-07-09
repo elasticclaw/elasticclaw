@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket/wsjson"
@@ -390,7 +391,7 @@ func (s *Server) canViewMessages(w http.ResponseWriter, r *http.Request, tenantI
 
 	clawTagsMsg, err := s.st().Claws().Tags(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
-		http.Error(w, "not found", http.StatusNotFound)
+		httpserver.WriteDomainErr(w, types.ErrClawNotFound)
 		return false
 	}
 	if err != nil {

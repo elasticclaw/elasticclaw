@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -142,7 +143,7 @@ func (s *Server) handleWorkspaceWorkflowsList(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	http.Error(w, "workspace not found", http.StatusNotFound)
+	httpserver.WriteDomainErr(w, types.ErrWorkspaceNotFound)
 }
 
 type WorkflowPushRequest struct {
@@ -211,7 +212,7 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 	}
 	workflow, ok := s.findWorkflowView(workspaceName, workflowName)
 	if !ok {
-		http.Error(w, "workflow not found", http.StatusNotFound)
+		httpserver.WriteDomainErr(w, types.ErrWorkflowNotFound)
 		return
 	}
 	jsonOK(w, workflow)
@@ -250,7 +251,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !ok {
-		http.Error(w, "workflow not found", http.StatusNotFound)
+		httpserver.WriteDomainErr(w, types.ErrWorkflowNotFound)
 		return
 	}
 	if req.Enabled != nil {
@@ -293,7 +294,7 @@ func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.R
 		return
 	}
 	if !ok {
-		jsonError(w, http.StatusNotFound, "workflow not found")
+		httpserver.WriteDomainErr(w, types.ErrWorkflowNotFound)
 		return
 	}
 

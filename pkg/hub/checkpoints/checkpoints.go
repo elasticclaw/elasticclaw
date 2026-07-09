@@ -207,7 +207,7 @@ func (s *Service) HandleClawCheckpoints(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if err := s.restoreClawFromCheckpoint(r.Context(), tenantID, clawID, parts[2]); err != nil {
-			httpserver.WriteErr(w, http.StatusConflict, "conflict", err.Error())
+			httpserver.WriteDomainErr(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -264,15 +264,15 @@ func (s *Service) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawI
 	var status, manifestPath string
 	if err := s.deps.DB.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("checkpoint not found")
+			return types.ErrCheckpointNotFound
 		}
 		return err
 	}
 	if status != "ready" {
-		return fmt.Errorf("checkpoint is not ready")
+		return types.ErrCheckpointNotReady
 	}
 	if manifestPath == "" {
-		return fmt.Errorf("checkpoint has no manifest")
+		return fmt.Errorf("checkpoint has no manifest: %w", types.ErrCheckpointNotReady)
 	}
 
 	// Preserve the current state if the bridge is still reachable.

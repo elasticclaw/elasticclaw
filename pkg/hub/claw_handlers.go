@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/store"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/httpserver"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -502,7 +503,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 
 	c, err := s.st().Claws().Get(r.Context(), clawID, tenantID)
 	if err == sql.ErrNoRows {
-		writeErr(w, http.StatusNotFound, "not_found", "not found")
+		httpserver.WriteDomainErr(w, types.ErrClawNotFound)
 		return
 	}
 	if err != nil {
