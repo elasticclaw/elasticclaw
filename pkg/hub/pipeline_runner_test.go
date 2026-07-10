@@ -357,6 +357,46 @@ func TestPipelineEntryInjectIncludesInitialPlanInstruction(t *testing.T) {
 	}
 }
 
+func TestPipelineInjectIncludesExactManualTriggerInputs(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-manual-workflow-input"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, template_files, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "jira-AWB-2420", "lexipol", "connected",
+		`["workspace:lexipol","workflow:jira-ticket-test","manual-trigger"]`,
+		`{"TRIGGER_INPUTS.json":"{\"jira_ticket\":\"AWB-2420\"}"}`, "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "working",
+		Label: "Working",
+		OnEnter: pipeline.OnEnter{
+			Inject: "Use the single manual input `jira_ticket` as the Jira issue to investigate.",
+		},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+		t.Fatalf("stage transition returned false")
+	}
+
+	var content string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
+		t.Fatalf("select injected message: %v", err)
+	}
+	for _, want := range []string{
+		"Manual trigger inputs (use these exact values):",
+		`"jira_ticket": "AWB-2420"`,
+		"Use the single manual input `jira_ticket` as the Jira issue to investigate.",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("pipeline inject missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestGitHubAPIDeleteLabelIgnoresMissingLabel(t *testing.T) {
 	var sawDelete bool
 	var handlerErr string

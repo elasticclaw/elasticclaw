@@ -1138,6 +1138,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 
 	injectMessage:
+		if inputContext := formatManualTriggerInputs(s.loadManualTriggerInputs(clawID)); inputContext != "" {
+			injectMsg = inputContext + "\n\n" + injectMsg
+		}
 		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
