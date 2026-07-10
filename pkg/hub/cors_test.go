@@ -26,6 +26,19 @@ func doCORSRequest(t *testing.T, h http.Handler, method, origin string) *httptes
 	return rec
 }
 
+// doCORSPreflight models a real browser preflight: OPTIONS with Origin,
+// Access-Control-Request-Method, and Access-Control-Request-Headers set.
+func doCORSPreflight(t *testing.T, h http.Handler, origin string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodOptions, "/api/claws", nil)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	req.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestCORSMiddlewareAllowedOrigin(t *testing.T) {
 	h := newCORSHandler(map[string]struct{}{"http://localhost:3000": {}})
 
@@ -74,7 +87,7 @@ func TestCORSMiddlewareNoOriginHeader(t *testing.T) {
 func TestCORSMiddlewarePreflight(t *testing.T) {
 	h := newCORSHandler(map[string]struct{}{"http://localhost:3000": {}})
 
-	rec := doCORSRequest(t, h, http.MethodOptions, "http://localhost:3000")
+	rec := doCORSPreflight(t, h, "http://localhost:3000")
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("preflight status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
@@ -85,12 +98,32 @@ func TestCORSMiddlewarePreflight(t *testing.T) {
 		t.Error("expected Access-Control-Allow-Methods on preflight from allowed origin")
 	}
 
-	rec = doCORSRequest(t, h, http.MethodOptions, "https://evil.example.com")
+	rec = doCORSPreflight(t, h, "https://evil.example.com")
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("preflight status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want empty for unlisted origin", got)
+	}
+}
+
+func TestCORSMiddlewareOrdinaryOptionsDelegated(t *testing.T) {
+	h := newCORSHandler(map[string]struct{}{"http://localhost:3000": {}})
+
+	// OPTIONS without any CORS preflight headers must reach the next handler.
+	rec := doCORSRequest(t, h, http.MethodOptions, "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("non-CORS OPTIONS status = %d, want %d (delegated to next handler)", rec.Code, http.StatusOK)
+	}
+
+	// OPTIONS with Origin but no Access-Control-Request-Method is not a
+	// preflight either; it must also be delegated.
+	rec = doCORSRequest(t, h, http.MethodOptions, "http://localhost:3000")
+	if rec.Code != http.StatusOK {
+		t.Errorf("OPTIONS without Access-Control-Request-Method status = %d, want %d (delegated)", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q (CORS headers still apply)", got, "http://localhost:3000")
 	}
 }
 

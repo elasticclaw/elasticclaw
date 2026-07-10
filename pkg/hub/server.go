@@ -397,18 +397,21 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 // corsMiddleware adds CORS headers for origins on the allowlist. The request
 // origin is echoed back only when it matches an allowed origin; otherwise no
 // Access-Control-Allow-Origin header is sent. Vary: Origin is always set so
-// caches never reuse a response across origins.
+// caches never reuse a response across origins. Only CORS preflight requests
+// (OPTIONS with Origin and Access-Control-Request-Method) are short-circuited
+// with 204; ordinary OPTIONS requests are delegated to the next handler.
 func corsMiddleware(next http.Handler, allowedOrigins map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
-		if origin := r.Header.Get("Origin"); origin != "" {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
 			if _, ok := allowedOrigins[normalizeOrigin(origin)]; ok {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, ngrok-skip-browser-warning")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			}
 		}
-		if r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
