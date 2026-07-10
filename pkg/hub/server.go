@@ -4287,8 +4287,11 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
-	// Build env map for the container — passed directly as -e flags (no shell escaping needed)
-	containerEnv := map[string]string{
+	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
+	// Start with the request environment so workflow and workspace secret refs reach
+	// Docker claws, then overlay hub-managed values to prevent callers from
+	// overriding the claw's identity or connection details.
+	containerEnv := mergeDockerContainerEnv(req.Env, map[string]string{
 		"ELASTICCLAW_HUB_URL":            dockerClawHubURL(hubCfg),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
@@ -4304,7 +4307,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
 		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
 		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
-	}
+	})
 
 	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
 	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
@@ -4373,6 +4376,17 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	return nil
+}
+
+func mergeDockerContainerEnv(requestEnv, managedEnv map[string]string) map[string]string {
+	merged := make(map[string]string, len(requestEnv)+len(managedEnv))
+	for key, value := range requestEnv {
+		merged[key] = value
+	}
+	for key, value := range managedEnv {
+		merged[key] = value
+	}
+	return merged
 }
 
 func dockerClawHubURL(cfg *types.HubConfig) string {

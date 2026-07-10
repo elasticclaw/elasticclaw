@@ -1965,3 +1965,26 @@ func TestInaccessibleGitHubReposMessage(t *testing.T) {
 		t.Fatalf("message = %q, want %q", got, want)
 	}
 }
+
+func TestMergeDockerContainerEnvPreservesWorkflowSecrets(t *testing.T) {
+	requestEnv := map[string]string{
+		"JIRA_API_KEY":        "workspace-secret",
+		"ELASTICCLAW_HUB_URL": "http://untrusted.example",
+	}
+	managedEnv := map[string]string{
+		"ELASTICCLAW_HUB_URL": "http://host.docker.internal:8080",
+		"ELASTICCLAW_CLAW_ID": "claw-123",
+	}
+
+	got := mergeDockerContainerEnv(requestEnv, managedEnv)
+
+	if got["JIRA_API_KEY"] != "workspace-secret" {
+		t.Fatalf("JIRA_API_KEY = %q, want workspace secret", got["JIRA_API_KEY"])
+	}
+	if got["ELASTICCLAW_HUB_URL"] != managedEnv["ELASTICCLAW_HUB_URL"] {
+		t.Fatalf("ELASTICCLAW_HUB_URL = %q, want managed value %q", got["ELASTICCLAW_HUB_URL"], managedEnv["ELASTICCLAW_HUB_URL"])
+	}
+	if got["ELASTICCLAW_CLAW_ID"] != "claw-123" {
+		t.Fatalf("ELASTICCLAW_CLAW_ID = %q, want managed claw ID", got["ELASTICCLAW_CLAW_ID"])
+	}
+}
