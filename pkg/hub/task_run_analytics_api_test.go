@@ -349,6 +349,99 @@ func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Auth: &types.AuthConfig{
+			SessionSecret: "analytics-session-secret",
+			Access:        &types.AccessConfig{ViewRequiresTags: []string{"owner={user}"}},
+		},
+	}, "", "", "")
+	ts := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-alice", AttemptID: "attempt-alice", ClawID: "claw-alice", TenantID: "test-tenant-id",
+		Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Workspace: "alice-space", Factory: "alice-factory", Integration: "linear", Repo: "alice/repo", Model: "alice-model",
+		FailureType: taskRunFailureTimeout, StartedAt: ts + 100, HumanInteractions: 5, PRCount: 3, OpenPRCount: 3,
+	})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-bob", AttemptID: "attempt-bob", ClawID: "claw-bob", TenantID: "test-tenant-id",
+		Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Workspace: "bob-space", Factory: "bob-factory", Integration: "github", Repo: "bob/repo", Model: "bob-model",
+		WarningTypes: []string{taskRunWarningHumanPRComment}, StartedAt: ts, HumanInteractions: 1,
+		PRCount: 1, MergedPRCount: 1, MergedAt: ts + 500, FinishedAt: ts + 500,
+	})
+	for _, claw := range []struct{ id, tags string }{
+		{id: "claw-alice", tags: `["owner=alice"]`},
+		{id: "claw-bob", tags: `["owner=bob"]`},
+	} {
+		if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`, claw.id, "test-tenant-id", claw.id, claw.tags); err != nil {
+			t.Fatalf("insert claw: %v", err)
+		}
+	}
+	bobSession, err := signGitHubSession("analytics-session-secret", "bob", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
+	var summary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, summaryRR, &summary)
+	if summary.TotalRuns != 1 || summary.HumanInteractions != 1 {
+		t.Fatalf("OAuth summary was not ACL-filtered: %#v", summary)
+	}
+	if summary.ByStatus[taskRunStatusWarningSuccess] != 1 || summary.ByStatus[taskRunStatusFailed] != 0 || len(summary.FailureBreakdown) != 0 {
+		t.Fatalf("OAuth summary leaked hidden run breakdowns: %#v", summary)
+	}
+	if summary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 {
+		t.Fatalf("OAuth summary missing viewable warning counts: %#v", summary)
+	}
+	if summary.PRCounts.Total != 1 || summary.PRCounts.Open != 0 || summary.PRCounts.Merged != 1 || summary.PRCounts.Closed != 0 {
+		t.Fatalf("OAuth summary PR counts leaked hidden runs: %#v", summary.PRCounts)
+	}
+
+	optionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
+	var options taskRunAnalyticsFilterOptionsResponse
+	decodeTaskRunAnalyticsAPI(t, optionsRR, &options)
+	assertStringSliceEqual(t, options.Workspaces, []string{"bob-space"})
+	assertStringSliceEqual(t, options.Factories, []string{"bob-factory"})
+	assertStringSliceEqual(t, options.Integrations, []string{"github"})
+	assertStringSliceEqual(t, options.Repos, []string{"bob/repo"})
+	assertStringSliceEqual(t, options.Models, []string{"bob-model"})
+	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusWarningSuccess})
+	assertStringSliceEqual(t, options.WarningTypes, []string{taskRunWarningHumanPRComment})
+	assertStringSliceEqual(t, options.FailureTypes, []string{})
+	if strings.Contains(optionsRR.Body.String(), "alice") {
+		t.Fatalf("filter-options leaked hidden run values: %s", optionsRR.Body.String())
+	}
+
+	plainSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
+	var plainSummary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, plainSummaryRR, &plainSummary)
+	if plainSummary.TotalRuns != 2 || plainSummary.FailureBreakdown[taskRunFailureTimeout] != 1 {
+		t.Fatalf("plain token summary should be tenant-wide: %#v", plainSummary)
+	}
+	plainOptionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", "test-token")
+	var plainOptions taskRunAnalyticsFilterOptionsResponse
+	decodeTaskRunAnalyticsAPI(t, plainOptionsRR, &plainOptions)
+	assertStringSliceEqual(t, plainOptions.Workspaces, []string{"alice-space", "bob-space"})
+
+	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "claw-bob"); err != nil {
+		t.Fatalf("delete claw: %v", err)
+	}
+	missingClawSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
+	var missingClawSummary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, missingClawSummaryRR, &missingClawSummary)
+	if missingClawSummary.TotalRuns != 0 || len(missingClawSummary.ByStatus) != 0 {
+		t.Fatalf("OAuth summary should exclude runs with missing claws when ACLs are configured: %#v", missingClawSummary)
+	}
+	missingClawOptionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
+	var missingClawOptions taskRunAnalyticsFilterOptionsResponse
+	decodeTaskRunAnalyticsAPI(t, missingClawOptionsRR, &missingClawOptions)
+	assertStringSliceEqual(t, missingClawOptions.Workspaces, []string{})
+	assertStringSliceEqual(t, missingClawOptions.Statuses, []string{})
+}
+
 func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "test-token",
@@ -374,6 +467,17 @@ func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing
 	if detailRR.Code != http.StatusOK {
 		t.Fatalf("OAuth detail without configured ACL status = %d, body = %s", detailRR.Code, detailRR.Body.String())
 	}
+
+	summaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", session)
+	var summary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, summaryRR, &summary)
+	if summary.TotalRuns != 1 {
+		t.Fatalf("OAuth summary without configured ACL should be tenant-wide: %#v", summary)
+	}
+	optionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", session)
+	var options taskRunAnalyticsFilterOptionsResponse
+	decodeTaskRunAnalyticsAPI(t, optionsRR, &options)
+	assertStringSliceEqual(t, options.Factories, []string{"bugfix"})
 }
 
 func TestTaskRunAnalyticsAPIFilterOptionsAreTenantScoped(t *testing.T) {
