@@ -601,6 +601,11 @@ func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existin
 	} else {
 		delete(values, "webhook_secrets")
 	}
+	if len(workspace.Notifiers) > 0 {
+		values["notifiers"] = workspace.Notifiers
+	} else {
+		delete(values, "notifiers")
+	}
 	return marshalOrderedYAML(values, []string{
 		"schema_version",
 		"name",

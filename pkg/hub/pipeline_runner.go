@@ -1186,6 +1186,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 	}
 
+	if stage.OnEnter.Notify.Enabled {
+		s.executeNotifyAction(clawID, stage, stage.OnEnter.Notify, ctx)
+	}
+
 	targetStatus := stage.OnEnter.MoveIssue.Status
 	if targetStatus == "" {
 		return true

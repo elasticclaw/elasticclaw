@@ -269,6 +269,35 @@ type JudgeAction struct {
 	Timeout string `yaml:"timeout,omitempty"`
 }
 
+// NotifyAction sends a message through a workspace-configured notifier
+// (Slack, and eventually email, Google Chat, Teams, ...). Via names the
+// notifier; Text supports the same template variables as inject
+// ({{.Issue.*}}, {{.Inputs.*}}, {{.Outputs.*}}).
+type NotifyAction struct {
+	Enabled bool `yaml:"-" json:"-"`
+	// Via is the name of the workspace notifier to send through.
+	Via string `yaml:"via"`
+	// Text is the message body (templated).
+	Text string `yaml:"text"`
+	// Subject is used by providers that have one (e.g. email); templated.
+	Subject string `yaml:"subject,omitempty"`
+	// Target overrides the notifier's default destination (channel, address).
+	Target string `yaml:"target,omitempty"`
+	// Options is a provider-specific passthrough (e.g. Slack thread_ts).
+	Options map[string]any `yaml:"options,omitempty"`
+}
+
+// Validate checks the action's own invariants.
+func (n NotifyAction) Validate() error {
+	if !n.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(n.Via) == "" {
+		return fmt.Errorf("notify action requires via (the notifier name)")
+	}
+	return nil
+}
+
 // OnEnter holds the actions to run when entering a stage.
 type OnEnter struct {
 	// Run executes a command in the agent workspace.
@@ -289,6 +318,8 @@ type OnEnter struct {
 	AddLabels []string `yaml:"add_labels,omitempty"`
 	// RemoveLabels removes the specified labels from the associated GitHub issue.
 	RemoveLabels []string `yaml:"remove_labels,omitempty"`
+	// Notify sends a message through a workspace-configured notifier.
+	Notify NotifyAction `yaml:"notify,omitempty"`
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler for OnEnter so that move_issue can
@@ -305,6 +336,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		CloseIssue           bool        `yaml:"close_issue,omitempty"`
 		AddLabels            []string    `yaml:"add_labels,omitempty"`
 		RemoveLabels         []string    `yaml:"remove_labels,omitempty"`
+		NotifyRaw            yaml.Node   `yaml:"notify"`
 	}
 	var raw rawOnEnter
 	if err := value.Decode(&raw); err != nil {
@@ -326,6 +358,15 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		}
 		dua.Enabled = true
 		oe.DependencyUpdates = dua
+	}
+
+	if raw.NotifyRaw.Kind != 0 {
+		var na NotifyAction
+		if err := raw.NotifyRaw.Decode(&na); err != nil {
+			return err
+		}
+		na.Enabled = true
+		oe.Notify = na
 	}
 
 	if raw.MoveIssueRaw.Kind == 0 {
@@ -385,6 +426,9 @@ func (p *Pipeline) Validate() error {
 				return err
 			}
 			skipEdges[stage.ID] = append(skipEdges[stage.ID], skip.rule.GoTo)
+		}
+		if err := stage.OnEnter.Notify.Validate(); err != nil {
+			return fmt.Errorf("stage %q: %w", stage.ID, err)
 		}
 	}
 	if cycle := firstSkipCycle(skipEdges); len(cycle) > 0 {

@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,14 +11,80 @@ import (
 // WorkspaceConfig defines a persisted workspace. Workflows live beside this
 // file in external storage and are loaded into Workflows at API boundaries.
 type WorkspaceConfig struct {
-	SchemaVersion  string               `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
-	Name           string               `yaml:"name" json:"name"`
-	Repositories   RepositoryAccessList `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	Env            WorkspaceEnv         `yaml:"env,omitempty" json:"env,omitempty"`
-	Secrets        []string             `yaml:"secrets,omitempty" json:"secrets,omitempty"`
-	WebhookSecrets []string             `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
-	Workflows      []*WorkflowConfig    `yaml:"-" json:"workflows,omitempty"`
-	Files          map[string]string    `yaml:"-" json:"files,omitempty"`
+	SchemaVersion  string                    `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
+	Name           string                    `yaml:"name" json:"name"`
+	Repositories   RepositoryAccessList      `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	Env            WorkspaceEnv              `yaml:"env,omitempty" json:"env,omitempty"`
+	Secrets        []string                  `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+	WebhookSecrets []string                  `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
+	Notifiers      map[string]NotifierConfig `yaml:"notifiers,omitempty" json:"notifiers,omitempty"`
+	Workflows      []*WorkflowConfig         `yaml:"-" json:"workflows,omitempty"`
+	Files          map[string]string         `yaml:"-" json:"files,omitempty"`
+}
+
+// NotifierConfig defines an outbound messaging transport and its
+// provider-specific settings.
+type NotifierConfig struct {
+	Type     string         `yaml:"type"`
+	Settings map[string]any `yaml:",inline"`
+}
+
+func (n *NotifierConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("notifier: expected a mapping")
+	}
+	var flattened map[string]any
+	if err := value.Decode(&flattened); err != nil {
+		return err
+	}
+	return n.fromFlattened(flattened)
+}
+
+func (n NotifierConfig) MarshalYAML() (interface{}, error) {
+	return n.flattened(), nil
+}
+
+func (n *NotifierConfig) UnmarshalJSON(data []byte) error {
+	var flattened map[string]any
+	if err := json.Unmarshal(data, &flattened); err != nil {
+		return err
+	}
+	if flattened == nil {
+		return fmt.Errorf("notifier: expected an object")
+	}
+	return n.fromFlattened(flattened)
+}
+
+func (n NotifierConfig) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.flattened())
+}
+
+func (n *NotifierConfig) fromFlattened(flattened map[string]any) error {
+	n.Type = ""
+	n.Settings = make(map[string]any, len(flattened))
+	for key, value := range flattened {
+		if key == "type" {
+			var ok bool
+			n.Type, ok = value.(string)
+			if !ok {
+				return fmt.Errorf("notifier type must be a string")
+			}
+			continue
+		}
+		n.Settings[key] = value
+	}
+	return nil
+}
+
+func (n NotifierConfig) flattened() map[string]any {
+	flattened := make(map[string]any, len(n.Settings)+1)
+	for key, value := range n.Settings {
+		if key != "type" {
+			flattened[key] = value
+		}
+	}
+	flattened["type"] = n.Type
+	return flattened
 }
 
 // WorkflowConfig is the persisted workflow schema.
@@ -182,6 +249,14 @@ func (w *WorkspaceConfig) Validate() error {
 	}
 	if err := validateRepositoryAccessList("repositories", w.Repositories); err != nil {
 		return fmt.Errorf("workspace %q: %w", w.Name, err)
+	}
+	for name, notifier := range w.Notifiers {
+		if name == "" {
+			return fmt.Errorf("workspace %q: notifier name is required", w.Name)
+		}
+		if notifier.Type == "" {
+			return fmt.Errorf("workspace %q: notifier %q: notifier type is required", w.Name, name)
+		}
 	}
 	for _, workflow := range w.Workflows {
 		if workflow == nil {

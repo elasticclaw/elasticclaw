@@ -723,3 +723,68 @@ func TestGetJSONPath(t *testing.T) {
 		t.Fatalf("details.missing = %v, want nil", v)
 	}
 }
+
+func TestParseNotifyAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: done
+    on_enter:
+      notify:
+        via: eng-releases
+        text: "PR merged for {{.Issue.Identifier}}"
+        subject: "PR merged"
+        target: "#override"
+        options:
+          thread_ts: "123.456"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	action := p.Stages[0].OnEnter.Notify
+	if !action.Enabled {
+		t.Fatal("notify should be marked enabled when present")
+	}
+	if action.Via != "eng-releases" {
+		t.Fatalf("via = %q, want eng-releases", action.Via)
+	}
+	if action.Text != "PR merged for {{.Issue.Identifier}}" {
+		t.Fatalf("text = %q", action.Text)
+	}
+	if action.Subject != "PR merged" {
+		t.Fatalf("subject = %q", action.Subject)
+	}
+	if action.Target != "#override" {
+		t.Fatalf("target = %q", action.Target)
+	}
+	if action.Options["thread_ts"] != "123.456" {
+		t.Fatalf("options.thread_ts = %v", action.Options["thread_ts"])
+	}
+}
+
+func TestParseNotifyActionRequiresVia(t *testing.T) {
+	_, err := pipeline.Parse([]byte(`
+stages:
+  - id: done
+    on_enter:
+      notify:
+        text: "hello"
+`))
+	if err == nil {
+		t.Fatal("expected validation error when notify.via is missing")
+	}
+}
+
+func TestParseNotifyActionAbsent(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: done
+    on_enter:
+      inject: "hello"
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if p.Stages[0].OnEnter.Notify.Enabled {
+		t.Fatal("notify should not be enabled when absent")
+	}
+}

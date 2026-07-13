@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -106,6 +107,9 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 
 	// --- Factories ---
 	checks = append(checks, s.checkFactories(hubCfg, diskCfg)...)
+
+	// --- Workflows ---
+	checks = append(checks, s.checkNotifiers(hubCfg, diskCfg)...)
 
 	// --- Templates ---
 	checks = append(checks, s.checkTemplates(hubCfg, diskCfg)...)
@@ -431,6 +435,149 @@ func (s *Server) checkProviders(cfg *types.HubConfig) []DoctorCheck {
 		})
 	}
 
+	return checks
+}
+
+// ==================== WORKFLOW CHECKS ====================
+
+func (s *Server) checkNotifiers(_ *types.HubConfig, diskCfg *types.HubConfig) []DoctorCheck {
+	workspaces, err := loadExternalWorkspaces()
+	if err != nil {
+		return nil
+	}
+
+	secretNames := make(map[string]bool)
+	if diskCfg != nil {
+		for name := range diskCfg.Secrets {
+			secretNames[name] = true
+		}
+	}
+
+	var checks []DoctorCheck
+	notifyActions := 0
+	allNotifiersValid := true
+	for _, workspace := range workspaces {
+		if workspace == nil {
+			continue
+		}
+		// Mirror the runtime resolution order (executeNotifyAction): workspace
+		// secrets first, then hub secrets.
+		workspaceSecrets, _ := loadWorkspaceSecrets(workspace.Name)
+		for _, workflow := range workspace.Workflows {
+			if workflow == nil {
+				continue
+			}
+			for _, stage := range workflow.Stages {
+				rawValue, present := stage.OnEnter["notify"]
+				if !present {
+					continue
+				}
+				rawNotify, _ := rawValue.(map[string]interface{})
+				via, _ := rawNotify["via"].(string)
+				if strings.TrimSpace(via) == "" {
+					// A notify block without a valid "via" is fatal at runtime:
+					// pipeline validation rejects it and the pipeline stops.
+					allNotifiersValid = false
+					checks = append(checks, DoctorCheck{
+						Category:    "workflows",
+						Severity:    "critical",
+						Title:       fmt.Sprintf("Workflow %q stage %q notify action has no valid \"via\"", workflow.Name, stage.ID),
+						Description: fmt.Sprintf("Workflow %q stage %q in workspace %q has a notify action without a \"via\" notifier name; the pipeline will fail to parse at runtime.", workflow.Name, stage.ID, workspace.Name),
+						OK:          false,
+						FixAction: &FixAction{
+							Type:   "navigate",
+							Target: "/settings/workspaces",
+							Label:  "Fix Workflow",
+						},
+					})
+					continue
+				}
+				notifyActions++
+
+				notifier, ok := workspace.Notifiers[via]
+				if !ok {
+					allNotifiersValid = false
+					checks = append(checks, DoctorCheck{
+						Category:    "workflows",
+						Severity:    "critical",
+						Title:       fmt.Sprintf("Workflow %q stage %q references missing notifier %q", workflow.Name, stage.ID, via),
+						Description: fmt.Sprintf("Workflow %q stage %q references notifier %q, which is not configured in workspace %q.", workflow.Name, stage.ID, via, workspace.Name),
+						OK:          false,
+						FixAction: &FixAction{
+							Type:   "navigate",
+							Target: "/settings/workspaces",
+							Label:  "Configure Notifier",
+						},
+					})
+					continue
+				}
+
+				if !notify.Supported(notifier.Type) {
+					allNotifiersValid = false
+					checks = append(checks, DoctorCheck{
+						Category:    "workflows",
+						Severity:    "critical",
+						Title:       fmt.Sprintf("Notifier %q has unsupported type %q", via, notifier.Type),
+						Description: fmt.Sprintf("Notifier %q in workspace %q uses a notifier type that is not supported.", via, workspace.Name),
+						OK:          false,
+						FixAction: &FixAction{
+							Type:   "navigate",
+							Target: "/settings/workspaces",
+							Label:  "Configure Notifier",
+						},
+					})
+					continue
+				}
+
+				if notifier.Type != "slack" {
+					continue
+				}
+				tokenSecret, _ := notifier.Settings["token_secret"].(string)
+				if strings.TrimSpace(tokenSecret) == "" {
+					allNotifiersValid = false
+					checks = append(checks, DoctorCheck{
+						Category:    "workflows",
+						Severity:    "warning",
+						Title:       fmt.Sprintf("Notifier %q has no token_secret", via),
+						Description: fmt.Sprintf("Slack notifier %q in workspace %q must reference a secret containing its bot token.", via, workspace.Name),
+						OK:          false,
+						FixAction: &FixAction{
+							Type:   "navigate",
+							Target: "/settings/workspaces",
+							Label:  "Configure Notifier",
+						},
+					})
+					continue
+				}
+				_, inWorkspace := workspaceSecrets[tokenSecret]
+				if !inWorkspace && !secretNames[tokenSecret] {
+					allNotifiersValid = false
+					checks = append(checks, DoctorCheck{
+						Category:    "workflows",
+						Severity:    "warning",
+						Title:       fmt.Sprintf("Notifier %q token_secret references missing secret %q", via, tokenSecret),
+						Description: fmt.Sprintf("Notifier %q in workspace %q references secret %q, which is not in the secrets map.", via, workspace.Name, tokenSecret),
+						OK:          false,
+						FixAction: &FixAction{
+							Type:   "navigate",
+							Target: "/settings/secrets",
+							Label:  "Create Secret",
+						},
+					})
+				}
+			}
+		}
+	}
+
+	if notifyActions > 0 && allNotifiersValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "workflows",
+			Severity:    "info",
+			Title:       "Workflow notifiers configured",
+			Description: fmt.Sprintf("%d workflow notify action(s) configured with valid notifiers.", notifyActions),
+			OK:          true,
+		})
+	}
 	return checks
 }
 
