@@ -30,7 +30,7 @@ func newSlack(cfg map[string]any, secrets SecretResolver) (Notifier, error) {
 	}
 	token, ok := secrets(secretName)
 	if !ok || token == "" {
-		return nil, fmt.Errorf("slack notifier secret %q not found in hub secrets", secretName)
+		return nil, fmt.Errorf("slack notifier secret %q not found (checked workspace and hub secrets)", secretName)
 	}
 	apiBase := stringOption(cfg, "api_base")
 	if apiBase == "" {

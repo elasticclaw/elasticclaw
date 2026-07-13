@@ -529,41 +529,43 @@ func (s *Server) checkNotifiers(_ *types.HubConfig, diskCfg *types.HubConfig) []
 					continue
 				}
 
-				if notifier.Type != "slack" {
-					continue
-				}
-				tokenSecret, _ := notifier.Settings["token_secret"].(string)
-				if strings.TrimSpace(tokenSecret) == "" {
-					allNotifiersValid = false
-					checks = append(checks, DoctorCheck{
-						Category:    "workflows",
-						Severity:    "warning",
-						Title:       fmt.Sprintf("Notifier %q has no token_secret", via),
-						Description: fmt.Sprintf("Slack notifier %q in workspace %q must reference a secret containing its bot token.", via, workspace.Name),
-						OK:          false,
-						FixAction: &FixAction{
-							Type:   "navigate",
-							Target: "/settings/workspaces",
-							Label:  "Configure Notifier",
-						},
-					})
-					continue
-				}
-				_, inWorkspace := workspaceSecrets[tokenSecret]
-				if !inWorkspace && !secretNames[tokenSecret] {
-					allNotifiersValid = false
-					checks = append(checks, DoctorCheck{
-						Category:    "workflows",
-						Severity:    "warning",
-						Title:       fmt.Sprintf("Notifier %q token_secret references missing secret %q", via, tokenSecret),
-						Description: fmt.Sprintf("Notifier %q in workspace %q references secret %q, which is not in the secrets map.", via, workspace.Name, tokenSecret),
-						OK:          false,
-						FixAction: &FixAction{
-							Type:   "navigate",
-							Target: "/settings/secrets",
-							Label:  "Create Secret",
-						},
-					})
+				// Each provider declares which settings must name an existing
+				// secret (notify.SecretSettings), so new provider types get
+				// doctor coverage without changes here.
+				for _, settingKey := range notify.SecretSettings(notifier.Type) {
+					secretRef, _ := notifier.Settings[settingKey].(string)
+					if strings.TrimSpace(secretRef) == "" {
+						allNotifiersValid = false
+						checks = append(checks, DoctorCheck{
+							Category:    "workflows",
+							Severity:    "warning",
+							Title:       fmt.Sprintf("Notifier %q has no %s", via, settingKey),
+							Description: fmt.Sprintf("Notifier %q (type %q) in workspace %q must set %q to the name of a secret.", via, notifier.Type, workspace.Name, settingKey),
+							OK:          false,
+							FixAction: &FixAction{
+								Type:   "navigate",
+								Target: "/settings/workspaces",
+								Label:  "Configure Notifier",
+							},
+						})
+						continue
+					}
+					_, inWorkspace := workspaceSecrets[secretRef]
+					if !inWorkspace && !secretNames[secretRef] {
+						allNotifiersValid = false
+						checks = append(checks, DoctorCheck{
+							Category:    "workflows",
+							Severity:    "warning",
+							Title:       fmt.Sprintf("Notifier %q %s references missing secret %q", via, settingKey, secretRef),
+							Description: fmt.Sprintf("Notifier %q in workspace %q references secret %q, which is not in the secrets map.", via, workspace.Name, secretRef),
+							OK:          false,
+							FixAction: &FixAction{
+								Type:   "navigate",
+								Target: "/settings/secrets",
+								Label:  "Create Secret",
+							},
+						})
+					}
 				}
 			}
 		}

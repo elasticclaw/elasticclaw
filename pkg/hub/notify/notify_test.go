@@ -230,3 +230,13 @@ func TestSlackOptionsPassthrough(t *testing.T) {
 		t.Errorf("text = %v, want hi", got)
 	}
 }
+
+func TestSecretSettingsPerType(t *testing.T) {
+	got := SecretSettings("slack")
+	if len(got) != 1 || got[0] != "token_secret" {
+		t.Fatalf("SecretSettings(slack) = %v, want [token_secret]", got)
+	}
+	if got := SecretSettings("carrier-pigeon"); got != nil {
+		t.Fatalf("SecretSettings(unknown) = %v, want nil", got)
+	}
+}

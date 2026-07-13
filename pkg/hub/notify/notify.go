@@ -32,17 +32,38 @@ type SecretResolver func(name string) (string, bool)
 // resolved at construction time so misconfiguration fails fast.
 type Constructor func(cfg map[string]any, secrets SecretResolver) (Notifier, error)
 
-var registry = map[string]Constructor{
-	"slack": newSlack,
+// provider bundles a constructor with the metadata the doctor needs to
+// validate a notifier config without constructing it. New provider types add
+// one entry here, next to their implementation file, and doctor coverage is
+// inherited automatically.
+type provider struct {
+	construct Constructor
+	// secretSettings lists the config keys whose values must name an
+	// existing hub or workspace secret (e.g. "token_secret" for slack).
+	secretSettings []string
+}
+
+var registry = map[string]provider{
+	"slack": {construct: newSlack, secretSettings: []string{"token_secret"}},
 }
 
 // New builds a Notifier of the given type from its configuration.
 func New(typ string, cfg map[string]any, secrets SecretResolver) (Notifier, error) {
-	ctor, ok := registry[typ]
+	p, ok := registry[typ]
 	if !ok {
 		return nil, fmt.Errorf("unknown notifier type %q (supported: %s)", typ, supportedTypes())
 	}
-	return ctor(cfg, secrets)
+	return p.construct(cfg, secrets)
+}
+
+// SecretSettings returns the config keys of the given notifier type whose
+// values must reference an existing secret. Returns nil for unknown types.
+func SecretSettings(typ string) []string {
+	p, ok := registry[typ]
+	if !ok {
+		return nil
+	}
+	return p.secretSettings
 }
 
 // Supported reports whether the given notifier type is registered.
