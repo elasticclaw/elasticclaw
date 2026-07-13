@@ -16,6 +16,7 @@ const activityPageSize = 100
 
 export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts: TaskRunAttempt[] }) {
   const [open, setOpen] = useState(false)
+  const [tab, setTab] = useState("actions")
   const attemptOptions = useMemo(() => attempts.filter((attempt) => attempt.clawId), [attempts])
   const defaultClawId = useMemo(
     () => attemptOptions.find((attempt) => attempt.attemptId === run.currentAttemptId)?.clawId || run.clawId,
@@ -44,13 +45,13 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>Agent activity and pipeline output for {run.ownerDisplayName || run.runId}.</DialogDescription>
           </DialogHeader>
-          <Tabs defaultValue="actions" className="min-h-0 flex-1 gap-0 px-6 pb-6">
+          <Tabs value={tab} onValueChange={setTab} className="min-h-0 flex-1 gap-0 px-6 pb-6">
             <div className="flex shrink-0 items-center justify-between gap-3 pb-3">
               <TabsList>
                 <TabsTrigger value="actions">Actions</TabsTrigger>
                 <TabsTrigger value="output">Output</TabsTrigger>
               </TabsList>
-              {attemptOptions.length > 1 && (
+              {tab === "actions" && attemptOptions.length > 1 && (
                 <Select value={clawId} onValueChange={setSelectedClawId}>
                   <SelectTrigger size="sm" className="w-44">
                     <SelectValue placeholder="Select attempt" />
@@ -170,7 +171,7 @@ function ActivityLine({ message }: { message: ApiMessage }) {
       </div>
       <div className="min-w-0 space-y-1">
         {detailItems.length > 0 ? detailItems.map((item, index) => (
-          item.kind === "url" ? (
+          item.kind === "url" && isSafeHttpUrl(item.value) ? (
             <a key={`${item.kind}-${index}`} href={item.value} target="_blank" rel="noreferrer" className="block truncate text-primary underline-offset-4 hover:underline">{item.value}</a>
           ) : (
             <div key={`${item.kind}-${index}`} className={cn("break-words text-muted-foreground", item.kind === "command" && "rounded bg-muted px-2 py-1 font-mono text-foreground", item.kind === "error" && "text-destructive")}>{item.value}</div>
@@ -242,6 +243,15 @@ function OutputBlock({ output }: { output: TaskRunOutput }) {
 
 function LogStream({ label, value, error = false }: { label: string; value: string; error?: boolean }) {
   return <div><div className={cn("mb-1 text-xs font-medium text-muted-foreground", error && "text-destructive")}>{label}</div><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono text-xs">{value}</pre></div>
+}
+
+function isSafeHttpUrl(value: string) {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === "http:" || protocol === "https:"
+  } catch {
+    return false
+  }
 }
 
 function parseActivity(message: ApiMessage): AgentActivity | null {
