@@ -2876,6 +2876,22 @@ func (s *Server) Provision(token, clawToken string) (string, error) {
 
 // ─── Provisioning ─────────────────────────────────────────────────────────────
 
+type daytonaSandboxProvisioner interface {
+	Create(context.Context, types.CreateRequest) (*types.Instance, error)
+	ConfigureOpenClaw(context.Context, string, map[string]string) error
+}
+
+func createAndConfigureDaytonaSandbox(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string) (*types.Instance, error) {
+	instance, err := p.Create(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("daytona create: %w", err)
+	}
+	if err := p.ConfigureOpenClaw(ctx, instance.ID, env); err != nil {
+		return nil, fmt.Errorf("daytona configure OpenClaw environment for sandbox %s: %w", instance.ID, err)
+	}
+	return instance, nil
+}
+
 func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
@@ -2893,9 +2909,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := p.Create(ctx, createReq)
+	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env)
 	if err != nil {
-		return fmt.Errorf("daytona create: %w", err)
+		return err
 	}
 	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
 	recordE2EDaytonaSandboxID(instance.ID)

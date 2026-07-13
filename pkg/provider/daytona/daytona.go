@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,24 @@ type Provider struct {
 }
 
 var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func buildOpenClawEnvFile(env map[string]string) ([]byte, error) {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		if !shellEnvNameRE.MatchString(key) {
+			return nil, fmt.Errorf("invalid environment variable name %q", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	envLines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		escapedValue := strings.ReplaceAll(env[key], "'", "'\"'\"'")
+		envLines = append(envLines, fmt.Sprintf("export %s='%s'", key, escapedValue))
+	}
+	return []byte(strings.Join(envLines, "\n")), nil
+}
 
 // New creates a new Daytona provider
 func New(config map[string]interface{}) (*Provider, error) {
@@ -311,33 +330,30 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 	}
 
 	// Create openclaw config directory
-	response, err := sandbox.Process.ExecuteCommand(ctx, "bash -c 'mkdir -p ~/.openclaw'")
+	response, err := sandbox.Process.ExecuteCommand(ctx, "bash -c 'mkdir -p /home/daytona/.openclaw'")
 	if err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
+	}
+	if response.ExitCode != 0 {
+		return fmt.Errorf("failed to create config dir: command exited with status %d", response.ExitCode)
 	}
 
 	// Write environment to a file that gets sourced
 	if len(env) > 0 {
-		var envLines []string
-		for k, v := range env {
-			if !shellEnvNameRE.MatchString(k) {
-				return fmt.Errorf("invalid environment variable name %q", k)
-			}
-			// Escape for shell
-			escapedV := strings.ReplaceAll(v, "'", "'\"'\"'")
-			envLines = append(envLines, fmt.Sprintf("export %s='%s'", k, escapedV))
+		envContent, err := buildOpenClawEnvFile(env)
+		if err != nil {
+			return err
 		}
-		envContent := strings.Join(envLines, "\n")
 
 		// Write env file
-		err = sandbox.FileSystem.UploadFile(ctx, []byte(envContent), "/home/daytona/.openclaw/env")
+		err = sandbox.FileSystem.UploadFile(ctx, envContent, "/home/daytona/.openclaw/env")
 		if err != nil {
 			return fmt.Errorf("failed to write env file: %w", err)
 		}
 
 		// Source it from bashrc
 		response, err = sandbox.Process.ExecuteCommand(ctx,
-			"bash -c 'grep -q openclaw/env ~/.bashrc || echo \"source ~/.openclaw/env\" >> ~/.bashrc'")
+			"bash -c 'grep -q openclaw/env /home/daytona/.bashrc || echo \"source ~/.openclaw/env\" >> /home/daytona/.bashrc'")
 		if err != nil || response.ExitCode != 0 {
 			// Non-fatal
 		}
