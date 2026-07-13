@@ -8,6 +8,7 @@ import type {
   TaskRunAttempt,
   TaskRunEvent,
   TaskRunFilterOptions,
+  TaskRunOutput,
   TaskRunPR,
   TaskRunsResponse,
   TaskRunSummary,
@@ -75,6 +76,13 @@ if (typeof window !== "undefined") {
   resolveToken()
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = "ApiError"
+  }
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
@@ -99,7 +107,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
       if (typeof parsed.error === "string") message = parsed.error
     } catch { /* not JSON */ }
     if (!message) message = `API error ${res.status}`
-    throw new Error(message)
+    throw new ApiError(message, res.status)
   }
   if (res.status === 204) return undefined as T
   return res.json()
@@ -403,6 +411,10 @@ export async function fetchTaskRunEvents(runId: string): Promise<{ events: TaskR
 
 export async function fetchTaskRunPRs(runId: string): Promise<{ prs: TaskRunPR[] }> {
   return apiFetch<{ prs: TaskRunPR[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/prs`)
+}
+
+export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[] }> {
+  return apiFetch<{ outputs: TaskRunOutput[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
 }
 
 export async function fetchTaskRunFilterOptions(): Promise<TaskRunFilterOptions> {

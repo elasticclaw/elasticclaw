@@ -22,6 +22,7 @@ import type {
 } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { RunLogsDialog } from "@/components/run-logs-dialog"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -434,6 +435,7 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
             {error}
           </div>
         )}
+        <RunLogsDialog key={run.runId} run={run} attempts={details?.attempts ?? []} />
         <section className="grid grid-cols-2 gap-2 text-sm">
           <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
