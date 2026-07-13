@@ -613,9 +613,10 @@ func (s *Server) readTaskRunAnalyticsFilterOptionsForRequest(tenantID, githubLog
 		}
 		sets[set][value] = true
 	}
-	// Default filters match the SQL variant's eligibility clause
+	// Same eligibility clause as the SQL variant
 	// (analytics_enabled=1 AND requires_pr=1).
-	filters := taskRunAnalyticsFilters{TenantID: tenantID}
+	eligible := true
+	filters := taskRunAnalyticsFilters{TenantID: tenantID, RequiresPR: &eligible, AnalyticsEnabled: &eligible}
 	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
 		add("workspaces", run.WorkspaceName)
 		add("workflows", run.WorkflowName)
