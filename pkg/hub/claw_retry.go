@@ -1,0 +1,400 @@
+package hub
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"strconv"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
+	"nhooyr.io/websocket"
+)
+
+const maxClawAttempts = 3
+
+const prepareClawRetryAttempts = 3
+
+var clawRetryBackoff = []time.Duration{0, 30 * time.Second, 2 * time.Minute}
+
+type clawRetryDisposition int
+
+const (
+	clawRetryNotApplicable clawRetryDisposition = iota
+	clawRetryScheduled
+	clawRetryAlreadyHandled
+	clawRetryIndeterminate
+)
+
+type clawRetryPlan struct {
+	tenantID    string
+	attempt     int
+	failureType string
+}
+
+func retryableAgentFailure(kind agentFailureKind) bool {
+	switch kind {
+	case agentFailureProvisioning, agentFailureBootstrap, agentFailureSandboxTerminated,
+		agentFailureRestore, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles,
+		agentFailureProviderLost:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
+	switch kind {
+	case agentFailureProvisioning:
+		return taskRunFailureProvisionFailed
+	case agentFailureSandboxTerminated, agentFailureProviderLost:
+		return taskRunFailureProviderLost
+	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles:
+		return taskRunFailureBootstrapFailed
+	case agentFailureGitHubCredentials:
+		return taskRunFailurePermissionOrAuth
+	default:
+		return taskRunFailureUnknown
+	}
+}
+
+func isProtectedClawStatus(status string) bool {
+	return status == "idle" || status == "completed" || status == "deleted"
+}
+
+type watchdogHealthAction int
+
+const (
+	watchdogHealthNone watchdogHealthAction = iota
+	watchdogHealthWarn
+	watchdogHealthEscalate
+)
+
+func heartbeatShouldEscalate(unhealthyCount int, status string, bootstrapOK bool) bool {
+	return unhealthyCount == 12 && status == "connected" && bootstrapOK
+}
+
+func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time) watchdogHealthAction {
+	if status != "connected" || !bootstrapOK || !gatewayReady {
+		return watchdogHealthNone
+	}
+	silentFor := nowAt.Sub(lastStatusAt)
+	if userSilentFor := nowAt.Sub(lastUserMessageAt); userSilentFor < silentFor {
+		silentFor = userSilentFor
+	}
+	if warnedAt.IsZero() && silentFor > 5*time.Minute {
+		return watchdogHealthWarn
+	}
+	if !warnedAt.IsZero() && silentFor > 10*time.Minute && nowAt.Sub(warnedAt) >= 5*time.Minute {
+		return watchdogHealthEscalate
+	}
+	return watchdogHealthNone
+}
+
+func (s *Server) escalateClawHealthFailure(clawID, reason string) {
+	var status string
+	var bootstrapOK int
+	if err := s.db.QueryRow(`SELECT status, bootstrap_ok FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK); err != nil {
+		return
+	}
+	if status != "connected" || bootstrapOK == 0 || isProtectedClawStatus(status) {
+		return
+	}
+	s.stopAgentWithReason(clawID, reason, false)
+}
+
+func (s *Server) escalateGatewayHealthFailure(clawID string) {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return
+	}
+	cc.mu.RLock()
+	unhealthyCount := cc.gatewayUnhealthyCount
+	cc.mu.RUnlock()
+	if unhealthyCount < 12 {
+		return
+	}
+	s.escalateClawHealthFailure(clawID, "workspace unresponsive: gateway unhealthy for ~3m")
+}
+
+// prepareClawRetry atomically fails the current attempt and creates its
+// successor. Updating the claw to error in the same transaction keeps another
+// detector from consuming a second attempt while replacement is waiting.
+func (s *Server) prepareClawRetry(clawID, reason string) (clawRetryDisposition, clawRetryPlan, error) {
+	var disposition clawRetryDisposition
+	var plan clawRetryPlan
+	var err error
+	for attempt := 0; attempt < prepareClawRetryAttempts; attempt++ {
+		disposition, plan, err = s.prepareClawRetryOnce(clawID, reason)
+		if err == nil || !isSQLiteBusy(err) {
+			return disposition, plan, err
+		}
+		if attempt+1 < prepareClawRetryAttempts {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+		}
+	}
+	return disposition, plan, err
+}
+
+func (s *Server) prepareClawRetryOnce(clawID, reason string) (clawRetryDisposition, clawRetryPlan, error) {
+	failure := classifyAgentFailure(reason)
+	if !retryableAgentFailure(failure.Kind) {
+		return clawRetryNotApplicable, clawRetryPlan{}, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	defer tx.Rollback()
+
+	var tenantID, status, provider, runID string
+	if err := tx.QueryRow(`
+		SELECT tenant_id, status, COALESCE(provider,''), COALESCE(task_run_id,'')
+		  FROM claws WHERE id=?`, clawID).Scan(&tenantID, &status, &provider, &runID); err != nil {
+		if err == sql.ErrNoRows {
+			return clawRetryAlreadyHandled, clawRetryPlan{}, nil
+		}
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if isProtectedClawStatus(status) {
+		return clawRetryNotApplicable, clawRetryPlan{}, nil
+	}
+	if status == "error" {
+		return clawRetryAlreadyHandled, clawRetryPlan{}, nil
+	}
+	if provider == "" || runID == "" {
+		return clawRetryNotApplicable, clawRetryPlan{}, nil
+	}
+
+	var currentAttemptID, triggerID string
+	var attemptCount int
+	if err := tx.QueryRow(`
+		SELECT current_attempt_id, attempt_count, COALESCE(trigger_id,'')
+		  FROM task_runs WHERE id=? AND claw_id=?`, runID, clawID).Scan(&currentAttemptID, &attemptCount, &triggerID); err != nil {
+		if err == sql.ErrNoRows {
+			return clawRetryNotApplicable, clawRetryPlan{}, nil
+		}
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if attemptCount >= maxClawAttempts {
+		return clawRetryNotApplicable, clawRetryPlan{}, nil
+	}
+
+	ts := epochMillis(now())
+	failureType := taskRunFailureTypeForAgentFailure(failure.Kind)
+	res, err := tx.Exec(`
+		UPDATE task_run_attempts
+		   SET status='failed', failure_type=?, finished_at=?, updated_at=?
+		 WHERE id=? AND run_id=? AND status='running'`, failureType, ts, ts, currentAttemptID, runID)
+	if err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return clawRetryNotApplicable, clawRetryPlan{}, nil
+	}
+
+	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
+	res, err = tx.Exec(`
+		UPDATE claws
+		   SET status='error', bootstrap_status='', bootstrap_diagnostic=?
+		 WHERE id=? AND tenant_id=? AND status=?`, safeReason, clawID, tenantID, status)
+	if err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return clawRetryAlreadyHandled, clawRetryPlan{}, nil
+	}
+
+	nextAttempt := attemptCount + 1
+	nextAttemptID := uuid.New().String()
+	if _, err := tx.Exec(`
+		INSERT INTO task_run_attempts(
+			id, tenant_id, run_id, attempt_id, attempt_number, trigger_id, claw_id,
+			status, failure_type, started_at, created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		nextAttemptID, tenantID, runID, nextAttemptID, nextAttempt, triggerID, clawID,
+		"running", "", ts, ts, ts); err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if _, err := tx.Exec(`
+		UPDATE task_runs SET current_attempt_id=?, attempt_count=?, updated_at=? WHERE id=?`,
+		nextAttemptID, nextAttempt, ts, runID); err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if err := recordTaskRunEventTx(tx, TaskRunEvent{
+		TenantID:        tenantID,
+		RunID:           runID,
+		AttemptID:       nextAttemptID,
+		EventKey:        "retry:" + clawID + ":" + strconv.Itoa(nextAttempt),
+		Source:          taskRunSourceHub,
+		EventType:       taskRunEventProvisionStarted,
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionNeutral,
+		Detail:          map[string]any{"attempt": nextAttempt, "reason": safeReason, "previous_failure_type": failureType},
+		OccurredAt:      now(),
+	}); err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return clawRetryNotApplicable, clawRetryPlan{}, err
+	}
+	return clawRetryScheduled, clawRetryPlan{tenantID: tenantID, attempt: nextAttempt, failureType: failureType}, nil
+}
+
+func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
+	disposition, plan, err := s.prepareClawRetry(clawID, reason)
+	if err != nil {
+		log.Printf("[claw-retry] failed to prepare retry for %s: %v", shortID(clawID), err)
+		return clawRetryIndeterminate
+	}
+	if disposition != clawRetryScheduled {
+		return disposition
+	}
+
+	message := fmt.Sprintf("🔄 Agent recovery is starting (attempt %d/%d).", plan.attempt, maxClawAttempts)
+	s.broadcastToUsers(plan.tenantID, types.WSMessage{
+		Type: "message",
+		Payload: map[string]interface{}{
+			"role": "system", "content": message, "claw_id": clawID,
+		},
+	})
+
+	delay := retryDelay(clawRetryBackoff, plan.attempt-2)
+	go func() {
+		err := retryOperation(retryOptions{
+			Label:    "claw instance replacement",
+			Attempts: 1,
+			Delays:   []time.Duration{delay},
+			Run: func() error {
+				return s.replaceClawInstance(context.Background(), plan.tenantID, clawID, reason, plan.attempt)
+			},
+		})
+		if err != nil {
+			log.Printf("[claw-retry] replacement failed for %s: %v", shortID(clawID), err)
+			s.stopAgentTerminalWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
+		}
+	}()
+	return clawRetryScheduled
+}
+
+// replaceClawInstance tears down the corrupted provider instance and starts a
+// fresh one. It restores the newest ready checkpoint unless the previous failed
+// attempt used that exact checkpoint, in which case it provisions cleanly.
+func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reason string, attempt int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	checkpointID, err := s.retryCheckpointBeforeTermination(tenantID, clawID, attempt)
+	if err != nil {
+		return err
+	}
+
+	var provider, providerID string
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`,
+		clawID, tenantID).Scan(&provider, &providerID); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		if cc.conn != nil {
+			_ = cc.conn.Close(websocket.StatusNormalClosure, "replacing corrupted instance")
+		}
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+	if providerID != "" {
+		go s.terminateVM(provider, providerID)
+	}
+
+	bootstrapStatus := fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxClawAttempts)
+	reset, err := s.resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus)
+	if err != nil {
+		return err
+	}
+	if !reset {
+		return nil
+	}
+	if _, err := s.db.Exec(`
+		UPDATE task_run_attempts SET restored_checkpoint_id=?, updated_at=?
+		 WHERE id=(
+			SELECT tr.current_attempt_id FROM task_runs tr
+			JOIN claws c ON c.task_run_id=tr.id WHERE c.id=?
+		 )`,
+		nullIfEmpty(checkpointID), epochMillis(now()), clawID); err != nil {
+		return err
+	}
+
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "claw_status",
+		Payload: map[string]string{
+			"claw_id": clawID, "status": "provisioning", "bootstrap_status": bootstrapStatus,
+		},
+	})
+	log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
+	go s.provisionStoredClaw(clawID)
+	return nil
+}
+
+// retryCheckpointBeforeTermination fixes the restore choice at the failure
+// boundary. A best-effort termination checkpoint is retained for diagnostics,
+// but is never selected as the state used to recover that same failure.
+func (s *Server) retryCheckpointBeforeTermination(tenantID, clawID string, attempt int) (string, error) {
+	checkpointID, err := s.retryCheckpointID(tenantID, clawID, attempt)
+	if err != nil {
+		return "", err
+	}
+	s.checkpointBeforeTermination(clawID, "automatic-retry")
+	return checkpointID, nil
+}
+
+func (s *Server) retryCheckpointID(tenantID, clawID string, attempt int) (string, error) {
+	var previousCheckpointID string
+	_ = s.db.QueryRow(`
+		SELECT COALESCE(restored_checkpoint_id,'')
+		  FROM task_run_attempts
+		 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=?`, clawID, attempt-1).Scan(&previousCheckpointID)
+
+	var checkpointID string
+	err := s.db.QueryRow(`
+		SELECT id FROM claw_checkpoints
+		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
+		 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if checkpointID == previousCheckpointID {
+		return "", nil
+	}
+	return checkpointID, nil
+}
+
+func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus string) (bool, error) {
+	res, err := s.db.Exec(`
+		UPDATE claws
+		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic='',
+		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?
+		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
+		bootstrapStatus, checkpointID, clawID, tenantID)
+	if err != nil {
+		return false, err
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0, nil
+}
+
+func nullIfEmpty(value string) interface{} {
+	if value == "" {
+		return nil
+	}
+	return value
+}

@@ -51,6 +51,10 @@ const (
 	taskRunFailurePRClosedUnmerged   = "pr_closed_unmerged"
 	taskRunFailureManualStopDelivery = "manual_stop_before_delivery"
 	taskRunFailureAgentStopped       = "agent_stopped"
+	taskRunFailureProvisionFailed    = "provision_failed"
+	taskRunFailureBootstrapFailed    = "bootstrap_failed"
+	taskRunFailureProviderLost       = "provider_lost"
+	taskRunFailurePermissionOrAuth   = "permission_or_auth_failed"
 	taskRunFailureTimeout            = "timeout"
 	taskRunFailureUnknown            = "unknown"
 
