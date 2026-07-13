@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -211,6 +212,167 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	notFoundRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-other-tenant", "test-token")
 	if notFoundRR.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant detail status = %d, body = %s", notFoundRR.Code, notFoundRR.Body.String())
+	}
+}
+
+func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	ts := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-outputs", AttemptID: "attempt-one", ClawID: "claw-one", TenantID: "test-tenant-id",
+		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: ts,
+	})
+	if _, err := db.Exec(`
+		INSERT INTO task_run_attempts(id, tenant_id, run_id, attempt_id, attempt_number, claw_id, status, started_at, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"attempt-two", "test-tenant-id", "run-outputs", "attempt-two", 2, "claw-two", "succeeded", ts+100, ts+100, ts+100,
+	); err != nil {
+		t.Fatalf("insert second attempt: %v", err)
+	}
+	for _, output := range []struct {
+		clawID, stageID, name, stdout, stderr string
+		exitCode                              int
+		createdAt                             time.Time
+	}{
+		{clawID: "claw-one", stageID: "prepare", name: "checkout", stdout: "ready", createdAt: time.UnixMilli(ts)},
+		{clawID: "claw-two", stageID: "verify", name: "tests", stderr: "failed test", exitCode: 1, createdAt: time.UnixMilli(ts + 200)},
+		{clawID: "unrelated", stageID: "hidden", name: "other", stdout: "ignore", createdAt: time.UnixMilli(ts + 300)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at)
+			VALUES(?,?,?,?,?,?,?)`, output.clawID, output.stageID, output.name, output.stdout, output.stderr, output.exitCode, output.createdAt); err != nil {
+			t.Fatalf("insert pipeline output: %v", err)
+		}
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-outputs/outputs", "test-token")
+	var response taskRunAnalyticsOutputsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if len(response.Outputs) != 2 {
+		t.Fatalf("outputs = %#v", response.Outputs)
+	}
+	if response.Outputs[0].AttemptID != "attempt-one" || response.Outputs[0].Stdout != "ready" || response.Outputs[0].CreatedAt != ts {
+		t.Fatalf("unexpected first output: %#v", response.Outputs[0])
+	}
+	if response.Outputs[1].AttemptID != "attempt-two" || response.Outputs[1].ExitCode != 1 || response.Outputs[1].Stderr != "failed test" {
+		t.Fatalf("unexpected second output: %#v", response.Outputs[1])
+	}
+
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-empty", AttemptID: "attempt-empty", ClawID: "claw-empty", TenantID: "test-tenant-id",
+		OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts + 1000,
+	})
+	emptyRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-empty/outputs", "test-token")
+	var empty taskRunAnalyticsOutputsResponse
+	decodeTaskRunAnalyticsAPI(t, emptyRR, &empty)
+	if empty.Outputs == nil || len(empty.Outputs) != 0 {
+		t.Fatalf("empty outputs should be an empty array, got %#v", empty.Outputs)
+	}
+}
+
+func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Auth: &types.AuthConfig{
+			SessionSecret: "analytics-session-secret",
+			Access:        &types.AccessConfig{ViewRequiresTags: []string{"owner={user}"}},
+		},
+	}, "", "", "")
+	ts := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-alice", AttemptID: "attempt-alice", ClawID: "claw-alice", TenantID: "test-tenant-id",
+		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts + 100,
+	})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-bob", AttemptID: "attempt-bob", ClawID: "claw-bob", TenantID: "test-tenant-id",
+		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts,
+	})
+	for _, claw := range []struct{ id, tags string }{
+		{id: "claw-alice", tags: `["owner=alice"]`},
+		{id: "claw-bob", tags: `["owner=bob"]`},
+	} {
+		if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`, claw.id, "test-tenant-id", claw.id, claw.tags); err != nil {
+			t.Fatalf("insert claw: %v", err)
+		}
+	}
+	bobSession, err := signGitHubSession("analytics-session-secret", "bob", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", bobSession)
+	var list taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, listRR, &list)
+	if len(list.Runs) != 1 || list.Runs[0].RunID != "run-bob" {
+		t.Fatalf("OAuth list was not ACL-filtered: %#v", list.Runs)
+	}
+	for _, path := range []string{
+		"/api/analytics/runs/run-alice",
+		"/api/analytics/runs/run-alice/attempts",
+		"/api/analytics/runs/run-alice/events",
+		"/api/analytics/runs/run-alice/prs",
+		"/api/analytics/runs/run-alice/outputs",
+	} {
+		rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, path, bobSession)
+		if rr.Code != http.StatusForbidden && rr.Code != http.StatusNotFound {
+			t.Fatalf("OAuth request %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+	}
+	allowedRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-bob", bobSession)
+	if allowedRR.Code != http.StatusOK {
+		t.Fatalf("allowed OAuth detail status = %d, body = %s", allowedRR.Code, allowedRR.Body.String())
+	}
+	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "claw-bob"); err != nil {
+		t.Fatalf("delete claw: %v", err)
+	}
+	missingClawListRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", bobSession)
+	var missingClawList taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, missingClawListRR, &missingClawList)
+	if len(missingClawList.Runs) != 0 {
+		t.Fatalf("OAuth list should hide runs with missing claws when ACLs are configured: %#v", missingClawList.Runs)
+	}
+	missingClawDetailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-bob", bobSession)
+	if missingClawDetailRR.Code != http.StatusNotFound {
+		t.Fatalf("OAuth detail with configured ACL and missing claw status = %d, body = %s", missingClawDetailRR.Code, missingClawDetailRR.Body.String())
+	}
+
+	plainListRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
+	var plainList taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, plainListRR, &plainList)
+	if len(plainList.Runs) != 2 {
+		t.Fatalf("plain token list should be unrestricted: %#v", plainList.Runs)
+	}
+	plainDetailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-alice/attempts", "test-token")
+	if plainDetailRR.Code != http.StatusOK {
+		t.Fatalf("plain token detail status = %d, body = %s", plainDetailRR.Code, plainDetailRR.Body.String())
+	}
+}
+
+func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+		Auth:  &types.AuthConfig{SessionSecret: "analytics-session-secret"},
+	}, "", "", "")
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-deleted-claw", AttemptID: "attempt-deleted-claw", ClawID: "claw-deleted", TenantID: "test-tenant-id",
+		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: 1760000000000,
+	})
+	session, err := signGitHubSession("analytics-session-secret", "alice", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", session)
+	var list taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, listRR, &list)
+	if len(list.Runs) != 1 || list.Runs[0].RunID != "run-deleted-claw" {
+		t.Fatalf("OAuth list should include persisted run without claw when ACLs are unrestricted: %#v", list.Runs)
+	}
+
+	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-deleted-claw", session)
+	if detailRR.Code != http.StatusOK {
+		t.Fatalf("OAuth detail without configured ACL status = %d, body = %s", detailRR.Code, detailRR.Body.String())
 	}
 }
 

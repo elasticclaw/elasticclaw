@@ -221,6 +221,17 @@ export interface TaskRunEvent {
   createdAt: number
 }
 
+export interface TaskRunOutput {
+  clawId: string
+  attemptId?: string
+  stageId: string
+  outputName: string
+  stdout: string
+  stderr: string
+  exitCode: number
+  createdAt: number
+}
+
 export interface TaskRunPR {
   id: string
   repo: string

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const taskRunAnalyticsDefaultLimit = 50
@@ -72,6 +74,10 @@ type taskRunAnalyticsEventsResponse struct {
 
 type taskRunAnalyticsPRsResponse struct {
 	PRs []taskRunAnalyticsPRView `json:"prs"`
+}
+
+type taskRunAnalyticsOutputsResponse struct {
+	Outputs []taskRunAnalyticsOutputView `json:"outputs"`
 }
 
 type taskRunAnalyticsFilterOptionsResponse struct {
@@ -188,6 +194,17 @@ type taskRunAnalyticsPRView struct {
 	UpdatedAt        int64  `json:"updatedAt"`
 }
 
+type taskRunAnalyticsOutputView struct {
+	ClawID     string `json:"clawId"`
+	AttemptID  string `json:"attemptId,omitempty"`
+	StageID    string `json:"stageId"`
+	OutputName string `json:"outputName"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exitCode"`
+	CreatedAt  int64  `json:"createdAt"`
+}
+
 type taskRunAnalyticsFilters struct {
 	TenantID         string
 	FromStartedAt    int64
@@ -247,7 +264,7 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	runs, nextCursor, err := s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
+	runs, nextCursor, err := s.readTaskRunAnalyticsRunsForRequest(filters, limit, cursorStartedAt, cursorRunID, githubLoginFromContext(r.Context()))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -271,24 +288,23 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 		jsonError(w, http.StatusBadRequest, "invalid run id")
 		return
 	}
+	run, found, err := s.readTaskRunAnalyticsRun(tenantID, runID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if !found {
+		jsonError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.canViewTaskRunAnalyticsRun(w, r, tenantID, run.ClawID) {
+		return
+	}
 	if len(parts) == 1 {
-		run, found, err := s.readTaskRunAnalyticsRun(tenantID, runID)
-		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "db error")
-			return
-		}
-		if !found {
-			jsonError(w, http.StatusNotFound, "not found")
-			return
-		}
 		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
 		return
 	}
 	if len(parts) != 2 {
-		jsonError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if !s.taskRunAnalyticsRunExists(tenantID, runID) {
 		jsonError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -314,6 +330,13 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			return
 		}
 		jsonOK(w, taskRunAnalyticsPRsResponse{PRs: prs})
+	case "outputs":
+		outputs, err := s.readTaskRunAnalyticsOutputs(tenantID, runID, run.ClawID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		jsonOK(w, taskRunAnalyticsOutputsResponse{Outputs: outputs})
 	default:
 		jsonError(w, http.StatusNotFound, "not found")
 	}
@@ -463,6 +486,89 @@ func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit
 	return runs, nextCursor, nil
 }
 
+func (s *Server) readTaskRunAnalyticsRunsForRequest(filters taskRunAnalyticsFilters, limit int, cursorStartedAt int64, cursorRunID, githubLogin string) ([]taskRunAnalyticsRunView, string, error) {
+	if githubLogin == "" {
+		return s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
+	}
+	accessCfg := s.taskRunAnalyticsAccessConfig()
+	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
+		return s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
+	}
+
+	const batchSize = taskRunAnalyticsMaxLimit
+	visible := make([]taskRunAnalyticsRunView, 0, limit+1)
+	batchStartedAt, batchRunID := cursorStartedAt, cursorRunID
+	for {
+		batch, batchNextCursor, err := s.readTaskRunAnalyticsRuns(filters, batchSize, batchStartedAt, batchRunID)
+		if err != nil {
+			return nil, "", err
+		}
+		clawTags, err := s.readTaskRunAnalyticsClawTags(filters.TenantID, batch)
+		if err != nil {
+			return nil, "", err
+		}
+		for _, run := range batch {
+			tags, found := clawTags[run.ClawID]
+			if !found || !canViewClaw(accessCfg, githubLogin, tags) {
+				continue
+			}
+			visible = append(visible, run)
+			if len(visible) == limit+1 {
+				last := visible[limit-1]
+				return visible[:limit], encodeTaskRunAnalyticsCursor(last.StartedAt, last.RunID), nil
+			}
+		}
+		if batchNextCursor == "" {
+			return visible, "", nil
+		}
+		batchStartedAt, batchRunID, err = decodeTaskRunAnalyticsCursor(batchNextCursor)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+}
+
+func (s *Server) readTaskRunAnalyticsClawTags(tenantID string, runs []taskRunAnalyticsRunView) (map[string][]string, error) {
+	clawIDs := make([]string, 0, len(runs))
+	seen := make(map[string]bool, len(runs))
+	for _, run := range runs {
+		if run.ClawID == "" || seen[run.ClawID] {
+			continue
+		}
+		seen[run.ClawID] = true
+		clawIDs = append(clawIDs, run.ClawID)
+	}
+	tagsByClawID := make(map[string][]string, len(clawIDs))
+	if len(clawIDs) == 0 {
+		return tagsByClawID, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
+	args := make([]any, 0, len(clawIDs)+1)
+	args = append(args, tenantID)
+	for _, clawID := range clawIDs {
+		args = append(args, clawID)
+	}
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(tags,'[]')
+		  FROM claws
+		 WHERE tenant_id=? AND id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var clawID, tagsJSON string
+		if err := rows.Scan(&clawID, &tagsJSON); err != nil {
+			return nil, err
+		}
+		var tags []string
+		_ = json.Unmarshal([]byte(tagsJSON), &tags)
+		tagsByClawID[clawID] = tags
+	}
+	return tagsByClawID, rows.Err()
+}
+
 func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyticsRunView, bool, error) {
 	rows, err := s.db.Query(`
 		SELECT `+taskRunAnalyticsRunColumns()+`
@@ -557,6 +663,123 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 		prs = append(prs, pr)
 	}
 	return prs, rows.Err()
+}
+
+func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) ([]taskRunAnalyticsOutputView, error) {
+	attemptRows, err := s.db.Query(`
+		SELECT attempt_id, claw_id
+		  FROM task_run_attempts
+		 WHERE tenant_id=? AND run_id=?
+		 ORDER BY attempt_number ASC`, tenantID, runID)
+	if err != nil {
+		return nil, err
+	}
+	attemptByClaw := map[string]string{}
+	clawIDs := []string{}
+	seenClaws := map[string]bool{}
+	if runClawID != "" {
+		clawIDs = append(clawIDs, runClawID)
+		seenClaws[runClawID] = true
+	}
+	for attemptRows.Next() {
+		var attemptID, clawID string
+		if err := attemptRows.Scan(&attemptID, &clawID); err != nil {
+			attemptRows.Close()
+			return nil, err
+		}
+		if clawID == "" {
+			continue
+		}
+		attemptByClaw[clawID] = attemptID
+		if !seenClaws[clawID] {
+			clawIDs = append(clawIDs, clawID)
+			seenClaws[clawID] = true
+		}
+	}
+	if err := attemptRows.Err(); err != nil {
+		attemptRows.Close()
+		return nil, err
+	}
+	attemptRows.Close()
+	if len(clawIDs) == 0 {
+		return []taskRunAnalyticsOutputView{}, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
+	args := make([]any, 0, len(clawIDs))
+	for _, clawID := range clawIDs {
+		args = append(args, clawID)
+	}
+	rows, err := s.db.Query(`
+		SELECT claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at
+		  FROM pipeline_outputs
+		 WHERE claw_id IN (`+placeholders+`)
+		 ORDER BY created_at ASC, claw_id ASC, output_name ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	outputs := []taskRunAnalyticsOutputView{}
+	for rows.Next() {
+		var output taskRunAnalyticsOutputView
+		var createdAt time.Time
+		if err := rows.Scan(&output.ClawID, &output.StageID, &output.OutputName, &output.Stdout, &output.Stderr, &output.ExitCode, &createdAt); err != nil {
+			return nil, err
+		}
+		output.AttemptID = attemptByClaw[output.ClawID]
+		output.CreatedAt = epochMillis(createdAt)
+		outputs = append(outputs, output)
+	}
+	return outputs, rows.Err()
+}
+
+func (s *Server) canViewTaskRunAnalyticsRun(w http.ResponseWriter, r *http.Request, tenantID, clawID string) bool {
+	githubLogin := githubLoginFromContext(r.Context())
+	if githubLogin == "" {
+		return true
+	}
+	allowed, found, err := s.taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return false
+	}
+	if !found {
+		jsonError(w, http.StatusNotFound, "not found")
+		return false
+	}
+	if !allowed {
+		jsonError(w, http.StatusForbidden, "forbidden")
+		return false
+	}
+	return true
+}
+
+func (s *Server) taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin string) (allowed, found bool, err error) {
+	accessCfg := s.taskRunAnalyticsAccessConfig()
+	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
+		return true, true, nil
+	}
+
+	var tagsJSON string
+	err = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON)
+	if err == sql.ErrNoRows {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	var clawTags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
+	return canViewClaw(accessCfg, githubLogin, clawTags), true, nil
+}
+
+func (s *Server) taskRunAnalyticsAccessConfig() *types.AccessConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.hubCfg.Auth != nil {
+		return s.hubCfg.Auth.Access
+	}
+	return nil
 }
 
 func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnalyticsFilterOptionsResponse, error) {
