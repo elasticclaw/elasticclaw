@@ -157,9 +157,18 @@ CI runs on Depot. Workflows in `.depot/workflows/`:
 
 ## Reading Depot CI Logs
 
-If you need to inspect CI logs for a Depot build, use the Depot CI API directly. The `DEPOT_TOKEN` env var is injected into the workspace (set via hub secrets). It is a Bearer token for `https://api.depot.dev`.
+If you need to inspect CI logs for a Depot build, use the Depot CI API directly. `DEPOT_TOKEN` is a Bearer token for `https://api.depot.dev`. Store it as a named secret in the hub (global or workspace-scoped) and inject it only where needed.
 
-**Security note:** `DEPOT_TOKEN` is exposed to every process in the workspace, just like any other injected secret. Store it in hub secrets with the narrowest scope possible — ideally a token that can only read CI logs and metrics, not trigger builds or access other Depot resources. If you only need the token occasionally, you can also omit it from the workspace config and set it manually when asked.
+**Recommended: scope it to the workflow.** Add a `secret_refs` entry to the workflow that needs to read Depot logs:
+
+```yaml
+secret_refs:
+  DEPOT_TOKEN: depot_token
+```
+
+This injects `DEPOT_TOKEN` only into claws created by that workflow, so other workflows in the workspace do not receive it. `secret_refs` resolves from workflow-scoped secrets first, then workspace secrets, then global hub secrets.
+
+**Security note:** Injected secrets are exposed to every process in the claw, so scope the Depot token as narrowly as possible — ideally a token that can only read CI logs and metrics, not trigger builds or access other Depot resources. If you only need the token occasionally, omit it and set it manually when asked.
 
 Useful API calls (Connect RPC over HTTP, JSON encoding):
 
