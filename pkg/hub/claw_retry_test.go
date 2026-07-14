@@ -335,3 +335,50 @@ func TestRetryOperationUsesDelaysAndSanitizesFinalError(t *testing.T) {
 		t.Fatalf("expected sanitized final error, got %v", err)
 	}
 }
+
+func TestResolveClawStopDisposition(t *testing.T) {
+	t.Run("indeterminate then scheduled", func(t *testing.T) {
+		var slept []time.Duration
+		results := []clawRetryDisposition{clawRetryIndeterminate, clawRetryIndeterminate, clawRetryScheduled}
+		calls := 0
+		got := resolveClawStopDisposition(func() clawRetryDisposition {
+			calls++
+			return results[calls-1]
+		}, func(delay time.Duration) { slept = append(slept, delay) })
+		if got != clawRetryScheduled {
+			t.Fatalf("disposition=%v, want scheduled", got)
+		}
+		if len(slept) != 2 || slept[0] != clawStopRevaluationDelays[0] || slept[1] != clawStopRevaluationDelays[1] {
+			t.Fatalf("slept=%v, want %v", slept, clawStopRevaluationDelays)
+		}
+	})
+
+	t.Run("always indeterminate falls through to terminal", func(t *testing.T) {
+		calls := 0
+		got := resolveClawStopDisposition(func() clawRetryDisposition {
+			calls++
+			return clawRetryIndeterminate
+		}, func(time.Duration) {})
+		if got != clawRetryNotApplicable {
+			t.Fatalf("disposition=%v, want notApplicable", got)
+		}
+		if calls != 3 {
+			t.Fatalf("evaluations=%d, want 3", calls)
+		}
+	})
+
+	t.Run("already handled returns immediately", func(t *testing.T) {
+		var slept []time.Duration
+		calls := 0
+		got := resolveClawStopDisposition(func() clawRetryDisposition {
+			calls++
+			return clawRetryAlreadyHandled
+		}, func(delay time.Duration) { slept = append(slept, delay) })
+		if got != clawRetryAlreadyHandled {
+			t.Fatalf("disposition=%v, want alreadyHandled", got)
+		}
+		if calls != 1 || len(slept) != 0 {
+			t.Fatalf("calls=%d slept=%v, want 1 evaluation and no sleeps", calls, slept)
+		}
+	})
+}

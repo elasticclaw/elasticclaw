@@ -19,6 +19,8 @@ const prepareClawRetryAttempts = 3
 
 var clawRetryBackoff = []time.Duration{0, 30 * time.Second, 2 * time.Minute}
 
+var clawStopRevaluationDelays = []time.Duration{time.Second, 5 * time.Second}
+
 type clawRetryDisposition int
 
 const (
@@ -244,6 +246,28 @@ func (s *Server) prepareClawRetryOnce(clawID, reason string) (clawRetryDispositi
 		return clawRetryNotApplicable, clawRetryPlan{}, err
 	}
 	return clawRetryScheduled, clawRetryPlan{tenantID: tenantID, attempt: nextAttempt, failureType: failureType}, nil
+}
+
+// resolveClawStopDisposition re-evaluates an indeterminate retry decision a
+// bounded number of times. Indeterminate means retry preparation rolled back
+// (DB error / SQLite busy), so no replacement of ours exists; re-evaluating
+// resolves the common cases (a concurrent detector won → alreadyHandled, or
+// the DB recovered → scheduled). If it stays indeterminate, we return
+// notApplicable so the caller proceeds to the terminal path: a run stuck
+// forever is worse than the tiny residual race with a concurrent detector.
+func resolveClawStopDisposition(evaluate func() clawRetryDisposition, sleep func(time.Duration)) clawRetryDisposition {
+	disposition := evaluate()
+	for _, delay := range clawStopRevaluationDelays {
+		if disposition != clawRetryIndeterminate {
+			return disposition
+		}
+		sleep(delay)
+		disposition = evaluate()
+	}
+	if disposition == clawRetryIndeterminate {
+		return clawRetryNotApplicable
+	}
+	return disposition
 }
 
 func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
