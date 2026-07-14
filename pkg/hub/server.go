@@ -2882,14 +2882,32 @@ type daytonaSandboxProvisioner interface {
 	Destroy(context.Context, string, bool) error
 }
 
-func createAndConfigureDaytonaSandbox(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string) (*types.Instance, error) {
-	return createAndConfigureDaytonaSandboxWithRetry(ctx, p, req, env, []time.Duration{2 * time.Second, 5 * time.Second})
+var daytonaLongRetryDelays = []time.Duration{
+	5 * time.Second,
+	10 * time.Second,
+	20 * time.Second,
+	40 * time.Second,
+	60 * time.Second,
 }
 
-func createAndConfigureDaytonaSandboxWithRetry(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string, retryDelays []time.Duration) (*types.Instance, error) {
+func createAndConfigureDaytonaSandbox(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string, recordCreated func(*types.Instance) error) (*types.Instance, error) {
+	return createAndConfigureDaytonaSandboxWithRetry(ctx, p, req, env, recordCreated, daytonaLongRetryDelays)
+}
+
+func createAndConfigureDaytonaSandboxWithRetry(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string, recordCreated func(*types.Instance) error, retryDelays []time.Duration) (*types.Instance, error) {
 	instance, err := p.Create(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("daytona create: %w", err)
+	}
+	if recordCreated != nil {
+		if err := recordCreated(instance); err != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancelCleanup()
+			if cleanupErr := p.Destroy(cleanupCtx, instance.ID, false); cleanupErr != nil {
+				return nil, fmt.Errorf("daytona record sandbox %s: %w (sandbox cleanup failed: %v)", instance.ID, err, cleanupErr)
+			}
+			return nil, fmt.Errorf("daytona record sandbox %s: %w", instance.ID, err)
+		}
 	}
 
 	var configureErr error
@@ -2938,13 +2956,17 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env)
+	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
+		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, created.ID, clawID); err != nil {
+			return err
+		}
+		log.Printf("daytona workspace created: %s (claw %s)", created.ID, clawID)
+		recordE2EDaytonaSandboxID(created.ID)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	log.Printf("daytona workspace created: %s (claw %s)", instance.ID, clawID)
-	recordE2EDaytonaSandboxID(instance.ID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
 	clawName := req.Name
@@ -3731,13 +3753,7 @@ sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 
 }
 
 func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {
-	delays := []time.Duration{
-		5 * time.Second,
-		10 * time.Second,
-		20 * time.Second,
-		40 * time.Second,
-		60 * time.Second,
-	}
+	delays := daytonaLongRetryDelays
 	const maxAttempts = 6
 	var lastErr error
 

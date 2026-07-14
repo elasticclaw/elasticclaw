@@ -52,7 +52,10 @@ func TestCreateAndConfigureDaytonaSandboxMaterializesEnvBeforeBootstrap(t *testi
 		"AWS_SECRET_ACCESS_KEY": "resolved-workflow-secret-key",
 	}
 
-	instance, err := createAndConfigureDaytonaSandbox(context.Background(), p, types.CreateRequest{Name: "ec-claw123", Env: env}, env)
+	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{Name: "ec-claw123", Env: env}, env, func(instance *types.Instance) error {
+		p.calls = append(p.calls, "record:"+instance.ID)
+		return nil
+	}, nil)
 	if err != nil {
 		t.Fatalf("createAndConfigureDaytonaSandbox: %v", err)
 	}
@@ -61,7 +64,7 @@ func TestCreateAndConfigureDaytonaSandboxMaterializesEnvBeforeBootstrap(t *testi
 	if instance.ID != "sandbox-123" {
 		t.Fatalf("instance ID = %q, want sandbox-123", instance.ID)
 	}
-	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123", "bootstrap"}) {
+	if !reflect.DeepEqual(p.calls, []string{"create", "record:sandbox-123", "configure-openclaw:sandbox-123", "bootstrap"}) {
 		t.Fatalf("call order = %v", p.calls)
 	}
 	if !reflect.DeepEqual(p.configuredEnv, env) {
@@ -74,7 +77,7 @@ func TestCreateAndConfigureDaytonaSandboxStopsOnMaterializationFailureWithoutLea
 	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("upload failed")}}
 	env := map[string]string{"AWS_SECRET_ACCESS_KEY": secret}
 
-	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{Env: env}, env, nil)
+	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{Env: env}, env, nil, nil)
 	if err == nil {
 		t.Fatal("expected configuration error")
 	}
@@ -95,7 +98,7 @@ func TestCreateAndConfigureDaytonaSandboxStopsOnMaterializationFailureWithoutLea
 func TestCreateAndConfigureDaytonaSandboxRetriesUntilSandboxIsReady(t *testing.T) {
 	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("sandbox not ready"), nil}}
 
-	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{}, nil, []time.Duration{0})
+	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{}, nil, nil, []time.Duration{0})
 	if err != nil {
 		t.Fatalf("createAndConfigureDaytonaSandboxWithRetry: %v", err)
 	}
@@ -107,12 +110,19 @@ func TestCreateAndConfigureDaytonaSandboxRetriesUntilSandboxIsReady(t *testing.T
 	}
 }
 
+func TestDaytonaConfigureUsesLongBootstrapRetryPolicy(t *testing.T) {
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second}
+	if !reflect.DeepEqual(daytonaLongRetryDelays, want) {
+		t.Fatalf("Daytona retry delays = %v, want %v", daytonaLongRetryDelays, want)
+	}
+}
+
 func TestCreateAndConfigureDaytonaSandboxCleansUpWithIndependentContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("sandbox not ready")}}
 
-	_, err := createAndConfigureDaytonaSandboxWithRetry(ctx, p, types.CreateRequest{}, nil, nil)
+	_, err := createAndConfigureDaytonaSandboxWithRetry(ctx, p, types.CreateRequest{}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected configuration error")
 	}
@@ -120,6 +130,32 @@ func TestCreateAndConfigureDaytonaSandboxCleansUpWithIndependentContext(t *testi
 		t.Fatalf("cleanup inherited canceled context: %v", p.destroyContextErr)
 	}
 	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123", "destroy:sandbox-123"}) {
+		t.Fatalf("call order = %v", p.calls)
+	}
+}
+
+func TestCreateAndConfigureDaytonaSandboxRecordsIDBeforeConfigurationAndCleanup(t *testing.T) {
+	p := &recordingDaytonaSandboxProvisioner{
+		configureErrors: []error{errors.New("upload failed")},
+		destroyErr:      errors.New("destroy timed out"),
+	}
+	recordedID := ""
+
+	_, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{}, nil, func(instance *types.Instance) error {
+		recordedID = instance.ID
+		p.calls = append(p.calls, "record:"+instance.ID)
+		return nil
+	}, nil)
+	if err == nil {
+		t.Fatal("expected configuration and cleanup error")
+	}
+	if recordedID != "sandbox-123" {
+		t.Fatalf("recorded ID = %q, want sandbox-123", recordedID)
+	}
+	if !strings.Contains(err.Error(), "sandbox cleanup failed: destroy timed out") {
+		t.Fatalf("error lacks cleanup context: %v", err)
+	}
+	if !reflect.DeepEqual(p.calls, []string{"create", "record:sandbox-123", "configure-openclaw:sandbox-123", "destroy:sandbox-123"}) {
 		t.Fatalf("call order = %v", p.calls)
 	}
 }
