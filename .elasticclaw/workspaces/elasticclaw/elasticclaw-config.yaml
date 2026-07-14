@@ -14,4 +14,6 @@ repositories:
 env:
   LINEAR_API_KEY:
     secret: LINEAR_API_KEY
+  DEPOT_TOKEN:
+    secret: DEPOT_TOKEN
   ENVIRONMENT: dev
