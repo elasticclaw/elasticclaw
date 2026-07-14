@@ -155,6 +155,46 @@ CI runs on Depot. Workflows in `.depot/workflows/`:
 
 **Important:** Depot does NOT support `release` event trigger — only `push`/`pull_request`/`tag`.
 
+## Reading Depot CI Logs
+
+If you need to inspect CI logs for a Depot build, use the Depot CI API directly. The `DEPOT_TOKEN` env var is injected into the workspace (set via hub secrets). It is a Bearer token for `https://api.depot.dev`.
+
+Useful API calls (Connect RPC over HTTP, JSON encoding):
+
+```bash
+# List recent CI runs for a repo
+curl -fsSL https://api.depot.dev/depot.ci.v1.CIService/ListRuns \
+  -H "Authorization: Bearer $DEPOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Connect-Protocol-Version: 1" \
+  --json '{"repo": "elasticclaw/elasticclaw", "pageSize": 10}'
+
+# Get run status with nested workflows, jobs, and attempts
+curl -fsSL https://api.depot.dev/depot.ci.v1.CIService/GetRunStatus \
+  -H "Authorization: Bearer $DEPOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Connect-Protocol-Version: 1" \
+  --json '{"runId": "<run-id>"}'
+
+# Get logs for a job attempt (use current attemptId from GetRunStatus)
+curl -fsSL https://api.depot.dev/depot.ci.v1.CIService/GetJobAttemptLogs \
+  -H "Authorization: Bearer $DEPOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Connect-Protocol-Version: 1" \
+  --json '{"jobId": "<job-id>", "attemptId": "<attempt-id>"}'
+
+# Get failure diagnosis for a failed run/workflow/job/attempt
+curl -fsSL https://api.depot.dev/depot.ci.v1.CIService/GetFailureDiagnosis \
+  -H "Authorization: Bearer $DEPOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Connect-Protocol-Version: 1" \
+  --json '{"runId": "<run-id>"}'
+```
+
+Full reference: https://depot.dev/docs/api/ci/reference
+
+When asked to read CI logs, start by listing recent runs, identify the relevant run/workflow/job, then fetch the attempt logs. Use `GetFailureDiagnosis` when the run failed to get a summarized reason.
+
 ## Key Files
 
 ```
