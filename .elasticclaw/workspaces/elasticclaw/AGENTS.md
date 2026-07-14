@@ -159,6 +159,8 @@ CI runs on Depot. Workflows in `.depot/workflows/`:
 
 If you need to inspect CI logs for a Depot build, use the Depot CI API directly. The `DEPOT_TOKEN` env var is injected into the workspace (set via hub secrets). It is a Bearer token for `https://api.depot.dev`.
 
+**Security note:** `DEPOT_TOKEN` is exposed to every process in the workspace, just like any other injected secret. Store it in hub secrets with the narrowest scope possible — ideally a token that can only read CI logs and metrics, not trigger builds or access other Depot resources. If you only need the token occasionally, you can also omit it from the workspace config and set it manually when asked.
+
 Useful API calls (Connect RPC over HTTP, JSON encoding):
 
 ```bash
