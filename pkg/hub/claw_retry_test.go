@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -208,6 +209,34 @@ func TestResetClawForRetryRaceGuard(t *testing.T) {
 	reset, err = s.resetClawForRetry("tenant", "retry-claw", "", "retrying")
 	if err != nil || reset {
 		t.Fatalf("second reset: reset=%v err=%v, want no-op", reset, err)
+	}
+}
+
+func TestReplaceClawInstanceFailsDanglingAttemptWhenClawChangedState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, db, runID := newClawRetryTestServer(t, "connected")
+
+	disposition, plan, err := s.prepareClawRetry("retry-claw", "Provider VM lost: HTTP 404 not found")
+	if err != nil || disposition != clawRetryScheduled {
+		t.Fatalf("prepare retry: disposition=%v err=%v", disposition, err)
+	}
+	// Simulate the claw leaving 'error' during the backoff, e.g. a manual restore.
+	if _, err := db.Exec(`UPDATE claws SET status='idle' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.replaceClawInstance(context.Background(), "tenant", "retry-claw", "Provider VM lost: HTTP 404 not found", plan.attempt); err != nil {
+		t.Fatalf("replace claw instance: %v", err)
+	}
+
+	var status, failureType string
+	if err := db.QueryRow(`
+		SELECT status, failure_type FROM task_run_attempts WHERE run_id=? AND attempt_number=?`,
+		runID, plan.attempt).Scan(&status, &failureType); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || failureType != taskRunFailureUnknown {
+		t.Fatalf("successor attempt status=%q failure_type=%q, want failed/unknown", status, failureType)
 	}
 }
 

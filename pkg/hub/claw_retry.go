@@ -319,6 +319,17 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 		return err
 	}
 	if !reset {
+		// The claw left 'error'/'offline' during the backoff (e.g. deleted or
+		// manually restored), so no VM will be provisioned for the successor
+		// attempt; settle it so the run does not report 'running' forever.
+		ts := epochMillis(now())
+		if _, err := s.db.Exec(`
+			UPDATE task_run_attempts SET status='failed', failure_type=?, finished_at=?, updated_at=?
+			 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=? AND status='running'`,
+			taskRunFailureUnknown, ts, ts, clawID, attempt); err != nil {
+			return err
+		}
+		log.Printf("[claw-retry] replacement skipped for %s: claw changed state during backoff (attempt %d/%d)", shortID(clawID), attempt, maxClawAttempts)
 		return nil
 	}
 	if _, err := s.db.Exec(`
