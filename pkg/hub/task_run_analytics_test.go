@@ -55,7 +55,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	})
 	assertColumns(t, db, "task_run_attempts", []string{
 		"id", "tenant_id", "run_id", "attempt_id", "attempt_number", "trigger_id", "claw_id", "status",
-		"failure_type", "started_at", "finished_at", "created_at", "updated_at",
+		"failure_type", "restored_checkpoint_id", "started_at", "finished_at", "created_at", "updated_at",
 	})
 	assertColumns(t, db, "task_run_events", []string{
 		"id", "tenant_id", "run_id", "attempt_id", "event_key", "source", "source_event_id",

@@ -1777,6 +1777,17 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 // skipVMTerminate should be true when the caller already knows the VM is gone (e.g. Replicated
 // poll saw "terminated") to avoid redundant delete attempts that spam the logs with 404 errors.
 func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool) {
+	disposition := resolveClawStopDisposition(func() clawRetryDisposition {
+		return s.scheduleClawRetry(clawID, reason)
+	}, time.Sleep)
+	switch disposition {
+	case clawRetryScheduled, clawRetryAlreadyHandled:
+		return
+	}
+	s.stopAgentTerminalWithReason(clawID, reason, skipVMTerminate)
+}
+
+func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTerminate bool) {
 	s.checkpointBeforeTermination(clawID, "stop-agent")
 	s.syncWorkflowVolumes(clawID)
 

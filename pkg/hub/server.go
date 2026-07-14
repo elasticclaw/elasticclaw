@@ -126,6 +126,7 @@ type clawConn struct {
 	lastStatusAt          time.Time       // when we last got a status response
 	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
+	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
 }
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -1563,6 +1564,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if cc != nil {
 			cc.mu.Lock()
 			cc.lastUserMessageAt = time.Now()
+			cc.unresponsiveWarnedAt = time.Time{}
 			// Check if claw is currently streaming/processing
 			isBusy := !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
 			if isBusy {
@@ -2090,6 +2092,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if existing2, ok2 := s.claws[clawID]; ok2 {
 						existing2.mu.Lock()
 						existing2.lastStatusAt = time.Now()
+						existing2.unresponsiveWarnedAt = time.Time{}
 						existing2.mu.Unlock()
 					}
 					s.mu.Unlock()
@@ -2183,9 +2186,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		})
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
-		// Don't overwrite terminal/watching states — idle means the claw sent [DONE]
-		// and is watching for PR merge; deleted means it's being cleaned up.
-		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" {
+		// Don't overwrite terminal/watching states or a replacement already being
+		// provisioned. The disconnect may belong to the superseded instance.
+		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" && currentStatus != "error" && currentStatus != "provisioning" {
 			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
@@ -2218,6 +2221,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					var wakeConn *clawConn
 					var shouldWake bool
 					var shouldWarnContext bool
+					var shouldEscalateGateway bool
 					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
@@ -2255,6 +2259,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
+							if cc.gatewayUnhealthyCount == 12 {
+								shouldEscalateGateway = true
+							}
 						}
 						// Log context usage on every heartbeat when it crosses the 80% threshold,
 						// regardless of gateway health — don't silence diagnostics during outages.
@@ -2276,6 +2283,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
+					if shouldEscalateGateway {
+						go s.escalateGatewayHealthFailure(clawID)
+					}
 					if shouldWarnContext {
 						s.mu.RLock()
 						warnCC := s.claws[clawID]
@@ -4761,6 +4771,7 @@ func (s *Server) checkClawStatus() {
 		lastUserMessageAt := cc.lastUserMessageAt
 		lastStatusAt := cc.lastStatusAt
 		lastStatusBroadcastAt := cc.lastStatusBroadcastAt
+		unresponsiveWarnedAt := cc.unresponsiveWarnedAt
 		statusConn := cc.statusConn
 		gatewayReady := cc.gatewayReady
 		contextUsage := cc.contextUsage
@@ -4789,15 +4800,14 @@ func (s *Server) checkClawStatus() {
 			}
 		}
 
-		var name string
-		_ = s.db.QueryRow(`SELECT name FROM claws WHERE id=?`, id).Scan(&name)
+		var name, status string
+		var bootstrapOK int
+		_ = s.db.QueryRow(`SELECT name, status, bootstrap_ok FROM claws WHERE id=?`, id).Scan(&name, &status, &bootstrapOK)
 
-		// Detect silent death: no status response AND no user message for >5 min
-		// while the claw is supposedly connected and gateway was ready
-		if gatewayReady &&
-			now.Sub(lastStatusAt) > 5*time.Minute &&
-			now.Sub(lastUserMessageAt) > 5*time.Minute &&
-			now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
+		// Detect silent death while the claw is fully bootstrapped. Warn after five
+		// minutes, then escalate through the common failure funnel after ten.
+		healthAction := watchdogAction(now, status, bootstrapOK != 0, gatewayReady, lastStatusAt, lastUserMessageAt, unresponsiveWarnedAt)
+		if healthAction == watchdogHealthWarn && now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
 			msg := fmt.Sprintf("🚨 Agent %s appears unresponsive (no status in 5m). It may have crashed.", name)
 			log.Printf("[watchdog] %s", msg)
 			// Inject as system message so user sees it in the chat stream
@@ -4812,7 +4822,13 @@ func (s *Server) checkClawStatus() {
 			// Update lastStatusBroadcastAt under per-claw lock so we don't spam
 			cc.mu.Lock()
 			cc.lastStatusBroadcastAt = now
+			cc.unresponsiveWarnedAt = now
 			cc.mu.Unlock()
+		} else if healthAction == watchdogHealthEscalate {
+			cc.mu.Lock()
+			cc.unresponsiveWarnedAt = now
+			cc.mu.Unlock()
+			go s.escalateClawHealthFailure(id, "agent unresponsive: no activity for 10m after gateway ready")
 		}
 
 		// Context usage warning (>90%) — skip if a streaming turn is in progress
@@ -4888,26 +4904,11 @@ func (s *Server) syncReplicatedVMs() {
 	for _, c := range pending {
 		vm, err := p.GetVM(context.Background(), c.providerID)
 		if err != nil {
-			// 404 means VM was deleted externally — clean up the claw
+			// A 404 means the provider lost the VM. Route it through the same
+			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
-				log.Printf("pollProviderStatus: VM %s not found (404) — marking claw %s offline", c.providerID, c.id[:8])
-				res, execErr := s.db.Exec(
-					`UPDATE claws SET status='offline' WHERE id=? AND status IN ('provisioning','starting')`,
-					c.id)
-				if execErr == nil {
-					if n, _ := res.RowsAffected(); n > 0 {
-						s.mu.Lock()
-						if cc, ok := s.claws[c.id]; ok {
-							cc.conn.Close(websocket.StatusGoingAway, "VM not found")
-							delete(s.claws, c.id)
-						}
-						s.mu.Unlock()
-						s.broadcastToUsers(c.tenantID, types.WSMessage{
-							Type:    "claw_status",
-							Payload: map[string]string{"claw_id": c.id, "status": "offline"},
-						})
-					}
-				}
+				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
+				go s.stopAgentWithReason(c.id, "Provider VM lost: HTTP 404 not found", true)
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
@@ -4930,7 +4931,7 @@ func (s *Server) syncReplicatedVMs() {
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			go s.stopAgentWithReason(c.id, "Sandbox terminated (TTL expired or external shutdown)", true)
+			go s.stopAgentWithReason(c.id, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
@@ -6605,6 +6606,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	tenantID := cc.tenantID
 	clawID := cc.id
 	cc.lastUserMessageAt = time.Now()
+	cc.unresponsiveWarnedAt = time.Time{}
 	cc.mu.Unlock()
 
 	// Send via WebSocket (outside of lock to avoid blocking other goroutines)

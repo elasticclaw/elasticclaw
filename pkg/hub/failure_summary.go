@@ -40,6 +40,7 @@ const (
 	agentFailureTrackerRead        agentFailureKind = "tracker_read"
 	agentFailureTemplate           agentFailureKind = "template"
 	agentFailureProviderConfig     agentFailureKind = "provider_config"
+	agentFailureProviderLost       agentFailureKind = "provider_lost"
 	agentFailureHubPersistence     agentFailureKind = "hub_persistence"
 	agentFailureWorkspaceSecrets   agentFailureKind = "workspace_secrets"
 	agentFailureTriggerClaim       agentFailureKind = "trigger_claim"
@@ -76,6 +77,7 @@ type agentFailureRule struct {
 }
 
 var agentFailureRules = []agentFailureRule{
+	{agentFailureProviderLost, []string{"provider vm lost", "vm not found", "provider lost"}},
 	{agentFailureTrackerRead, []string{"cannot read issue", "fetchgithubissuedetails", "fetchlinearissuedetails"}},
 	{agentFailureTemplate, []string{"template \"", "template '", "resolvetemplatefiles"}},
 	{agentFailureProviderConfig, []string{"no provider configured", "provider \"", " is not configured", "unsupported provider", "unknown provider"}},
@@ -85,7 +87,7 @@ var agentFailureRules = []agentFailureRule{
 	{agentFailureTaskRunAnalytics, []string{"task run analytics"}},
 	{agentFailureProvisioning, []string{"provisioning failed", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
 	{agentFailureBootstrap, []string{"bootstrap failed", "daytona bootstrap failed", "exedev bootstrap failed", "install openclaw failed", "start claw-bridge", "connector download"}},
-	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete"}},
+	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete", "workspace unresponsive", "agent unresponsive"}},
 	{agentFailureWorkspaceFiles, []string{"could not write workspace files", "workspace files incomplete", "template file staging failed", "docker file copy failed", "invalid template file path", "path must stay inside workspace"}},
 	{agentFailureGitHubCredentials, []string{"could not configure github credentials", "auth gh cli failed", "verify gh auth failed", "fetch github bootstrap token"}},
 	{agentFailureWorkflowVolume, []string{"workflow volume attach failed"}},
@@ -185,7 +187,7 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 		return "ElasticClaw could not complete the pull request action."
 	case agentFailureIssueAction:
 		return "ElasticClaw could not update the source issue/ticket."
-	case agentFailureSandboxTerminated:
+	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return "The agent workspace stopped before ElasticClaw could finish."
 	case agentFailureTrackerAPI:
 		return "ElasticClaw received an error from the issue tracker API."
@@ -200,7 +202,7 @@ func agentFailureNextStep(kind agentFailureKind) string {
 		return "Check the issue tracker token permissions, then re-trigger the workflow."
 	case agentFailureTemplate, agentFailureProviderConfig, agentFailureWorkspaceSecrets, agentFailureGitHubCredentials, agentFailureWorkflowVolume:
 		return "Check the ElasticClaw workspace/workflow configuration, then re-trigger the workflow."
-	case agentFailureProvisioning, agentFailureBootstrap, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles, agentFailureRestore, agentFailureSandboxTerminated:
+	case agentFailureProvisioning, agentFailureBootstrap, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles, agentFailureRestore, agentFailureSandboxTerminated, agentFailureProviderLost:
 		return "Check the ElasticClaw run logs and provider status, then retry the workflow."
 	case agentFailureWorkflowCommand, agentFailureDependencyUpdate, agentFailureJudge, agentFailureGate, agentFailurePullRequestAction, agentFailureIssueAction:
 		return "Review the workflow result, fix the command/review/PR issue, then retry from the appropriate stage."
