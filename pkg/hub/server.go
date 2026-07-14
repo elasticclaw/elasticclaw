@@ -2879,17 +2879,46 @@ func (s *Server) Provision(token, clawToken string) (string, error) {
 type daytonaSandboxProvisioner interface {
 	Create(context.Context, types.CreateRequest) (*types.Instance, error)
 	ConfigureOpenClaw(context.Context, string, map[string]string) error
+	Destroy(context.Context, string, bool) error
 }
 
 func createAndConfigureDaytonaSandbox(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string) (*types.Instance, error) {
+	return createAndConfigureDaytonaSandboxWithRetry(ctx, p, req, env, []time.Duration{2 * time.Second, 5 * time.Second})
+}
+
+func createAndConfigureDaytonaSandboxWithRetry(ctx context.Context, p daytonaSandboxProvisioner, req types.CreateRequest, env map[string]string, retryDelays []time.Duration) (*types.Instance, error) {
 	instance, err := p.Create(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("daytona create: %w", err)
 	}
-	if err := p.ConfigureOpenClaw(ctx, instance.ID, env); err != nil {
-		return nil, fmt.Errorf("daytona configure OpenClaw environment for sandbox %s: %w", instance.ID, err)
+
+	var configureErr error
+	attempts := 0
+configureLoop:
+	for {
+		attempts++
+		configureErr = p.ConfigureOpenClaw(ctx, instance.ID, env)
+		if configureErr == nil {
+			return instance, nil
+		}
+		if attempts > len(retryDelays) {
+			break
+		}
+		timer := time.NewTimer(retryDelays[attempts-1])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			break configureLoop
+		case <-timer.C:
+		}
 	}
-	return instance, nil
+
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelCleanup()
+	if cleanupErr := p.Destroy(cleanupCtx, instance.ID, false); cleanupErr != nil {
+		return nil, fmt.Errorf("daytona configure OpenClaw environment for sandbox %s after %d attempts: %w (sandbox cleanup failed: %v)", instance.ID, attempts, configureErr, cleanupErr)
+	}
+	return nil, fmt.Errorf("daytona configure OpenClaw environment for sandbox %s after %d attempts: %w", instance.ID, attempts, configureErr)
 }
 
 func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {

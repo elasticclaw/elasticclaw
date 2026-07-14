@@ -6,14 +6,17 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 type recordingDaytonaSandboxProvisioner struct {
-	calls         []string
-	configuredEnv map[string]string
-	configureErr  error
+	calls             []string
+	configuredEnv     map[string]string
+	configureErrors   []error
+	destroyErr        error
+	destroyContextErr error
 }
 
 func (p *recordingDaytonaSandboxProvisioner) Create(_ context.Context, req types.CreateRequest) (*types.Instance, error) {
@@ -22,12 +25,23 @@ func (p *recordingDaytonaSandboxProvisioner) Create(_ context.Context, req types
 }
 
 func (p *recordingDaytonaSandboxProvisioner) ConfigureOpenClaw(_ context.Context, instanceID string, env map[string]string) error {
-	if !reflect.DeepEqual(p.calls, []string{"create"}) {
-		return errors.New("ConfigureOpenClaw was not called immediately after Create")
+	if len(p.calls) == 0 || p.calls[0] != "create" {
+		return errors.New("ConfigureOpenClaw was called before Create")
 	}
 	p.calls = append(p.calls, "configure-openclaw:"+instanceID)
 	p.configuredEnv = env
-	return p.configureErr
+	if len(p.configureErrors) == 0 {
+		return nil
+	}
+	err := p.configureErrors[0]
+	p.configureErrors = p.configureErrors[1:]
+	return err
+}
+
+func (p *recordingDaytonaSandboxProvisioner) Destroy(ctx context.Context, instanceID string, _ bool) error {
+	p.calls = append(p.calls, "destroy:"+instanceID)
+	p.destroyContextErr = ctx.Err()
+	return p.destroyErr
 }
 
 func TestCreateAndConfigureDaytonaSandboxMaterializesEnvBeforeBootstrap(t *testing.T) {
@@ -57,23 +71,55 @@ func TestCreateAndConfigureDaytonaSandboxMaterializesEnvBeforeBootstrap(t *testi
 
 func TestCreateAndConfigureDaytonaSandboxStopsOnMaterializationFailureWithoutLeakingSecrets(t *testing.T) {
 	const secret = "must-not-appear-in-error"
-	p := &recordingDaytonaSandboxProvisioner{configureErr: errors.New("upload failed")}
+	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("upload failed")}}
 	env := map[string]string{"AWS_SECRET_ACCESS_KEY": secret}
 
-	instance, err := createAndConfigureDaytonaSandbox(context.Background(), p, types.CreateRequest{Env: env}, env)
+	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{Env: env}, env, nil)
 	if err == nil {
 		t.Fatal("expected configuration error")
 	}
 	if instance != nil {
 		t.Fatalf("instance = %#v, want nil on configuration failure", instance)
 	}
-	if !strings.Contains(err.Error(), "daytona configure OpenClaw environment for sandbox sandbox-123: upload failed") {
+	if !strings.Contains(err.Error(), "daytona configure OpenClaw environment for sandbox sandbox-123 after 1 attempts: upload failed") {
 		t.Fatalf("error lacks safe context: %v", err)
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatal("error leaked secret value")
 	}
-	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123"}) {
+	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123", "destroy:sandbox-123"}) {
 		t.Fatalf("provisioning continued after materialization failure: %v", p.calls)
+	}
+}
+
+func TestCreateAndConfigureDaytonaSandboxRetriesUntilSandboxIsReady(t *testing.T) {
+	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("sandbox not ready"), nil}}
+
+	instance, err := createAndConfigureDaytonaSandboxWithRetry(context.Background(), p, types.CreateRequest{}, nil, []time.Duration{0})
+	if err != nil {
+		t.Fatalf("createAndConfigureDaytonaSandboxWithRetry: %v", err)
+	}
+	if instance == nil || instance.ID != "sandbox-123" {
+		t.Fatalf("instance = %#v, want sandbox-123", instance)
+	}
+	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123", "configure-openclaw:sandbox-123"}) {
+		t.Fatalf("call order = %v", p.calls)
+	}
+}
+
+func TestCreateAndConfigureDaytonaSandboxCleansUpWithIndependentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &recordingDaytonaSandboxProvisioner{configureErrors: []error{errors.New("sandbox not ready")}}
+
+	_, err := createAndConfigureDaytonaSandboxWithRetry(ctx, p, types.CreateRequest{}, nil, nil)
+	if err == nil {
+		t.Fatal("expected configuration error")
+	}
+	if p.destroyContextErr != nil {
+		t.Fatalf("cleanup inherited canceled context: %v", p.destroyContextErr)
+	}
+	if !reflect.DeepEqual(p.calls, []string{"create", "configure-openclaw:sandbox-123", "destroy:sandbox-123"}) {
+		t.Fatalf("call order = %v", p.calls)
 	}
 }
