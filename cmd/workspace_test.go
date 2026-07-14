@@ -80,9 +80,15 @@ func TestCollectWorkspacesForPush_CustomPathFilterMismatch(t *testing.T) {
 	customPath := filepath.Join(root, "custom", "my-workspace")
 	writeMinimalWorkspace(t, customPath, "my-workspace")
 
-	_, err := collectWorkspacesForPush("wrong-name", customPath)
-	if err == nil {
-		t.Fatalf("expected error for filter mismatch, got nil")
+	// A filter mismatch on a custom path should behave like the default scan:
+	// return no matches (not a hard error), so callers get a consistent
+	// "no workspaces matched" message from runWorkspacePush.
+	workspaces, err := collectWorkspacesForPush("wrong-name", customPath)
+	if err != nil {
+		t.Fatalf("expected no error for filter mismatch, got %v", err)
+	}
+	if len(workspaces) != 0 {
+		t.Fatalf("expected 0 workspaces for filter mismatch, got %d", len(workspaces))
 	}
 }
 

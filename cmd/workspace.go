@@ -240,7 +240,7 @@ func collectWorkspacesForPush(filterName string, path string) ([]*types.Workspac
 			return nil, err
 		}
 		if filterName != "" && !strings.EqualFold(workspace.Name, filterName) {
-			return nil, fmt.Errorf("workspace at %q has name %q, does not match filter %q", path, workspace.Name, filterName)
+			return []*types.WorkspaceConfig{}, nil
 		}
 		if err := workspace.Validate(); err != nil {
 			return nil, fmt.Errorf("validation failed for %s: %w", path, err)
