@@ -739,6 +739,71 @@ func TestTerminalPipelineFailureStageMarksWorkflowRunFailed(t *testing.T) {
 	}
 }
 
+func TestNonTerminalPipelineOnEnterFailureMarksWorkflowRunFailed(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	const clawID = "claw-nonterminal-failure"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected")
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`, "run-nonterminal-failure", "test-tenant-id", "nightly", "engineering", "cron", "running", clawID, "{}")
+	if err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+
+	stage := pipeline.Stage{ID: "validate", OnEnter: pipeline.OnEnter{Judge: pipeline.JudgeAction{Instructions: "review", Inputs: []pipeline.JudgeInput{pipeline.JudgeInputIssue}}}}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{}) {
+		t.Fatal("transition returned false")
+	}
+	var clawStatus, runStatus string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&clawStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id=?`, "run-nonterminal-failure").Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "error" || runStatus != "failed" {
+		t.Fatalf("statuses = claw %q, run %q; want error, failed", clawStatus, runStatus)
+	}
+}
+
+func TestGateErrorWithoutRouteMarksWorkflowRunFailed(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	const clawID = "claw-gate-error-no-route"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`, "run-gate-error", "test-tenant-id", "nightly", "engineering", "cron", "running", clawID, "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &types.FactoryConfig{Name: "gate-no-route", PipelineYAML: "stages:\n  - id: validate\n    entry: true\n"}
+	s.autoTransitionAfterGate(clawID, "validate", "error", pipelineContext{Factory: factory}, "output was malformed")
+	var clawStatus, runStatus string
+	_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&clawStatus)
+	_ = db.QueryRow(`SELECT status FROM workflow_runs WHERE id=?`, "run-gate-error").Scan(&runStatus)
+	if clawStatus != "error" || runStatus != "failed" {
+		t.Fatalf("statuses = claw %q, run %q; want error, failed", clawStatus, runStatus)
+	}
+}
+
+func TestGateErrorRouteTransitions(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-gate-error-route"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "validate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &types.FactoryConfig{Name: "gate-error-route", PipelineYAML: "stages:\n  - id: validate\n    entry: true\n  - id: recover\n    triggers:\n      - gate_result:\n          stage: validate\n          verdict: error\n"}
+	s.autoTransitionAfterGate(clawID, "validate", "error", pipelineContext{Factory: factory}, "output was malformed")
+	if got := s.getPipelineStage(clawID); got != "recover" {
+		t.Fatalf("stage = %q, want recover", got)
+	}
+}
+
 func TestParseJudgeResponseValid(t *testing.T) {
 	raw := `{"verdict":"pass","summary":"Looks good","findings":[],"required_fixes":[]}`
 	result, err := parseJudgeResponse(raw)
