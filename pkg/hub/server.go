@@ -141,9 +141,9 @@ type clawConn struct {
 }
 
 const (
-	gatewayUnhealthyMax = 12
-	busyTurnMax         = 45 * time.Minute
-	silentDeathMax      = 10 * time.Minute
+	defaultGatewayUnhealthyMax = 12
+	defaultBusyTurnMax         = 45 * time.Minute
+	defaultSilentDeathMax      = 10 * time.Minute
 )
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -2325,7 +2325,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-							if cc.gatewayUnhealthyCount == gatewayUnhealthyMax {
+							if cc.gatewayUnhealthyCount == s.livenessSettings().gatewayUnhealthyMax {
 								shouldEscalateGateway = true
 							}
 						}
@@ -2353,7 +2353,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// Re-read the claw state before escalating: idle/completed claws
 						// remain connected intentionally, and bootstrapping claws are
 						// handled by the bootstrap watchdog.
-						go s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax))
+						go s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", s.livenessSettings().gatewayUnhealthyMax))
 					}
 					if shouldWarnContext {
 						s.mu.RLock()
@@ -4914,11 +4914,11 @@ func (s *Server) checkClawStatus() {
 		// The bridge normally closes a turn with a message.  If that terminal
 		// message is lost, preserve the partial response and unblock the queue.
 		// A second consecutive recovery means the bridge is repeatedly wedged.
-		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > busyTurnMax {
+		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > s.livenessSettings().busyTurnMax {
 			var content, messageID string
 			var escalate bool
 			cc.mu.Lock()
-			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > busyTurnMax {
+			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > s.livenessSettings().busyTurnMax {
 				if cc.streamingBuf.Len() > 0 {
 					content = cc.streamingBuf.String() + " [interrupted]"
 					messageID = cc.streamingMsgID
@@ -4969,7 +4969,7 @@ func (s *Server) checkClawStatus() {
 
 		// Detect silent death while the claw is fully bootstrapped. Warn after five
 		// minutes, then escalate through the common failure funnel after ten.
-		healthAction := watchdogAction(now, status, bootstrapOK != 0, gatewayReady, lastStatusAt, lastUserMessageAt, unresponsiveWarnedAt)
+		healthAction := watchdogAction(now, status, bootstrapOK != 0, gatewayReady, lastStatusAt, lastUserMessageAt, unresponsiveWarnedAt, s.livenessSettings().silentDeathMax)
 		if healthAction == watchdogHealthWarn && now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
 			msg := fmt.Sprintf("🚨 Agent %s appears unresponsive (no status in 5m). It may have crashed.", name)
 			log.Printf("[watchdog] %s", msg)

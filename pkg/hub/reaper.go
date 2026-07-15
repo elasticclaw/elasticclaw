@@ -9,6 +9,8 @@ const reaperActionLimit = 20
 
 type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
+	gatewayUnhealthyMax                                  int
+	busyTurnMax, silentDeathMax                          time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
@@ -19,7 +21,15 @@ func (s *Server) livenessEnabled() bool {
 }
 
 func (s *Server) livenessSettings() livenessSettings {
-	cfg := livenessSettings{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, time.Minute}
+	cfg := livenessSettings{
+		offlineGrace:        10 * time.Minute,
+		provisioningMaxAge:  30 * time.Minute,
+		claimTTL:            15 * time.Minute,
+		interval:            time.Minute,
+		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
+		busyTurnMax:         defaultBusyTurnMax,
+		silentDeathMax:      defaultSilentDeathMax,
+	}
 	if s.hubCfg == nil || s.hubCfg.Liveness == nil {
 		return cfg
 	}
@@ -28,7 +38,7 @@ func (s *Server) livenessSettings() livenessSettings {
 			return fallback
 		}
 		d, err := time.ParseDuration(value)
-		if err != nil || d < 0 {
+		if err != nil || d <= 0 {
 			log.Printf("[reaper] invalid %s %q; using %s", name, value, fallback)
 			return fallback
 		}
@@ -39,8 +49,14 @@ func (s *Server) livenessSettings() livenessSettings {
 	cfg.provisioningMaxAge = parse(l.ProvisioningMaxAge, cfg.provisioningMaxAge, "provisioning_max_age")
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
-	if cfg.interval <= 0 {
-		cfg.interval = time.Minute
+	cfg.busyTurnMax = parse(l.BusyTurnMax, cfg.busyTurnMax, "busy_turn_max")
+	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
+	if l.GatewayUnhealthyChecks != nil {
+		if *l.GatewayUnhealthyChecks <= 0 {
+			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
+		} else {
+			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
 	}
 	return cfg
 }
