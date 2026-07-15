@@ -179,10 +179,10 @@ func (cs *cronScheduler) reload() error {
 }
 
 // parseCronSchedule parses a cron schedule with timezone support.
-// If the schedule has seconds field (6 fields), we use WithSeconds.
+// It delegates expression parsing to types.ParseCronSchedule so that the
+// scheduler and save-time validation always accept the same expressions.
 func parseCronSchedule(schedule string, loc *time.Location) (cron.Schedule, error) {
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	s, err := parser.Parse(schedule)
+	s, err := types.ParseCronSchedule(schedule)
 	if err != nil {
 		return nil, err
 	}

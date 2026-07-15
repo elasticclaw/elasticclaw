@@ -352,13 +352,20 @@ func validateWorkflowTrigger(workflowName string, trigger *WorkflowTrigger) erro
 	return validateShortcutWorkflowTrigger(workflowName, trigger.Shortcut)
 }
 
+// ParseCronSchedule parses a cron schedule expression using the canonical
+// parser. Both save-time validation and the runtime scheduler go through this
+// helper so the set of accepted expressions can never diverge between them.
+func ParseCronSchedule(schedule string) (cron.Schedule, error) {
+	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	return parser.Parse(schedule)
+}
+
 func validateCronWorkflowTrigger(workflowName string, trigger *CronWorkflowTrigger) error {
 	if trigger.Schedule == "" {
 		return fmt.Errorf("workflow %q: cron trigger requires schedule", workflowName)
 	}
-	// Validate cron expression syntax using the same parser as the scheduler
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	if _, err := parser.Parse(trigger.Schedule); err != nil {
+	// Validate cron expression syntax using the same parser as the scheduler.
+	if _, err := ParseCronSchedule(trigger.Schedule); err != nil {
 		return fmt.Errorf("workflow %q: invalid cron schedule %q: %v", workflowName, trigger.Schedule, err)
 	}
 	if trigger.OverlapPolicy != "" && !validCronOverlapPolicies[trigger.OverlapPolicy] {
