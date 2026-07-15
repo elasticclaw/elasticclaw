@@ -96,6 +96,12 @@ type Server struct {
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
+
+	// Reaper state is deliberately in-memory: its conservative timers reset on
+	// a hub restart rather than treating an uncertain outage as an agent failure.
+	reaperMu        sync.Mutex
+	reaperFirstSeen map[string]time.Time
+	nowFunc         func() time.Time
 }
 
 type clawConn struct {
@@ -224,6 +230,11 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		fileReadWaiters:   make(map[string]chan types.FileReadResp),
 		checkpointWaiters: make(map[string]chan error),
 		webhookDedup:      make(map[string]time.Time),
+		reaperFirstSeen:   make(map[string]time.Time),
+		nowFunc:           now,
+	}
+	if srv.livenessEnabled() {
+		srv.reconcileOnBoot()
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -232,6 +243,9 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.pruneAnalytics()
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
+	if srv.livenessEnabled() {
+		go srv.runReaper()
+	}
 	srv.startPRWatcher()
 
 	// Start cron scheduler for workflow triggers
@@ -5014,7 +5028,7 @@ func (s *Server) syncReplicatedVMs() {
 			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
-				go s.stopAgentWithReason(c.id, "Provider VM lost: HTTP 404 not found", true)
+				go s.stopAgentWithReason(c.id, "Provider VM lost: replicated VM no longer exists", true)
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}

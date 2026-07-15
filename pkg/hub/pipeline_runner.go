@@ -1782,9 +1782,11 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	}, time.Sleep)
 	switch disposition {
 	case clawRetryScheduled, clawRetryAlreadyHandled:
+		s.promotePendingClaws()
 		return
 	}
 	s.stopAgentTerminalWithReason(clawID, reason, skipVMTerminate)
+	s.promotePendingClaws()
 }
 
 func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTerminate bool) {

@@ -312,7 +312,7 @@ func TestHealthEscalationThresholds(t *testing.T) {
 }
 
 func TestProviderLostClassificationAndFailureType(t *testing.T) {
-	failure := classifyAgentFailure("Provider VM lost: HTTP 404 not found")
+	failure := classifyAgentFailure("Provider VM lost: replicated VM no longer exists")
 	if failure.Kind != agentFailureProviderLost {
 		t.Fatalf("kind=%q, want %q", failure.Kind, agentFailureProviderLost)
 	}
