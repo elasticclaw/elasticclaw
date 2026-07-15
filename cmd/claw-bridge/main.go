@@ -3537,10 +3537,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
 
-				if writeErr := wsjson.Write(connCtx, conn, hubMsg{
-					Type:    "message",
-					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": reply}),
-				}); writeErr != nil {
+				if writeErr := deliver("claw", reply); writeErr != nil {
 					// Hub connection dropped — queue the completed reply for redelivery,
 					// not the input, so the turn is not re-run on reconnect.
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
