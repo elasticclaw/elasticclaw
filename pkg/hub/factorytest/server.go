@@ -229,6 +229,28 @@ func NewTestServerWithExternal(t *testing.T) *TestServer {
         Read your CONTEXT.md and start working on the issue.
 `,
 			},
+			{
+				Name:          "generic-webhook-factory",
+				Integration:   "external",
+				Template:      "elasticclaw",
+				Provider:      "noop",
+				WebhookSecret: "test-webhook-secret",
+				ExternalTrigger: &types.ExternalTrigger{
+					Source: "generic-webhook",
+					Filter: &types.ExternalTriggerFilter{
+						Repository: "testorg/testrepo",
+						EventType:  "generic-event",
+					},
+				},
+				PipelineYAML: `stages:
+  - id: working
+    label: "Working"
+    entry: true
+    on_enter:
+      inject: |
+        Read your CONTEXT.md and start working on the issue.
+`,
+			},
 		},
 		Providers: map[string]types.ProviderConfig{
 			"noop": {Type: "noop"},

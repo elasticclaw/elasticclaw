@@ -169,7 +169,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.safeGo("external webhook", func() { s.processExternalEvent(payload, body, sig) })
+	s.safeGo("external webhook", func() { s.processExternalEvent(payload, body, sig, deliveryID) })
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -197,7 +197,7 @@ func (s *Server) validateExternalSignatureForFactory(factory *types.FactoryConfi
 }
 
 // processExternalEvent finds matching factories and creates claws for external events.
-func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig string) {
+func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig, deliveryID string) {
 	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		return
@@ -281,13 +281,32 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 		}
 
 		// Build trigger key for atomic claim
-		triggerKey := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
+		var triggerKey string
 		if payload.Release != nil {
 			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
+		} else {
+			triggerKey = fmt.Sprintf("%s:%s@%s:%s", factory.Name, repoFullName, eventType,
+				externalEventDiscriminator(deliveryID, payload, body))
 		}
 
 		s.processExternalFactoryTrigger(factory, payload, triggerKey, repoFullName, eventType)
 	}
+}
+
+func externalEventDiscriminator(deliveryID string, payload externalWebhookPayload, body []byte) string {
+	// Prefer a delivery ID, then an event timestamp or ID, before falling back to the body hash.
+	if deliveryID != "" {
+		return deliveryID
+	}
+	for _, key := range []string{"timestamp", "created_at", "id"} {
+		if value, ok := payload.Payload[key]; ok {
+			if discriminator := fmt.Sprint(value); discriminator != "" {
+				return discriminator
+			}
+		}
+	}
+	hash := sha256.Sum256(body)
+	return hex.EncodeToString(hash[:])[:16]
 }
 
 func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, payload externalWebhookPayload, triggerKey, repoFullName, eventType string) {

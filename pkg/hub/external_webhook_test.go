@@ -56,6 +56,84 @@ func signPayload(body []byte, secret string) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func buildGenericWebhookPayload(repo string) []byte {
+	payload := map[string]interface{}{
+		"event_type": "generic-event",
+		"repository": map[string]interface{}{
+			"full_name": repo,
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return b
+}
+
+func sendGenericWebhook(t *testing.T, ts *factorytest.TestServer, body []byte, deliveryID string) {
+	t.Helper()
+	req, err := http.NewRequest("POST", ts.URL()+"/api/integrations/external/webhook", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request build failed: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", signPayload(body, "test-webhook-secret"))
+	req.Header.Set("X-GitHub-Delivery", deliveryID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func waitForExternalClawCount(t *testing.T, ts *factorytest.TestServer, factoryName string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE factory_name=?`, factoryName).Scan(&count); err != nil {
+			t.Fatalf("count query failed: %v", err)
+		}
+		if count == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var count int
+	if err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE factory_name=?`, factoryName).Scan(&count); err != nil {
+		t.Fatalf("final count query failed: %v", err)
+	}
+	t.Fatalf("expected %d claws for factory %q, got %d", want, factoryName, count)
+}
+
+func TestExternalWebhook_GenericEvent_DifferentDeliveryIDsBothCreateRuns(t *testing.T) {
+	ts := factorytest.NewTestServerWithExternal(t)
+	body := buildGenericWebhookPayload("testorg/testrepo")
+
+	sendGenericWebhook(t, ts, body, "generic-delivery-1")
+	sendGenericWebhook(t, ts, body, "generic-delivery-2")
+
+	waitForExternalClawCount(t, ts, "generic-webhook-factory", 2)
+}
+
+func TestExternalWebhook_GenericEvent_SameDeliveryIDIsDeduped(t *testing.T) {
+	ts := factorytest.NewTestServerWithExternal(t)
+	body := buildGenericWebhookPayload("testorg/testrepo")
+
+	sendGenericWebhook(t, ts, body, "generic-delivery-retry")
+	waitForExternalClawCount(t, ts, "generic-webhook-factory", 1)
+	sendGenericWebhook(t, ts, body, "generic-delivery-retry")
+
+	time.Sleep(200 * time.Millisecond)
+	var count int
+	if err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE factory_name=?`, "generic-webhook-factory").Scan(&count); err != nil {
+		t.Fatalf("count query failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 claw for retry delivery, got %d", count)
+	}
+}
+
 func TestExternalWebhook_ConcurrentDeliveryCreatesOneClaw(t *testing.T) {
 	ts := factorytest.NewTestServerWithExternal(t)
 
