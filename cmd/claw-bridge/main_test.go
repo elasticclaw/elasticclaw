@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1007,3 +1008,149 @@ func testPEM(typ string) string {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestMsgQueueReplyNeverExpires(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("completed reply")
+	// Backdate well beyond the TTL — replies must still survive.
+	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
+
+	out := q.drain()
+	if len(out) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(out))
+	}
+	if out[0].kind != queuedReply || out[0].content != "completed reply" {
+		t.Fatalf("expected surviving reply, got kind=%d content=%q", out[0].kind, out[0].content)
+	}
+}
+
+func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
+	q := &msgQueue{}
+	q.pushInput("stale user input")
+	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
+
+	out := q.drain()
+	if len(out) != 1 {
+		t.Fatalf("expected 1 entry (notice only), got %d", len(out))
+	}
+	notice := out[0]
+	if notice.kind != queuedNotice {
+		t.Fatalf("expected queuedNotice, got kind=%d", notice.kind)
+	}
+	if notice.content == "stale user input" {
+		t.Fatalf("raw input must not be returned")
+	}
+	if !strings.Contains(notice.content, "dropped") {
+		t.Fatalf("notice should mention the drop: %q", notice.content)
+	}
+	if !strings.Contains(notice.content, "stale user input") {
+		t.Fatalf("notice should include the preview: %q", notice.content)
+	}
+}
+
+func TestMsgQueueOverflowEvictsOldestInputAndSurfacesNotice(t *testing.T) {
+	q := &msgQueue{}
+	for i := 0; i < msgQueueMax+5; i++ {
+		q.pushInput(fmt.Sprintf("input-%d", i))
+	}
+	if len(q.msgs) != msgQueueMax {
+		t.Fatalf("expected queue capped at %d, got %d", msgQueueMax, len(q.msgs))
+	}
+	// The 5 oldest inputs (input-0..input-4) must have been evicted.
+	if q.msgs[0].content != "input-5" {
+		t.Fatalf("expected oldest surviving input to be input-5, got %q", q.msgs[0].content)
+	}
+
+	out := q.drain()
+	if len(out) == 0 || out[0].kind != queuedNotice {
+		t.Fatalf("expected a leading notice about evictions")
+	}
+	if !strings.Contains(out[0].content, "5 queued message") {
+		t.Fatalf("notice should count the 5 evictions: %q", out[0].content)
+	}
+
+	// Replies must never be evicted, even when the queue is full.
+	q2 := &msgQueue{}
+	for i := 0; i < msgQueueMax; i++ {
+		q2.pushReply(fmt.Sprintf("reply-%d", i))
+	}
+	q2.pushReply("reply-overflow")
+	if len(q2.msgs) != msgQueueMax+1 {
+		t.Fatalf("expected replies to grow beyond cap, got %d", len(q2.msgs))
+	}
+	if q2.dropped != 0 {
+		t.Fatalf("expected no drops when queue is full of replies, got %d", q2.dropped)
+	}
+}
+
+func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("finished reply")
+
+	var delivered []string
+	deliver := func(role, content string) error {
+		if role != "claw" {
+			t.Fatalf("expected role claw, got %q", role)
+		}
+		delivered = append(delivered, content)
+		return nil
+	}
+	runTurn := func(content string) {
+		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if len(delivered) != 1 || delivered[0] != "finished reply" {
+		t.Fatalf("expected reply delivered exactly once, got %v", delivered)
+	}
+}
+
+func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("undelivered reply")
+	originalAt := q.msgs[0].queuedAt
+
+	deliver := func(role, content string) error {
+		return errString("hub write failed")
+	}
+	runTurn := func(content string) {
+		t.Fatalf("runTurn must not be called")
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if len(q.msgs) != 1 {
+		t.Fatalf("expected reply re-queued, got %d entries", len(q.msgs))
+	}
+	if q.msgs[0].kind != queuedReply || q.msgs[0].content != "undelivered reply" {
+		t.Fatalf("expected the reply back in the queue, got %+v", q.msgs[0])
+	}
+	if !q.msgs[0].queuedAt.Equal(originalAt) {
+		t.Fatalf("expected original queuedAt preserved: got %v want %v", q.msgs[0].queuedAt, originalAt)
+	}
+}
+
+func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
+	q := &msgQueue{}
+	q.pushInput("do the work")
+
+	var deliverCalled bool
+	deliver := func(role, content string) error {
+		deliverCalled = true
+		return nil
+	}
+	var ran []string
+	runTurn := func(content string) {
+		ran = append(ran, content)
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if deliverCalled {
+		t.Fatalf("deliver must not be called for a queued input")
+	}
+	if len(ran) != 1 || ran[0] != "do the work" {
+		t.Fatalf("expected runTurn invoked with the input, got %v", ran)
+	}
+}
