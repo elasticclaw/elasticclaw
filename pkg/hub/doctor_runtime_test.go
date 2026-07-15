@@ -22,7 +22,7 @@ func TestCheckRuntimeStateFindsStuckRecords(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 	current := time.Now().UTC()
 	s.nowFunc = func() time.Time { return current }
-	old := current.Add(-time.Hour)
+	old := current.Add(-2 * time.Hour)
 	insertRuntimeClaw(t, db, "offline-claw", "offline", old, old)
 	insertRuntimeClaw(t, db, "error-claw", "error", old, old)
 	insertRuntimeClaw(t, db, "timeout-claw", "connected", old, old)
@@ -45,6 +45,30 @@ func TestCheckRuntimeStateFindsStuckRecords(t *testing.T) {
 		if !hasFailedRuntimeCheck(checks, title) {
 			t.Errorf("missing failed %q check in %#v", title, checks)
 		}
+	}
+	for title, want := range map[string]string{
+		"Stuck claws":                         "threshold is twice the configured grace period",
+		"Orphaned workflow runs":              "Boot reconciliation on hub restart",
+		"Unassigned claimed factory triggers": "threshold is twice the configured grace period",
+		"Stuck creating checkpoints":          "Boot reconciliation on hub restart",
+	} {
+		for _, check := range checks {
+			if check.Title == title && !strings.Contains(check.Description, want) {
+				t.Errorf("%q description = %q, want %q", title, check.Description, want)
+			}
+		}
+	}
+}
+
+func TestCheckRuntimeStateAllowsReaperObservationWindow(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	current := time.Now().UTC()
+	s.nowFunc = func() time.Time { return current }
+	insertRuntimeClaw(t, db, "recent-offline-claw", "offline", current.Add(-15*time.Minute), current.Add(-15*time.Minute))
+
+	checks := s.checkRuntimeState(context.Background())
+	if hasFailedRuntimeCheck(checks, "Stuck claws") {
+		t.Fatalf("offline claw within twice the configured grace period reported stuck: %#v", checks)
 	}
 }
 

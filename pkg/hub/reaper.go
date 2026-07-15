@@ -3,6 +3,8 @@ package hub
 import (
 	"log"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const reaperActionLimit = 20
@@ -14,10 +16,13 @@ type livenessSettings struct {
 }
 
 func (s *Server) livenessEnabled() bool {
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil || s.hubCfg.Liveness.Enabled == nil {
+	s.mu.RLock()
+	liveness := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if liveness == nil || liveness.Enabled == nil {
 		return true
 	}
-	return *s.hubCfg.Liveness.Enabled
+	return *liveness.Enabled
 }
 
 func (s *Server) livenessSettings() livenessSettings {
@@ -30,7 +35,10 @@ func (s *Server) livenessSettings() livenessSettings {
 		busyTurnMax:         defaultBusyTurnMax,
 		silentDeathMax:      defaultSilentDeathMax,
 	}
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil {
+	s.mu.RLock()
+	l := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if l == nil {
 		return cfg
 	}
 	parse := func(value string, fallback time.Duration, name string) time.Duration {
@@ -44,7 +52,6 @@ func (s *Server) livenessSettings() livenessSettings {
 		}
 		return d
 	}
-	l := s.hubCfg.Liveness
 	cfg.offlineGrace = parse(l.OfflineGrace, cfg.offlineGrace, "offline_grace")
 	cfg.provisioningMaxAge = parse(l.ProvisioningMaxAge, cfg.provisioningMaxAge, "provisioning_max_age")
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
@@ -59,6 +66,13 @@ func (s *Server) livenessSettings() livenessSettings {
 		}
 	}
 	return cfg
+}
+
+func livenessConfig(cfg *types.HubConfig) *types.LivenessConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Liveness
 }
 
 func (s *Server) reaperNow() time.Time {
