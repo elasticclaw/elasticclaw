@@ -1386,7 +1386,7 @@ func isTaskRunSensitiveTextKey(key string) bool {
 
 func mergeTaskRunTags(raw string, extra []string) (string, error) {
 	seen := map[string]bool{}
-	var tags []string
+	tags := []string{}
 	var decoded any
 	if strings.TrimSpace(raw) != "" && json.Unmarshal([]byte(raw), &decoded) == nil {
 		if list, ok := decoded.([]any); ok {

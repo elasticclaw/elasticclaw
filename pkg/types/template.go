@@ -542,6 +542,20 @@ type HubConfig struct {
 	// and are promoted to 'provisioning' when a running claw terminates.
 	// 0 means unlimited (default).
 	MaxConcurrentClaws int `yaml:"max_concurrent_claws,omitempty" json:"maxConcurrentClaws"`
+
+	// Liveness configures recovery of claws and runs stranded by hub or
+	// infrastructure failures.
+	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
+}
+
+// LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
+// Durations use Go duration strings. Empty values receive conservative defaults.
+type LivenessConfig struct {
+	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	OfflineGrace       string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
+	ProvisioningMaxAge string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
+	ClaimTTL           string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
+	ReaperInterval     string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

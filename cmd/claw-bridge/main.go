@@ -49,9 +49,14 @@ import (
 )
 
 var (
-	Version   = "dev"
-	Commit    = "none"
-	BuildDate = "unknown"
+	Version             = "dev"
+	Commit              = "none"
+	BuildDate           = "unknown"
+	gatewayProcessState struct {
+		sync.RWMutex
+		exited  bool
+		session *gatewaySession
+	}
 )
 
 // ─── hub wire types ─────────────────────────────────────────────────────────
@@ -1541,6 +1546,40 @@ func (gs *gatewaySession) IsReady() bool {
 	return gs.ready
 }
 
+func gatewayProcessExited() bool {
+	gatewayProcessState.RLock()
+	defer gatewayProcessState.RUnlock()
+	return gatewayProcessState.exited
+}
+
+func markGatewayProcessExited() {
+	gatewayProcessState.Lock()
+	gatewayProcessState.exited = true
+	gs := gatewayProcessState.session
+	gatewayProcessState.Unlock()
+
+	// Match readLoop's disconnect path so a caller waiting on a turn gets an
+	// immediate error rather than waiting for its deadline.
+	if gs == nil {
+		return
+	}
+	gs.infMu.RLock()
+	inf := gs.inFlight
+	gs.infMu.RUnlock()
+	if inf != nil {
+		select {
+		case inf.done <- agentResult{err: fmt.Errorf("gateway process exited")}:
+		default:
+		}
+	}
+}
+
+func setActiveGatewaySession(gs *gatewaySession) {
+	gatewayProcessState.Lock()
+	gatewayProcessState.session = gs
+	gatewayProcessState.Unlock()
+}
+
 func (gs *gatewaySession) setReady() {
 	gs.readyMu.Lock()
 	gs.ready = true
@@ -2856,6 +2895,7 @@ func runBootstrap() error {
 		} else {
 			log.Printf("[bootstrap] gateway exited")
 		}
+		markGatewayProcessExited()
 	}()
 
 	// Step 9: Wait for device.json
@@ -3117,6 +3157,7 @@ func main() {
 		break
 	}
 	log.Printf("[bridge] gateway session ready: %s", gwSession.getSessionKey())
+	setActiveGatewaySession(gwSession)
 
 	// Start status channel goroutine (lightweight second WS to hub)
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
@@ -3339,7 +3380,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			case <-ticker.C:
 				// Refresh context usage before sending heartbeat (best-effort)
 				go gwSession.refreshContextUsage(ctx)
-				health := checkGateway(gwClient.addr)
+				health := !gatewayProcessExited() && checkGateway(gwClient.addr)
 				cu := gwSession.ContextUsage()
 				log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%%", health, gwSession.IsReady(), cu)
 				_ = wsjson.Write(ctx, conn, hubMsg{

@@ -132,7 +132,7 @@ func (s *Server) handleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processJiraEvent(workspaceName, payload)
+	s.safeGo("jira webhook", func() { s.processJiraEvent(workspaceName, payload) })
 	w.WriteHeader(http.StatusOK)
 }
 

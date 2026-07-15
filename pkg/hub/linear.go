@@ -109,7 +109,8 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processLinearEvent(strings.TrimSpace(r.PathValue("workspace")), payload)
+	workspace := strings.TrimSpace(r.PathValue("workspace"))
+	s.safeGo("linear webhook", func() { s.processLinearEvent(workspace, payload) })
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1171,23 +1172,36 @@ func buildLinearContext(payload linearWebhookPayload, requiresPR bool) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
-	// Get the issue ID and tenant for this claw.
+	// Get the issue ID and tenant for this claw. Workflow claws may not have an
+	// issue, but [DONE] must still give those runs a terminal path.
 	var issueID, tenantID string
-	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil || issueID == "" {
-		return // not a factory claw
+	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,''),''), tenant_id FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID); err != nil {
+		return
 	}
-
-	log.Printf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
 
 	// Extract PR URLs from the [DONE] line.
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
 	prURLs := extractDonePRURLs(rawMessage)
 
 	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
-		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		if issueID != "" {
+			s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
+		}
 		s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 		return
 	}
+	if issueID == "" {
+		var runningWorkflowRun bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE claw_id=? AND status='running')`, clawID).Scan(&runningWorkflowRun); err != nil || !runningWorkflowRun {
+			// Interactive claws have no tracker issue or workflow run; [DONE] is
+			// ordinary conversation for them, not a teardown signal.
+			return
+		}
+		s.completeIssueLessDoneClaw(clawID, tenantID, prURLs)
+		return
+	}
+
+	log.Printf("[factory] claw %s sent [DONE] for issue %s", clawID[:8], issueID)
 
 	noPRDoneAllowed := false
 	if len(prURLs) == 0 {
@@ -1371,6 +1385,46 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 }
 
+// completeIssueLessDoneClaw completes a workflow/manual claw that has no
+// tracker issue. PR-bearing runs stay idle to watch their PRs; all other runs
+// use the normal non-PR teardown path.
+func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []string) {
+	if len(prURLs) > 0 {
+		if ghToken := s.resolveGitHubToken(); ghToken != "" {
+			if rejected, reason := s.validateDonePRs(clawID, prURLs, ghToken); rejected {
+				s.injectUserMessage(clawID, reason)
+				return
+			}
+		}
+	}
+	if s.hasFailedRequiredGate(clawID) {
+		s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
+		return
+	}
+	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
+		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+	}
+	if len(prURLs) == 0 {
+		s.completeNoPRDoneClaw(clawID, tenantID, "")
+		return
+	}
+	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
+	if err != nil {
+		return
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return
+	}
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type:    "claw_status",
+		Payload: map[string]string{"claw_id": clawID, "status": "idle"},
+	})
+}
+
 func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	var provider, providerID string
 	_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID)
@@ -1394,6 +1448,9 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		OccurredAt:      now(),
 	}); err != nil {
 		log.Printf("[task-run-analytics] failed to record non-pr completion for claw %s: %v", clawID, err)
+	}
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,12 +17,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
@@ -92,6 +96,12 @@ type Server struct {
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
+
+	// Reaper state is deliberately in-memory: its conservative timers reset on
+	// a hub restart rather than treating an uncertain outage as an agent failure.
+	reaperMu        sync.Mutex
+	reaperFirstSeen map[string]time.Time
+	nowFunc         func() time.Time
 }
 
 type clawConn struct {
@@ -104,6 +114,7 @@ type clawConn struct {
 	contextUsage          int             // 0-100, updated from heartbeats
 	gatewayReady          bool            // true once bridge reports gateway session established
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
+	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending  bool            // true while initial volume attach / wake is in flight
 	workflowStartDone     bool            // true once initial volume attach / wake has completed
 	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
@@ -128,6 +139,12 @@ type clawConn struct {
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
 }
+
+const (
+	gatewayUnhealthyMax = 12
+	busyTurnMax         = 45 * time.Minute
+	silentDeathMax      = 10 * time.Minute
+)
 
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
@@ -220,6 +237,11 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		fileReadWaiters:   make(map[string]chan types.FileReadResp),
 		checkpointWaiters: make(map[string]chan error),
 		webhookDedup:      make(map[string]time.Time),
+		reaperFirstSeen:   make(map[string]time.Time),
+		nowFunc:           now,
+	}
+	if srv.livenessEnabled() {
+		srv.reconcileOnBoot()
 	}
 
 	// Start background poller to keep provider VM status fresh
@@ -228,6 +250,9 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.pruneAnalytics()
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
+	if srv.livenessEnabled() {
+		go srv.runReaper()
+	}
 	srv.startPRWatcher()
 
 	// Start cron scheduler for workflow triggers
@@ -246,7 +271,25 @@ type RunOptions struct {
 	NoWebUI bool // skip serving embedded web UI (use in dev when Next.js runs separately)
 }
 
+// safeGo contains panics in goroutines that own agent or workflow progress.
+func (s *Server) safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[hub] panic in %s: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
 func (s *Server) Run(opts ...RunOptions) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return s.run(ctx, opts...)
+}
+
+func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
@@ -265,11 +308,34 @@ func (s *Server) Run(opts ...RunOptions) error {
 		}
 	}
 
+	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(mux)}
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		log.Printf("[hub] shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		defer close(shutdownDone)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[hub] shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
+		// finish draining active requests before closing their database.
+		<-shutdownDone
+		if closeErr := s.db.Close(); closeErr != nil {
+			return fmt.Errorf("close database: %w", closeErr)
+		}
+		return nil
+	}
+	return err
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -2259,7 +2325,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-							if cc.gatewayUnhealthyCount == 12 {
+							if cc.gatewayUnhealthyCount == gatewayUnhealthyMax {
 								shouldEscalateGateway = true
 							}
 						}
@@ -2284,7 +2350,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldEscalateGateway {
-						go s.escalateGatewayHealthFailure(clawID)
+						// Re-read the claw state before escalating: idle/completed claws
+						// remain connected intentionally, and bootstrapping claws are
+						// handled by the bootstrap watchdog.
+						go s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax))
 					}
 					if shouldWarnContext {
 						s.mu.RLock()
@@ -2409,6 +2478,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					skipPersist = cc.streamingSplit
 				}
 				cc.finishTurnLocked()
+				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
@@ -2447,9 +2517,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if pipelineHandledDone {
 					prURLs := extractDonePRURLs(hm.Content)
 					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-					go s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
 				} else if !strings.Contains(hm.Content, "[DONE]") {
-					go s.checkPipelineMessageTriggers(clawID, hm.Content)
+					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, hm.Content) })
 				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -2461,13 +2531,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
-					go func() {
+					s.safeGo("done checkpoint", func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
-					}()
+					})
 					if !pipelineHandledDone {
-						go s.handleClawDoneSignal(clawID, hm.Content)
+						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, hm.Content) })
 					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
@@ -4833,12 +4903,44 @@ func (s *Server) checkClawStatus() {
 		lastStatusAt := cc.lastStatusAt
 		lastStatusBroadcastAt := cc.lastStatusBroadcastAt
 		unresponsiveWarnedAt := cc.unresponsiveWarnedAt
+		streamingStartedAt := cc.streamingStartedAt
 		statusConn := cc.statusConn
 		gatewayReady := cc.gatewayReady
 		contextUsage := cc.contextUsage
 		contextWarningSent := cc.contextWarningSent
 		tenantID := cc.tenantID
 		cc.mu.RUnlock()
+
+		// The bridge normally closes a turn with a message.  If that terminal
+		// message is lost, preserve the partial response and unblock the queue.
+		// A second consecutive recovery means the bridge is repeatedly wedged.
+		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > busyTurnMax {
+			var content, messageID string
+			var escalate bool
+			cc.mu.Lock()
+			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > busyTurnMax {
+				if cc.streamingBuf.Len() > 0 {
+					content = cc.streamingBuf.String() + " [interrupted]"
+					messageID = cc.streamingMsgID
+					if messageID == "" {
+						messageID = uuid.New().String()
+					}
+				}
+				cc.finishTurnLocked()
+				cc.forcedFinishCount++
+				escalate = cc.forcedFinishCount >= 2
+			}
+			cc.mu.Unlock()
+			if content != "" {
+				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content`, messageID, id, tenantID, "claw", content, now)
+				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
+			}
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "agent_typing", Payload: map[string]string{"claw_id": id, "status": "idle"}})
+			s.sendNextQueuedMessage(cc)
+			if escalate {
+				go s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false)
+			}
+		}
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
@@ -4889,7 +4991,8 @@ func (s *Server) checkClawStatus() {
 			cc.mu.Lock()
 			cc.unresponsiveWarnedAt = now
 			cc.mu.Unlock()
-			go s.escalateClawHealthFailure(id, "agent unresponsive: no activity for 10m after gateway ready")
+			minutes := int(now.Sub(lastStatusAt).Minutes())
+			go s.stopAgentWithReason(id, fmt.Sprintf("no status updates for %d minutes, agent presumed dead", minutes), false)
 		}
 
 		// Context usage warning (>90%) — skip if a streaming turn is in progress
@@ -4969,7 +5072,7 @@ func (s *Server) syncReplicatedVMs() {
 			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
-				go s.stopAgentWithReason(c.id, "Provider VM lost: HTTP 404 not found", true)
+				go s.stopAgentWithReason(c.id, "Provider VM lost: replicated VM no longer exists", true)
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}

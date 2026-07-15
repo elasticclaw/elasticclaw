@@ -20,13 +20,13 @@ import (
 // creates agents when the matching trigger has not already claimed that
 // external item.
 func (s *Server) startIntegrationPoller() {
-	go func() {
+	s.safeGo("integration poller", func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			s.pollTick()
+			s.safeGo("integration poll tick", s.pollTick)
 		}
-	}()
+	})
 }
 
 // pollTick queries integration platforms for recently updated items and

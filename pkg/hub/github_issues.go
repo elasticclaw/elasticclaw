@@ -121,7 +121,7 @@ func (s *Server) handleGitHubIssuesWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	go s.processGitHubIssuesEvent(workspaceName, payload)
+	s.safeGo("github issues webhook", func() { s.processGitHubIssuesEvent(workspaceName, payload) })
 	w.WriteHeader(http.StatusOK)
 }
 

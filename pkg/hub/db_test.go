@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+func TestOpenDBSetsBusyTimeout(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var timeout int
+	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", timeout)
+	}
+}
+
 func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 	t.Run("fresh schema", func(t *testing.T) {
 		db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
