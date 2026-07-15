@@ -36,7 +36,11 @@ func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
 	// Node/OpenClaw/gateway steps live inside claw-bridge Go code.
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP=1", "bootstrap env var set")
-	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/claw-bridge.log\" 2>&1 </dev/null &", "bridge backgrounded in bootstrap mode")
+	assertContains(t, script, `cat > "$HOME/.claw-bridge-supervisor.sh" <<'EOF'`, "writes bootstrap supervisor")
+	assertContains(t, script, `nohup "$HOME/.claw-bridge-supervisor.sh" >> "$HOME/claw-bridge.log" 2>&1 </dev/null &`, "supervisor backgrounded in bootstrap mode")
+	assertContains(t, script, "ELASTICCLAW_BRIDGE_RESTARTS", "supervisor reports cumulative restart count")
+	assertContains(t, script, "restarting (attempt $restarts/3)", "supervisor caps restarts")
+	assertContains(t, script, "sleep \"$backoff\"", "supervisor backs off restarts")
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
 	assertNotContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge must not block SSH session")
 	// Node/OpenClaw installs are NOT in the bash script anymore
@@ -61,9 +65,13 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, prep, "[ ! -s /tmp/claw-bridge ]", "reports missing downloaded bridge before install")
 	assertContains(t, prep, "sudo install -m 0755 /tmp/claw-bridge /usr/local/bin/claw-bridge", "installs bridge outside tmp before execution")
 	assertContains(t, prep, "claw-bridge installed at /usr/local/bin/claw-bridge is not executable", "reports non-executable install")
-	assertContains(t, cmd, "exec /usr/local/bin/claw-bridge", "runs installed bridge from async session command")
+	assertContains(t, cmd, "/usr/local/bin/claw-bridge", "runs installed bridge from async session command")
 	assertContains(t, cmd, "claw-bridge.pid", "writes pid file for idempotent retries")
 	assertContains(t, cmd, "kill -0", "validates existing and newly started process")
+	assertContains(t, cmd, "trap", "installs supervisor exit trap")
+	assertContains(t, cmd, `rm -f "$PIDFILE"`, "removes supervisor pid file on exit")
+	assertContains(t, cmd, "ELASTICCLAW_BRIDGE_RESTARTS", "exports restart count to bridge")
+	assertContains(t, cmd, "restart budget exhausted after 3 attempts", "caps rapid restart flapping")
 	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID='claw-123'`, "passes claw id to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
 	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
@@ -163,7 +171,7 @@ func TestBootstrapScript_BridgeStartsBeforeCredentialHelper(t *testing.T) {
 	p.GitHubRepos = []types.GitHubRepoAccess{{Repo: "owner/repo", Permissions: "write"}}
 	script := GenerateReplicatedBootstrapScript(p)
 
-	assertContains(t, script, "/usr/local/bin/claw-bridge >> \"$HOME/claw-bridge.log\" 2>&1 </dev/null &", "bridge started")
+	assertContains(t, script, `nohup "$HOME/.claw-bridge-supervisor.sh" >> "$HOME/claw-bridge.log" 2>&1 </dev/null &`, "bridge supervisor started")
 	// Credential helper is NOT in the generated script — it runs as a separate SSH step
 	assertNotContains(t, script, "elasticclaw-git-credentials", "cred helper not in bootstrap script")
 }
