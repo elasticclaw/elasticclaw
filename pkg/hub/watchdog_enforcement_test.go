@@ -134,12 +134,16 @@ func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	s.checkClawStatus()
 	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	// The connection bootstrap may deliver unrelated frames (e.g. an async
+	// checkpoint_create request) before the queued message; skip those.
 	var delivered types.WSMessage
-	if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
-		t.Fatalf("read delivered queued message: %v", err)
-	}
-	if delivered.Type != "message" {
-		t.Fatalf("delivered type = %q, want message", delivered.Type)
+	for {
+		if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
+			t.Fatalf("read delivered queued message: %v", err)
+		}
+		if delivered.Type == "message" {
+			break
+		}
 	}
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
