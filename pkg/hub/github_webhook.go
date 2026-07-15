@@ -907,7 +907,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}
 
 	// Store the PR immediately so the watcher picks it up
-	s.storePRMention(clawID, repoFullName, prNumber, prURL)
+	if err := s.storePRMention(clawID, repoFullName, prNumber, prURL); err != nil {
+		log.Printf("[pr-watcher] failed to store PR mention: %v", err)
+	}
 
 	// Log factory event
 	s.logFactoryEvent(factory.Name,

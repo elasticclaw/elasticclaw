@@ -73,11 +73,11 @@ func extractPRs(content string) []struct {
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) error {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
-		return
+		return nil
 	}
 
 	// Track analytics: PR was opened (detected for the first time)
@@ -136,7 +136,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
 	); err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
-		return
+		return err
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -154,12 +154,15 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
+	return nil
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
 func (s *Server) scanMessageForPRs(clawID, content string) {
 	for _, pr := range extractPRs(content) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
+		}
 	}
 }
 
@@ -304,6 +307,12 @@ func (s *Server) pollAllPRs() {
 		if isPipelineDriven && !r.pr.prConditionsFired {
 			if stage := s.checkPRConditions(r.pr, token, pipelineCtx); stage != nil {
 				s.firePRConditions(r.pr, *stage, pipelineCtx)
+			} else if pl := parsePipelineForContext(pipelineCtx); pl != nil && pl.StageForPRConditions() != nil {
+				maxWait := s.livenessSettings().prConditionsMaxWait
+				if created, err := time.Parse(time.RFC3339, r.pr.createdAt); err == nil && time.Since(created) > maxWait {
+					go s.stopAgentWithReason(r.pr.clawID, fmt.Sprintf("pr_conditions on PR %s not satisfied within %s — CI stuck or no check runs", r.pr.prURL, maxWait), false)
+					terminatedClaws[r.pr.clawID] = true
+				}
 			}
 		}
 	}

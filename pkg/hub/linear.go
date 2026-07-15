@@ -1245,7 +1245,11 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 
 	// Store all validated PRs (idempotent).
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, pr.url))
+			return
+		}
 	}
 
 	pipelineHandledDone := false
@@ -1402,7 +1406,9 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 		return
 	}
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
+		}
 	}
 	if len(prURLs) == 0 {
 		s.completeNoPRDoneClaw(clawID, tenantID, "")
