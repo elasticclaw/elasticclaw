@@ -881,6 +881,18 @@ func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResu
 	return fmt.Sprintf("Workflow command failed: `%s`\n\n%s", command, sanitizeBootstrapOutput(details))
 }
 
+// routedRequiredGateError means a required gate prevented subsequent on_enter
+// actions, but its verdict has a declared gate_result route that will handle it.
+// It must not terminate the source stage before that route can transition.
+type routedRequiredGateError struct {
+	stageID string
+	verdict string
+}
+
+func (e *routedRequiredGateError) Error() string {
+	return fmt.Sprintf("required gate %q %s", e.stageID, e.verdict)
+}
+
 // runOnEnter executes the on_enter actions for a given stage.
 //
 // - stage.OnEnter.Run: executes a command in the agent workspace
@@ -889,7 +901,7 @@ func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResu
 //
 // issueID is the default issue from the trigger; it can be overridden by
 // MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
-func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) (injectDelivered bool, err error) {
 	issueID := ctx.IssueID
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
@@ -911,7 +923,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			} else {
 				log.Printf("[pipeline] %s", msg)
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-				return false
+				return false, fmt.Errorf("run action failed: %s", msg)
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
@@ -935,7 +947,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			if !stage.OnEnter.DependencyUpdates.ContinueOnError {
-				return false
+				return false, fmt.Errorf("dependency update step failed: %s", msg)
 			}
 		}
 	}
@@ -949,7 +961,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			if !stage.OnEnter.Judge.ContinueOnError {
-				return false
+				return false, fmt.Errorf("judge action failed: %s", msg)
 			}
 		} else {
 			log.Printf("[pipeline] judge completed for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, judgeResult.Verdict)
@@ -987,7 +999,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				log.Printf("[pipeline] %s", msg)
 				if !stage.OnEnter.Judge.ContinueOnError {
 					s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-					return false
+					return false, fmt.Errorf("judge requirement failed: %s", msg)
 				}
 			}
 		}
@@ -1019,13 +1031,18 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if autoTransitionVerdict == "skipped" && stage.Gate.TreatSkippedAsPass {
 			autoTransitionVerdict = "pass"
 		}
-		s.safeGo("pipeline gate auto-transition", func() { s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx) })
+		s.safeGo("pipeline gate auto-transition", func() {
+			s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx, gateResult.Reason)
+		})
 		// If gate is required and failed (or errored), block further on_enter actions
 		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-			return false
+			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict) != nil {
+				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
+			}
+			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
 		}
 	}
 
@@ -1142,6 +1159,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
 		s.injectHubMessageByID(clawID, injectMsg)
+		injectDelivered = true
 	}
 
 	if stage.OnEnter.MergePR {
@@ -1188,7 +1206,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	targetStatus := stage.OnEnter.MoveIssue.Status
 	if targetStatus == "" {
-		return true
+		return injectDelivered, nil
 	}
 
 	// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
@@ -1269,7 +1287,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	}
 issueResolved:
 	if resolvedIssueID == "" {
-		return true
+		return injectDelivered, nil
 	}
 
 	// Determine issue tracker: explicit workflow/factory integration takes precedence,
@@ -1291,7 +1309,7 @@ issueResolved:
 		tracker, ok := s.resolveJiraTrackerForPipeline(ctx)
 		if !ok {
 			log.Printf("[pipeline] %s: no Jira tracker for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return true
+			return injectDelivered, nil
 		}
 		if err := s.moveJiraIssue(tracker, resolvedIssueID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move Jira issue %s to %q: %v", resolvedIssueID, targetStatus, err)
@@ -1307,7 +1325,7 @@ issueResolved:
 		scToken := s.resolveShortcutTokenForPipeline(ctx)
 		if scToken == "" {
 			log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return true
+			return injectDelivered, nil
 		}
 		if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
@@ -1319,18 +1337,18 @@ issueResolved:
 		ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 		if ghToken == "" {
 			log.Printf("[pipeline] %s: no GitHub Issues token for move_issue, skipping", ctx.Name())
-			return true
+			return injectDelivered, nil
 		}
 		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) != 3 {
 			log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return true
+			return injectDelivered, nil
 		}
 		repo := parts[0] + "/" + parts[1]
 		var issueNum int
 		if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
 			log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return true
+			return injectDelivered, nil
 		}
 		if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
 			log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
@@ -1342,7 +1360,7 @@ issueResolved:
 		linearToken := s.resolveLinearTokenForPipeline(ctx)
 		if linearToken == "" {
 			log.Printf("[pipeline] %s: no Linear token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return true
+			return injectDelivered, nil
 		}
 		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
 			log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
@@ -1350,7 +1368,7 @@ issueResolved:
 			log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
 		}
 	}
-	return true
+	return injectDelivered, nil
 }
 
 func pipelineTerminalWorkflowRunResult(stage pipeline.Stage, stageActionsSucceeded bool) (status, result string) {
@@ -1448,19 +1466,31 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	return s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+	return transitioned
 }
 
-func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) (transitioned, injectDelivered bool) {
 	if !s.claimPipelineStageTransition(clawID, stage.ID) {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
-		return false
+		return false, false
 	}
 	// Record that this claw has visited this stage, so one-shot triggers
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
-	stageActionsSucceeded := s.runOnEnter(clawID, stage, ctx)
+	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
+	stageActionsSucceeded := onEnterErr == nil
+	var routedGateErr *routedRequiredGateError
+	if errors.As(onEnterErr, &routedGateErr) {
+		// autoTransitionAfterGate was started by runOnEnter and owns the declared
+		// gate_result route. Do not race it by terminating this source stage.
+		return true, false
+	}
+	if onEnterErr != nil && !stage.Terminal {
+		s.stopAgentWithReason(clawID, fmt.Sprintf("pipeline stage %q on_enter failed: %v", stage.ID, onEnterErr), false)
+		return true, false
+	}
 
 	// If this is a terminal stage, terminate the claw
 	if stage.Terminal {
@@ -1507,7 +1537,7 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 			go s.terminateVM(provider, providerID)
 		}
 	}
-	return true
+	return true, injectDelivered
 }
 
 func (s *Server) resolvePipelineStageSkips(clawID string, stage pipeline.Stage, ctx pipelineContext) pipeline.Stage {
@@ -1619,6 +1649,7 @@ type GateEvaluationResult struct {
 	Verdict      string // "pass", "fail", "skipped", "error"
 	MatchedPath  string
 	MatchedValue string
+	Reason       string
 }
 
 // evaluateGate inspects a named pipeline output and evaluates the gate
@@ -1634,6 +1665,7 @@ func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *Gate
 			result.Verdict = "skipped"
 		} else {
 			result.Verdict = "error"
+			result.Reason = fmt.Sprintf("required output %q was not found", gate.Output)
 		}
 		log.Printf("[pipeline] gate %q for claw %s: output %q not found, verdict=%s", stageID, clawID[:8], gate.Output, result.Verdict)
 		s.persistGateResult(clawID, stageID, gate, result)
@@ -1673,6 +1705,7 @@ func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *Gate
 	}
 
 	// Neither pass nor fail matched — error
+	result.Reason = "no gate condition matched"
 	log.Printf("[pipeline] gate %q for claw %s: no conditions matched, verdict=error", stageID, clawID[:8])
 	s.persistGateResult(clawID, stageID, gate, result)
 	return result
@@ -1730,7 +1763,7 @@ func (s *Server) hasFailedRequiredGate(clawID string) bool {
 
 // autoTransitionAfterGate checks the pipeline for a stage with a gate_result
 // trigger matching the given stage ID and verdict, and transitions to it.
-func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pipelineContext) {
+func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pipelineContext, errorReasons ...string) {
 	pl := parsePipelineForContext(ctx)
 	if pl == nil {
 		return
@@ -1738,6 +1771,13 @@ func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pi
 	stage := pl.StageForGateResult(stageID, verdict)
 	if stage == nil {
 		log.Printf("[pipeline] claw %s: no stage with gate_result stage=%s verdict=%s trigger found", clawID[:8], stageID, verdict)
+		if verdict == "error" {
+			reason := "no gate condition matched"
+			if len(errorReasons) > 0 && strings.TrimSpace(errorReasons[0]) != "" {
+				reason = errorReasons[0]
+			}
+			s.stopAgentWithReason(clawID, fmt.Sprintf("pipeline gate %q errored: %s", stageID, reason), false)
+		}
 		return
 	}
 	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after gate stage=%s verdict=%s", clawID[:8], stage.ID, stageID, verdict)
@@ -1768,7 +1808,8 @@ func (s *Server) initializePipelineEntryIfNeeded(clawID string) bool {
 	}
 
 	effectiveEntry := s.resolvePipelineStageSkips(clawID, *entry, ctx)
-	return s.transitionResolvedPipelineStageWithContext(clawID, effectiveEntry, ctx) && strings.TrimSpace(effectiveEntry.OnEnter.Inject) != ""
+	_, injectDelivered := s.transitionResolvedPipelineStageWithContext(clawID, effectiveEntry, ctx)
+	return injectDelivered
 }
 
 // stopAgentWithReason is the centralized handler for unexpected agent termination.
