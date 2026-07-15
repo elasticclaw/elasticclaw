@@ -2291,7 +2291,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldEscalateGateway {
-						go s.stopAgentWithReason(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax), false)
+						// Re-read the claw state before escalating: idle/completed claws
+						// remain connected intentionally, and bootstrapping claws are
+						// handled by the bootstrap watchdog.
+						go s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax))
 					}
 					if shouldWarnContext {
 						s.mu.RLock()

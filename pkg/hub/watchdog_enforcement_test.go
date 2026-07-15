@@ -61,13 +61,20 @@ func watchdogClawConn(t *testing.T, s *Server, clawID string) *clawConn {
 	return cc
 }
 
-func TestWatchdogUnhealthyHeartbeatsStopClawAndFailRun(t *testing.T) {
+func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	s.cronScheduler = newCronScheduler(s)
 	const clawID = "watchdog-unhealthy"
 	conn := watchdogClaw(t, s, clawID)
-	if _, err := db.Exec(`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`, "watchdog-run", "test-tenant-id", "watchdog", "test", "cron", "running", clawID, "{}"); err != nil {
+	// Registration intentionally leaves newly seen claws in starting/bootstrap-pending.
+	// The watchdog only escalates an active, bootstrapped claw, and retry scheduling
+	// advances a task run (not the legacy workflow_runs record).
+	if _, err := db.Exec(`UPDATE claws SET provider='noop', status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
+	}
+	runID, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, Tags: []string{}})
+	if err != nil {
+		t.Fatalf("create task run: %v", err)
 	}
 	for i := 0; i < gatewayUnhealthyMax; i++ {
 		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": false}}); err != nil {
@@ -75,11 +82,11 @@ func TestWatchdogUnhealthyHeartbeatsStopClawAndFailRun(t *testing.T) {
 		}
 	}
 	eventuallyWatchdog(t, func() bool {
-		var clawStatus, runStatus string
-		_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&clawStatus)
-		_ = db.QueryRow(`SELECT status FROM workflow_runs WHERE id='watchdog-run'`).Scan(&runStatus)
-		return clawStatus == "error" && runStatus == "failed"
-	}, "claw error and failed workflow run")
+		var attempts, retryEvents int
+		_ = db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&attempts)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_key=?`, runID, "retry:"+clawID+":2").Scan(&retryEvents)
+		return attempts == 2 && retryEvents == 1
+	}, "replacement attempt scheduled for unhealthy claw")
 }
 
 func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {

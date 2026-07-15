@@ -87,7 +87,7 @@ var agentFailureRules = []agentFailureRule{
 	{agentFailureTaskRunAnalytics, []string{"task run analytics"}},
 	{agentFailureProvisioning, []string{"provisioning failed", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
 	{agentFailureBootstrap, []string{"bootstrap failed", "daytona bootstrap failed", "exedev bootstrap failed", "install openclaw failed", "start claw-bridge", "connector download"}},
-	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete", "workspace unresponsive", "agent unresponsive"}},
+	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete", "workspace unresponsive", "agent unresponsive", "agent process unhealthy for", "no status updates for", "agent repeatedly stuck mid-turn"}},
 	{agentFailureWorkspaceFiles, []string{"could not write workspace files", "workspace files incomplete", "template file staging failed", "docker file copy failed", "invalid template file path", "path must stay inside workspace"}},
 	{agentFailureGitHubCredentials, []string{"could not configure github credentials", "auth gh cli failed", "verify gh auth failed", "fetch github bootstrap token"}},
 	{agentFailureWorkflowVolume, []string{"workflow volume attach failed"}},
