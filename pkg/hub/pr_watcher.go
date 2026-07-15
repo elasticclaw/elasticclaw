@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,28 @@ import (
 )
 
 var prURLRegex = regexp.MustCompile(`https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)`)
+
+const prMergedPermanentFailureLimit = 5
+
+type githubAPIError struct {
+	StatusCode  int
+	Body        string
+	RateLimited bool
+}
+
+func (e *githubAPIError) Error() string {
+	return fmt.Sprintf("github API returned status %d: %s", e.StatusCode, e.Body)
+}
+func isPermanentGitHubAPIError(err error) bool {
+	var apiErr *githubAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode == 404 || apiErr.StatusCode == 410 || apiErr.StatusCode == 401 {
+		return true
+	}
+	return apiErr.StatusCode == 403 && !apiErr.RateLimited && !strings.Contains(strings.ToLower(apiErr.Body), "rate limit")
+}
 
 // extractPRs finds GitHub PR URLs in a message body.
 func extractPRs(content string) []struct {
@@ -939,6 +962,9 @@ func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)
@@ -1056,8 +1082,20 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
 	if err != nil {
+		if isPermanentGitHubAPIError(err) {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=permanent_failure_count+1 WHERE id=?`, pr.id)
+			var failures int
+			_ = s.db.QueryRow(`SELECT permanent_failure_count FROM claw_prs WHERE id=?`, pr.id).Scan(&failures)
+			if failures >= prMergedPermanentFailureLimit {
+				var apiErr *githubAPIError
+				_ = errors.As(err, &apiErr)
+				go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been inaccessible (HTTP %d) for %d consecutive polls — repo or PR deleted, or GitHub App uninstalled", pr.prURL, apiErr.StatusCode, prMergedPermanentFailureLimit), false)
+				return true
+			}
+		}
 		return false
 	}
+	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 
@@ -1369,9 +1407,9 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 		// Surface a clearer error when the token is likely the problem.
 		msg := string(body)
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(msg, "Not Found") {
-			return nil, fmt.Errorf("github API returned 404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg)
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
 		}
-		return nil, fmt.Errorf("github API returned status %d: %s", resp.StatusCode, msg)
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
 	}
 	var result []interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
