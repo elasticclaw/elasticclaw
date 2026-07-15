@@ -1790,9 +1790,6 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 }
 
 func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTerminate bool) {
-	s.checkpointBeforeTermination(clawID, "stop-agent")
-	s.syncWorkflowVolumes(clawID)
-
 	// Resolve workflow/factory + issueID
 	pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
 	factory, issueID := s.findFactoryForClaw(clawID)
@@ -1830,6 +1827,12 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 			s.cronScheduler.finishRunByClawID(clawID, "failed", safeReason)
 		}
 	}
+
+	// A checkpoint request can wait up to checkpointTerminationTimeout for a
+	// bridge response.  Do not leave the claw and any workflow run marked as
+	// running while that best-effort preservation step waits.
+	s.checkpointBeforeTermination(clawID, "stop-agent")
+	s.syncWorkflowVolumes(clawID)
 
 	// 2. Broadcast "Agent Stopped" card to dashboard
 	s.broadcastToUsers(tenantID, types.WSMessage{

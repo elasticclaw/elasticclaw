@@ -75,7 +75,7 @@ const (
 )
 
 func heartbeatShouldEscalate(unhealthyCount int, status string, bootstrapOK bool) bool {
-	return unhealthyCount == 12 && status == "connected" && bootstrapOK
+	return unhealthyCount == gatewayUnhealthyMax && status == "connected" && bootstrapOK
 }
 
 func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time) watchdogHealthAction {
@@ -89,7 +89,7 @@ func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bo
 	if warnedAt.IsZero() && silentFor > 5*time.Minute {
 		return watchdogHealthWarn
 	}
-	if !warnedAt.IsZero() && silentFor > 10*time.Minute && nowAt.Sub(warnedAt) >= 5*time.Minute {
+	if !warnedAt.IsZero() && silentFor > silentDeathMax && nowAt.Sub(warnedAt) >= 5*time.Minute {
 		return watchdogHealthEscalate
 	}
 	return watchdogHealthNone
