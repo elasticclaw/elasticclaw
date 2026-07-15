@@ -1190,6 +1190,12 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		return
 	}
 	if issueID == "" {
+		var runningWorkflowRun bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE claw_id=? AND status='running')`, clawID).Scan(&runningWorkflowRun); err != nil || !runningWorkflowRun {
+			// Interactive claws have no tracker issue or workflow run; [DONE] is
+			// ordinary conversation for them, not a teardown signal.
+			return
+		}
 		s.completeIssueLessDoneClaw(clawID, tenantID, prURLs)
 		return
 	}

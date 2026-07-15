@@ -881,6 +881,18 @@ func formatPipelineRunFailure(action pipeline.RunAction, result *pipelineRunResu
 	return fmt.Sprintf("Workflow command failed: `%s`\n\n%s", command, sanitizeBootstrapOutput(details))
 }
 
+// routedRequiredGateError means a required gate prevented subsequent on_enter
+// actions, but its verdict has a declared gate_result route that will handle it.
+// It must not terminate the source stage before that route can transition.
+type routedRequiredGateError struct {
+	stageID string
+	verdict string
+}
+
+func (e *routedRequiredGateError) Error() string {
+	return fmt.Sprintf("required gate %q %s", e.stageID, e.verdict)
+}
+
 // runOnEnter executes the on_enter actions for a given stage.
 //
 // - stage.OnEnter.Run: executes a command in the agent workspace
@@ -1025,6 +1037,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
 			log.Printf("[pipeline] %s", msg)
 			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict) != nil {
+				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
+			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
 		}
 	}
@@ -1464,6 +1479,12 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
 	stageActionsSucceeded := onEnterErr == nil
+	var routedGateErr *routedRequiredGateError
+	if errors.As(onEnterErr, &routedGateErr) {
+		// autoTransitionAfterGate was started by runOnEnter and owns the declared
+		// gate_result route. Do not race it by terminating this source stage.
+		return true, false
+	}
 	if onEnterErr != nil && !stage.Terminal {
 		s.stopAgentWithReason(clawID, fmt.Sprintf("pipeline stage %q on_enter failed: %v", stage.ID, onEnterErr), false)
 		return true, false

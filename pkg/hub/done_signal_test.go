@@ -408,6 +408,10 @@ func TestHandleClawDoneSignal_IssueLessWorkflowWatchesPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = db.Exec(`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`, "run-issue-less-pr", "test-tenant-id", "nightly", "engineering", "cron", "running", clawID, "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
@@ -422,5 +426,24 @@ func TestHandleClawDoneSignal_IssueLessWorkflowWatchesPR(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("claw_prs count = %d, want 1", count)
+	}
+}
+
+func TestHandleClawDoneSignal_IssueLessInteractiveClawIsNoOp(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-issue-less-interactive"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "interactive claw", "base", "connected")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE]")
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "connected" {
+		t.Fatalf("status = %q, want connected", status)
 	}
 }
