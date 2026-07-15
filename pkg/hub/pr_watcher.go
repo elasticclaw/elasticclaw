@@ -272,10 +272,20 @@ func (s *Server) pollAllPRs() {
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
 		if isPipelineDriven && !r.pr.prConditionsFired {
 			if stage := s.checkPRConditions(r.pr, token, pipelineCtx); stage != nil {
-				_, _ = s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, r.pr.id)
-				s.transitionPipelineStageWithContext(r.pr.clawID, *stage, pipelineCtx)
+				s.firePRConditions(r.pr, *stage, pipelineCtx)
 			}
 		}
+	}
+}
+
+// firePRConditions consumes the one-shot trigger only after its transition
+// claims the stage. A failed claim remains eligible for the next poll.
+func (s *Server) firePRConditions(pr clawPR, stage pipeline.Stage, ctx pipelineContext) {
+	if !s.transitionPipelineStageWithContext(pr.clawID, stage, ctx) {
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE claw_prs SET pr_conditions_fired=1 WHERE id=?`, pr.id); err != nil {
+		log.Printf("[pr-watcher] marking pr conditions fired for %s: %v", pr.prURL, err)
 	}
 }
 
