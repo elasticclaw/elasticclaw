@@ -104,6 +104,7 @@ type clawConn struct {
 	contextUsage          int             // 0-100, updated from heartbeats
 	gatewayReady          bool            // true once bridge reports gateway session established
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
+	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending  bool            // true while initial volume attach / wake is in flight
 	workflowStartDone     bool            // true once initial volume attach / wake has completed
 	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
@@ -128,6 +129,12 @@ type clawConn struct {
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
 }
+
+const (
+	gatewayUnhealthyMax = 12
+	busyTurnMax         = 45 * time.Minute
+	silentDeathMax      = 10 * time.Minute
+)
 
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
@@ -2259,7 +2266,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-							if cc.gatewayUnhealthyCount == 12 {
+							if cc.gatewayUnhealthyCount == gatewayUnhealthyMax {
 								shouldEscalateGateway = true
 							}
 						}
@@ -2284,7 +2291,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
 					if shouldEscalateGateway {
-						go s.escalateGatewayHealthFailure(clawID)
+						go s.stopAgentWithReason(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax), false)
 					}
 					if shouldWarnContext {
 						s.mu.RLock()
@@ -2409,6 +2416,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					skipPersist = cc.streamingSplit
 				}
 				cc.finishTurnLocked()
+				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
@@ -4833,12 +4841,44 @@ func (s *Server) checkClawStatus() {
 		lastStatusAt := cc.lastStatusAt
 		lastStatusBroadcastAt := cc.lastStatusBroadcastAt
 		unresponsiveWarnedAt := cc.unresponsiveWarnedAt
+		streamingStartedAt := cc.streamingStartedAt
 		statusConn := cc.statusConn
 		gatewayReady := cc.gatewayReady
 		contextUsage := cc.contextUsage
 		contextWarningSent := cc.contextWarningSent
 		tenantID := cc.tenantID
 		cc.mu.RUnlock()
+
+		// The bridge normally closes a turn with a message.  If that terminal
+		// message is lost, preserve the partial response and unblock the queue.
+		// A second consecutive recovery means the bridge is repeatedly wedged.
+		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > busyTurnMax {
+			var content, messageID string
+			var escalate bool
+			cc.mu.Lock()
+			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > busyTurnMax {
+				if cc.streamingBuf.Len() > 0 {
+					content = cc.streamingBuf.String() + " [interrupted]"
+					messageID = cc.streamingMsgID
+					if messageID == "" {
+						messageID = uuid.New().String()
+					}
+				}
+				cc.finishTurnLocked()
+				cc.forcedFinishCount++
+				escalate = cc.forcedFinishCount >= 2
+			}
+			cc.mu.Unlock()
+			if content != "" {
+				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content`, messageID, id, tenantID, "claw", content, now)
+				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
+			}
+			s.broadcastToUsers(tenantID, types.WSMessage{Type: "agent_typing", Payload: map[string]string{"claw_id": id, "status": "idle"}})
+			s.sendNextQueuedMessage(cc)
+			if escalate {
+				go s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false)
+			}
+		}
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
@@ -4889,7 +4929,8 @@ func (s *Server) checkClawStatus() {
 			cc.mu.Lock()
 			cc.unresponsiveWarnedAt = now
 			cc.mu.Unlock()
-			go s.escalateClawHealthFailure(id, "agent unresponsive: no activity for 10m after gateway ready")
+			minutes := int(now.Sub(lastStatusAt).Minutes())
+			go s.stopAgentWithReason(id, fmt.Sprintf("no status updates for %d minutes, agent presumed dead", minutes), false)
 		}
 
 		// Context usage warning (>90%) — skip if a streaming turn is in progress
