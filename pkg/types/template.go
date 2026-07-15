@@ -556,6 +556,8 @@ type LivenessConfig struct {
 	ProvisioningMaxAge string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
 	ClaimTTL           string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
 	ReaperInterval     string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
+	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

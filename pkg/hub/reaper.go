@@ -8,7 +8,7 @@ import (
 const reaperActionLimit = 20
 
 type livenessSettings struct {
-	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
+	offlineGrace, provisioningMaxAge, claimTTL, interval, prConditionsMaxWait time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
@@ -19,7 +19,7 @@ func (s *Server) livenessEnabled() bool {
 }
 
 func (s *Server) livenessSettings() livenessSettings {
-	cfg := livenessSettings{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, time.Minute}
+	cfg := livenessSettings{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, time.Minute, 2 * time.Hour}
 	if s.hubCfg == nil || s.hubCfg.Liveness == nil {
 		return cfg
 	}
@@ -39,6 +39,7 @@ func (s *Server) livenessSettings() livenessSettings {
 	cfg.provisioningMaxAge = parse(l.ProvisioningMaxAge, cfg.provisioningMaxAge, "provisioning_max_age")
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
+	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
 	if cfg.interval <= 0 {
 		cfg.interval = time.Minute
 	}
