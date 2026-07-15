@@ -979,7 +979,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				s.injectHubMessageByID(clawID, findingsMsg)
 			}
 			// Auto-transition to next stage if a judge_verdict trigger matches
-			go s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx)
+			s.safeGo("pipeline judge auto-transition", func() { s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx) })
 			// Check required verdict
 			if stage.OnEnter.Judge.Require.Verdict != "" &&
 				!strings.EqualFold(judgeResult.Verdict, stage.OnEnter.Judge.Require.Verdict) {
@@ -1019,7 +1019,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if autoTransitionVerdict == "skipped" && stage.Gate.TreatSkippedAsPass {
 			autoTransitionVerdict = "pass"
 		}
-		go s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx)
+		s.safeGo("pipeline gate auto-transition", func() { s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx) })
 		// If gate is required and failed (or errored), block further on_enter actions
 		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)

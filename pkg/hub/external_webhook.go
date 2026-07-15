@@ -169,7 +169,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go s.processExternalEvent(payload, body, sig)
+	s.safeGo("external webhook", func() { s.processExternalEvent(payload, body, sig) })
 	w.WriteHeader(http.StatusOK)
 }
 

@@ -63,7 +63,7 @@ func (cs *cronScheduler) start() error {
 	defer cs.mu.Unlock()
 
 	// Create cron with second-level precision (optional) and timezone support
-	cs.cron = cron.New(cron.WithSeconds())
+	cs.cron = cron.New(cron.WithSeconds(), cron.WithChain(cron.Recover(cron.DefaultLogger)))
 
 	// Load all workspaces and register cron workflows
 	if err := cs.reloadWorkflows(); err != nil {

@@ -109,7 +109,8 @@ func (s *Server) handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processLinearEvent(strings.TrimSpace(r.PathValue("workspace")), payload)
+	workspace := strings.TrimSpace(r.PathValue("workspace"))
+	s.safeGo("linear webhook", func() { s.processLinearEvent(workspace, payload) })
 	w.WriteHeader(http.StatusOK)
 }
 

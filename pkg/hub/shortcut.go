@@ -145,7 +145,8 @@ func (s *Server) handleShortcutWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go s.processShortcutEvent(strings.TrimSpace(r.PathValue("workspace")), payload)
+	workspace := strings.TrimSpace(r.PathValue("workspace"))
+	s.safeGo("shortcut webhook", func() { s.processShortcutEvent(workspace, payload) })
 	w.WriteHeader(http.StatusOK)
 }
 

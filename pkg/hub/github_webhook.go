@@ -83,7 +83,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[github-webhook] issues action=%q repo=%q issue=#%d author=%q",
 			payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Issue.User.Login)
-		go s.processGitHubIssueEvent(payload)
+		s.safeGo("github issue webhook", func() { s.processGitHubIssueEvent(payload) })
 	case "pull_request":
 		var payload githubPRPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -94,7 +94,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[github-webhook] pull_request action=%q repo=%q pr=#%d author=%q base=%q",
 			payload.Action, payload.Repository.FullName, payload.Number,
 			payload.PullRequest.User.Login, payload.PullRequest.Base.Ref)
-		go s.processGitHubPREvent(payload)
+		s.safeGo("github PR webhook", func() { s.processGitHubPREvent(payload) })
 	case "pull_request_review_comment":
 		var payload githubPRReviewCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -104,7 +104,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[github-webhook] pull_request_review_comment action=%q repo=%q pr=#%d author=%q",
 			payload.Action, payload.Repository.FullName, payload.PullRequest.Number, payload.Comment.User.Login)
-		go s.processGitHubPRReviewCommentEvent(payload)
+		s.safeGo("github PR review comment webhook", func() { s.processGitHubPRReviewCommentEvent(payload) })
 	case "pull_request_review":
 		var payload githubPRReviewPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -114,7 +114,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[github-webhook] pull_request_review action=%q state=%q repo=%q pr=#%d author=%q",
 			payload.Action, payload.Review.State, payload.Repository.FullName, payload.PullRequest.Number, payload.Review.User.Login)
-		go s.processGitHubPRReviewEvent(payload)
+		s.safeGo("github PR review webhook", func() { s.processGitHubPRReviewEvent(payload) })
 	case "issue_comment":
 		var payload githubIssueCommentPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -125,12 +125,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			// Comment on a pull request
 			log.Printf("[github-webhook] issue_comment action=%q repo=%q pr=#%d author=%q",
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
-			go s.processGitHubIssueCommentEvent(payload)
+			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueCommentEvent(payload) })
 		} else {
 			// Comment on a plain issue (not PR)
 			log.Printf("[github-webhook] issue_comment action=%q repo=%q issue=#%d author=%q",
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
-			go s.processGitHubIssueComment(payload)
+			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
 	case "ping":
 		log.Printf("[github-webhook] ping received — webhook configured correctly")
