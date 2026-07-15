@@ -95,21 +95,25 @@ func (s *Server) reconcileOnBoot() {
 }
 
 func (s *Server) runReaper() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[reaper] loop panic: %v", r)
-		}
-	}()
-	ticker := time.NewTicker(s.livenessSettings().interval)
-	defer ticker.Stop()
-	for range ticker.C {
+	for {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[reaper] tick panic: %v", r)
+					log.Printf("[reaper] loop panic, restarting: %v", r)
 				}
 			}()
-			s.reapOnce()
+			ticker := time.NewTicker(s.livenessSettings().interval)
+			defer ticker.Stop()
+			for range ticker.C {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[reaper] tick panic: %v", r)
+						}
+					}()
+					s.reapOnce()
+				}()
+			}
 		}()
 	}
 }
@@ -168,21 +172,17 @@ func (s *Server) reapOnce() {
 			s.stopAgentWithReason(c.id, "provisioning timed out", false)
 		}
 	}
-	s.reaperMu.Lock()
-	for key := range s.reaperFirstSeen {
-		if len(key) > 5 && key[:5] == "claw:" && !seen[key] {
-			delete(s.reaperFirstSeen, key)
-		}
-	}
-	s.reaperMu.Unlock()
 	triggers, err := s.db.Query(`SELECT id, created_at FROM factory_triggers WHERE status='claimed' AND claw_id=''`)
 	if err == nil {
 		var triggerIDs []string
 		for triggers.Next() {
 			var id string
 			var created time.Time
-			if triggers.Scan(&id, &created) == nil && n.Sub(s.firstSeen("trigger:"+id, true, n)) > cfg.claimTTL {
-				triggerIDs = append(triggerIDs, id)
+			if triggers.Scan(&id, &created) == nil {
+				seen["trigger:"+id] = true
+				if n.Sub(s.firstSeen("trigger:"+id, true, n)) > cfg.claimTTL {
+					triggerIDs = append(triggerIDs, id)
+				}
 			}
 		}
 		triggers.Close()
@@ -213,6 +213,15 @@ func (s *Server) reapOnce() {
 			s.stopAgentWithReason(id, "task run exceeded its timeout", false)
 		}
 	}
+	// Evict firstSeen entries for claws/triggers no longer in a reap-eligible
+	// state, so the map cannot grow monotonically.
+	s.reaperMu.Lock()
+	for key := range s.reaperFirstSeen {
+		if !seen[key] {
+			delete(s.reaperFirstSeen, key)
+		}
+	}
+	s.reaperMu.Unlock()
 	if actions > 0 {
 		s.promotePendingClaws()
 	}
