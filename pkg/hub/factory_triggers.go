@@ -83,7 +83,7 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		return false, err
 	}
 
-	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
+	if clawID != "" && clawStatus != "" && clawStatus != "deleted" && clawStatus != "error" {
 		_, err = tx.Exec(`
 			UPDATE factory_triggers
 			   SET trigger_source=?, trigger_payload=?, last_seen_at=?, updated_at=?
@@ -108,7 +108,7 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		return false, tx.Commit()
 	}
 
-	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
+	if clawID != "" && clawStatus != "" && clawStatus != "deleted" && clawStatus != "error" {
 		_, _ = tx.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "canceled", "factory trigger reclaimed")

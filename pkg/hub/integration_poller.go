@@ -1497,11 +1497,11 @@ func (s *Server) queryGitHubPRs(repo, token, since, base string) ([]githubPRPoll
 func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types.FactoryConfig, repo, base string) {
 	prID := fmt.Sprintf("%s#%d", repo, pr.Number)
 
-	// If a non-deleted claw already exists for this PR, skip
+	// If a non-error, non-deleted claw already exists for this PR, skip.
 	var existingID string
 	_ = s.db.QueryRow(
 		`SELECT c.id FROM claws c JOIN claw_prs cp ON cp.claw_id = c.id
-		 WHERE cp.pr_url=? AND c.status NOT IN ('deleted') LIMIT 1`,
+		 WHERE cp.pr_url=? AND c.status NOT IN ('error','deleted') LIMIT 1`,
 		pr.HTMLURL).Scan(&existingID)
 	if existingID != "" {
 		return
@@ -1534,6 +1534,9 @@ func (s *Server) processGitHubPRPollItem(pr githubPRPollItem, factories []*types
 
 		payload := s.buildGitHubPRPollPayload(pr, repo)
 		if err := s.createClawForGitHubPR(factory, payload, "poll"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[poll-github-prs] failed to create claw for %s: %v", prID, err)
 		} else {
 			log.Printf("[poll-github-prs] created claw for %s via factory %s", prID, factory.Name)
