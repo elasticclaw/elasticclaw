@@ -114,6 +114,7 @@ type clawConn struct {
 	contextUsage          int             // 0-100, updated from heartbeats
 	gatewayReady          bool            // true once bridge reports gateway session established
 	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
+	gatewayRestartCount   int             // cumulative bridge restarts reported by heartbeats
 	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending  bool            // true while initial volume attach / wake is in flight
 	workflowStartDone     bool            // true once initial volume attach / wake has completed
@@ -2282,6 +2283,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					GatewayHealthy bool  `json:"gateway_healthy"`
 					GatewayReady   *bool `json:"gateway_ready,omitempty"`
 					ContextUsage   int   `json:"context_usage"`
+					RestartCount   int   `json:"restart_count"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
 					var wakeConn *clawConn
@@ -2295,6 +2297,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// Log only on status changes, not every heartbeat
 						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
+						if hb.RestartCount > cc.gatewayRestartCount {
+							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
+						}
+						cc.gatewayRestartCount = hb.RestartCount
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) {
@@ -3824,7 +3830,38 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
 fi
 rm -f "$PIDFILE"
 ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s \
-sh -c 'echo $$ > "$1"; exec /usr/local/bin/claw-bridge' sh "$PIDFILE" >> "$LOG" 2>&1`,
+sh -c '
+PIDFILE="$1"
+LOG="$2"
+echo $$ > "$PIDFILE"
+trap '\''rm -f "$PIDFILE"'\'' 0
+trap '\''exit 0'\'' TERM INT
+restarts=0
+backoff=5
+while :; do
+  started_at=$(date +%%s)
+  export ELASTICCLAW_BRIDGE_RESTARTS="$restarts"
+  /usr/local/bin/claw-bridge >> "$LOG" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "[supervisor] claw-bridge exited cleanly" >> "$LOG"
+    exit 0
+  fi
+  now=$(date +%%s)
+  if [ $((now - started_at)) -ge 300 ]; then
+    restarts=0
+    backoff=5
+  fi
+  if [ "$restarts" -ge 3 ]; then
+    echo "[supervisor] claw-bridge restart budget exhausted after 3 attempts" >> "$LOG"
+    exit 1
+  fi
+  restarts=$((restarts + 1))
+  echo "[supervisor] claw-bridge exited (code=$rc); restarting (attempt $restarts/3) in ${backoff}s" >> "$LOG"
+  sleep "$backoff"
+  backoff=$((backoff * 2))
+done
+' sh "$PIDFILE" "$LOG"`,
 		shellQuote(hubURL),
 		shellQuote(clawID),
 		shellQuote(clawToken),

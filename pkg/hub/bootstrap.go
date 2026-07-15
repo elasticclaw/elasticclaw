@@ -328,7 +328,38 @@ chmod 600 "$HOME/.claw-bridge.env"
 export ELASTICCLAW_BOOTSTRAP=1
 export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
 rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
-nohup /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 </dev/null &
+cat > "$HOME/.claw-bridge-supervisor.sh" <<'EOF'
+#!/bin/sh
+. "$HOME/.claw-bridge.env"
+export ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
+restarts=0
+backoff=5
+while :; do
+  started_at=$(date +%%s)
+  export ELASTICCLAW_BRIDGE_RESTARTS="$restarts"
+  /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "[supervisor] claw-bridge exited cleanly"
+    exit 0
+  fi
+  now=$(date +%%s)
+  if [ $((now - started_at)) -ge 300 ]; then
+    restarts=0
+    backoff=5
+  fi
+  if [ "$restarts" -ge 3 ]; then
+    echo "[supervisor] claw-bridge restart budget exhausted after 3 attempts"
+    exit 1
+  fi
+  restarts=$((restarts + 1))
+  echo "[supervisor] claw-bridge exited (code=$rc); restarting (attempt $restarts/3) in ${backoff}s"
+  sleep "$backoff"
+  backoff=$((backoff * 2))
+done
+EOF
+chmod 700 "$HOME/.claw-bridge-supervisor.sh"
+nohup "$HOME/.claw-bridge-supervisor.sh" >> "$HOME/claw-bridge.log" 2>&1 </dev/null &
 BRIDGE_PID=$!
 for _ in {1..1800}; do
   if [ -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE" ]; then
