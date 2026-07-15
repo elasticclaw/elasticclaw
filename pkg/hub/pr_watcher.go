@@ -227,6 +227,14 @@ func (s *Server) pollAllPRs() {
 
 	token := s.resolveGitHubToken()
 	if token == "" {
+		if len(prs) > 0 {
+			s.mu.Lock()
+			if time.Since(s.lastTokenFailureLog) >= time.Minute {
+				log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed; PR watcher is effectively disabled for %d tracked PR(s)", len(prs))
+				s.lastTokenFailureLog = time.Now()
+			}
+			s.mu.Unlock()
+		}
 		return
 	}
 
@@ -324,10 +332,12 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	for _, appCfg := range cfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
+			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed: %v", err)
 			continue
 		}
 		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
+			log.Printf("[pr-watcher] CRITICAL: GitHub token provider failed: %v", err)
 			continue
 		}
 		return token

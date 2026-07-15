@@ -52,9 +52,10 @@ type Server struct {
 	mux       *http.ServeMux
 	artifacts artifact.Store
 
-	mu    sync.RWMutex
-	claws map[string]*clawConn // claw_id -> conn
-	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	mu                  sync.RWMutex
+	claws               map[string]*clawConn // claw_id -> conn
+	users               map[string]*userConn // tenant_id -> []conn (broadcast)
+	lastTokenFailureLog time.Time
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
