@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,12 +17,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
@@ -246,7 +250,25 @@ type RunOptions struct {
 	NoWebUI bool // skip serving embedded web UI (use in dev when Next.js runs separately)
 }
 
+// safeGo contains panics in goroutines that own agent or workflow progress.
+func (s *Server) safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[hub] panic in %s: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
 func (s *Server) Run(opts ...RunOptions) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return s.run(ctx, opts...)
+}
+
+func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
@@ -265,11 +287,29 @@ func (s *Server) Run(opts ...RunOptions) error {
 		}
 	}
 
+	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(mux)}
+	go func() {
+		<-ctx.Done()
+		log.Printf("[hub] shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[hub] shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("ElasticClaw Hub listening on %s", s.addr)
 	if s.hubCfg.UIPassword == "" {
 		log.Printf("⚠️  Web UI password not set — using default: 'admin'. Set ui_password in hub.yaml to secure the UI.")
 	}
-	return http.ListenAndServe(s.addr, corsMiddleware(mux))
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		if closeErr := s.db.Close(); closeErr != nil {
+			return fmt.Errorf("close database: %w", closeErr)
+		}
+		return nil
+	}
+	return err
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -2447,9 +2487,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if pipelineHandledDone {
 					prURLs := extractDonePRURLs(hm.Content)
 					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-					go s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
 				} else if !strings.Contains(hm.Content, "[DONE]") {
-					go s.checkPipelineMessageTriggers(clawID, hm.Content)
+					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, hm.Content) })
 				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -2461,13 +2501,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				})
 				// Check for [DONE] signal from a factory-created claw
 				if strings.Contains(hm.Content, "[DONE]") {
-					go func() {
+					s.safeGo("done checkpoint", func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
-					}()
+					})
 					if !pipelineHandledDone {
-						go s.handleClawDoneSignal(clawID, hm.Content)
+						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, hm.Content) })
 					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
