@@ -288,11 +288,13 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	}
 
 	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(mux)}
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		log.Printf("[hub] shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		defer close(shutdownDone)
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("[hub] shutdown error: %v", err)
 		}
@@ -304,6 +306,9 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	}
 	err := srv.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
+		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
+		// finish draining active requests before closing their database.
+		<-shutdownDone
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
