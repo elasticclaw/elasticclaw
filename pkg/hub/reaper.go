@@ -137,19 +137,18 @@ func (s *Server) reapOnce() {
 		actions++
 		return true
 	}
-	rows, err := s.db.Query(`SELECT id, status, created_at FROM claws WHERE status IN ('offline','provisioning','starting')`)
+	rows, err := s.db.Query(`SELECT id, status FROM claws WHERE status IN ('offline','provisioning','starting')`)
 	if err != nil {
 		log.Printf("[reaper] claw query: %v", err)
 		return
 	}
 	type claw struct {
 		id, status string
-		created    time.Time
 	}
 	var claws []claw
 	for rows.Next() {
 		var c claw
-		if rows.Scan(&c.id, &c.status, &c.created) == nil {
+		if rows.Scan(&c.id, &c.status) == nil {
 			claws = append(claws, c)
 		}
 	}
@@ -160,11 +159,6 @@ func (s *Server) reapOnce() {
 		seen[key] = true
 		first := s.firstSeen(key, true, n)
 		age := n.Sub(first)
-		if c.status == "provisioning" || c.status == "starting" {
-			if !c.created.IsZero() {
-				age = n.Sub(c.created)
-			}
-		}
 		if c.status == "offline" && age > cfg.offlineGrace && take() {
 			log.Printf("[reaper] stopping offline claw %s", c.id)
 			s.stopAgentWithReason(c.id, "agent offline for "+cfg.offlineGrace.String()+", sandbox presumed dead", false)

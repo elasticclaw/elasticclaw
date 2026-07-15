@@ -99,6 +99,30 @@ func TestReaperOfflineGraceAndReconnectReset(t *testing.T) {
 	}
 }
 
+func TestReaperProvisioningMaxAgeStartsWhenProvisioningIsObserved(t *testing.T) {
+	enabled := true
+	s, db := newReaperTestServer(t, &types.HubConfig{Liveness: &types.LivenessConfig{Enabled: &enabled, ProvisioningMaxAge: "30m"}})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES('provisioning01','tenant','provisioning','provisioning',?)`, tm.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// This claw may have spent an hour pending before promotion. Its row creation
+	// time must not make the newly observed provisioning attempt time out at once.
+	s.reapOnce()
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='provisioning01'`).Scan(&status); err != nil || status != "provisioning" {
+		t.Fatalf("newly observed provisioning claw: status=%q err=%v", status, err)
+	}
+
+	tm = tm.Add(31 * time.Minute)
+	s.reapOnce()
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='provisioning01'`).Scan(&status); err != nil || status != "error" {
+		t.Fatalf("timed out provisioning claw: status=%q err=%v", status, err)
+	}
+}
+
 func TestStopAgentWithReasonPromotesPendingClaw(t *testing.T) {
 	s, db := newReaperTestServer(t, &types.HubConfig{MaxConcurrentClaws: 1})
 	tm := time.Now().UTC()
