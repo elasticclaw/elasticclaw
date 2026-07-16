@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,67 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 	}
 	if len(cursors) != 2 || cursors[0] != nil || cursors[1] != "cursor-1" {
 		t.Fatalf("cursor variables = %#v", cursors)
+	}
+}
+
+func TestQueryLinearIssuesDrainsBurstAcrossMultiplePages(t *testing.T) {
+	const totalIssues = 55
+	const pageSize = 10
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Variables struct {
+				After *string `json:"after"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		page := 0
+		if request.Variables.After != nil {
+			if _, err := fmt.Sscanf(*request.Variables.After, "cursor-%d", &page); err != nil {
+				t.Errorf("invalid cursor %q: %v", *request.Variables.After, err)
+				return
+			}
+			page++
+		}
+		start := page * pageSize
+		end := start + pageSize
+		if end > totalIssues {
+			end = totalIssues
+		}
+		nodes := make([]map[string]any, 0, end-start)
+		for i := start; i < end; i++ {
+			nodes = append(nodes, map[string]any{
+				"id":         fmt.Sprintf("%d", i+1),
+				"identifier": fmt.Sprintf("ELA-%d", i+1),
+				"title":      "burst issue",
+				"state":      map[string]string{"name": "Todo"},
+				"team":       map[string]string{"key": "ELA"},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{
+			"nodes":    nodes,
+			"pageInfo": map[string]any{"hasNextPage": end < totalIssues, "endCursor": fmt.Sprintf("cursor-%d", page)},
+		}}})
+	}))
+	defer server.Close()
+
+	s := newFactoryTriggerTestServer(t)
+	s.linearBaseURL = server.URL
+	issues, err := s.queryLinearIssues("token", time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != totalIssues {
+		t.Fatalf("issues = %d, want %d", len(issues), totalIssues)
+	}
+	for i, issue := range issues {
+		want := fmt.Sprintf("ELA-%d", i+1)
+		if issue.Identifier != want {
+			t.Fatalf("issue %d identifier = %q, want %q", i, issue.Identifier, want)
+		}
 	}
 }
 

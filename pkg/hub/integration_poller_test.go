@@ -57,3 +57,48 @@ func TestPollHighWaterMarkAdvancesOnlyAfterSuccessfulLinearQuery(t *testing.T) {
 		t.Fatalf("failed query advanced high-water mark to %s", got)
 	}
 }
+
+func TestPollTickAdvancesLinearHighWaterMarkOnlyAfterSuccessfulQuery(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s := newFactoryTriggerTestServer(t)
+	initial := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	s.setPollHighWaterMark("linear", initial)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`))
+	}))
+	defer server.Close()
+
+	s.linearBaseURL = server.URL
+	s.hubCfg = &types.HubConfig{
+		Factories:    []*types.FactoryConfig{{Name: "code", Integration: "linear", Workspace: "eng"}},
+		Integrations: &types.IntegrationsConfig{Linear: []*types.LinearIntegrationConfig{{Workspace: "eng", Token: "token"}}},
+	}
+
+	s.pollTick()
+	got, ok := s.getPollHighWaterMark("linear")
+	if !ok || !got.Equal(initial) {
+		t.Fatalf("failed poll tick advanced high-water mark to %s, want %s", got, initial)
+	}
+	// The tick must have queried Linear at least once; it's the response
+	// (first request errors) that this test cares about, not the exact count.
+	if attempts < 1 {
+		t.Fatalf("Linear query attempts = %d, want at least 1", attempts)
+	}
+	afterFirstTick := attempts
+
+	s.pollTick()
+	got, ok = s.getPollHighWaterMark("linear")
+	if !ok || !got.After(initial) {
+		t.Fatalf("successful poll tick high-water mark = %s, want after %s", got, initial)
+	}
+	if attempts <= afterFirstTick {
+		t.Fatalf("Linear query attempts = %d, want more than %d after second tick", attempts, afterFirstTick)
+	}
+}
