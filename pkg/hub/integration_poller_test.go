@@ -59,6 +59,7 @@ func TestPollHighWaterMarkAdvancesOnlyAfterSuccessfulLinearQuery(t *testing.T) {
 }
 
 func TestPollTickAdvancesLinearHighWaterMarkOnlyAfterSuccessfulQuery(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s := newFactoryTriggerTestServer(t)
 	initial := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
 	s.setPollHighWaterMark("linear", initial)
