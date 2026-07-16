@@ -305,9 +305,14 @@ func (s *Server) pollAllPRs() {
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
 		if isPipelineDriven && !r.pr.prConditionsFired {
-			if stage := s.checkPRConditions(r.pr, token, pipelineCtx); stage != nil {
+			stage, status := s.checkPRConditions(r.pr, token, pipelineCtx)
+			if stage != nil {
 				s.firePRConditions(r.pr, *stage, pipelineCtx)
-			} else if pl := parsePipelineForContext(pipelineCtx); pl != nil && pl.StageForPRConditions() != nil {
+			} else if status == prConditionsStuck {
+				// Only a genuine CI stall (no check runs ever appeared) is eligible
+				// for the max-wait timeout. Healthy progress (CI running, changes
+				// being addressed, quiet_for still elapsing) and transient API
+				// errors keep the run alive.
 				maxWait := s.livenessSettings().prConditionsMaxWait
 				if created, err := time.Parse(time.RFC3339, r.pr.createdAt); err == nil && time.Since(created) > maxWait {
 					go s.stopAgentWithReason(r.pr.clawID, fmt.Sprintf("pr_conditions on PR %s not satisfied within %s — CI stuck or no check runs", r.pr.prURL, maxWait), false)
@@ -1111,7 +1116,11 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 				go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been inaccessible (HTTP %d) for %d consecutive polls — repo or PR deleted, or GitHub App uninstalled", pr.prURL, apiErr.StatusCode, prMergedPermanentFailureLimit), false)
 				return true
 			}
+			return false
 		}
+		// Transient error (5xx, network): reset the counter so only genuinely
+		// consecutive permanent failures accumulate toward the limit.
+		_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 		return false
 	}
 	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
@@ -1268,16 +1277,40 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	return true
 }
 
+// prConditionsStatus explains why checkPRConditions did or didn't fire, so the
+// poller can distinguish a genuine CI stall (eligible for the max-wait timeout)
+// from healthy progress or transient API errors that must never time out a run.
+type prConditionsStatus int
+
+const (
+	// prConditionsSatisfied: all conditions passed and the stage should fire.
+	prConditionsSatisfied prConditionsStatus = iota
+	// prConditionsWaiting: conditions evaluated cleanly but aren't met yet
+	// (CI still running, checks failing, changes requested, quiet_for not
+	// elapsed). Healthy — the claw is expected to keep working, so this never
+	// triggers the timeout.
+	prConditionsWaiting
+	// prConditionsTransientError: a GitHub API call failed, so conditions can't
+	// be evaluated. Must not be treated as a stall.
+	prConditionsTransientError
+	// prConditionsStuck: ci:passing is required but no check runs have appeared
+	// (or the PR has no head SHA). This is the "CI stuck / no check runs" stall
+	// the max-wait guards against — the only status eligible for the timeout.
+	prConditionsStuck
+)
+
 // checkPRConditions evaluates the pr_conditions trigger for a given PR.
-// Returns the matching stage if ALL conditions pass, nil otherwise.
-func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext) *pipeline.Stage {
+// Returns the matching stage if ALL conditions pass (with prConditionsSatisfied),
+// otherwise nil and a status explaining why so the caller can tell a genuine
+// stall apart from healthy progress or transient errors.
+func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext) (*pipeline.Stage, prConditionsStatus) {
 	pl := parsePipelineForContext(ctx)
 	if pl == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 	stage := pl.StageForPRConditions()
 	if stage == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 	// Find the pr_conditions trigger on this stage
 	var cond *pipeline.PRConditionsTrigger
@@ -1288,7 +1321,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		}
 	}
 	if cond == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 
 	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
@@ -1305,31 +1338,31 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		headObj, _ := prData["head"].(map[string]interface{})
 		sha, _ := headObj["sha"].(string)
 		if sha == "" {
-			return nil // no head SHA yet, can't check
+			return nil, prConditionsStuck // no head SHA yet, CI can't run
 		}
 		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		checkRuns, _ := checksData["check_runs"].([]interface{})
 		if len(checkRuns) == 0 {
-			return nil // no checks yet
+			return nil, prConditionsStuck // no checks ever appeared — the stall the max-wait targets
 		}
 		for _, cr := range checkRuns {
 			run, _ := cr.(map[string]interface{})
 			conclusion, _ := run["conclusion"].(string)
 			status, _ := run["status"].(string)
 			if status != "completed" {
-				return nil // not all done
+				return nil, prConditionsWaiting // CI still running — healthy progress
 			}
 			if conclusion != "success" && conclusion != "skipped" && conclusion != "neutral" {
-				return nil // a check failed or is pending
+				return nil, prConditionsWaiting // a check failed — claw is expected to fix it
 			}
 		}
 	}
@@ -1339,7 +1372,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		reviewsData, err := githubAPIListWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		latestReviewStateByUser := make(map[string]struct {
 			id    int64
@@ -1366,7 +1399,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		}
 		for _, latest := range latestReviewStateByUser {
 			if latest.state == "CHANGES_REQUESTED" {
-				return nil
+				return nil, prConditionsWaiting // claw is expected to address feedback
 			}
 		}
 	}
@@ -1376,7 +1409,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		dur, err := time.ParseDuration(cond.QuietFor)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
-			return nil
+			return nil, prConditionsWaiting
 		}
 		// If no comments yet, use PR creation time — a PR with no comments
 		// has been quiet since it was created, so quiet_for should still fire.
@@ -1385,18 +1418,18 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 			quietSince = pr.createdAt
 		}
 		if quietSince == "" {
-			return nil
+			return nil, prConditionsWaiting
 		}
 		lastComment, err := time.Parse(time.RFC3339, quietSince)
 		if err != nil {
-			return nil
+			return nil, prConditionsWaiting
 		}
 		if time.Since(lastComment) < dur {
-			return nil // not quiet enough
+			return nil, prConditionsWaiting // not quiet enough yet — healthy, keep waiting
 		}
 	}
 
-	return stage
+	return stage, prConditionsSatisfied
 }
 
 // githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
