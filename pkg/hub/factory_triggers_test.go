@@ -115,7 +115,7 @@ func TestClaimFactoryTriggerSkipsActiveSameFactory(t *testing.T) {
 	}
 }
 
-func TestClaimFactoryTriggerSkipsErroredSameFactoryClaw(t *testing.T) {
+func TestClaimFactoryTriggerReclaimsErroredClaw(t *testing.T) {
 	s := newFactoryTriggerTestServer(t)
 	triggerKey := factoryTriggerKey("shortcut", "sc-123")
 	_, _ = s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
@@ -136,8 +136,8 @@ func TestClaimFactoryTriggerSkipsErroredSameFactoryClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
-	if claimed {
-		t.Fatal("expected errored same-factory claw to remain idempotent")
+	if !claimed {
+		t.Fatal("expected errored claw to be reclaimable")
 	}
 }
 

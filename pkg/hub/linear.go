@@ -941,16 +941,17 @@ func (s *Server) promotePendingClaws() {
 func (s *Server) provisionPendingClaw(clawID string) {
 	// Re-fetch the claw record
 	var (
-		name, template, provider, defaultModel, templateFilesJSON string
-		githubReposJSON, linearWorkspace, llmKey                  string
-		nixEnabled, dockerEnabled                                 int
-		tagsJSON, color, issueID                                  string
-		tenantID                                                  string
+		name, template, provider, defaultModel, templateFilesJSON  string
+		githubReposJSON, linearWorkspace, llmKey                   string
+		nixEnabled, dockerEnabled                                  int
+		tagsJSON, color                                            string
+		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID string
+		tenantID                                                   string
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')) FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &issueID)
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &linearIssueID, &githubIssueID, &shortcutStoryID, &jiraIssueID)
 	if err != nil {
 		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
@@ -971,6 +972,16 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	// Resolve factory for this issue so we can look up integration tokens and
 	// template-declared secrets.
 	var factory *types.FactoryConfig
+	issueID := linearIssueID
+	if issueID == "" {
+		issueID = githubIssueID
+	}
+	if issueID == "" {
+		issueID = shortcutStoryID
+	}
+	if issueID == "" {
+		issueID = jiraIssueID
+	}
 	if issueID != "" {
 		factory = s.findFactoryForIssue(issueID)
 	}
@@ -1117,6 +1128,68 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		// Slot is now free (error claws don't count toward limit); try to
 		// promote the next pending claw.
 		go s.promotePendingClaws()
+		return
+	}
+
+	s.moveIssueToWorkingStatusForPendingClaw(factory, linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, linearToken, githubToken, shortcutToken, jiraTracker, hasJiraTracker)
+}
+
+// moveIssueToWorkingStatusForPendingClaw moves a promoted claw's linked issue
+// to its factory working status. Failures are logged but do not stop provisioning.
+func (s *Server) moveIssueToWorkingStatusForPendingClaw(factory *types.FactoryConfig, linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, linearToken, githubToken, shortcutToken string, jiraTracker workspaceIssueTracker, hasJiraTracker bool) {
+	if factory == nil || factory.WorkingStatus == "" {
+		return
+	}
+
+	if linearIssueID != "" && linearToken != "" {
+		if err := s.moveLinearIssueOnServer(linearToken, linearIssueID, factory.WorkingStatus); err != nil {
+			log.Printf("[factory] failed to move issue %s to working status '%s': %v", linearIssueID, factory.WorkingStatus, err)
+		} else {
+			log.Printf("[factory] moved issue %s to working status '%s'", linearIssueID, factory.WorkingStatus)
+		}
+		return
+	}
+
+	if githubIssueID != "" && githubToken != "" {
+		rest := strings.TrimPrefix(githubIssueID, "gh-")
+		lastSlash := strings.LastIndex(rest, "/")
+		if lastSlash <= 0 {
+			log.Printf("[factory] cannot move GitHub issue %s to working status '%s': malformed issue ID (want owner/repo/number)", githubIssueID, factory.WorkingStatus)
+			return
+		}
+		repo := rest[:lastSlash]
+		var issueNum int
+		if _, err := fmt.Sscanf(rest[lastSlash+1:], "%d", &issueNum); err != nil {
+			log.Printf("[factory] cannot move GitHub issue %s to working status '%s': malformed issue number: %v", githubIssueID, factory.WorkingStatus, err)
+			return
+		}
+		base := s.githubBaseURL
+		if base == "" {
+			base = "https://api.github.com"
+		}
+		if err := moveGitHubIssue(githubToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+			log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", githubIssueID, factory.WorkingStatus, err)
+		} else {
+			log.Printf("[factory] moved GitHub issue %s to working status '%s'", githubIssueID, factory.WorkingStatus)
+		}
+		return
+	}
+
+	if shortcutStoryID != "" && shortcutToken != "" {
+		if err := moveShortcutStory(s.resolveShortcutBaseURL(), shortcutToken, shortcutStoryID, factory.WorkingStatus); err != nil {
+			log.Printf("[factory] failed to move story %s to working status '%s': %v", shortcutStoryID, factory.WorkingStatus, err)
+		} else {
+			log.Printf("[factory] moved story %s to working status '%s'", shortcutStoryID, factory.WorkingStatus)
+		}
+		return
+	}
+
+	if jiraIssueID != "" && hasJiraTracker {
+		if err := s.moveJiraIssue(jiraTracker, jiraIssueID, factory.WorkingStatus); err != nil {
+			log.Printf("[factory] failed to move Jira issue %s to working status '%s': %v", jiraIssueID, factory.WorkingStatus, err)
+		} else {
+			log.Printf("[factory] moved Jira issue %s to working status '%s'", jiraIssueID, factory.WorkingStatus)
+		}
 	}
 }
 

@@ -53,6 +53,146 @@ func TestGitHubPRFactoryLabelsAndExcludeLabelsMatchBackingIssueLabels(t *testing
 	waitForGitHubPRClaw(t, db, "https://github.com/elastic/claw/pull/43")
 }
 
+func TestGitHubPRPollRecreatesClawAfterError(t *testing.T) {
+	factory := &types.FactoryConfig{
+		Name:        "generic-pr",
+		Integration: "github",
+		Template:    "elasticclaw",
+		Provider:    "noop",
+		Repos:       []string{"elastic/claw"},
+		Trigger:     &types.GitHubTrigger{On: "pull_request"},
+	}
+	s, db := newGitHubLabelFactoryTestServer(t, "", []*types.FactoryConfig{factory})
+	payload := githubPRPayload{}
+	payload.Number = 46
+	payload.Repository.FullName = "elastic/claw"
+	payload.PullRequest.HTMLURL = "https://github.com/elastic/claw/pull/46"
+	payload.PullRequest.Title = "Test PR"
+	payload.PullRequest.User.Login = "alice"
+	payload.PullRequest.Head.Ref = "feature"
+	payload.PullRequest.Base.Ref = "main"
+
+	if err := s.createClawForGitHubPR(factory, payload, "webhook"); err != nil {
+		t.Fatalf("create initial PR claw: %v", err)
+	}
+	var clawID string
+	if err := db.QueryRow(`SELECT claw_id FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&clawID); err != nil {
+		t.Fatalf("find initial PR claw: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("mark claw errored: %v", err)
+	}
+
+	s.processGitHubPRPollItem(githubPRPollItem{
+		Number:  46,
+		Title:   "Test PR",
+		HTMLURL: payload.PullRequest.HTMLURL,
+		User: struct {
+			Login string `json:"login"`
+		}{Login: "alice"},
+		Head: struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		}{Ref: "feature", SHA: "abc123"},
+		Base: struct {
+			Ref string `json:"ref"`
+		}{Ref: "main"},
+	}, []*types.FactoryConfig{factory}, "elastic/claw", "")
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&count); err != nil {
+		t.Fatalf("count PR claws: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected a replacement PR claw after error, got %d claws", count)
+	}
+}
+
+func TestGitHubPRClawCreationRejectsClaimedTrigger(t *testing.T) {
+	factory := &types.FactoryConfig{
+		Name:        "generic-pr",
+		Integration: "github",
+		Template:    "elasticclaw",
+		Provider:    "noop",
+	}
+	s, db := newGitHubLabelFactoryTestServer(t, "", []*types.FactoryConfig{factory})
+	payload := githubPRPayload{}
+	payload.Number = 47
+	payload.Repository.FullName = "elastic/claw"
+	payload.PullRequest.HTMLURL = "https://github.com/elastic/claw/pull/47"
+
+	triggerKey := factoryTriggerKey("github-pr", payload.PullRequest.HTMLURL)
+	claimed, err := s.claimFactoryTrigger(factory.Name, "github-pr", triggerKey, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("claim concurrent trigger: claimed=%v err=%v", claimed, err)
+	}
+	if err := s.createClawForGitHubPR(factory, payload, "webhook"); err == nil || !strings.Contains(err.Error(), "trigger claimed") {
+		t.Fatalf("expected claimed trigger rejection, got %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&count); err != nil {
+		t.Fatalf("count PR claws: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("created %d claws despite concurrent trigger claim", count)
+	}
+}
+
+func TestGitHubPRClawPRAssociationFailureReleasesClaim(t *testing.T) {
+	factory := &types.FactoryConfig{
+		Name:        "generic-pr",
+		Integration: "github",
+		Template:    "elasticclaw",
+		Provider:    "noop",
+		Repos:       []string{"elastic/claw"},
+		Trigger:     &types.GitHubTrigger{On: "pull_request"},
+	}
+	s, db := newGitHubLabelFactoryTestServer(t, "", []*types.FactoryConfig{factory})
+	payload := githubPRPayload{}
+	payload.Number = 48
+	payload.Repository.FullName = "elastic/claw"
+	payload.PullRequest.HTMLURL = "https://github.com/elastic/claw/pull/48"
+	payload.PullRequest.Title = "Test PR"
+	payload.PullRequest.User.Login = "alice"
+	payload.PullRequest.Head.Ref = "feature"
+	payload.PullRequest.Base.Ref = "main"
+
+	// Force the claw_prs association INSERT to fail by renaming the table away.
+	if _, err := db.Exec(`ALTER TABLE claw_prs RENAME TO claw_prs_hidden`); err != nil {
+		t.Fatalf("hide claw_prs table: %v", err)
+	}
+	if err := s.createClawForGitHubPR(factory, payload, "webhook"); err == nil {
+		t.Fatal("expected createClawForGitHubPR to fail when claw_prs association fails")
+	}
+
+	// The claw created before the failed association must be marked deleted.
+	var deletedCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM claws WHERE status='deleted' AND tags LIKE ?`,
+		"%github_pr:elastic/claw#48%",
+	).Scan(&deletedCount); err != nil {
+		t.Fatalf("count deleted claws: %v", err)
+	}
+	if deletedCount != 1 {
+		t.Fatalf("expected 1 deleted claw after association failure, got %d", deletedCount)
+	}
+
+	// Restore the table; the claim must have been released so a retry succeeds.
+	if _, err := db.Exec(`ALTER TABLE claw_prs_hidden RENAME TO claw_prs`); err != nil {
+		t.Fatalf("restore claw_prs table: %v", err)
+	}
+	if err := s.createClawForGitHubPR(factory, payload, "webhook"); err != nil {
+		t.Fatalf("expected retry to succeed after claim release, got %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&count); err != nil {
+		t.Fatalf("count PR claws: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 PR claw after successful retry, got %d", count)
+	}
+}
+
 func TestGitHubIssueFactoryExcludeLabelsAllowsIssueWithoutExcludedLabel(t *testing.T) {
 	ghi := newGitHubIssueLabelMock(t)
 	ghi.setIssueLabels("elastic/claw", 44, []string{"agent-ready"})

@@ -1053,6 +1053,77 @@ func TestHubConfigValidate(t *testing.T) {
 	}
 }
 
+func TestValidateCronWorkflowTrigger(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger *CronWorkflowTrigger
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid schedule",
+			trigger: &CronWorkflowTrigger{Schedule: "0 9 * * 1"},
+			wantErr: false,
+		},
+		{
+			name:    "valid schedule with timezone",
+			trigger: &CronWorkflowTrigger{Schedule: "0 9 * * 1", Timezone: "America/Chicago"},
+			wantErr: false,
+		},
+		{
+			name:    "missing schedule",
+			trigger: &CronWorkflowTrigger{},
+			wantErr: true,
+			errMsg:  "requires schedule",
+		},
+		{
+			name:    "invalid schedule expression",
+			trigger: &CronWorkflowTrigger{Schedule: "not-a-cron"},
+			wantErr: true,
+			errMsg:  `invalid cron schedule "not-a-cron"`,
+		},
+		{
+			name:    "invalid timezone",
+			trigger: &CronWorkflowTrigger{Schedule: "0 9 * * 1", Timezone: "Mars/Phobos"},
+			wantErr: true,
+			errMsg:  `invalid cron timezone "Mars/Phobos"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCronWorkflowTrigger("wf", tt.trigger)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateCronWorkflowTrigger() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && tt.errMsg != "" && !contains(err.Error(), tt.errMsg) {
+				t.Errorf("validateCronWorkflowTrigger() error = %q, should contain %q", err.Error(), tt.errMsg)
+			}
+		})
+	}
+}
+
+// TestWorkflowConfigValidateRejectsBadCron exercises the save-time path
+// (WorkflowConfig.Validate) that the hub API uses before persisting configs.
+func TestWorkflowConfigValidateRejectsBadCron(t *testing.T) {
+	wf := &WorkflowConfig{
+		Name:    "nightly",
+		Trigger: &WorkflowTrigger{Cron: &CronWorkflowTrigger{Schedule: "bogus"}},
+	}
+	err := wf.Validate()
+	if err == nil {
+		t.Fatal("expected Validate() to reject invalid cron schedule")
+	}
+	if !contains(err.Error(), `invalid cron schedule "bogus"`) {
+		t.Errorf("Validate() error = %q, should mention the offending schedule", err.Error())
+	}
+
+	wf.Trigger.Cron.Schedule = "0 9 * * 1"
+	if err := wf.Validate(); err != nil {
+		t.Fatalf("expected valid cron workflow to pass, got %v", err)
+	}
+}
+
 // Helper functions
 func floatPtr(f float64) *float64 {
 	return &f
