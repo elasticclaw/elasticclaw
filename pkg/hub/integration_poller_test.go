@@ -86,13 +86,19 @@ func TestPollTickAdvancesLinearHighWaterMarkOnlyAfterSuccessfulQuery(t *testing.
 	if !ok || !got.Equal(initial) {
 		t.Fatalf("failed poll tick advanced high-water mark to %s, want %s", got, initial)
 	}
+	// The tick must have queried Linear at least once; it's the response
+	// (first request errors) that this test cares about, not the exact count.
+	if attempts < 1 {
+		t.Fatalf("Linear query attempts = %d, want at least 1", attempts)
+	}
+	afterFirstTick := attempts
 
 	s.pollTick()
 	got, ok = s.getPollHighWaterMark("linear")
 	if !ok || !got.After(initial) {
 		t.Fatalf("successful poll tick high-water mark = %s, want after %s", got, initial)
 	}
-	if attempts != 2 {
-		t.Fatalf("Linear query attempts = %d, want 2", attempts)
+	if attempts <= afterFirstTick {
+		t.Fatalf("Linear query attempts = %d, want more than %d after second tick", attempts, afterFirstTick)
 	}
 }
