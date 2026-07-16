@@ -82,12 +82,35 @@ func TestStopAgentTerminalIsIdempotent(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO workflow_runs(id,tenant_id,workflow_name,workspace_name,status,claw_id,created_at) VALUES('once-run','tenant','workflow','workspace','running','terminal-once',?)`, tm); err != nil {
 		t.Fatal(err)
 	}
-	terminations := 0
-	s.terminateVMOverride = func(_, _ string) error { terminations++; return nil }
+	terminations := make(chan struct{}, 2)
+	s.terminateVMOverride = func(_, _ string) error { terminations <- struct{}{}; return nil }
 	s.stopAgentTerminalWithReason("terminal-once", "failure", false)
 	s.stopAgentTerminalWithReason("terminal-once", "failure", false)
-	if terminations != 1 {
-		t.Fatalf("VM terminations=%d, want 1", terminations)
+	// The VM terminate runs on a goroutine; the first stop must invoke it
+	// exactly once and the second (idempotent no-op) not at all.
+	select {
+	case <-terminations:
+	case <-time.After(2 * time.Second):
+		t.Fatal("VM terminate was not invoked by the first stop")
+	}
+	select {
+	case <-terminations:
+		t.Fatal("VM terminate invoked more than once")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Wait for the terminate goroutine's provider_id clear so it cannot
+	// outlive the test and race the DB teardown.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var providerID string
+		if err := db.QueryRow(`SELECT provider_id FROM claws WHERE id='terminal-once'`).Scan(&providerID); err != nil {
+			t.Fatal(err)
+		}
+		if providerID == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("provider_id=%q was never cleared after terminate", providerID)
+		}
 	}
 	var runStatus string
 	if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='once-run'`).Scan(&runStatus); err != nil || runStatus != "failed" {
