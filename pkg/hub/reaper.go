@@ -3,24 +3,42 @@ package hub
 import (
 	"log"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const reaperActionLimit = 20
 
 type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
+	gatewayUnhealthyMax                                  int
+	busyTurnMax, silentDeathMax                          time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil || s.hubCfg.Liveness.Enabled == nil {
+	s.mu.RLock()
+	liveness := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if liveness == nil || liveness.Enabled == nil {
 		return true
 	}
-	return *s.hubCfg.Liveness.Enabled
+	return *liveness.Enabled
 }
 
 func (s *Server) livenessSettings() livenessSettings {
-	cfg := livenessSettings{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, time.Minute}
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil {
+	cfg := livenessSettings{
+		offlineGrace:        10 * time.Minute,
+		provisioningMaxAge:  30 * time.Minute,
+		claimTTL:            15 * time.Minute,
+		interval:            time.Minute,
+		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
+		busyTurnMax:         defaultBusyTurnMax,
+		silentDeathMax:      defaultSilentDeathMax,
+	}
+	s.mu.RLock()
+	l := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if l == nil {
 		return cfg
 	}
 	parse := func(value string, fallback time.Duration, name string) time.Duration {
@@ -28,21 +46,33 @@ func (s *Server) livenessSettings() livenessSettings {
 			return fallback
 		}
 		d, err := time.ParseDuration(value)
-		if err != nil || d < 0 {
+		if err != nil || d <= 0 {
 			log.Printf("[reaper] invalid %s %q; using %s", name, value, fallback)
 			return fallback
 		}
 		return d
 	}
-	l := s.hubCfg.Liveness
 	cfg.offlineGrace = parse(l.OfflineGrace, cfg.offlineGrace, "offline_grace")
 	cfg.provisioningMaxAge = parse(l.ProvisioningMaxAge, cfg.provisioningMaxAge, "provisioning_max_age")
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
-	if cfg.interval <= 0 {
-		cfg.interval = time.Minute
+	cfg.busyTurnMax = parse(l.BusyTurnMax, cfg.busyTurnMax, "busy_turn_max")
+	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
+	if l.GatewayUnhealthyChecks != nil {
+		if *l.GatewayUnhealthyChecks <= 0 {
+			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
+		} else {
+			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
 	}
 	return cfg
+}
+
+func livenessConfig(cfg *types.HubConfig) *types.LivenessConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Liveness
 }
 
 func (s *Server) reaperNow() time.Time {
