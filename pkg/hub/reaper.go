@@ -13,6 +13,7 @@ type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
 	gatewayUnhealthyMax                                  int
 	busyTurnMax, silentDeathMax                          time.Duration
+	prConditionsMaxWait                                  time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
@@ -34,6 +35,7 @@ func (s *Server) livenessSettings() livenessSettings {
 		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
 		busyTurnMax:         defaultBusyTurnMax,
 		silentDeathMax:      defaultSilentDeathMax,
+		prConditionsMaxWait: 2 * time.Hour,
 	}
 	s.mu.RLock()
 	l := livenessConfig(s.hubCfg)
@@ -58,6 +60,7 @@ func (s *Server) livenessSettings() livenessSettings {
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
 	cfg.busyTurnMax = parse(l.BusyTurnMax, cfg.busyTurnMax, "busy_turn_max")
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
+	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
 	if l.GatewayUnhealthyChecks != nil {
 		if *l.GatewayUnhealthyChecks <= 0 {
 			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)

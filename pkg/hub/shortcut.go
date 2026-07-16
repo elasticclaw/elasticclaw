@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -816,6 +817,13 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
 		case "lambda-microvms":
 			provErr = s.provisionLambdaMicroVMs(context.Background(), clawID, req, provCfg, fileBytes)
+		case "noop":
+			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
+				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
+			} else {
+				providerID := "noop-vm-" + clawID[:8]
+				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}

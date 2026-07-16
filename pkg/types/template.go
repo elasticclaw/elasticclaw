@@ -559,6 +559,8 @@ type LivenessConfig struct {
 	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
 	BusyTurnMax            string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
 	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
+	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
