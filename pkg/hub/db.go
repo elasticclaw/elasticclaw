@@ -62,6 +62,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_attempts ADD COLUMN restored_checkpoint_id TEXT`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
@@ -107,6 +108,7 @@ func migrate(db *sql.DB) error {
 		claw_id        TEXT NOT NULL DEFAULT '',
 		task_run_id    TEXT NOT NULL DEFAULT '',
 		status         TEXT NOT NULL DEFAULT 'claimed',
+		retry_count     INTEGER NOT NULL DEFAULT 0,
 		first_seen_at  DATETIME NOT NULL,
 		last_seen_at   DATETIME NOT NULL,
 		created_at     DATETIME NOT NULL,
@@ -241,6 +243,7 @@ func migrate(db *sql.DB) error {
 		claw_id        TEXT NOT NULL DEFAULT '',
 		task_run_id    TEXT NOT NULL DEFAULT '',
 		status         TEXT NOT NULL DEFAULT 'claimed',
+		retry_count     INTEGER NOT NULL DEFAULT 0,
 		first_seen_at  DATETIME NOT NULL,
 		last_seen_at   DATETIME NOT NULL,
 		created_at     DATETIME NOT NULL,

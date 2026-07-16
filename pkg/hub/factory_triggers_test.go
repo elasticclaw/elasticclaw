@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newFactoryTriggerTestServer(t *testing.T) *Server {
@@ -136,5 +137,68 @@ func TestCompleteFactoryTriggerReturnsMissingClaimError(t *testing.T) {
 	err := s.completeFactoryTrigger("missing", "linear", "linear:ELA-123", "claw-1")
 	if err == nil {
 		t.Fatal("expected missing claim error")
+	}
+}
+
+func TestFailedFactoryTriggerBackoffAndWebhookBypass(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	key := factoryTriggerKey("linear", "ELA-456")
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	s.failFactoryTrigger("code", "linear", key)
+
+	var status string
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT status, retry_count FROM factory_triggers WHERE trigger_key=?`, key).Scan(&status, &retryCount); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || retryCount != 1 {
+		t.Fatalf("failed trigger = status %q retry_count %d, want failed/1", status, retryCount)
+	}
+
+	claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || claimed {
+		t.Fatalf("claim before backoff = %v, %v; want false, nil", claimed, err)
+	}
+	_, err = s.db.Exec(`UPDATE factory_triggers SET updated_at=? WHERE trigger_key=?`, time.Now().UTC().Add(-61*time.Second), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("claim after backoff = %v, %v", claimed, err)
+	}
+
+	otherKey := factoryTriggerKey("linear", "ELA-457")
+	claimed, err = s.claimFactoryTrigger("code", "linear", otherKey, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("other initial claim = %v, %v", claimed, err)
+	}
+	s.failFactoryTrigger("code", "linear", otherKey)
+	claimed, err = s.claimFactoryTrigger("code", "linear", otherKey, "webhook", nil)
+	if err != nil || !claimed {
+		t.Fatalf("webhook bypass claim = %v, %v", claimed, err)
+	}
+}
+
+func TestCompleteFactoryTriggerResetsRetryCount(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	key := factoryTriggerKey("linear", "ELA-789")
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	s.failFactoryTrigger("code", "linear", key)
+	if err := s.completeFactoryTrigger("code", "linear", key, "claw-789"); err != nil {
+		t.Fatal(err)
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, key).Scan(&retryCount); err != nil {
+		t.Fatal(err)
+	}
+	if retryCount != 0 {
+		t.Fatalf("retry_count = %d, want 0", retryCount)
 	}
 }
