@@ -108,12 +108,13 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		return false, tx.Commit()
 	}
 
-	if clawID != "" && clawStatus != "" && clawStatus != "deleted" && clawStatus != "error" {
-		_, _ = tx.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "canceled", "factory trigger reclaimed")
-		}
-	}
+	// Reclaim path: reached only when the linked claw is missing or already in a
+	// terminal state ('deleted'/'error'), or the trigger has no claw and is not
+	// actively being processed. No cleanup of the old claw is needed here — a
+	// claw reaches 'error' via stopAgentTerminalWithReason, which already calls
+	// finishRunByClawID, and the boot reaper sweeps any still-'running' run whose
+	// claw is 'error'/'deleted'/missing. (A prior cleanup block here was dead code:
+	// its guard duplicated the "already claimed" block above, which returns first.)
 	_, err = tx.Exec(`
 		UPDATE factory_triggers
 		   SET trigger_source=?, trigger_payload=?, claw_id='', status='claimed', last_seen_at=?, updated_at=?
