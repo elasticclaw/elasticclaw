@@ -37,6 +37,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,9 +55,11 @@ var (
 	BuildDate           = "unknown"
 	gatewayProcessState struct {
 		sync.RWMutex
-		exited  bool
-		session *gatewaySession
+		exited       bool
+		restartCount int
+		session      *gatewaySession
 	}
+	gatewayRestartBase int
 )
 
 // ─── hub wire types ─────────────────────────────────────────────────────────
@@ -1552,6 +1555,33 @@ func gatewayProcessExited() bool {
 	return gatewayProcessState.exited
 }
 
+func gatewayRestartCount() int {
+	gatewayProcessState.RLock()
+	defer gatewayProcessState.RUnlock()
+	return gatewayProcessState.restartCount
+}
+
+func markGatewayProcessRunning() {
+	gatewayProcessState.Lock()
+	gatewayProcessState.exited = false
+	gatewayProcessState.Unlock()
+}
+
+func incrementGatewayRestartCount() int {
+	gatewayProcessState.Lock()
+	defer gatewayProcessState.Unlock()
+	gatewayProcessState.restartCount++
+	return gatewayProcessState.restartCount
+}
+
+func gatewayRestartBaseFromEnv() int {
+	count, err := strconv.Atoi(os.Getenv("ELASTICCLAW_BRIDGE_RESTARTS"))
+	if err != nil || count < 0 {
+		return 0
+	}
+	return count
+}
+
 func markGatewayProcessExited() {
 	gatewayProcessState.Lock()
 	gatewayProcessState.exited = true
@@ -2706,6 +2736,70 @@ func stopGateway(cmd *exec.Cmd) {
 	}
 }
 
+const (
+	gatewayRestartBudget = 3
+	gatewayStableUptime  = 60 * time.Second
+)
+
+// superviseGatewayLoop waits for a gateway process and replaces it after an
+// unexpected exit. Its hooks keep the restart policy testable without starting
+// real processes.
+func superviseGatewayLoop(wait func() error, restart func() (func() error, int, error), sleep func(time.Duration), now func() time.Time, exited func(), running func(), restarted func() int) {
+	attempts := 0
+	for {
+		startedAt := now()
+		if err := wait(); err != nil {
+			log.Printf("[supervisor] gateway exited: %v", err)
+		} else {
+			log.Printf("[supervisor] gateway exited")
+		}
+		exited()
+
+		if now().Sub(startedAt) >= gatewayStableUptime {
+			attempts = 0
+		}
+		if attempts >= gatewayRestartBudget {
+			log.Printf("[supervisor] gateway restart budget exhausted after %d attempts — leaving unhealthy for hub watchdog", gatewayRestartBudget)
+			return
+		}
+
+		sleep(2 * time.Second << attempts)
+		attempts++
+		nextWait, pid, err := restart()
+		if err != nil {
+			log.Printf("[supervisor] gateway restart attempt %d failed: %v", attempts, err)
+			continue
+		}
+
+		restartCount := restarted()
+		running()
+		log.Printf("[supervisor] gateway restarted (pid=%d, restart_count=%d)", pid, restartCount)
+		wait = nextWait
+	}
+}
+
+func superviseGateway(gateway *exec.Cmd, hasFlake bool) {
+	superviseGatewayLoop(
+		gateway.Wait,
+		func() (func() error, int, error) {
+			cmd, err := startGatewayWithFlake(hasFlake)
+			if err != nil {
+				return nil, 0, err
+			}
+			if !checkGateway("localhost:18789") {
+				stopGateway(cmd)
+				return nil, 0, fmt.Errorf("gateway did not become healthy")
+			}
+			return cmd.Wait, cmd.Process.Pid, nil
+		},
+		time.Sleep,
+		time.Now,
+		markGatewayProcessExited,
+		markGatewayProcessRunning,
+		incrementGatewayRestartCount,
+	)
+}
+
 // waitForDeviceJSON waits up to 120s for ~/.openclaw/identity/device.json.
 func waitForDeviceJSON() error {
 	home, _ := os.UserHomeDir()
@@ -2889,14 +2983,7 @@ func runBootstrap() error {
 			}
 		}
 	}
-	go func() {
-		if err := gateway.Wait(); err != nil {
-			log.Printf("[bootstrap] gateway exited: %v", err)
-		} else {
-			log.Printf("[bootstrap] gateway exited")
-		}
-		markGatewayProcessExited()
-	}()
+	go superviseGateway(gateway, hasFlake)
 
 	// Step 9: Wait for device.json
 	if err := waitForDeviceJSON(); err != nil {
@@ -3050,6 +3137,9 @@ func printVersion() {
 }
 
 func main() {
+	// Retain restart history when an external supervisor relaunches this bridge.
+	gatewayRestartBase = gatewayRestartBaseFromEnv()
+
 	// Handle version requests very early, before any env var requirements.
 	// Supports: claw-bridge version, claw-bridge --version, claw-bridge -v
 	if len(os.Args) > 1 {
@@ -3382,13 +3472,15 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				go gwSession.refreshContextUsage(ctx)
 				health := !gatewayProcessExited() && checkGateway(gwClient.addr)
 				cu := gwSession.ContextUsage()
-				log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%%", health, gwSession.IsReady(), cu)
+				restarts := gatewayRestartBase + gatewayRestartCount()
+				log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d", health, gwSession.IsReady(), cu, restarts)
 				_ = wsjson.Write(ctx, conn, hubMsg{
 					Type: "heartbeat",
 					Payload: mustJSON(map[string]interface{}{
 						"gateway_healthy": health,
 						"gateway_ready":   gwSession.IsReady(),
 						"context_usage":   cu,
+						"restart_count":   restarts,
 					}),
 				})
 			}
