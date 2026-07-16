@@ -122,6 +122,13 @@ func TestExternalWebhook_GenericEvent_SameDeliveryIDIsDeduped(t *testing.T) {
 
 	sendGenericWebhook(t, ts, body, "generic-delivery-retry")
 	waitForExternalClawCount(t, ts, "generic-webhook-factory", 1)
+
+	// Bypass the 5s in-memory isDuplicateWebhook window so the retry is only
+	// stopped by the durable factory_triggers claim. Without this the second
+	// delivery would be swallowed by the in-memory cache and the claim-based
+	// dedup — the property this test cares about — would never be exercised.
+	ts.Server.ClearWebhookDedupForTest()
+
 	sendGenericWebhook(t, ts, body, "generic-delivery-retry")
 
 	time.Sleep(200 * time.Millisecond)
@@ -131,6 +138,17 @@ func TestExternalWebhook_GenericEvent_SameDeliveryIDIsDeduped(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 claw for retry delivery, got %d", count)
+	}
+
+	// Assert the durable claim is what deduped: exactly one factory_triggers row
+	// exists for this trigger and it references the single created claw.
+	var triggerCount int
+	if err := ts.DB.QueryRow(`SELECT COUNT(*) FROM factory_triggers WHERE factory_name=? AND integration=? AND claw_id!=''`,
+		"generic-webhook-factory", "external").Scan(&triggerCount); err != nil {
+		t.Fatalf("trigger count query failed: %v", err)
+	}
+	if triggerCount != 1 {
+		t.Fatalf("expected exactly 1 claimed factory_trigger for retry delivery, got %d", triggerCount)
 	}
 }
 

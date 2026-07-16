@@ -149,3 +149,13 @@ func (s *Server) StartPRWatcherForTest() {
 func (s *Server) PollIntegrationsForTest() {
 	s.pollTick()
 }
+
+// ClearWebhookDedupForTest empties the in-memory webhook dedup cache so tests can
+// exercise the durable factory_triggers claim rather than the short-lived 5s window.
+func (s *Server) ClearWebhookDedupForTest() {
+	s.webhookDedupMu.Lock()
+	defer s.webhookDedupMu.Unlock()
+	for k := range s.webhookDedup {
+		delete(s.webhookDedup, k)
+	}
+}

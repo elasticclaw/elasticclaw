@@ -286,24 +286,26 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
 		} else {
 			triggerKey = fmt.Sprintf("%s:%s@%s:%s", factory.Name, repoFullName, eventType,
-				externalEventDiscriminator(deliveryID, payload, body))
+				externalEventDiscriminator(deliveryID, body))
 		}
 
 		s.processExternalFactoryTrigger(factory, payload, triggerKey, repoFullName, eventType)
 	}
 }
 
-func externalEventDiscriminator(deliveryID string, payload externalWebhookPayload, body []byte) string {
-	// Prefer a delivery ID, then an event timestamp or ID, before falling back to the body hash.
+func externalEventDiscriminator(deliveryID string, body []byte) string {
+	// Prefer an explicit delivery ID; otherwise fall back to a deterministic hash
+	// of the raw body.
+	//
+	// We intentionally do NOT key off volatile payload fields (timestamp /
+	// created_at / id): for sources without a delivery-ID header — the only path
+	// that reaches this fallback — a retry of the SAME delivery can arrive with a
+	// re-stamped send-time timestamp, which would change the discriminator and
+	// create a duplicate claw. The body hash is strictly safer because retries of
+	// the same delivery always carry an identical body, so the durable
+	// factory_triggers claim can dedup them.
 	if deliveryID != "" {
 		return deliveryID
-	}
-	for _, key := range []string{"timestamp", "created_at", "id"} {
-		if value, ok := payload.Payload[key]; ok {
-			if discriminator := fmt.Sprint(value); discriminator != "" {
-				return discriminator
-			}
-		}
 	}
 	hash := sha256.Sum256(body)
 	return hex.EncodeToString(hash[:])[:16]
