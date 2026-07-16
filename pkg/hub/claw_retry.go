@@ -74,11 +74,11 @@ const (
 	watchdogHealthEscalate
 )
 
-func heartbeatShouldEscalate(unhealthyCount int, status string, bootstrapOK bool) bool {
+func heartbeatShouldEscalate(unhealthyCount, gatewayUnhealthyMax int, status string, bootstrapOK bool) bool {
 	return unhealthyCount == gatewayUnhealthyMax && status == "connected" && bootstrapOK
 }
 
-func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time) watchdogHealthAction {
+func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time, silentDeathMax time.Duration) watchdogHealthAction {
 	if status != "connected" || !bootstrapOK || !gatewayReady {
 		return watchdogHealthNone
 	}

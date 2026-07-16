@@ -2,7 +2,11 @@ package hub
 
 import (
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,4 +140,248 @@ func TestStopAgentWithReasonPromotesPendingClaw(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id='pending01'`).Scan(&status); err != nil || status != "provisioning" {
 		t.Fatalf("pending status=%q err=%v, want provisioning", status, err)
 	}
+}
+
+func TestReaperRedrivesVMAndCommentAfterClosingRows(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,stop_comment_pending,created_at) VALUES('redrive-vm','tenant','vm','docker','vm-1','error',0,?),('redrive-comment','tenant','comment','','','error',1,?)`, tm, tm); err != nil {
+		t.Fatal(err)
+	}
+	terminated := make(chan struct{}, 1)
+	s.terminateVMOverride = func(provider, id string) error {
+		terminated <- struct{}{}
+		return nil
+	}
+
+	// The first observation starts both grace windows.
+	s.reapOnce()
+	tm = tm.Add(redriveGrace + time.Second)
+	done := make(chan struct{})
+	go func() { s.reapOnce(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reaper blocked while redriving rows on a single DB connection")
+	}
+	select {
+	case <-terminated:
+	case <-time.After(time.Second):
+		t.Fatal("VM redrive was not dispatched")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		var providerID string
+		if err := db.QueryRow(`SELECT provider_id FROM claws WHERE id='redrive-vm'`).Scan(&providerID); err != nil {
+			t.Fatal(err)
+		}
+		if providerID == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("VM redrive did not clear provider_id")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='redrive-comment'`).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("unresolved comment pending=%d err=%v, want 0", pending, err)
+	}
+}
+
+func TestReaperRedrivesStopComment(t *testing.T) {
+	newServer := func(t *testing.T, status int, requests chan<- string) (*Server, *sql.DB) {
+		t.Helper()
+		tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Query     string            `json:"query"`
+				Variables map[string]string `json:"variables"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode tracker request: %v", err)
+			}
+			select {
+			case requests <- request.Query + "\n" + request.Variables["body"]:
+			default:
+			}
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+				return
+			}
+			if strings.Contains(request.Query, "commentCreate") {
+				_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1"}}}`))
+		}))
+		t.Cleanup(tracker.Close)
+
+		s, db := newReaperTestServer(t, &types.HubConfig{Integrations: &types.IntegrationsConfig{
+			Linear: []*types.LinearIntegrationConfig{{Workspace: "workspace", Token: "token"}},
+		}, Factories: []*types.FactoryConfig{{Name: "factory", Integration: "linear", Workspace: "workspace"}}})
+		s.linearBaseURL = tracker.URL
+		return s, db
+	}
+
+	t.Run("posts and clears pending", func(t *testing.T) {
+		requests := make(chan string, 2)
+		s, db := newServer(t, http.StatusOK, requests)
+		tm := time.Now().UTC()
+		s.nowFunc = func() time.Time { return tm }
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,linear_issue_id,tags,stop_comment_pending,bootstrap_diagnostic,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, "comment", "tenant", "comment", "error", "ENG-1", `["factory:factory"]`, 1, "some reason", tm); err != nil {
+			t.Fatal(err)
+		}
+
+		s.reapOnce()
+		tm = tm.Add(redriveGrace + time.Second)
+		s.reapOnce()
+
+		deadline := time.After(time.Second)
+		for {
+			select {
+			case request := <-requests:
+				if strings.Contains(request, "commentCreate") {
+					if !strings.Contains(request, "Agent stopped") || !strings.Contains(request, "some reason") {
+						t.Fatalf("stop comment = %q, want agent-stopped comment with diagnostic", request)
+					}
+					var pending int
+					for stop := time.Now().Add(time.Second); ; time.Sleep(10 * time.Millisecond) {
+						if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='comment'`).Scan(&pending); err != nil {
+							t.Fatal(err)
+						}
+						if pending == 0 {
+							return
+						}
+						if time.Now().After(stop) {
+							t.Fatalf("stop_comment_pending=%d, want 0", pending)
+						}
+					}
+				}
+			case <-deadline:
+				t.Fatal("tracker did not receive stop comment")
+			}
+		}
+	})
+
+	t.Run("clears unresolved context without tracker request", func(t *testing.T) {
+		requests := make(chan string, 1)
+		s, db := newServer(t, http.StatusOK, requests)
+		tm := time.Now().UTC()
+		s.nowFunc = func() time.Time { return tm }
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,stop_comment_pending,bootstrap_diagnostic,created_at) VALUES(?,?,?,?,?,?,?)`, "unresolved", "tenant", "unresolved", "error", 1, "some reason", tm); err != nil {
+			t.Fatal(err)
+		}
+		s.reapOnce()
+		tm = tm.Add(redriveGrace + time.Second)
+		s.reapOnce()
+
+		var pending int
+		if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='unresolved'`).Scan(&pending); err != nil || pending != 0 {
+			t.Fatalf("pending=%d err=%v, want 0", pending, err)
+		}
+		select {
+		case <-requests:
+			t.Fatal("unresolved claw sent a tracker request")
+		default:
+		}
+	})
+
+	t.Run("retains pending when tracker fails", func(t *testing.T) {
+		requests := make(chan string, 1)
+		s, db := newServer(t, http.StatusInternalServerError, requests)
+		tm := time.Now().UTC()
+		s.nowFunc = func() time.Time { return tm }
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,linear_issue_id,tags,stop_comment_pending,bootstrap_diagnostic,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, "failed", "tenant", "failed", "error", "ENG-2", `["factory:factory"]`, 1, "some reason", tm); err != nil {
+			t.Fatal(err)
+		}
+		s.reapOnce()
+		tm = tm.Add(redriveGrace + time.Second)
+		s.reapOnce()
+
+		select {
+		case <-requests:
+		case <-time.After(time.Second):
+			t.Fatal("tracker did not receive failed delivery")
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			var pending int
+			if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='failed'`).Scan(&pending); err != nil {
+				t.Fatal(err)
+			}
+			if pending == 1 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("stop_comment_pending=%d, want 1 after failed delivery", pending)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}
+
+func TestReaperRecoversStrandedTerminalPipelineStage(t *testing.T) {
+	const pipelineYAML = `
+stages:
+  - id: work
+    label: "Work"
+    triggers:
+      - message_contains: "[START]"
+  - id: done
+    label: "Done"
+    triggers:
+      - message_contains: "[DONE]"
+    terminal: true
+`
+	newServer := func(t *testing.T) (*Server, *sql.DB, func(time.Duration)) {
+		t.Helper()
+		s, db := newReaperTestServer(t, &types.HubConfig{Factories: []*types.FactoryConfig{{
+			Name: "factory", Integration: "linear", Workspace: "workspace", PipelineYAML: pipelineYAML,
+		}}})
+		s.cronScheduler = newCronScheduler(s)
+		tm := time.Now().UTC()
+		s.nowFunc = func() time.Time { return tm }
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,pipeline_stage,tags,created_at) VALUES('stranded','tenant','stranded','connected','done',?,?)`, `["factory:factory"]`, tm); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO workflow_runs(id,tenant_id,workflow_name,workspace_name,trigger_type,status,claw_id,run_context,started_at,created_at) VALUES('run-stranded','tenant','wf','workspace','cron','running','stranded','{}',?,?)`, tm, tm); err != nil {
+			t.Fatal(err)
+		}
+		return s, db, func(d time.Duration) { tm = tm.Add(d) }
+	}
+
+	t.Run("completes after grace", func(t *testing.T) {
+		s, db, advance := newServer(t)
+		s.reapOnce()
+		advance(terminalStageRecoveryGrace + time.Second)
+		s.reapOnce()
+		var clawStatus, runStatus string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id='stranded'`).Scan(&clawStatus); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='run-stranded'`).Scan(&runStatus); err != nil {
+			t.Fatal(err)
+		}
+		if clawStatus != "deleted" || runStatus != "completed" {
+			t.Fatalf("claw=%q run=%q, want deleted/completed", clawStatus, runStatus)
+		}
+	})
+
+	t.Run("leaves in-flight termination alone within grace", func(t *testing.T) {
+		s, db, advance := newServer(t)
+		s.reapOnce()
+		advance(terminalStageRecoveryGrace - time.Second)
+		s.reapOnce()
+		var clawStatus, runStatus string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id='stranded'`).Scan(&clawStatus); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='run-stranded'`).Scan(&runStatus); err != nil {
+			t.Fatal(err)
+		}
+		if clawStatus != "connected" || runStatus != "running" {
+			t.Fatalf("claw=%q run=%q, want connected/running (untouched within grace)", clawStatus, runStatus)
+		}
+	})
 }

@@ -3,24 +3,50 @@ package hub
 import (
 	"log"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const reaperActionLimit = 20
+const redriveGrace = 2 * time.Minute
+
+// terminalStageRecoveryGrace must exceed the legitimate in-flight window of a
+// terminal pipeline transition (streaming wait ~30s + checkpoint wait 90s), so
+// the reaper never completes a stage the main path is still finishing.
+const terminalStageRecoveryGrace = 5 * time.Minute
 
 type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
+	gatewayUnhealthyMax                                  int
+	busyTurnMax, silentDeathMax                          time.Duration
+	prConditionsMaxWait                                  time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil || s.hubCfg.Liveness.Enabled == nil {
+	s.mu.RLock()
+	liveness := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if liveness == nil || liveness.Enabled == nil {
 		return true
 	}
-	return *s.hubCfg.Liveness.Enabled
+	return *liveness.Enabled
 }
 
 func (s *Server) livenessSettings() livenessSettings {
-	cfg := livenessSettings{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, time.Minute}
-	if s.hubCfg == nil || s.hubCfg.Liveness == nil {
+	cfg := livenessSettings{
+		offlineGrace:        10 * time.Minute,
+		provisioningMaxAge:  30 * time.Minute,
+		claimTTL:            15 * time.Minute,
+		interval:            time.Minute,
+		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
+		busyTurnMax:         defaultBusyTurnMax,
+		silentDeathMax:      defaultSilentDeathMax,
+		prConditionsMaxWait: 2 * time.Hour,
+	}
+	s.mu.RLock()
+	l := livenessConfig(s.hubCfg)
+	s.mu.RUnlock()
+	if l == nil {
 		return cfg
 	}
 	parse := func(value string, fallback time.Duration, name string) time.Duration {
@@ -28,21 +54,34 @@ func (s *Server) livenessSettings() livenessSettings {
 			return fallback
 		}
 		d, err := time.ParseDuration(value)
-		if err != nil || d < 0 {
+		if err != nil || d <= 0 {
 			log.Printf("[reaper] invalid %s %q; using %s", name, value, fallback)
 			return fallback
 		}
 		return d
 	}
-	l := s.hubCfg.Liveness
 	cfg.offlineGrace = parse(l.OfflineGrace, cfg.offlineGrace, "offline_grace")
 	cfg.provisioningMaxAge = parse(l.ProvisioningMaxAge, cfg.provisioningMaxAge, "provisioning_max_age")
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
-	if cfg.interval <= 0 {
-		cfg.interval = time.Minute
+	cfg.busyTurnMax = parse(l.BusyTurnMax, cfg.busyTurnMax, "busy_turn_max")
+	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
+	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
+	if l.GatewayUnhealthyChecks != nil {
+		if *l.GatewayUnhealthyChecks <= 0 {
+			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
+		} else {
+			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
 	}
 	return cfg
+}
+
+func livenessConfig(cfg *types.HubConfig) *types.LivenessConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Liveness
 }
 
 func (s *Server) reaperNow() time.Time {
@@ -170,6 +209,96 @@ func (s *Server) reapOnce() {
 		if (c.status == "provisioning" || c.status == "starting") && age > cfg.provisioningMaxAge && take() {
 			log.Printf("[reaper] stopping timed out provisioning claw %s", c.id)
 			s.stopAgentWithReason(c.id, "provisioning timed out", false)
+		}
+	}
+	type vm struct{ id, provider, providerID string }
+	vmRows, err := s.db.Query(`SELECT id, COALESCE(provider,''), provider_id FROM claws WHERE status IN ('error','deleted') AND provider_id != ''`)
+	if err == nil {
+		var vms []vm
+		for vmRows.Next() {
+			var v vm
+			if vmRows.Scan(&v.id, &v.provider, &v.providerID) == nil {
+				vms = append(vms, v)
+			}
+		}
+		vmRows.Close()
+		for _, v := range vms {
+			key := "vm:" + v.id
+			seen[key] = true
+			if n.Sub(s.firstSeen(key, true, n)) > redriveGrace && take() {
+				log.Printf("[reaper] re-driving VM terminate for claw %s", v.id)
+				go s.terminateVMForClaw(v.id, v.provider, v.providerID)
+			}
+		}
+	}
+	commentRows, err := s.db.Query(`SELECT id FROM claws WHERE status='error' AND stop_comment_pending=1`)
+	if err == nil {
+		var commentIDs []string
+		for commentRows.Next() {
+			var id string
+			if commentRows.Scan(&id) == nil {
+				commentIDs = append(commentIDs, id)
+			}
+		}
+		commentRows.Close()
+		for _, id := range commentIDs {
+			key := "comment:" + id
+			seen[key] = true
+			if n.Sub(s.firstSeen(key, true, n)) <= redriveGrace || !take() {
+				continue
+			}
+			var reason string
+			_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_diagnostic,'') FROM claws WHERE id=?`, id).Scan(&reason)
+			if ctx, ok := s.findPipelineContextForClaw(id); ok && ctx.Workflow != nil && ctx.IssueID != "" {
+				s.dispatchWorkflowStopComment(id, ctx, reason)
+			} else if f, issueID := s.findFactoryForClaw(id); f != nil && issueID != "" {
+				s.dispatchFactoryStopComment(id, f, issueID, reason)
+			} else {
+				log.Printf("[reaper] clearing unresolved stop comment for claw %s", id)
+				_, _ = s.execStatusLogged("clear stop comment claw "+id, `UPDATE claws SET stop_comment_pending=0 WHERE id=?`, id)
+			}
+		}
+	}
+	// A terminal pipeline stage is claimed before its terminal transaction is
+	// committed. If that transaction exhausts its short retry budget, recover it
+	// here rather than leaving the claimed stage and workflow run running forever.
+	terminalRows, err := s.db.Query(`SELECT c.id, c.pipeline_stage FROM claws c WHERE c.status NOT IN ('error','deleted') AND c.pipeline_stage != '' AND EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.claw_id=c.id AND wr.status='running')`)
+	if err == nil {
+		type terminalCandidate struct{ id, stageID string }
+		var candidates []terminalCandidate
+		for terminalRows.Next() {
+			var c terminalCandidate
+			if terminalRows.Scan(&c.id, &c.stageID) == nil {
+				candidates = append(candidates, c)
+			}
+		}
+		terminalRows.Close()
+		for _, c := range candidates {
+			ctx, ok := s.findPipelineContextForClaw(c.id)
+			stage := parsePipelineForContext(ctx)
+			if !ok || stage == nil || stage.StageByID(c.stageID) == nil || !stage.StageByID(c.stageID).Terminal {
+				continue
+			}
+			// The main termination path legitimately holds this state while it
+			// waits for streaming and a best-effort checkpoint; only recover
+			// stages that have been stuck well past that window.
+			key := "terminal:" + c.id
+			seen[key] = true
+			if n.Sub(s.firstSeen(key, true, n)) <= terminalStageRecoveryGrace || !take() {
+				continue
+			}
+			status, result := pipelineTerminalWorkflowRunResult(*stage.StageByID(c.stageID), true)
+			if applied, e := s.finishClawTerminalTx(c.id, "deleted", "", status, result, terminalTxOpts{}); e == nil && applied {
+				log.Printf("[reaper] completed stranded terminal pipeline stage for claw %s", c.id)
+				if s.cronScheduler != nil {
+					s.cronScheduler.releaseClawWorkflowSlot(c.id)
+				}
+				var provider, providerID string
+				_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=?`, c.id).Scan(&provider, &providerID)
+				if providerID != "" {
+					go s.terminateVMForClaw(c.id, provider, providerID)
+				}
+			}
 		}
 	}
 	triggers, err := s.db.Query(`SELECT id, created_at FROM factory_triggers WHERE status='claimed' AND claw_id=''`)

@@ -7,8 +7,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 var issueTrackerHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -32,13 +36,68 @@ type agentFailureFeedback struct {
 	AgentStatusError string
 	Failure          agentFailureMessage
 	ClawID           string
+	JiraTracker      workspaceIssueTracker
+}
+
+// workflowIssueRef contains the tracker-native identity needed to report workflow failures.
+type workflowIssueRef struct {
+	Integration, IssueID, LinearIdentifier, GitHubRepo string
+	GitHubIssueNum                                     int
+	JiraTracker                                        workspaceIssueTracker
+}
+
+func (s *Server) notifyWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, ref workflowIssueRef, actor triggerActor, createErr error) {
+	if workspace == nil || workflow == nil || workflow.Trigger == nil {
+		return
+	}
+	f := agentFailureFeedback{Integration: ref.Integration, IssueID: ref.IssueID, LinearIdentifier: ref.LinearIdentifier, GitHubRepo: ref.GitHubRepo, GitHubIssueNum: ref.GitHubIssueNum, JiraTracker: ref.JiraTracker, TriggerActor: actor, Failure: classifyAgentFailure(createErr.Error())}
+	var token string
+	switch ref.Integration {
+	case "linear":
+		if workflow.Trigger.Linear == nil {
+			return
+		}
+		token = s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError)
+	case "github-issues":
+		if workflow.Trigger.GitHubIssues == nil {
+			return
+		}
+		token = s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.GitHubIssues.AgentStatusError)
+	case "shortcut":
+		if workflow.Trigger.Shortcut == nil {
+			return
+		}
+		token = s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Shortcut.AgentStatusError)
+	case "jira":
+		if workflow.Trigger.Jira == nil {
+			return
+		}
+		if f.JiraTracker.Token == "" {
+			f.JiraTracker, _ = s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+		}
+		token = f.JiraTracker.Token
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Jira.AgentStatusError)
+	default:
+		return
+	}
+	if token == "" {
+		log.Printf("[agent-failure-feedback] workflow %s/%s has no %s token; skipping failure feedback", workspace.Name, workflow.Name, ref.Integration)
+		return
+	}
+	// Feedback delivery retries status moves with backoff; run it off the
+	// caller's goroutine so webhook and poll handlers are never blocked on a
+	// slow or failing tracker.
+	go s.handleAgentFailureFeedback(f, token)
 }
 
 type linearGraphQLError struct {
 	Message string `json:"message"`
 }
 
-func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token string) {
+func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token string) bool {
 	if feedback.Failure.UserMessage == "" {
 		feedback.Failure = classifyAgentFailure(feedback.Failure.SafeDetail)
 	}
@@ -50,11 +109,14 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 		if base == "" {
 			base = "https://api.github.com"
 		}
-		if err := commentGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, comment); err != nil {
+		commented := commentGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment GitHub issue %s#%d: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, err)
 		}
 		if feedback.AgentStatusError != "" {
-			if err := githubAPIAddLabel(base, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, token); err != nil {
+			if err := s.retryTrackerMove("mark GitHub issue", func() error {
+				return githubAPIAddLabel(base, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, token)
+			}); err != nil {
 				log.Printf("[agent-failure-feedback] failed to mark GitHub issue %s#%d with label %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, err)
 			}
 		}
@@ -63,12 +125,16 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to assign GitHub issue %s#%d to %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login, err)
 			}
 		}
+		return commented == nil
 	case "linear":
-		if err := s.commentLinearIssue(token, feedback.LinearIdentifier, comment); err != nil {
+		commented := s.commentLinearIssue(token, feedback.LinearIdentifier, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment Linear issue %s: %v", feedback.LinearIdentifier, err)
 		}
 		if feedback.AgentStatusError != "" {
-			if err := s.moveLinearIssueOnServer(token, feedback.LinearIdentifier, feedback.AgentStatusError); err != nil {
+			if err := s.retryTrackerMove("move Linear issue", func() error {
+				return s.moveLinearIssueOnServer(token, feedback.LinearIdentifier, feedback.AgentStatusError)
+			}); err != nil {
 				log.Printf("[agent-failure-feedback] failed to mark Linear issue %s with status %q: %v", feedback.LinearIdentifier, feedback.AgentStatusError, err)
 			}
 		}
@@ -77,7 +143,76 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
 			}
 		}
+		return commented == nil
+	case "shortcut":
+		commented := commentShortcutIssue(s.resolveShortcutBaseURL(), token, feedback.IssueID, comment)
+		if err := commented; err != nil {
+			log.Printf("[agent-failure-feedback] failed to comment Shortcut story %s: %v", feedback.IssueID, err)
+		}
+		if feedback.AgentStatusError != "" {
+			if err := s.retryTrackerMove("move Shortcut story", func() error {
+				return moveShortcutStory(s.resolveShortcutBaseURL(), token, feedback.IssueID, feedback.AgentStatusError)
+			}); err != nil {
+				log.Printf("[agent-failure-feedback] failed to mark Shortcut story %s: %v", feedback.IssueID, err)
+			}
+		}
+		return commented == nil
+	case "jira":
+		commented := s.commentJiraIssue(feedback.JiraTracker, feedback.IssueID, comment)
+		if err := commented; err != nil {
+			log.Printf("[agent-failure-feedback] failed to comment Jira issue %s: %v", feedback.IssueID, err)
+		}
+		if feedback.AgentStatusError != "" {
+			if err := s.retryTrackerMove("move Jira issue", func() error {
+				return s.moveJiraIssue(feedback.JiraTracker, feedback.IssueID, feedback.AgentStatusError)
+			}); err != nil {
+				log.Printf("[agent-failure-feedback] failed to mark Jira issue %s: %v", feedback.IssueID, err)
+			}
+		}
+		return commented == nil
 	}
+	return false
+}
+
+var trackerAPIErrStatusRe = regexp.MustCompile(`(?i)\bAPI error (\d{3})\b`)
+
+// isPermanentTrackerMoveErr reports whether a tracker move failed for a
+// reason retrying cannot fix (bad token, missing issue, insufficient scope),
+// so retryTrackerMove fails fast instead of sleeping through doomed attempts.
+func isPermanentTrackerMoveErr(err error) bool {
+	msg := err.Error()
+	if m := trackerAPIErrStatusRe.FindStringSubmatch(msg); m != nil {
+		code, _ := strconv.Atoi(m[1])
+		return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+	}
+	return strings.Contains(msg, "not found")
+}
+
+func (s *Server) retryTrackerMove(op string, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if isPermanentTrackerMoveErr(err) {
+			log.Printf("[tracker-move] %s failed permanently, not retrying: %v", op, err)
+			return err
+		}
+		log.Printf("[tracker-move] %s attempt %d/3 failed: %v", op, attempt+1, err)
+		if attempt < 2 {
+			d := time.Duration(0)
+			if s.trackerMoveBackoff != nil {
+				d = s.trackerMoveBackoff(attempt)
+			} else if attempt == 0 {
+				d = time.Second
+			} else {
+				d = 4 * time.Second
+			}
+			time.Sleep(d)
+		}
+	}
+	log.Printf("[tracker-move] giving up %s after 3 attempts", op)
+	return err
 }
 
 func (s *Server) triggerActorForClaw(clawID string) triggerActor {

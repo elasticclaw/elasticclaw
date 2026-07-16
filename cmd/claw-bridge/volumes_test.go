@@ -18,14 +18,14 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestSyncVolumeClosesPipeOnPutError(t *testing.T) {
-	oldClient := http.DefaultClient
-	http.DefaultClient = &http.Client{
+	oldClient := hubTransferHTTPClient
+	hubTransferHTTPClient = &http.Client{
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("put failed before reading body")
 		}),
 	}
 	defer func() {
-		http.DefaultClient = oldClient
+		hubTransferHTTPClient = oldClient
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
