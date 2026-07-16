@@ -1968,7 +1968,7 @@ func TestReconnectDeliversQueuedMessagesInOrder(t *testing.T) {
 	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
 		t.Fatalf("second delivered content = %q, want second", got)
 	}
-	assertMessagesDelivered(t, db, clawID, 2)
+	waitForMessagesDelivered(t, db, clawID, 2)
 }
 
 func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
@@ -1982,6 +1982,10 @@ func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	if got := readTestHubMessage(t, firstWS).Content; got != "deliver me again" {
 		t.Fatalf("initial delivered content = %q", got)
 	}
+	// The hub marks delivered_at after the WS write, so the frame can arrive
+	// here before the UPDATE runs. Wait for the mark before resetting it, or
+	// the hub's late UPDATE (WHERE delivered_at IS NULL) would re-mark the row.
+	waitForMessagesDelivered(t, db, clawID, 1)
 	// Model a hub crash after the bridge accepted the write but before the
 	// delivered_at update was committed.
 	if _, err := db.Exec(`UPDATE messages SET delivered_at=NULL WHERE claw_id=?`, clawID); err != nil {
@@ -1995,7 +1999,7 @@ func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	if got := readTestHubMessage(t, clawWS).Content; got != "deliver me again" {
 		t.Fatalf("redelivered content = %q", got)
 	}
-	assertMessagesDelivered(t, db, clawID, 1)
+	waitForMessagesDelivered(t, db, clawID, 1)
 }
 
 func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
@@ -2025,7 +2029,7 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 	if got := readTestHubMessage(t, retryWS).Content; got != "retry me" {
 		t.Fatalf("retried content = %q", got)
 	}
-	assertMessagesDelivered(t, db, clawID, 1)
+	waitForMessagesDelivered(t, db, clawID, 1)
 }
 
 func insertPendingMessage(t *testing.T, db *sql.DB, clawID, content string, createdAt time.Time) {
@@ -2095,6 +2099,22 @@ func assertMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) 
 	if got != want {
 		t.Fatalf("delivered messages = %d, want %d", got, want)
 	}
+}
+
+func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var got int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND delivered_at IS NOT NULL`, clawID).Scan(&got); err != nil {
+			t.Fatalf("count delivered messages: %v", err)
+		}
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d delivered messages", want)
 }
 
 func waitForTestClawDisconnect(t *testing.T, s *Server, clawID string) {
