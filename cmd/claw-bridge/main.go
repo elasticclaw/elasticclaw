@@ -2897,23 +2897,30 @@ func superviseGatewayLoop(wait func() error, restart func() (func() error, int, 
 		if now().Sub(startedAt) >= gatewayStableUptime {
 			attempts = 0
 		}
-		if attempts >= gatewayRestartBudget {
+
+		// Retry restarts here instead of re-waiting on the dead process: a
+		// failed attempt must not call the stale wait fn again.
+		replaced := false
+		for attempts < gatewayRestartBudget {
+			sleep(2 * time.Second << attempts)
+			attempts++
+			nextWait, pid, err := restart()
+			if err != nil {
+				log.Printf("[supervisor] gateway restart attempt %d failed: %v", attempts, err)
+				continue
+			}
+
+			restartCount := restarted()
+			running()
+			log.Printf("[supervisor] gateway restarted (pid=%d, restart_count=%d)", pid, restartCount)
+			wait = nextWait
+			replaced = true
+			break
+		}
+		if !replaced {
 			log.Printf("[supervisor] gateway restart budget exhausted after %d attempts — leaving unhealthy for hub watchdog", gatewayRestartBudget)
 			return
 		}
-
-		sleep(2 * time.Second << attempts)
-		attempts++
-		nextWait, pid, err := restart()
-		if err != nil {
-			log.Printf("[supervisor] gateway restart attempt %d failed: %v", attempts, err)
-			continue
-		}
-
-		restartCount := restarted()
-		running()
-		log.Printf("[supervisor] gateway restarted (pid=%d, restart_count=%d)", pid, restartCount)
-		wait = nextWait
 	}
 }
 

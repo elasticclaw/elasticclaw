@@ -335,14 +335,16 @@ export ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
 restarts=0
 total_restarts=0
 backoff=5
+child=""
+trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' TERM INT
 while :; do
   started_at=$(date +%%s)
   export ELASTICCLAW_BRIDGE_RESTARTS="$total_restarts"
   /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
   child=$!
-  trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM INT
   wait "$child"
   rc=$?
+  child=""
   if [ "$rc" -eq 0 ]; then
     echo "[supervisor] claw-bridge exited cleanly"
     exit 0

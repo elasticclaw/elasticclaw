@@ -2311,7 +2311,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							s.gatewayRestartCounts = make(map[string]int)
 						}
 						lastRestartCount := s.gatewayRestartCounts[clawID]
-						if hb.RestartCount > lastRestartCount {
+						// Any change signals a restart: an increase is an in-process
+						// gateway restart; a decrease means the bridge process itself
+						// was relaunched and its counter reset.
+						if hb.RestartCount != lastRestartCount {
 							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
 							s.gatewayRestartCounts[clawID] = hb.RestartCount
 						}

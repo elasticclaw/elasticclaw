@@ -43,6 +43,12 @@ func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
 	assertContains(t, script, "unset ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "only the first supervised bridge runs bootstrap")
 	assertContains(t, script, "#!/bin/bash", "persisted bash-quoted environment is sourced by bash")
 	assertContains(t, script, "restarting (attempt $restarts/3)", "supervisor caps restarts")
+	supervisorTrap := `trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' TERM INT`
+	assertContains(t, script, supervisorTrap, "supervisor installs guarded exit trap")
+	if trapIdx, loopIdx := strings.Index(script, supervisorTrap), strings.Index(script, "while :; do"); trapIdx == -1 || loopIdx == -1 || trapIdx > loopIdx {
+		t.Errorf("supervisor trap must be installed before the restart loop (trap at %d, loop at %d)", trapIdx, loopIdx)
+	}
+	assertNotContains(t, script, "child=$!\n  trap", "trap must not be reinstalled inside the loop after spawning the child")
 	assertContains(t, script, "sleep \"$backoff\"", "supervisor backs off restarts")
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
 	assertNotContains(t, script, "exec /usr/local/bin/claw-bridge", "bridge must not block SSH session")

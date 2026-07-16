@@ -48,10 +48,14 @@ func TestSuperviseGatewayLoopRestartsAndSupervisesNewProcess(t *testing.T) {
 	var sleeps []time.Duration
 	restarts := 0
 	nextWaitSignaled := false
+	initialWaitCalls := 0
 
 	go func() {
 		superviseGatewayLoop(
-			func() error { return errors.New("initial exit") },
+			func() error {
+				initialWaitCalls++
+				return errors.New("initial exit")
+			},
 			func() (func() error, int, error) {
 				restarts++
 				if restarts == 1 {
@@ -88,6 +92,11 @@ func TestSuperviseGatewayLoopRestartsAndSupervisesNewProcess(t *testing.T) {
 	if len(sleeps) != 2 || sleeps[0] != 2*time.Second || sleeps[1] != 4*time.Second {
 		t.Fatalf("restart delays = %v, want [2s 4s]", sleeps)
 	}
+	// The first restart attempt failed; the supervisor must retry the restart
+	// without re-invoking the stale wait fn of the already-exited process.
+	if initialWaitCalls != 1 {
+		t.Fatalf("initial wait called %d times, want 1 (failed restart must not re-wait a dead process)", initialWaitCalls)
+	}
 	close(releaseNextWait)
 	<-done
 }
@@ -95,8 +104,12 @@ func TestSuperviseGatewayLoopRestartsAndSupervisesNewProcess(t *testing.T) {
 func TestSuperviseGatewayLoopExhaustsRestartBudget(t *testing.T) {
 	resetGatewayProcessState(t)
 	var sleeps []time.Duration
+	waitCalls := 0
 	superviseGatewayLoop(
-		func() error { return errors.New("exit") },
+		func() error {
+			waitCalls++
+			return errors.New("exit")
+		},
 		func() (func() error, int, error) { return nil, 0, errors.New("start failed") },
 		func(d time.Duration) { sleeps = append(sleeps, d) },
 		time.Now,
@@ -106,6 +119,9 @@ func TestSuperviseGatewayLoopExhaustsRestartBudget(t *testing.T) {
 	)
 	if !gatewayProcessExited() {
 		t.Fatal("gateway marked running after exhausted restart budget")
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait called %d times, want 1 (only real process exits should be awaited)", waitCalls)
 	}
 	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 	if len(sleeps) != len(want) {
