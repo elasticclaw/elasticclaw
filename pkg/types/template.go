@@ -551,11 +551,16 @@ type HubConfig struct {
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
 // Durations use Go duration strings. Empty values receive conservative defaults.
 type LivenessConfig struct {
-	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	OfflineGrace       string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
-	ProvisioningMaxAge string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
-	ClaimTTL           string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
-	ReaperInterval     string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	Enabled                *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	OfflineGrace           string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
+	ProvisioningMaxAge     string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
+	ClaimTTL               string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
+	ReaperInterval         string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
+	BusyTurnMax            string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
+	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
+	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
@@ -635,6 +640,7 @@ type FactoryConfig struct {
 	WorkingStatus    string   `yaml:"working_status,omitempty" json:"working_status,omitempty"`         // claw moves issue here when it starts working
 	FinishedStatus   string   `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`       // claw moves issue here when it finishes working
 	DoneStatus       string   `yaml:"done_status,omitempty" json:"done_status,omitempty"`               // claw moves issue here when done (PR merged)
+	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"` // claw moves issue here when agent stops with an error
 	TerminateOnLeave bool     `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"` // leaving trigger_status → kill claw
 	Template         string   `yaml:"template" json:"template"`                                         // template name (must be pushed to hub)
 	Provider         string   `yaml:"provider,omitempty" json:"provider,omitempty"`                     // override the default provider for this factory

@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,28 @@ import (
 )
 
 var prURLRegex = regexp.MustCompile(`https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)`)
+
+const prMergedPermanentFailureLimit = 5
+
+type githubAPIError struct {
+	StatusCode  int
+	Body        string
+	RateLimited bool
+}
+
+func (e *githubAPIError) Error() string {
+	return fmt.Sprintf("github API returned status %d: %s", e.StatusCode, e.Body)
+}
+func isPermanentGitHubAPIError(err error) bool {
+	var apiErr *githubAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode == 404 || apiErr.StatusCode == 410 || apiErr.StatusCode == 401 {
+		return true
+	}
+	return apiErr.StatusCode == 403 && !apiErr.RateLimited && !strings.Contains(strings.ToLower(apiErr.Body), "rate limit")
+}
 
 // extractPRs finds GitHub PR URLs in a message body.
 func extractPRs(content string) []struct {
@@ -49,11 +72,11 @@ func extractPRs(content string) []struct {
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) error {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
-		return
+		return nil
 	}
 
 	// Track analytics: PR was opened (detected for the first time)
@@ -107,12 +130,20 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	}
 
 	prID := uuid.New().String()
-	if _, err := s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	// INSERT OR IGNORE: the [DONE] handler and the message scanner can race to
+	// register the same PR (both saw no row in the pre-check above). The loser
+	// hitting the (claw_id, pr_url) unique index means the PR is already
+	// tracked — idempotent success, not a persistence failure.
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
-	); err != nil {
+	)
+	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
-		return
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return nil // concurrent writer already registered this PR
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -130,12 +161,15 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
+	return nil
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
 func (s *Server) scanMessageForPRs(clawID, content string) {
 	for _, pr := range extractPRs(content) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
+		}
 	}
 }
 
@@ -203,6 +237,14 @@ func (s *Server) pollAllPRs() {
 
 	token := s.resolveGitHubToken()
 	if token == "" {
+		if len(prs) > 0 {
+			s.mu.Lock()
+			if time.Since(s.lastTokenFailureLog) >= time.Minute {
+				log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed; PR watcher is effectively disabled for %d tracked PR(s)", len(prs))
+				s.lastTokenFailureLog = time.Now()
+			}
+			s.mu.Unlock()
+		}
 		return
 	}
 
@@ -270,8 +312,19 @@ func (s *Server) pollAllPRs() {
 
 		// For pipeline-driven claws, evaluate pr_conditions trigger.
 		if isPipelineDriven && !r.pr.prConditionsFired {
-			if stage := s.checkPRConditions(r.pr, token, pipelineCtx); stage != nil {
+			stage, status := s.checkPRConditions(r.pr, token, pipelineCtx)
+			if stage != nil {
 				s.firePRConditions(r.pr, *stage, pipelineCtx)
+			} else if status == prConditionsStuck {
+				// Only a genuine CI stall (no check runs ever appeared) is eligible
+				// for the max-wait timeout. Healthy progress (CI running, changes
+				// being addressed, quiet_for still elapsing) and transient API
+				// errors keep the run alive.
+				maxWait := s.livenessSettings().prConditionsMaxWait
+				if created, err := time.Parse(time.RFC3339, r.pr.createdAt); err == nil && time.Since(created) > maxWait {
+					go s.stopAgentWithReason(r.pr.clawID, fmt.Sprintf("pr_conditions on PR %s not satisfied within %s — CI stuck or no check runs", r.pr.prURL, maxWait), false)
+					terminatedClaws[r.pr.clawID] = true
+				}
 			}
 		}
 	}
@@ -300,10 +353,12 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	for _, appCfg := range cfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
+			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed: %v", err)
 			continue
 		}
 		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
+			log.Printf("[pr-watcher] CRITICAL: GitHub token provider failed: %v", err)
 			continue
 		}
 		return token
@@ -905,6 +960,9 @@ func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)
@@ -1010,7 +1068,10 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
-// It terminates the claw only when merged, and returns true only in that case.
+// It returns true when it terminates the claw, which happens in two cases:
+// the PR was merged, or the PR has been inaccessible (permanent API error:
+// 404/410/401/non-rate-limit 403) for prMergedPermanentFailureLimit
+// consecutive polls — repo/PR deleted or GitHub App uninstalled.
 func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
@@ -1022,8 +1083,24 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), tokenForPR)
 	if err != nil {
+		if isPermanentGitHubAPIError(err) {
+			_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=permanent_failure_count+1 WHERE id=?`, pr.id)
+			var failures int
+			_ = s.db.QueryRow(`SELECT permanent_failure_count FROM claw_prs WHERE id=?`, pr.id).Scan(&failures)
+			if failures >= prMergedPermanentFailureLimit {
+				var apiErr *githubAPIError
+				_ = errors.As(err, &apiErr)
+				go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been inaccessible (HTTP %d) for %d consecutive polls — repo or PR deleted, or GitHub App uninstalled", pr.prURL, apiErr.StatusCode, prMergedPermanentFailureLimit), false)
+				return true
+			}
+			return false
+		}
+		// Transient error (5xx, network): reset the counter so only genuinely
+		// consecutive permanent failures accumulate toward the limit.
+		_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 		return false
 	}
+	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 
@@ -1150,9 +1227,12 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	s.checkpointBeforeTermination(clawID, "pr-merged")
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "PR merged", terminalTxOpts{})
+	if err != nil || !applied {
+		return false
+	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "completed", "PR merged")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 
 	s.mu.Lock()
@@ -1177,16 +1257,40 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	return true
 }
 
+// prConditionsStatus explains why checkPRConditions did or didn't fire, so the
+// poller can distinguish a genuine CI stall (eligible for the max-wait timeout)
+// from healthy progress or transient API errors that must never time out a run.
+type prConditionsStatus int
+
+const (
+	// prConditionsSatisfied: all conditions passed and the stage should fire.
+	prConditionsSatisfied prConditionsStatus = iota
+	// prConditionsWaiting: conditions evaluated cleanly but aren't met yet
+	// (CI still running, checks failing, changes requested, quiet_for not
+	// elapsed). Healthy — the claw is expected to keep working, so this never
+	// triggers the timeout.
+	prConditionsWaiting
+	// prConditionsTransientError: a GitHub API call failed, so conditions can't
+	// be evaluated. Must not be treated as a stall.
+	prConditionsTransientError
+	// prConditionsStuck: ci:passing is required but no check runs have appeared
+	// (or the PR has no head SHA). This is the "CI stuck / no check runs" stall
+	// the max-wait guards against — the only status eligible for the timeout.
+	prConditionsStuck
+)
+
 // checkPRConditions evaluates the pr_conditions trigger for a given PR.
-// Returns the matching stage if ALL conditions pass, nil otherwise.
-func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext) *pipeline.Stage {
+// Returns the matching stage if ALL conditions pass (with prConditionsSatisfied),
+// otherwise nil and a status explaining why so the caller can tell a genuine
+// stall apart from healthy progress or transient errors.
+func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext) (*pipeline.Stage, prConditionsStatus) {
 	pl := parsePipelineForContext(ctx)
 	if pl == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 	stage := pl.StageForPRConditions()
 	if stage == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 	// Find the pr_conditions trigger on this stage
 	var cond *pipeline.PRConditionsTrigger
@@ -1197,7 +1301,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		}
 	}
 	if cond == nil {
-		return nil
+		return nil, prConditionsWaiting
 	}
 
 	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
@@ -1214,31 +1318,31 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get PR data: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		headObj, _ := prData["head"].(map[string]interface{})
 		sha, _ := headObj["sha"].(string)
 		if sha == "" {
-			return nil // no head SHA yet, can't check
+			return nil, prConditionsStuck // no head SHA yet, CI can't run
 		}
 		checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, sha), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get check-runs: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		checkRuns, _ := checksData["check_runs"].([]interface{})
 		if len(checkRuns) == 0 {
-			return nil // no checks yet
+			return nil, prConditionsStuck // no checks ever appeared — the stall the max-wait targets
 		}
 		for _, cr := range checkRuns {
 			run, _ := cr.(map[string]interface{})
 			conclusion, _ := run["conclusion"].(string)
 			status, _ := run["status"].(string)
 			if status != "completed" {
-				return nil // not all done
+				return nil, prConditionsWaiting // CI still running — healthy progress
 			}
 			if conclusion != "success" && conclusion != "skipped" && conclusion != "neutral" {
-				return nil // a check failed or is pending
+				return nil, prConditionsWaiting // a check failed — claw is expected to fix it
 			}
 		}
 	}
@@ -1248,7 +1352,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		reviewsData, err := githubAPIListWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.repo, pr.prNumber), repoToken)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: failed to get reviews: %v", pr.clawID[:8], err)
-			return nil
+			return nil, prConditionsTransientError
 		}
 		latestReviewStateByUser := make(map[string]struct {
 			id    int64
@@ -1275,7 +1379,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		}
 		for _, latest := range latestReviewStateByUser {
 			if latest.state == "CHANGES_REQUESTED" {
-				return nil
+				return nil, prConditionsWaiting // claw is expected to address feedback
 			}
 		}
 	}
@@ -1285,7 +1389,7 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 		dur, err := time.ParseDuration(cond.QuietFor)
 		if err != nil {
 			log.Printf("[pr-conditions] claw %s: invalid quiet_for %q: %v", pr.clawID[:8], cond.QuietFor, err)
-			return nil
+			return nil, prConditionsWaiting
 		}
 		// If no comments yet, use PR creation time — a PR with no comments
 		// has been quiet since it was created, so quiet_for should still fire.
@@ -1294,18 +1398,18 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 			quietSince = pr.createdAt
 		}
 		if quietSince == "" {
-			return nil
+			return nil, prConditionsWaiting
 		}
 		lastComment, err := time.Parse(time.RFC3339, quietSince)
 		if err != nil {
-			return nil
+			return nil, prConditionsWaiting
 		}
 		if time.Since(lastComment) < dur {
-			return nil // not quiet enough
+			return nil, prConditionsWaiting // not quiet enough yet — healthy, keep waiting
 		}
 	}
 
-	return stage
+	return stage, prConditionsSatisfied
 }
 
 // githubAPIListWithBase makes a GET request against a custom base URL expecting a JSON array.
@@ -1335,9 +1439,9 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 		// Surface a clearer error when the token is likely the problem.
 		msg := string(body)
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(msg, "Not Found") {
-			return nil, fmt.Errorf("github API returned 404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg)
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
 		}
-		return nil, fmt.Errorf("github API returned status %d: %s", resp.StatusCode, msg)
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
 	}
 	var result []interface{}
 	if err := json.Unmarshal(body, &result); err != nil {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -385,6 +386,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 						continue
 					}
 					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
+					s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "shortcut", IssueID: storyID}, triggerActor{}, err)
 				}
 			}
 		}
@@ -759,9 +761,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("db insert: %w", err)
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
@@ -816,6 +818,13 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
 		case "lambda-microvms":
 			provErr = s.provisionLambdaMicroVMs(context.Background(), clawID, req, provCfg, fileBytes)
+		case "noop":
+			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
+				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
+			} else {
+				providerID := "noop-vm-" + clawID[:8]
+				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)
 		}
@@ -876,9 +885,9 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}

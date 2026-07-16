@@ -76,7 +76,7 @@ func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task run: %v", err)
 	}
-	for i := 0; i < gatewayUnhealthyMax; i++ {
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
 		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": false}}); err != nil {
 			t.Fatalf("write unhealthy heartbeat %d: %v", i, err)
 		}
@@ -100,23 +100,23 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < gatewayUnhealthyMax-1; i++ {
+	for i := 0; i < defaultGatewayUnhealthyMax-1; i++ {
 		writeHeartbeat(false)
 	}
 	eventuallyWatchdog(t, func() bool {
 		cc.mu.RLock()
 		defer cc.mu.RUnlock()
-		return cc.gatewayUnhealthyCount == gatewayUnhealthyMax-1
+		return cc.gatewayUnhealthyCount == defaultGatewayUnhealthyMax-1
 	}, "unhealthy heartbeat count")
 	writeHeartbeat(true)
 	eventuallyWatchdog(t, func() bool { cc.mu.RLock(); defer cc.mu.RUnlock(); return cc.gatewayUnhealthyCount == 0 }, "healthy reset")
-	for i := 0; i < gatewayUnhealthyMax-1; i++ {
+	for i := 0; i < defaultGatewayUnhealthyMax-1; i++ {
 		writeHeartbeat(false)
 	}
 	eventuallyWatchdog(t, func() bool {
 		cc.mu.RLock()
 		defer cc.mu.RUnlock()
-		return cc.gatewayUnhealthyCount == gatewayUnhealthyMax-1
+		return cc.gatewayUnhealthyCount == defaultGatewayUnhealthyMax-1
 	}, "post-reset unhealthy count")
 }
 
@@ -126,7 +126,7 @@ func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	conn := watchdogClaw(t, s, clawID)
 	cc := watchdogClawConn(t, s, clawID)
 	cc.mu.Lock()
-	cc.streamingStartedAt = time.Now().Add(-busyTurnMax - time.Minute)
+	cc.streamingStartedAt = time.Now().Add(-defaultBusyTurnMax - time.Minute)
 	cc.streamingMsgID = "partial-turn"
 	cc.streamingBuf.WriteString("partial response")
 	cc.mu.Unlock()
@@ -165,7 +165,7 @@ func TestWatchdogSecondForcedFinishStopsClaw(t *testing.T) {
 	cc := watchdogClawConn(t, s, clawID)
 	for i := 0; i < 2; i++ {
 		cc.mu.Lock()
-		cc.streamingStartedAt = time.Now().Add(-busyTurnMax - time.Minute)
+		cc.streamingStartedAt = time.Now().Add(-defaultBusyTurnMax - time.Minute)
 		cc.mu.Unlock()
 		s.checkClawStatus()
 	}
@@ -185,8 +185,8 @@ func TestWatchdogSilentDeathStopsClaw(t *testing.T) {
 	}
 	cc := watchdogClawConn(t, s, clawID)
 	cc.mu.Lock()
-	cc.lastUserMessageAt = time.Now().Add(-silentDeathMax - time.Minute)
-	cc.lastStatusAt = time.Now().Add(-silentDeathMax - time.Minute)
+	cc.lastUserMessageAt = time.Now().Add(-defaultSilentDeathMax - time.Minute)
+	cc.lastStatusAt = time.Now().Add(-defaultSilentDeathMax - time.Minute)
 	cc.unresponsiveWarnedAt = time.Now().Add(-5 * time.Minute)
 	cc.mu.Unlock()
 	s.checkClawStatus()

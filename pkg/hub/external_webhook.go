@@ -169,7 +169,7 @@ func (s *Server) handleExternalWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.safeGo("external webhook", func() { s.processExternalEvent(payload, body, sig) })
+	s.safeGo("external webhook", func() { s.processExternalEvent(payload, body, sig, deliveryID) })
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -197,7 +197,7 @@ func (s *Server) validateExternalSignatureForFactory(factory *types.FactoryConfi
 }
 
 // processExternalEvent finds matching factories and creates claws for external events.
-func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig string) {
+func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byte, sig, deliveryID string) {
 	factories := s.resolveFactories()
 	if len(factories) == 0 {
 		return
@@ -281,13 +281,34 @@ func (s *Server) processExternalEvent(payload externalWebhookPayload, body []byt
 		}
 
 		// Build trigger key for atomic claim
-		triggerKey := fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, eventType)
+		var triggerKey string
 		if payload.Release != nil {
 			triggerKey = fmt.Sprintf("%s:%s@%s", factory.Name, repoFullName, payload.Release.TagName)
+		} else {
+			triggerKey = fmt.Sprintf("%s:%s@%s:%s", factory.Name, repoFullName, eventType,
+				externalEventDiscriminator(deliveryID, body))
 		}
 
 		s.processExternalFactoryTrigger(factory, payload, triggerKey, repoFullName, eventType)
 	}
+}
+
+func externalEventDiscriminator(deliveryID string, body []byte) string {
+	// Prefer an explicit delivery ID; otherwise fall back to a deterministic hash
+	// of the raw body.
+	//
+	// We intentionally do NOT key off volatile payload fields (timestamp /
+	// created_at / id): for sources without a delivery-ID header — the only path
+	// that reaches this fallback — a retry of the SAME delivery can arrive with a
+	// re-stamped send-time timestamp, which would change the discriminator and
+	// create a duplicate claw. The body hash is strictly safer because retries of
+	// the same delivery always carry an identical body, so the durable
+	// factory_triggers claim can dedup them.
+	if deliveryID != "" {
+		return deliveryID
+	}
+	hash := sha256.Sum256(body)
+	return hex.EncodeToString(hash[:])[:16]
 }
 
 func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, payload externalWebhookPayload, triggerKey, repoFullName, eventType string) {
@@ -328,9 +349,9 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 	}
 
 	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
 			factory.Name, triggerKey, err)
@@ -676,7 +697,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+				_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)

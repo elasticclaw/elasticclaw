@@ -14,9 +14,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+var hubHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var hubTransferHTTPClient = &http.Client{Timeout: 10 * time.Minute}
 
 type checkpointLocalFile struct {
 	entry types.CheckpointFile
@@ -235,7 +239,7 @@ func checkpointJSON(ctx context.Context, req types.CheckpointCreatePayload, meth
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := hubHTTPClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -257,7 +261,7 @@ func putCheckpointBlob(ctx context.Context, req types.CheckpointCreatePayload, s
 		return err
 	}
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := hubTransferHTTPClient.Do(httpReq)
 	if err != nil {
 		return err
 	}

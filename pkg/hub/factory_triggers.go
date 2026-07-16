@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -69,13 +70,15 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 	}
 
 	var clawID, triggerStatus, clawStatus string
+	var retryCount int
+	var updatedAt time.Time
 	err = tx.QueryRow(`
-		SELECT COALESCE(ft.claw_id,''), ft.status, COALESCE(c.status,'')
+		SELECT COALESCE(ft.claw_id,''), ft.status, COALESCE(c.status,''), ft.retry_count, ft.updated_at
 		  FROM factory_triggers ft
 		  LEFT JOIN claws c ON c.id = ft.claw_id
 		 WHERE ft.factory_name=? AND ft.integration=? AND ft.trigger_key=?`,
 		factoryName, integration, triggerKey,
-	).Scan(&clawID, &triggerStatus, &clawStatus)
+	).Scan(&clawID, &triggerStatus, &clawStatus, &retryCount, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, fmt.Errorf("factory trigger disappeared while claiming")
@@ -83,7 +86,7 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		return false, err
 	}
 
-	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
+	if clawID != "" && clawStatus != "" && clawStatus != "deleted" && clawStatus != "error" {
 		_, err = tx.Exec(`
 			UPDATE factory_triggers
 			   SET trigger_source=?, trigger_payload=?, last_seen_at=?, updated_at=?
@@ -107,13 +110,31 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		}
 		return false, tx.Commit()
 	}
-
-	if clawID != "" && clawStatus != "" && clawStatus != "deleted" {
-		_, _ = tx.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "canceled", "factory trigger reclaimed")
+	if clawID == "" && triggerStatus == "failed" && source != "webhook" {
+		// A failed attempt with count n waits min(30s * 2^n, 30m) before reclaiming.
+		backoff := 30 * time.Second
+		for i := 0; i < retryCount && backoff < 30*time.Minute; i++ {
+			backoff *= 2
+		}
+		if backoff > 30*time.Minute {
+			backoff = 30 * time.Minute
+		}
+		if now.Before(updatedAt.Add(backoff)) {
+			_, err = tx.Exec(`UPDATE factory_triggers SET last_seen_at=? WHERE factory_name=? AND integration=? AND trigger_key=?`, now, factoryName, integration, triggerKey)
+			if err != nil {
+				return false, err
+			}
+			return false, tx.Commit()
 		}
 	}
+
+	// Reclaim path: reached only when the linked claw is missing or already in a
+	// terminal state ('deleted'/'error'), or the trigger has no claw and is not
+	// actively being processed. No cleanup of the old claw is needed here — a
+	// claw reaches 'error' via stopAgentTerminalWithReason, which already calls
+	// finishRunByClawID, and the boot reaper sweeps any still-'running' run whose
+	// claw is 'error'/'deleted'/missing. (A prior cleanup block here was dead code:
+	// its guard duplicated the "already claimed" block above, which returns first.)
 	_, err = tx.Exec(`
 		UPDATE factory_triggers
 		   SET trigger_source=?, trigger_payload=?, claw_id='', status='claimed', last_seen_at=?, updated_at=?
@@ -132,7 +153,7 @@ func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, cl
 	}
 	res, err := s.db.Exec(`
 		UPDATE factory_triggers
-		   SET claw_id=?, status='active', updated_at=?
+		   SET claw_id=?, status='active', retry_count=0, updated_at=?
 		 WHERE factory_name=? AND integration=? AND trigger_key=?`,
 		clawID, now(), factoryName, integration, triggerKey,
 	)
@@ -149,7 +170,7 @@ func (s *Server) completeFactoryTrigger(factoryName, integration, triggerKey, cl
 func (s *Server) failFactoryTrigger(factoryName, integration, triggerKey string) {
 	_, _ = s.db.Exec(`
 		UPDATE factory_triggers
-		   SET status='failed', updated_at=?
+		   SET status='failed', retry_count=retry_count+1, updated_at=?
 		 WHERE factory_name=? AND integration=? AND trigger_key=? AND claw_id=''`,
 		now(), factoryName, integration, triggerKey,
 	)

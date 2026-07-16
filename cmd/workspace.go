@@ -157,17 +157,25 @@ Persistent notes for this workspace can go here.
 }
 
 func workspacePushCmd() *cobra.Command {
-	return &cobra.Command{
+	var path string
+	cmd := &cobra.Command{
 		Use:   "push [name]",
 		Short: "Push workspace definitions to the hub",
+		Long: `Push workspace definitions to the hub.
+
+By default, searches .elasticclaw/workspaces/ and pushes all valid workspaces.
+Pass a name to push only the matching workspace.
+Use --path to push a workspace from a specific directory instead of the default location.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := ""
 			if len(args) > 0 {
 				name = args[0]
 			}
-			return runWorkspacePush(name)
+			return runWorkspacePush(name, path)
 		},
 	}
+	cmd.Flags().StringVar(&path, "path", "", "path to a specific workspace directory to push (instead of .elasticclaw/workspaces/)")
+	return cmd
 }
 
 func workspaceRmCmd() *cobra.Command {
@@ -201,37 +209,74 @@ func runWorkspaceRm(name string) error {
 	return nil
 }
 
-func runWorkspacePush(filterName string) error {
-	hubURL, clawToken, err := resolveHubConn()
+func runWorkspacePush(filterName string, path string) error {
+	workspaces, err := collectWorkspacesForPush(filterName, path)
 	if err != nil {
 		return err
+	}
+	if len(workspaces) == 0 {
+		return fmt.Errorf("no workspaces matched")
+	}
+	return pushWorkspacesToHub(workspaces)
+}
+
+// collectWorkspacesForPush resolves the workspace directories to push.
+// If path is set, it pushes only that directory. Otherwise it scans
+// .elasticclaw/workspaces/*. The filterName optionally restricts results
+// to a single workspace name.
+func collectWorkspacesForPush(filterName string, path string) ([]*types.WorkspaceConfig, error) {
+	var workspaces []*types.WorkspaceConfig
+
+	if path != "" {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat workspace path %q: %w", path, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("workspace path %q is not a directory", path)
+		}
+		workspace, err := readWorkspaceDir(path)
+		if err != nil {
+			return nil, err
+		}
+		if filterName != "" && !strings.EqualFold(workspace.Name, filterName) {
+			return []*types.WorkspaceConfig{}, nil
+		}
+		if err := workspace.Validate(); err != nil {
+			return nil, fmt.Errorf("validation failed for %s: %w", path, err)
+		}
+		return []*types.WorkspaceConfig{workspace}, nil
 	}
 
 	pattern := filepath.Join(".elasticclaw", "workspaces", "*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
-		return fmt.Errorf("no workspaces found under .elasticclaw/workspaces/")
+		return nil, fmt.Errorf("no workspaces found under .elasticclaw/workspaces/")
 	}
 
-	var workspaces []*types.WorkspaceConfig
 	for _, match := range matches {
 		if info, err := os.Stat(match); err != nil || !info.IsDir() {
 			continue
 		}
 		workspace, err := readWorkspaceDir(match)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if filterName != "" && !strings.EqualFold(workspace.Name, filterName) {
 			continue
 		}
 		if err := workspace.Validate(); err != nil {
-			return fmt.Errorf("validation failed for %s: %w", match, err)
+			return nil, fmt.Errorf("validation failed for %s: %w", match, err)
 		}
 		workspaces = append(workspaces, workspace)
 	}
-	if len(workspaces) == 0 {
-		return fmt.Errorf("no workspaces matched")
+	return workspaces, nil
+}
+
+func pushWorkspacesToHub(workspaces []*types.WorkspaceConfig) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{"workspaces": workspaces})

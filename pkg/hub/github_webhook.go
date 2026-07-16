@@ -269,6 +269,9 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		// No existing claw — create one (regardless of action, first event wins)
 		log.Printf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
 		if err := s.createClawForGitHubPR(factory, payload, "github-pr webhook"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, payload.Number, err)
 			s.logFactoryEvent(factory.Name, fmt.Sprintf("%s#%d", repoFullName, payload.Number),
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
@@ -522,6 +525,9 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 		}
 		log.Printf("[factory:%s] issue_comment triggered claw creation for PR %s#%d", factory.Name, repoFullName, prNumber)
 		if err := s.createClawForGitHubPR(factory, prPayload, "github-pr webhook (issue_comment)"); err != nil {
+			if isFactoryTriggerAlreadyClaimed(err) {
+				continue
+			}
 			log.Printf("[factory:%s] failed to create claw for PR #%d: %v", factory.Name, prNumber, err)
 			continue // let next matching factory try
 		}
@@ -700,6 +706,25 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	if existingID != "" {
 		return fmt.Errorf("claw %s already exists for PR %s", existingID[:8], prURL)
 	}
+
+	triggerKey := factoryTriggerKey("github-pr", prURL)
+	claimed, err := s.claimFactoryTrigger(factory.Name, "github-pr", triggerKey, reason, map[string]interface{}{
+		"repository": repoFullName,
+		"pr_number":  prNumber,
+		"source":     reason,
+	})
+	if err != nil {
+		return fmt.Errorf("claim factory trigger: %w", err)
+	}
+	if !claimed {
+		return fmt.Errorf("%w: claw already being created for PR %s (trigger claimed)", errFactoryTriggerAlreadyClaimed, prURL)
+	}
+	claimOpen := true
+	defer func() {
+		if claimOpen {
+			s.failFactoryTrigger(factory.Name, "github-pr", triggerKey)
+		}
+	}()
 
 	// Resolve template files
 	templateFiles, err := s.resolveTemplateFiles(factory.Template)
@@ -906,8 +931,27 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	// Store the PR immediately so the watcher picks it up
-	s.storePRMention(clawID, repoFullName, prNumber, prURL)
+	// Store the PR immediately so the watcher picks it up. This claw_prs row is a
+	// hard prerequisite for completing the claim: the PR watcher and the existence
+	// checks both JOIN claw_prs, so a claw without it is invisible yet would leave
+	// the trigger claim active — permanently blocking re-creation for this PR. If
+	// the association fails, tear the claw down and release the claim so poll/webhook
+	// can retry.
+	if err := s.storePRMention(clawID, repoFullName, prNumber, prURL); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
+		return fmt.Errorf("associate PR with claw: %w", err)
+	}
+	if err := s.completeFactoryTrigger(factory.Name, "github-pr", triggerKey, clawID); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
+		return fmt.Errorf("complete factory trigger: %w", err)
+	}
+	claimOpen = false
 
 	// Log factory event
 	s.logFactoryEvent(factory.Name,

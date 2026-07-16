@@ -56,8 +56,10 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
@@ -65,6 +67,7 @@ func migrate(db *sql.DB) error {
 		_, _ = db.Exec(`UPDATE messages SET delivered_at = created_at`)
 	}
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_attempts ADD COLUMN restored_checkpoint_id TEXT`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
@@ -110,6 +113,7 @@ func migrate(db *sql.DB) error {
 		claw_id        TEXT NOT NULL DEFAULT '',
 		task_run_id    TEXT NOT NULL DEFAULT '',
 		status         TEXT NOT NULL DEFAULT 'claimed',
+		retry_count     INTEGER NOT NULL DEFAULT 0,
 		first_seen_at  DATETIME NOT NULL,
 		last_seen_at   DATETIME NOT NULL,
 		created_at     DATETIME NOT NULL,
@@ -117,6 +121,8 @@ func migrate(db *sql.DB) error {
 	)`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_triggers_integration_status ON factory_triggers(integration, status, claw_id)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS integration_poll_state (integration TEXT PRIMARY KEY, last_success_at DATETIME NOT NULL)`)
 	_, _ = db.Exec(`
 		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
 		SELECT lower(hex(randomblob(16))), factory_name, 'linear', 'linear:' || linear_issue_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
@@ -219,7 +225,8 @@ func migrate(db *sql.DB) error {
 		restored_from_checkpoint_id TEXT NOT NULL DEFAULT '',
 		task_run_id TEXT NOT NULL DEFAULT '',
 		workflow_volumes TEXT NOT NULL DEFAULT '[]',
-		trigger_actor_json TEXT NOT NULL DEFAULT '{}'
+		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
+		stop_comment_pending INTEGER NOT NULL DEFAULT 0
 	);
 
 
@@ -245,6 +252,7 @@ func migrate(db *sql.DB) error {
 		claw_id        TEXT NOT NULL DEFAULT '',
 		task_run_id    TEXT NOT NULL DEFAULT '',
 		status         TEXT NOT NULL DEFAULT 'claimed',
+		retry_count     INTEGER NOT NULL DEFAULT 0,
 		first_seen_at  DATETIME NOT NULL,
 		last_seen_at   DATETIME NOT NULL,
 		created_at     DATETIME NOT NULL,
@@ -252,6 +260,11 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key);
 	CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id);
+	CREATE INDEX IF NOT EXISTS idx_factory_triggers_integration_status ON factory_triggers(integration, status, claw_id);
+	CREATE TABLE IF NOT EXISTS integration_poll_state (
+		integration TEXT PRIMARY KEY,
+		last_success_at DATETIME NOT NULL
+	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
@@ -461,6 +474,7 @@ func migrate(db *sql.DB) error {
 		last_review_comment_id INTEGER NOT NULL DEFAULT 0, -- last PR review comment ID seen
 		last_review_id INTEGER NOT NULL DEFAULT 0, -- last top-level PR review ID seen
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
+		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);
