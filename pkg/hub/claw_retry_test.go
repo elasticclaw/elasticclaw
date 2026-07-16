@@ -288,25 +288,25 @@ func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 }
 
 func TestHealthEscalationThresholds(t *testing.T) {
-	if heartbeatShouldEscalate(11, "connected", true) {
+	if heartbeatShouldEscalate(11, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat escalated before threshold")
 	}
-	if !heartbeatShouldEscalate(12, "connected", true) {
+	if !heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat did not escalate at threshold")
 	}
-	if heartbeatShouldEscalate(12, "provisioning", true) || heartbeatShouldEscalate(12, "connected", false) {
+	if heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "provisioning", true) || heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", false) {
 		t.Fatal("heartbeat escalated an ineligible claw")
 	}
 
 	nowAt := time.Now()
 	lastActivity := nowAt.Add(-11 * time.Minute)
-	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, time.Time{}); got != watchdogHealthWarn {
+	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, time.Time{}, defaultSilentDeathMax); got != watchdogHealthWarn {
 		t.Fatalf("initial watchdog action=%v, want warn", got)
 	}
-	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute)); got != watchdogHealthEscalate {
+	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthEscalate {
 		t.Fatalf("continued watchdog action=%v, want escalate", got)
 	}
-	if got := watchdogAction(nowAt, "provisioning", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute)); got != watchdogHealthNone {
+	if got := watchdogAction(nowAt, "provisioning", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthNone {
 		t.Fatalf("provisioning watchdog action=%v, want none", got)
 	}
 }

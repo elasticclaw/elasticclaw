@@ -125,6 +125,9 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
 
+	// --- Runtime state ---
+	checks = append(checks, s.checkRuntimeState(ctx)...)
+
 	// Compute summary: total = all checks, passed = OK checks
 	var report DoctorResponse
 	report.Checks = checks
