@@ -301,12 +301,14 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return nil, err
+			// Return issues fetched from earlier pages (if any) so this tick can
+			// still process them; the error keeps the high-water mark from advancing.
+			return issues, err
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
-			return nil, fmt.Errorf("linear API error %d: %s", resp.StatusCode, string(respBody))
+			return issues, fmt.Errorf("linear API error %d: %s", resp.StatusCode, string(respBody))
 		}
 		var result struct {
 			Errors []struct {
@@ -345,12 +347,13 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(respBody, &result); err != nil {
-			return nil, fmt.Errorf("parse linear response: %w", err)
+			return issues, fmt.Errorf("parse linear response: %w", err)
 		}
 		// Linear returns HTTP 200 with a GraphQL errors array on failure; treat it
 		// as an error so the high-water mark does not advance past skipped items.
+		// Issues already fetched from earlier pages are still returned for this tick.
 		if len(result.Errors) > 0 {
-			return nil, fmt.Errorf("linear GraphQL error: %s", result.Errors[0].Message)
+			return issues, fmt.Errorf("linear GraphQL error: %s", result.Errors[0].Message)
 		}
 		for _, n := range result.Data.Issues.Nodes {
 			li := linearPollIssue{

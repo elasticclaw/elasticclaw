@@ -65,8 +65,34 @@ func TestQueryLinearIssuesReturnsGraphQLErrors(t *testing.T) {
 	defer server.Close()
 	s := newFactoryTriggerTestServer(t)
 	s.linearBaseURL = server.URL
-	if _, err := s.queryLinearIssues("token", time.Now().UTC().Format(time.RFC3339)); err == nil || !strings.Contains(err.Error(), "rate limited") {
+	issues, err := s.queryLinearIssues("token", time.Now().UTC().Format(time.RFC3339))
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("err = %v, want GraphQL error", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("issues = %#v, want none fetched before the error", issues)
+	}
+}
+
+func TestQueryLinearIssuesReturnsPartialResultsOnMidPaginationGraphQLError(t *testing.T) {
+	page := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		if page == 1 {
+			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"errors":[{"message":"rate limited"}],"data":null}`))
+	}))
+	defer server.Close()
+	s := newFactoryTriggerTestServer(t)
+	s.linearBaseURL = server.URL
+	issues, err := s.queryLinearIssues("token", time.Now().UTC().Format(time.RFC3339))
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("err = %v, want GraphQL error", err)
+	}
+	if len(issues) != 1 || issues[0].Identifier != "ELA-1" {
+		t.Fatalf("issues = %#v, want page-1 issues returned despite page-2 error", issues)
 	}
 }
 
