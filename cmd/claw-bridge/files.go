@@ -13,7 +13,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 // uploadDirPath lands files inside OpenClaw's workspace so the agent's
@@ -71,7 +70,7 @@ func handleFileMessage(ctx context.Context, conn *websocket.Conn, payload json.R
 }
 
 func sendAck(ctx context.Context, conn *websocket.Conn, ack types.FileAck) {
-	_ = wsjson.Write(ctx, conn, hubMsg{
+	_ = writeHubMessage(ctx, conn, hubMsg{
 		Type:    "file_ack",
 		Payload: mustJSON(ack),
 	})
@@ -92,7 +91,7 @@ func handleFileReadMessage(ctx context.Context, conn *websocket.Conn, payload js
 	}
 	resp := types.FileReadResp{RequestID: req.RequestID}
 	send := func() {
-		_ = wsjson.Write(ctx, conn, hubMsg{Type: "file_read_resp", Payload: mustJSON(resp)})
+		_ = writeHubMessage(ctx, conn, hubMsg{Type: "file_read_resp", Payload: mustJSON(resp)})
 	}
 
 	dir := uploadDirPath()

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -729,6 +730,78 @@ func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("session key rotation did not fail the in-flight turn")
+	}
+}
+
+func TestHubKeepalivesExitWhenConnectionContextIsCancelled(t *testing.T) {
+	before := runtime.NumGoroutine()
+	for range 10 {
+		ctx, cancel := context.WithCancel(context.Background())
+		startHubKeepalives(ctx, func(context.Context) error { return nil }, func() {}, func() {})
+		cancel()
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > before+2 {
+		t.Fatalf("goroutines after cancelled hub connections = %d, want at most %d", got, before+2)
+	}
+}
+
+// TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects drives the real
+// runHubLoop through several connect/disconnect cycles against an in-process
+// fake hub and asserts the keepalive goroutines started per connection do not
+// outlive it. This fails if the heartbeat/ping goroutines are keyed to the
+// process-lifetime context instead of the per-connection context.
+func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		var reg hubMsg
+		if err := wsjson.Read(r.Context(), conn, &reg); err != nil {
+			return
+		}
+		if reg.Type != "register" {
+			t.Errorf("first frame type = %q, want register", reg.Type)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
+			return
+		}
+		// Close immediately to force the bridge onto its reconnect path.
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	gwClient := &gatewayClient{addr: "127.0.0.1:0"}
+	gwSession := &gatewaySession{}
+	proxy := newHTTPProxy(nil)
+	queue := &msgQueue{}
+
+	before := runtime.NumGoroutine()
+	const cycles = 5
+	for range cycles {
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue)
+		if err == nil {
+			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > before+2 {
+		t.Fatalf("goroutines after %d hub reconnect cycles = %d, want at most %d (baseline %d)", cycles, got, before+2, before)
 	}
 }
 
