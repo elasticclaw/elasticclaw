@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,50 @@ func newFactoryTriggerTestServer(t *testing.T) *Server {
 		"tenant", "tenant", "token", "claw-token", now())
 	t.Cleanup(func() { db.Close() })
 	return &Server{db: db}
+}
+
+func TestFailedFactoryTriggerIsRetriedAfterServerRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hub.db")
+	db, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("open initial db: %v", err)
+	}
+	s := &Server{db: db}
+	key := factoryTriggerKey("linear", "ELA-restart")
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	// A creation failure leaves the durable trigger claim eligible for retry.
+	s.failFactoryTrigger("code", "linear", key)
+	if _, err := db.Exec(`UPDATE factory_triggers SET updated_at=? WHERE trigger_key=?`, time.Now().UTC().Add(-61*time.Second), key); err != nil {
+		t.Fatalf("age failed trigger beyond backoff: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close initial db: %v", err)
+	}
+
+	restartedDB, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("open restarted db: %v", err)
+	}
+	t.Cleanup(func() { restartedDB.Close() })
+	restarted := &Server{db: restartedDB}
+	claimed, err = restarted.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("claim after restart = %v, %v", claimed, err)
+	}
+	if err := restarted.completeFactoryTrigger("code", "linear", key, "claw-restarted"); err != nil {
+		t.Fatalf("complete retried trigger: %v", err)
+	}
+
+	var status string
+	if err := restartedDB.QueryRow(`SELECT status FROM factory_triggers WHERE trigger_key=?`, key).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("trigger status after retry = %q, want active", status)
+	}
 }
 
 func TestClaimFactoryTriggerScopesByFactoryName(t *testing.T) {
