@@ -1184,9 +1184,12 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	s.checkpointBeforeTermination(clawID, "pr-merged")
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "PR merged", false)
+	if err != nil || !applied {
+		return false
+	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "completed", "PR merged")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 
 	s.mu.Lock()

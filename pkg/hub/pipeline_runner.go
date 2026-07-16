@@ -1516,10 +1516,13 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		s.checkpointBeforeTermination(clawID, "pipeline-terminal")
 		s.syncWorkflowVolumes(clawID)
 
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		status, result := pipelineTerminalWorkflowRunResult(stage, stageActionsSucceeded)
+		applied, err := s.finishClawTerminalTx(clawID, "deleted", "", status, result, false)
+		if err != nil || !applied {
+			return transitioned, injectDelivered
+		}
 		if s.cronScheduler != nil {
-			status, result := pipelineTerminalWorkflowRunResult(stage, stageActionsSucceeded)
-			s.cronScheduler.finishRunByClawID(clawID, status, result)
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		s.mu.Lock()
 		if cc, ok := s.claws[clawID]; ok {
@@ -1534,7 +1537,7 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		})
 
 		if providerID != "" {
-			go s.terminateVM(provider, providerID)
+			go s.terminateVMForClaw(clawID, provider, providerID)
 		}
 	}
 	return true, injectDelivered
@@ -1842,16 +1845,23 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 	var tenantID, providerID, provider string
 	_ = s.db.QueryRow(`SELECT tenant_id, COALESCE(provider_id,''), COALESCE(provider,'') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &providerID, &provider)
 
-	// 1. Set terminal status and persist sanitized diagnostic
+	// 1. Set terminal status and finish the workflow run atomically.
 	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
-	res, updateErr := s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status != 'deleted'`, safeReason, clawID)
+	commentOwed := hasPipelineCtx && pipelineCtx.Workflow != nil && pipelineCtx.IssueID != "" && isFailureFeedbackWorkflowIntegration(pipelineCtx.Workflow.Integration) || factory != nil && issueID != ""
+	applied, updateErr := s.finishClawTerminalTx(clawID, "error", safeReason, "failed", safeReason, commentOwed)
 	if updateErr != nil {
-		log.Printf("[stopAgent] failed to mark claw %s as error: %v", clawID[:8], updateErr)
-	} else {
-		rowsAffected, _ := res.RowsAffected()
-		if rowsAffected == 0 {
-			return
-		}
+		return
+	}
+	if !applied {
+		return
+	}
+	if s.cronScheduler != nil {
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
+	}
+	if skipVMTerminate && providerID != "" {
+		_, _ = s.execStatusLogged("clear provider_id claw "+clawID, `UPDATE claws SET provider_id='' WHERE id=?`, clawID)
+	}
+	{
 		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
 			EventKey:        "agent_stopped:" + clawID,
 			Source:          taskRunSourceHub,
@@ -1863,9 +1873,6 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 			OccurredAt:      now(),
 		}); err != nil {
 			log.Printf("[task-run-analytics] failed to record agent stop for claw %s: %v", clawID, err)
-		}
-		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", safeReason)
 		}
 	}
 
@@ -1891,15 +1898,15 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 
 	// 4. Write issue-tracker comment without delaying agent shutdown.
 	if hasPipelineCtx && pipelineCtx.Workflow != nil && pipelineCtx.IssueID != "" && isFailureFeedbackWorkflowIntegration(pipelineCtx.Workflow.Integration) {
-		go s.commentWorkflowAgentStopToTracker(clawID, pipelineCtx, reason)
+		s.dispatchWorkflowStopComment(clawID, pipelineCtx, reason)
 	} else if factory != nil && issueID != "" {
 		factoryCopy := *factory
-		go s.commentAgentStopToTracker(clawID, &factoryCopy, issueID, reason)
+		s.dispatchFactoryStopComment(clawID, &factoryCopy, issueID, reason)
 	}
 
 	// 5. Terminate VM if still running
 	if providerID != "" && !skipVMTerminate {
-		go s.terminateVM(provider, providerID)
+		go s.terminateVMForClaw(clawID, provider, providerID)
 	}
 
 	log.Printf("[stopAgent] claw %s stopped: %s", clawID[:8], reason)
@@ -1909,8 +1916,39 @@ func isFailureFeedbackWorkflowIntegration(integration string) bool {
 	return integration == "github-issues" || integration == "linear" || integration == "jira"
 }
 
+// dispatchStopComment claims a pending notification before starting network I/O.
+// The claim prevents a slow initial delivery and a reaper redrive from posting
+// the same tracker comment concurrently. Failed deliveries restore pending=1.
+func (s *Server) dispatchStopComment(clawID string, deliver func()) {
+	res, err := s.db.Exec(`UPDATE claws SET stop_comment_pending=2 WHERE id=? AND stop_comment_pending=1`, clawID)
+	if err != nil {
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 1 {
+		go deliver()
+	}
+}
+
+func (s *Server) dispatchWorkflowStopComment(clawID string, ctx pipelineContext, reason string) {
+	s.dispatchStopComment(clawID, func() { s.commentWorkflowAgentStopToTracker(clawID, ctx, reason) })
+}
+
+func (s *Server) dispatchFactoryStopComment(clawID string, factory *types.FactoryConfig, issueID, reason string) {
+	s.dispatchStopComment(clawID, func() { s.commentAgentStopToTracker(clawID, factory, issueID, reason) })
+}
+
 func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineContext, reason string) {
+	clear := func() {
+		_, _ = s.execStatusLogged("clear stop comment claw "+clawID, `UPDATE claws SET stop_comment_pending=0 WHERE id=? AND stop_comment_pending=2`, clawID)
+	}
+	retry := func() {
+		_, _ = s.execStatusLogged("retry stop comment claw "+clawID, `UPDATE claws SET stop_comment_pending=1 WHERE id=? AND stop_comment_pending=2`, clawID)
+		// Keep retries spaced by the redrive grace period rather than attempting
+		// a permanently failing tracker on every reaper tick.
+		s.firstSeen("comment:"+clawID, true, s.reaperNow())
+	}
 	if ctx.Workflow == nil || ctx.Workspace == nil || ctx.IssueID == "" {
+		clear()
 		return
 	}
 	feedback := agentFailureFeedback{
@@ -1925,10 +1963,12 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		repo, issueNum, ok := parseGitHubIssueWorkflowID(ctx.IssueID)
 		if !ok {
 			log.Printf("[stopAgent] invalid GitHub workflow issue id %q for claw %s", ctx.IssueID, shortID(clawID))
+			clear()
 			return
 		}
 		token := s.resolveGitHubIssuesTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
 		if token == "" {
+			clear()
 			return
 		}
 		feedback.GitHubRepo = repo
@@ -1936,20 +1976,30 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.GitHubIssues != nil {
 			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.GitHubIssues.AgentStatusError)
 		}
-		s.handleAgentFailureFeedback(feedback, token)
+		if s.handleAgentFailureFeedback(feedback, token) {
+			clear()
+		} else {
+			retry()
+		}
 	case "linear":
 		token := s.resolveLinearTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
 		if token == "" {
+			clear()
 			return
 		}
 		feedback.LinearIdentifier = ctx.IssueID
 		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Linear != nil {
 			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
 		}
-		s.handleAgentFailureFeedback(feedback, token)
+		if s.handleAgentFailureFeedback(feedback, token) {
+			clear()
+		} else {
+			retry()
+		}
 	case "jira":
 		tracker, ok := s.resolveJiraTrackerForWorkflow(ctx.Workspace.Name, ctx.Workflow)
 		if !ok || tracker.Token == "" {
+			clear()
 			return
 		}
 		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Jira != nil {
@@ -1960,6 +2010,9 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		}
 		if err := s.commentJiraIssue(tracker, ctx.IssueID, s.buildAgentStopComment(clawID, reason)); err != nil {
 			log.Printf("[stopAgent] failed to comment Jira issue %s: %v", ctx.IssueID, err)
+			retry()
+		} else {
+			clear()
 		}
 	}
 }
@@ -1978,6 +2031,13 @@ func parseGitHubIssueWorkflowID(issueID string) (string, int, bool) {
 }
 
 func (s *Server) commentAgentStopToTracker(clawID string, factory *types.FactoryConfig, issueID, reason string) {
+	clear := func() {
+		_, _ = s.execStatusLogged("clear stop comment claw "+clawID, `UPDATE claws SET stop_comment_pending=0 WHERE id=? AND stop_comment_pending=2`, clawID)
+	}
+	retry := func() {
+		_, _ = s.execStatusLogged("retry stop comment claw "+clawID, `UPDATE claws SET stop_comment_pending=1 WHERE id=? AND stop_comment_pending=2`, clawID)
+		s.firstSeen("comment:"+clawID, true, s.reaperNow())
+	}
 	var commentBody string
 	getCommentBody := func() string {
 		if commentBody == "" {
@@ -1986,6 +2046,7 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 		return commentBody
 	}
 
+	success := false
 	switch factory.Integration {
 	case "linear":
 		token := s.resolveLinearTokenForFactory(factory)
@@ -1994,6 +2055,7 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 				log.Printf("[stopAgent] failed to comment Linear issue %s: %v", issueID, err)
 			} else {
 				log.Printf("[stopAgent] commented Linear issue %s", issueID)
+				success = true
 			}
 		}
 	case "shortcut":
@@ -2003,6 +2065,7 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 				log.Printf("[stopAgent] failed to comment Shortcut story %s: %v", issueID, err)
 			} else {
 				log.Printf("[stopAgent] commented Shortcut story %s", issueID)
+				success = true
 			}
 		}
 	case "github-issues":
@@ -2017,6 +2080,7 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 						log.Printf("[stopAgent] failed to comment GitHub issue %s: %v", issueID, err)
 					} else {
 						log.Printf("[stopAgent] commented GitHub issue %s", issueID)
+						success = true
 					}
 				}
 			}
@@ -2027,8 +2091,14 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 				log.Printf("[stopAgent] failed to comment Jira issue %s: %v", issueID, err)
 			} else {
 				log.Printf("[stopAgent] commented Jira issue %s", issueID)
+				success = true
 			}
 		}
+	}
+	if success {
+		clear()
+	} else {
+		retry()
 	}
 }
 

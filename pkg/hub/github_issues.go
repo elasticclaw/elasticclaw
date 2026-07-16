@@ -578,9 +578,9 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		return "", false, err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "github-issues", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), false)
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return "", false, fmt.Errorf("complete workflow trigger: %w", err)
 	}
@@ -865,9 +865,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("db insert: %w", err)
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "github-issues", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), false)
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
@@ -995,9 +995,12 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
-	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "canceled", "issue left trigger status", false)
+	if err != nil || !applied {
+		return
+	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "canceled", "issue left trigger status")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",

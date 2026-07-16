@@ -99,9 +99,10 @@ type Server struct {
 
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
-	reaperMu        sync.Mutex
-	reaperFirstSeen map[string]time.Time
-	nowFunc         func() time.Time
+	reaperMu            sync.Mutex
+	reaperFirstSeen     map[string]time.Time
+	nowFunc             func() time.Time
+	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 }
 
 type clawConn struct {
@@ -6416,129 +6417,143 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 // terminateVM terminates a provider VM by type and ID.
 func (s *Server) terminateVM(provider, vmID string) {
+	if err := s.terminateVMErr(provider, vmID); err != nil {
+		log.Printf("terminateVM: %v", err)
+	}
+}
+
+func (s *Server) terminateVMErr(provider, vmID string) error {
 	if vmID == "" {
-		return
+		return nil
+	}
+	if s.terminateVMOverride != nil {
+		return s.terminateVMOverride(provider, vmID)
 	}
 	switch provider {
 	case "replicated":
-		s.terminateReplicatedVM(vmID)
+		return s.terminateReplicatedVM(vmID)
 	case "daytona":
-		s.terminateDaytonaVM(vmID)
+		return s.terminateDaytonaVM(vmID)
 	case "exedev":
-		s.terminateExedevVM(vmID)
+		return s.terminateExedevVM(vmID)
 	case "docker":
-		s.terminateDockerVM(vmID)
+		return s.terminateDockerVM(vmID)
 	case "lambda-microvms":
-		s.terminateLambdaMicroVM(vmID)
+		return s.terminateLambdaMicroVM(vmID)
 	default:
-		log.Printf("terminateVM: unsupported provider %q for VM %s", provider, vmID)
+		return fmt.Errorf("unsupported provider %q for VM %s", provider, vmID)
 	}
 }
 
 // terminateDockerVM destroys a Docker agent container by name/ID.
-func (s *Server) terminateDockerVM(vmID string) {
+func (s *Server) terminateDockerVM(vmID string) error {
 	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["docker"]
 	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateDockerVM: no docker provider configured")
-		return
+		return fmt.Errorf("no docker provider configured")
 	}
 	p, err := newDockerProvider(cfg)
 	if err != nil {
 		log.Printf("terminateDockerVM: provider init error: %v", err)
-		return
+		return err
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
 		log.Printf("terminateDockerVM: failed to destroy container %s: %v", vmID, err)
-		return
+		return err
 	}
 	log.Printf("Docker container %s terminated", vmID)
+	return nil
 }
 
 // terminateLambdaMicroVM destroys an AWS Lambda MicroVM by ID.
-func (s *Server) terminateLambdaMicroVM(vmID string) {
+func (s *Server) terminateLambdaMicroVM(vmID string) error {
 	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["lambda-microvms"]
 	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateLambdaMicroVM: no lambda-microvms provider configured")
-		return
+		return fmt.Errorf("no lambda-microvms provider configured")
 	}
 	p, err := newLambdaMicroVMsProvider(cfg)
 	if err != nil {
 		log.Printf("terminateLambdaMicroVM: provider init error: %v", err)
-		return
+		return err
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
 		log.Printf("terminateLambdaMicroVM: failed to destroy MicroVM %s: %v", vmID, err)
-		return
+		return err
 	}
 	log.Printf("Lambda MicroVM %s terminated", vmID)
+	return nil
 }
 
 // terminateExedevVM destroys an exedev VM by ID.
-func (s *Server) terminateExedevVM(vmID string) {
+func (s *Server) terminateExedevVM(vmID string) error {
 	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["exedev"]
 	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateExedevVM: no exedev provider configured")
-		return
+		return fmt.Errorf("no exedev provider configured")
 	}
 
 	log.Printf("terminateExedevVM: destroying VM %s (ssh_key_path=%q)", vmID, cfg.SSHKeyPath)
 	p, err := newExedevProvider(cfg)
 	if err != nil {
 		log.Printf("terminateExedevVM: provider init error: %v", err)
-		return
+		return err
 	}
 	if err := p.Destroy(context.Background(), vmID, false); err != nil {
 		log.Printf("terminateExedevVM: failed to destroy VM %s: %v", vmID, err)
-		return
+		return err
 	}
 	log.Printf("Exedev VM %s terminated", vmID)
+	return nil
 }
 
 // terminateDaytonaVM destroys a Daytona workspace by ID.
-func (s *Server) terminateDaytonaVM(workspaceID string) {
+func (s *Server) terminateDaytonaVM(workspaceID string) error {
 	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["daytona"]
 	s.mu.RUnlock()
 	if !ok {
-		return
+		return fmt.Errorf("no daytona provider configured")
 	}
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
 		log.Printf("terminateDaytonaVM: provider init error: %v", err)
-		return
+		return err
 	}
 	if err := p.Destroy(context.Background(), workspaceID, false); err != nil {
 		log.Printf("terminateDaytonaVM: failed to destroy workspace %s: %v", workspaceID, err)
-		return
+		return err
 	}
 	log.Printf("Daytona workspace %s terminated", workspaceID)
+	return nil
 }
 
 // terminateReplicatedVM terminates a Replicated CMX VM by ID.
-func (s *Server) terminateReplicatedVM(vmID string) {
+func (s *Server) terminateReplicatedVM(vmID string) error {
 	s.mu.RLock()
 	cfg, ok := s.hubCfg.Providers["replicated"]
 	s.mu.RUnlock()
 	if !ok {
 		log.Printf("terminateReplicatedVM: no replicated provider configured")
-		return
+		return fmt.Errorf("no replicated provider configured")
 	}
 	p, err := newReplicatedProvider(cfg)
 	if err != nil {
 		log.Printf("terminateReplicatedVM: provider init error: %v", err)
-		return
+		return err
 	}
 	if err := p.DeleteVM(context.Background(), vmID); err != nil {
 		log.Printf("terminateReplicatedVM: failed to delete VM %s: %v", vmID, err)
-		return
+		return err
 	}
 	log.Printf("Replicated VM %s terminated", vmID)
+	return nil
 }
 
 // ─── GitHub Token Endpoint ────────────────────────────────────────────────────
