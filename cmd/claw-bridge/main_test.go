@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,171 @@ import (
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
+
+func resetGatewayProcessState(t *testing.T) {
+	t.Helper()
+	gatewayProcessState.Lock()
+	oldExited := gatewayProcessState.exited
+	oldRestartCount := gatewayProcessState.restartCount
+	oldSession := gatewayProcessState.session
+	gatewayProcessState.exited = false
+	gatewayProcessState.restartCount = 0
+	gatewayProcessState.session = nil
+	gatewayProcessState.Unlock()
+	t.Cleanup(func() {
+		gatewayProcessState.Lock()
+		gatewayProcessState.exited = oldExited
+		gatewayProcessState.restartCount = oldRestartCount
+		gatewayProcessState.session = oldSession
+		gatewayProcessState.Unlock()
+	})
+}
+
+func TestSuperviseGatewayLoopRestartsAndSupervisesNewProcess(t *testing.T) {
+	resetGatewayProcessState(t)
+	nextWaitStarted := make(chan struct{})
+	releaseNextWait := make(chan struct{})
+	done := make(chan struct{})
+	var sleeps []time.Duration
+	restarts := 0
+	nextWaitSignaled := false
+	initialWaitCalls := 0
+
+	go func() {
+		superviseGatewayLoop(
+			func() error {
+				initialWaitCalls++
+				return errors.New("initial exit")
+			},
+			func() (func() error, int, error) {
+				restarts++
+				if restarts == 1 {
+					return nil, 0, errors.New("start failed")
+				}
+				if restarts > 2 {
+					return nil, 0, errors.New("start failed")
+				}
+				return func() error {
+					if !nextWaitSignaled {
+						close(nextWaitStarted)
+						nextWaitSignaled = true
+					}
+					<-releaseNextWait
+					return errors.New("replacement exit")
+				}, 1234, nil
+			},
+			func(d time.Duration) { sleeps = append(sleeps, d) },
+			time.Now,
+			markGatewayProcessExited,
+			markGatewayProcessRunning,
+			incrementGatewayRestartCount,
+		)
+		close(done)
+	}()
+
+	<-nextWaitStarted
+	if gatewayProcessExited() {
+		t.Fatal("gateway remains exited after successful restart")
+	}
+	if got := gatewayRestartCount(); got != 1 {
+		t.Fatalf("restart count = %d, want 1", got)
+	}
+	if len(sleeps) != 2 || sleeps[0] != 2*time.Second || sleeps[1] != 4*time.Second {
+		t.Fatalf("restart delays = %v, want [2s 4s]", sleeps)
+	}
+	// The first restart attempt failed; the supervisor must retry the restart
+	// without re-invoking the stale wait fn of the already-exited process.
+	if initialWaitCalls != 1 {
+		t.Fatalf("initial wait called %d times, want 1 (failed restart must not re-wait a dead process)", initialWaitCalls)
+	}
+	close(releaseNextWait)
+	<-done
+}
+
+func TestSuperviseGatewayLoopExhaustsRestartBudget(t *testing.T) {
+	resetGatewayProcessState(t)
+	var sleeps []time.Duration
+	waitCalls := 0
+	superviseGatewayLoop(
+		func() error {
+			waitCalls++
+			return errors.New("exit")
+		},
+		func() (func() error, int, error) { return nil, 0, errors.New("start failed") },
+		func(d time.Duration) { sleeps = append(sleeps, d) },
+		time.Now,
+		markGatewayProcessExited,
+		markGatewayProcessRunning,
+		incrementGatewayRestartCount,
+	)
+	if !gatewayProcessExited() {
+		t.Fatal("gateway marked running after exhausted restart budget")
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait called %d times, want 1 (only real process exits should be awaited)", waitCalls)
+	}
+	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+	if len(sleeps) != len(want) {
+		t.Fatalf("restart delays = %v, want %v", sleeps, want)
+	}
+	for i := range want {
+		if sleeps[i] != want[i] {
+			t.Fatalf("restart delay %d = %v, want %v", i, sleeps[i], want[i])
+		}
+	}
+}
+
+func TestSuperviseGatewayLoopStableUptimeResetsBudget(t *testing.T) {
+	resetGatewayProcessState(t)
+	var sleeps []time.Duration
+	times := []time.Time{
+		time.Unix(0, 0), time.Unix(0, 0),
+		time.Unix(0, 0), time.Unix(60, 0),
+	}
+	nowCalls := 0
+	now := func() time.Time {
+		if nowCalls >= len(times) {
+			return times[len(times)-1]
+		}
+		v := times[nowCalls]
+		nowCalls++
+		return v
+	}
+	restarts := 0
+	superviseGatewayLoop(
+		func() error { return errors.New("exit") },
+		func() (func() error, int, error) {
+			restarts++
+			if restarts == 1 {
+				return func() error { return errors.New("stable replacement exit") }, 1234, nil
+			}
+			return nil, 0, errors.New("start failed")
+		},
+		func(d time.Duration) { sleeps = append(sleeps, d) },
+		now,
+		markGatewayProcessExited,
+		markGatewayProcessRunning,
+		incrementGatewayRestartCount,
+	)
+	if len(sleeps) < 2 || sleeps[0] != 2*time.Second || sleeps[1] != 2*time.Second {
+		t.Fatalf("restart delays = %v, want stable restart to reset second delay to 2s", sleeps)
+	}
+}
+
+func TestGatewayRestartBaseFromEnv(t *testing.T) {
+	t.Setenv("ELASTICCLAW_BRIDGE_RESTARTS", "")
+	if got := gatewayRestartBaseFromEnv(); got != 0 {
+		t.Fatalf("unset restart base = %d, want 0", got)
+	}
+	t.Setenv("ELASTICCLAW_BRIDGE_RESTARTS", "2")
+	if got := gatewayRestartBaseFromEnv(); got != 2 {
+		t.Fatalf("restart base = %d, want 2", got)
+	}
+	t.Setenv("ELASTICCLAW_BRIDGE_RESTARTS", "garbage")
+	if got := gatewayRestartBaseFromEnv(); got != 0 {
+		t.Fatalf("invalid restart base = %d, want 0", got)
+	}
+}
 
 func writeGatewayClientConfig(t *testing.T, home, config string) {
 	t.Helper()

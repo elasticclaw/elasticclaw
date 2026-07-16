@@ -120,6 +120,31 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	}, "post-reset unhealthy count")
 }
 
+func TestHeartbeatRestartCountChangeDetectedInBothDirections(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "heartbeat-restart-count"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	writeRestartCount := func(n int) {
+		t.Helper()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restartCount := func() int {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.gatewayRestartCount
+	}
+	writeRestartCount(3)
+	eventuallyWatchdog(t, func() bool { return restartCount() == 3 }, "restart count increase recorded")
+	// A shell-supervisor bridge relaunch resets the bridge's counter, so the
+	// reported restart_count can drop below the stored baseline. The baseline
+	// must follow the decrease or the relaunch goes permanently undetected.
+	writeRestartCount(1)
+	eventuallyWatchdog(t, func() bool { return restartCount() == 1 }, "restart count decrease (bridge relaunch) recorded")
+}
+
 func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-force-finish"
