@@ -328,9 +328,9 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 	}
 
 	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		log.Printf("[external-webhook] factory %q: failed to complete trigger for %s: %v",
 			factory.Name, triggerKey, err)
@@ -676,7 +676,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
 			} else {
 				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+				_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 			}
 		default:
 			provErr = fmt.Errorf("unsupported provider: %s", provider)

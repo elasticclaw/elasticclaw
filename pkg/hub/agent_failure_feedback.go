@@ -92,7 +92,7 @@ type linearGraphQLError struct {
 	Message string `json:"message"`
 }
 
-func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token string) {
+func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token string) bool {
 	if feedback.Failure.UserMessage == "" {
 		feedback.Failure = classifyAgentFailure(feedback.Failure.SafeDetail)
 	}
@@ -104,7 +104,8 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 		if base == "" {
 			base = "https://api.github.com"
 		}
-		if err := commentGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, comment); err != nil {
+		commented := commentGitHubIssueWithBase(base, token, feedback.GitHubRepo, feedback.GitHubIssueNum, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment GitHub issue %s#%d: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, err)
 		}
 		if feedback.AgentStatusError != "" {
@@ -119,8 +120,10 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to assign GitHub issue %s#%d to %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.TriggerActor.Login, err)
 			}
 		}
+		return commented == nil
 	case "linear":
-		if err := s.commentLinearIssue(token, feedback.LinearIdentifier, comment); err != nil {
+		commented := s.commentLinearIssue(token, feedback.LinearIdentifier, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment Linear issue %s: %v", feedback.LinearIdentifier, err)
 		}
 		if feedback.AgentStatusError != "" {
@@ -135,8 +138,10 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
 			}
 		}
+		return commented == nil
 	case "shortcut":
-		if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, feedback.IssueID, comment); err != nil {
+		commented := commentShortcutIssue(s.resolveShortcutBaseURL(), token, feedback.IssueID, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment Shortcut story %s: %v", feedback.IssueID, err)
 		}
 		if feedback.AgentStatusError != "" {
@@ -146,8 +151,10 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to mark Shortcut story %s: %v", feedback.IssueID, err)
 			}
 		}
+		return commented == nil
 	case "jira":
-		if err := s.commentJiraIssue(feedback.JiraTracker, feedback.IssueID, comment); err != nil {
+		commented := s.commentJiraIssue(feedback.JiraTracker, feedback.IssueID, comment)
+		if err := commented; err != nil {
 			log.Printf("[agent-failure-feedback] failed to comment Jira issue %s: %v", feedback.IssueID, err)
 		}
 		if feedback.AgentStatusError != "" {
@@ -157,7 +164,9 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to mark Jira issue %s: %v", feedback.IssueID, err)
 			}
 		}
+		return commented == nil
 	}
+	return false
 }
 
 func (s *Server) retryTrackerMove(op string, fn func() error) error {

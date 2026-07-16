@@ -551,11 +551,16 @@ type HubConfig struct {
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
 // Durations use Go duration strings. Empty values receive conservative defaults.
 type LivenessConfig struct {
-	Enabled            *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	OfflineGrace       string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
-	ProvisioningMaxAge string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
-	ClaimTTL           string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
-	ReaperInterval     string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	Enabled                *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	OfflineGrace           string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
+	ProvisioningMaxAge     string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
+	ClaimTTL               string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
+	ReaperInterval         string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
+	BusyTurnMax            string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
+	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
+	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
