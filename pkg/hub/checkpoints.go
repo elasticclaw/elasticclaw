@@ -396,8 +396,9 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	}
 	var restoreCheckpointID string
 	_ = s.db.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&restoreCheckpointID)
-	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format) VALUES(?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), now(), "pre")
+	createdAt := now()
+	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), createdAt, "pre", createdAt)
 }
 
 func (s *Server) requestCheckpoint(ctx context.Context, clawID, reason, createdBy string, wait bool, timeout time.Duration) (string, error) {

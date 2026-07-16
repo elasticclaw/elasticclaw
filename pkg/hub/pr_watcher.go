@@ -15,7 +15,6 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
-	"nhooyr.io/websocket/wsjson"
 )
 
 var prURLRegex = regexp.MustCompile(`https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/pull/(\d+)`)
@@ -800,7 +799,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		CreatedAt: now(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
 		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	if err != nil {
@@ -811,7 +810,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	// Broadcast to dashboard immediately, even if delivery to the agent is queued.
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
 
-	// Forward to agent over WS, or queue behind the current turn.
+	// Deliver oldest pending message when the agent is idle.
 	s.mu.RLock()
 	cc, ok := s.claws[clawID]
 	s.mu.RUnlock()
@@ -819,48 +818,15 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	if ok {
 		cc.mu.Lock()
 		cc.lastUserMessageAt = time.Now()
-		if cc.isBusyLocked() {
-			cc.messageQueue = append(cc.messageQueue, msg)
-			queueLen := len(cc.messageQueue)
-			cc.mu.Unlock()
-			acceptedForAgent = true
-			log.Printf("[pr-watcher] queued injected message for claw %s (queue length: %d)", shortID(clawID), queueLen)
-		} else {
-			conn := cc.conn
-			cc.mu.Unlock()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
-			cancel()
-			if err != nil {
-				log.Printf("[pr-watcher] failed to send injected message to claw %s: %v, queueing", shortID(clawID), err)
-				s.mu.RLock()
-				currentCC := s.claws[clawID]
-				s.mu.RUnlock()
-				if currentCC != nil {
-					currentCC.mu.Lock()
-					currentCC.messageQueue = append([]types.HubMessage{msg}, currentCC.messageQueue...)
-					queueLen := len(currentCC.messageQueue)
-					currentCC.mu.Unlock()
-					acceptedForAgent = true
-					log.Printf("[pr-watcher] queued injected message for claw %s after send failure (queue length: %d)", shortID(clawID), queueLen)
-					go s.sendNextQueuedMessage(currentCC)
-				}
-			} else {
-				acceptedForAgent = true
-				log.Printf("[pr-watcher] delivered injected message to claw %s", shortID(clawID))
-			}
+		busy := cc.isBusyLocked()
+		cc.mu.Unlock()
+		acceptedForAgent = true
+		if !busy {
+			s.sendNextQueuedMessage(cc)
 		}
 	}
 	if acceptedForAgent {
-		// Signal to UI that agent is working on the injected message
-		s.broadcastToUsers(tenantID, types.WSMessage{
-			Type: "agent_typing",
-			Payload: map[string]string{
-				"claw_id": clawID,
-				"status":  "typing",
-			},
-		})
+		log.Printf("[pr-watcher] injected message accepted for claw %s", shortID(clawID))
 	}
 
 	// If this is a user/hub message injection (not a claw response), move the issue

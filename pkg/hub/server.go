@@ -124,8 +124,7 @@ type clawConn struct {
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 
-	// Message queue for when claw is busy processing
-	messageQueue []types.HubMessage // queued messages waiting to be sent
+	deliveryInFlight bool // serializes DB-backed delivery writes
 
 	pendingCheckpointReason string // coalesced checkpoint request to run after current turn
 	pendingCheckpointID     string
@@ -189,9 +188,9 @@ func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) er
 	cc.mu.Unlock()
 
 	_, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-		msgID, clawID, tenantID, "claw", content, now(),
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
+		msgID, clawID, tenantID, "claw", content, now(), now(),
 	)
 	return err
 }
@@ -1616,14 +1615,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			Role: "user", Content: body.Content, CreatedAt: now(),
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
 			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
 		); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
 		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
-		// Forward to claw if connected (or queue if busy)
+		// Deliver oldest pending message if connected and idle.
 		s.mu.RLock()
 		cc := s.claws[clawID]
 		s.mu.RUnlock()
@@ -1631,26 +1630,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			cc.mu.Lock()
 			cc.lastUserMessageAt = time.Now()
 			cc.unresponsiveWarnedAt = time.Time{}
-			// Check if claw is currently streaming/processing
-			isBusy := !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
-			if isBusy {
-				// Queue the message for later delivery
-				cc.messageQueue = append(cc.messageQueue, msg)
-				queueLen := len(cc.messageQueue)
-				cc.mu.Unlock()
-				log.Printf("[hub] message queued for %s (queue length: %d)", clawID[:8], queueLen)
+			busy := cc.isBusyLocked()
+			cc.mu.Unlock()
+			if !busy {
+				s.sendNextQueuedMessage(cc)
 			} else {
-				cc.mu.Unlock()
-				// Send immediately
-				_ = wsjson.Write(r.Context(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
-				// Immediately signal to UI that agent is working, before first chunk arrives
-				s.broadcastToUsers(tenantID, types.WSMessage{
-					Type: "agent_typing",
-					Payload: map[string]string{
-						"claw_id": clawID,
-						"status":  "typing",
-					},
-				})
+				log.Printf("[hub] message pending for busy claw %s", clawID[:8])
 			}
 		}
 		jsonOK(w, msg)
@@ -2176,15 +2161,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
-		// Copy message queue from old connection to preserve queued messages
-		if len(old.messageQueue) > 0 {
-			cc.messageQueue = make([]types.HubMessage, len(old.messageQueue))
-			copy(cc.messageQueue, old.messageQueue)
-		}
 		old.mu.RUnlock()
 	}
-	// Capture whether we have queued messages before unlocking
-	hasQueuedMessages := len(cc.messageQueue) > 0
 	s.claws[clawID] = cc
 	s.mu.Unlock()
 
@@ -2196,12 +2174,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
-	// Drain any queued messages that were copied from the old connection.
-	// This must happen after the connection is live but before the read loop starts.
-	// We call it synchronously (not in a goroutine) to avoid racing with new user messages.
-	if hasQueuedMessages {
-		s.sendNextQueuedMessage(cc)
-	}
+	// This is synchronous so reconnect delivery is ordered with new user messages.
+	s.sendNextQueuedMessage(cc)
 
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
@@ -2232,9 +2206,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		if partialContent != "" {
 			interruptedAt := now()
 			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-				 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-				partialMsgID, clawID, tenantID, "claw", partialContent, interruptedAt,
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
+				partialMsgID, clawID, tenantID, "claw", partialContent, interruptedAt, interruptedAt,
 			)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{
 				ID: partialMsgID, ClawID: clawID, TenantID: tenantID, Role: "claw",
@@ -2404,8 +2378,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if content != "" && !isUnhelpfulActivityContent(activity, content) {
 						format := "activity:" + string(payload)
 						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
-							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt,
+							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
 						)
 					}
 					s.broadcastToUsers(tenantID, types.WSMessage{
@@ -2445,9 +2419,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Unlock()
 						// Upsert — insert on first chunk, update content on subsequent
 						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-							 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-							msgID, clawID, tenantID, "claw", bufContent, now(),
+							`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
+							 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
+							msgID, clawID, tenantID, "claw", bufContent, now(), now(),
 						)
 					}
 				}
@@ -2498,9 +2472,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				if !skipPersist && strings.TrimSpace(persistContent) != "" {
 					_, _ = s.db.Exec(
-						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)
-						 ON CONFLICT(id) DO UPDATE SET content=excluded.content`,
-						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt,
+						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
+						 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
+						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt, hm.CreatedAt,
 					)
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
@@ -2833,7 +2807,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.Role = "user"
 			hm.CreatedAt = now()
 			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
 			)
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
@@ -2841,7 +2815,14 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			cc := s.claws[hm.ClawID]
 			s.mu.RUnlock()
 			if cc != nil {
-				_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: hm})
+				cc.mu.Lock()
+				cc.lastUserMessageAt = time.Now()
+				cc.unresponsiveWarnedAt = time.Time{}
+				busy := cc.isBusyLocked()
+				cc.mu.Unlock()
+				if !busy {
+					s.sendNextQueuedMessage(cc)
+				}
 			}
 		}
 	}
@@ -4932,7 +4913,7 @@ func (s *Server) checkClawStatus() {
 			}
 			cc.mu.Unlock()
 			if content != "" {
-				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content`, messageID, id, tenantID, "claw", content, now)
+				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`, messageID, id, tenantID, "claw", content, now, now)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
 			}
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "agent_typing", Payload: map[string]string{"claw_id": id, "status": "idle"}})
@@ -4940,6 +4921,12 @@ func (s *Server) checkClawStatus() {
 			if escalate {
 				go s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false)
 			}
+		}
+		cc.mu.RLock()
+		idle := !cc.isBusyLocked()
+		cc.mu.RUnlock()
+		if idle {
+			s.sendNextQueuedMessage(cc)
 		}
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
@@ -5184,8 +5171,8 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		CreatedAt: now(),
 	}
 	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt,
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)`,
+		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt, wakeMsg.CreatedAt,
 	)
 	wakeMsg.Content = wakeContent
 	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
@@ -5249,8 +5236,8 @@ func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
 		return false
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, tenantID, "system", marker, now(),
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "system", marker, now(), now(),
 	)
 	if err != nil {
 		return false
@@ -6738,59 +6725,69 @@ func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string
 		CreatedAt: now(),
 	}
 	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
-		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt,
 	)
 	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
 	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
-// sendNextQueuedMessage checks if there are queued messages for a claw and sends
-// the next one if the claw is not currently busy. Must be called with s.mu unlocked.
+// sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
-
-	// Check if there's anything to send
-	if len(cc.messageQueue) == 0 {
+	if cc.isBusyLocked() || cc.deliveryInFlight {
 		cc.mu.Unlock()
 		return
 	}
-
-	// Check if claw is still busy
-	if cc.isBusyLocked() {
-		cc.mu.Unlock()
-		return
-	}
-
-	// Send the next queued message - copy fields needed for sending
-	msg := cc.messageQueue[0]
-	cc.messageQueue = cc.messageQueue[1:]
-	remainingCount := len(cc.messageQueue)
+	// Claim the in-flight guard before querying so a concurrent caller cannot
+	// read the same pending row and re-deliver it after we mark it delivered.
+	cc.deliveryInFlight = true
 	conn := cc.conn
 	tenantID := cc.tenantID
 	clawID := cc.id
+	cc.mu.Unlock()
+	defer func() {
+		cc.mu.Lock()
+		cc.deliveryInFlight = false
+		cc.mu.Unlock()
+	}()
+
+	var msg types.HubMessage
+	err := s.db.QueryRow(`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+		FROM messages WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL
+		ORDER BY created_at, rowid LIMIT 1`, clawID, tenantID).Scan(
+		&msg.ID, &msg.ClawID, &msg.TenantID, &msg.Role, &msg.Content, &msg.Format, &msg.CreatedAt)
+	if err == sql.ErrNoRows {
+		return
+	}
+	if err != nil {
+		log.Printf("[hub] find pending message for %s: %v", shortID(clawID), err)
+		return
+	}
+
+	// Re-check the claw is still idle and on the same connection before writing.
+	cc.mu.Lock()
+	if cc.isBusyLocked() || cc.conn != conn {
+		cc.mu.Unlock()
+		return
+	}
+	cc.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+	if err != nil {
+		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE messages SET delivered_at=? WHERE id=? AND delivered_at IS NULL`, now(), msg.ID); err != nil {
+		log.Printf("[hub] mark delivered message %s: %v", msg.ID, err)
+		return
+	}
+	cc.mu.Lock()
 	cc.lastUserMessageAt = time.Now()
 	cc.unresponsiveWarnedAt = time.Time{}
 	cc.mu.Unlock()
-
-	// Send via WebSocket (outside of lock to avoid blocking other goroutines)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
-
-	if err != nil {
-		// Write failed - re-enqueue the message at the front so it can be retried
-		log.Printf("[hub] failed to send queued message to %s: %v, re-enqueueing", clawID[:8], err)
-		s.mu.RLock()
-		if currentCC, ok := s.claws[clawID]; ok {
-			currentCC.mu.Lock()
-			// Prepend the message back to the front of the queue
-			currentCC.messageQueue = append([]types.HubMessage{msg}, currentCC.messageQueue...)
-			currentCC.mu.Unlock()
-		}
-		s.mu.RUnlock()
-		return
-	}
 
 	// Signal to UI that agent is working
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -6801,5 +6798,5 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		},
 	})
 
-	log.Printf("[hub] sent queued message to %s (%d remaining in queue)", clawID[:8], remainingCount)
+	log.Printf("[hub] delivered pending message to %s", shortID(clawID))
 }
