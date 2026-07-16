@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,10 +75,9 @@ func TestCheckPRMergedDoesNotCountTransientFailures(t *testing.T) {
 func TestCheckPRMergedResetsCounterBetweenPermanentFailures(t *testing.T) {
 	// Non-consecutive permanent failures interleaved with transient errors must
 	// not accumulate toward the "consecutive polls" limit.
-	var n int
+	var n atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
-		if n%2 == 1 {
+		if n.Add(1)%2 == 1 {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound) // permanent
 		} else {
 			http.Error(w, "temporary", http.StatusInternalServerError) // transient

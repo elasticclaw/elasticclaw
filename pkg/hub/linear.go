@@ -1247,7 +1247,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
 		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
 			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
-			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, pr.url))
+			// Resend with ALL original URLs: earlier PRs in the list are already
+			// stored (idempotent), and the retried [DONE] must carry the full set
+			// so pipeline transitions and analytics see the complete PR list.
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
 			return
 		}
 	}
@@ -1411,7 +1414,10 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 			// detect its merge/close and the claw would stall in 'idle' forever.
 			// Nudge the claw to resend [DONE] instead of idling it.
 			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
-			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, pr.url))
+			// Resend with ALL original URLs: earlier PRs in the list are already
+			// stored (idempotent), and the retried [DONE] must carry the full set
+			// so pipeline transitions and analytics see the complete PR list.
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
 			return
 		}
 	}

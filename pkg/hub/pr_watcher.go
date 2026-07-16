@@ -1102,7 +1102,10 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
-// It terminates the claw only when merged, and returns true only in that case.
+// It returns true when it terminates the claw, which happens in two cases:
+// the PR was merged, or the PR has been inaccessible (permanent API error:
+// 404/410/401/non-rate-limit 403) for prMergedPermanentFailureLimit
+// consecutive polls — repo/PR deleted or GitHub App uninstalled.
 func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
