@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,7 +34,6 @@ func (s *Server) startIntegrationPoller() {
 // processes any trigger transitions that webhooks may have missed.
 func (s *Server) pollTick() {
 	now := time.Now().UTC()
-	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
 
 	factories := s.resolveFactories()
 	linearWorkflowWorkspaces, err := loadExternalWorkflowsByIntegration("linear")
@@ -62,14 +62,20 @@ func (s *Server) pollTick() {
 	s.mu.RUnlock()
 
 	// === LINEAR ===
+	linearSince := s.pollSince("linear", now)
+	linearOK := true
 	if integrations != nil && len(integrations.Linear) > 0 {
-		s.pollLinear(factories, integrations.Linear, since)
+		linearOK = s.pollLinear(factories, integrations.Linear, linearSince.Format(time.RFC3339))
 	}
 	if len(linearWorkflowWorkspaces) > 0 {
-		s.pollLinearWorkflows(linearWorkflowWorkspaces, since)
+		linearOK = s.pollLinearWorkflows(linearWorkflowWorkspaces, linearSince.Format(time.RFC3339)) && linearOK
+	}
+	if ((integrations != nil && len(integrations.Linear) > 0) || len(linearWorkflowWorkspaces) > 0) && linearOK {
+		s.setPollHighWaterMark("linear", now)
 	}
 
 	// === SHORTCUT ===
+	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
 	if integrations != nil && len(integrations.Shortcut) > 0 {
 		s.pollShortcut(factories, integrations.Shortcut, since)
 	}
@@ -100,9 +106,46 @@ func (s *Server) pollTick() {
 	}
 }
 
+func (s *Server) getPollHighWaterMark(integration string) (time.Time, bool) {
+	var t time.Time
+	if err := s.db.QueryRow(`SELECT last_success_at FROM integration_poll_state WHERE integration=?`, integration).Scan(&t); err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (s *Server) setPollHighWaterMark(integration string, t time.Time) {
+	_, _ = s.db.Exec(`INSERT INTO integration_poll_state(integration,last_success_at) VALUES(?,?) ON CONFLICT(integration) DO UPDATE SET last_success_at=excluded.last_success_at`, integration, t)
+}
+
+func (s *Server) pollSince(integration string, n time.Time) time.Time {
+	since := n.Add(-2 * time.Minute)
+	if hwm, ok := s.getPollHighWaterMark(integration); ok && hwm.Before(since) {
+		since = hwm
+	}
+	// first_seen_at is slightly after a tracker's updatedAt, so retain a safety margin.
+	// MIN() strips the column's DATETIME decltype, so the driver hands back a raw
+	// string; scan it and parse with the driver's sqlite time layout.
+	var failed sql.NullString
+	if err := s.db.QueryRow(`SELECT MIN(first_seen_at) FROM factory_triggers WHERE integration=? AND status='failed' AND claw_id='' AND first_seen_at >= ?`, integration, n.Add(-24*time.Hour)).Scan(&failed); err != nil {
+		log.Printf("[poll] failed-trigger window query for %q: %v", integration, err)
+	} else if failed.Valid {
+		if t, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", failed.String); err != nil {
+			log.Printf("[poll] parse failed-trigger first_seen_at %q for %q: %v", failed.String, integration, err)
+		} else if t.Add(-5 * time.Minute).Before(since) {
+			since = t.Add(-5 * time.Minute)
+		}
+	}
+	if min := n.Add(-24 * time.Hour); since.Before(min) {
+		since = min
+	}
+	return since
+}
+
 // ── LINEAR POLLER ───────────────────────────────────────────────────────────
 
-func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*types.LinearIntegrationConfig, since string) {
+func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*types.LinearIntegrationConfig, since string) bool {
+	ok := true
 	// Group factories by workspace (team key) for efficient batching
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
@@ -138,6 +181,7 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 		issues, err := s.queryLinearIssues(li.Token, since)
 		if err != nil {
 			log.Printf("[poll-linear] query failed for workspace %q: %v", ws, err)
+			ok = false
 			continue
 		}
 
@@ -145,6 +189,7 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 			s.processLinearPollItem(issue, wsFactories, ws)
 		}
 	}
+	return ok
 }
 
 type linearWorkflowPollTarget struct {
@@ -152,7 +197,8 @@ type linearWorkflowPollTarget struct {
 	workflow  *types.WorkflowConfig
 }
 
-func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since string) bool {
+	ok := true
 	tokenTargets := map[string][]linearWorkflowPollTarget{}
 	for _, workspace := range workspaces {
 		if workspace == nil {
@@ -177,12 +223,14 @@ func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since 
 		issues, err := s.queryLinearIssues(token, since)
 		if err != nil {
 			log.Printf("[poll-linear] workflow query failed: %v", err)
+			ok = false
 			continue
 		}
 		for _, issue := range issues {
 			s.processLinearWorkflowPollItem(issue, targets)
 		}
 	}
+	return ok
 }
 
 // linearPollIssue is the subset of Linear GraphQL data we need for polling.

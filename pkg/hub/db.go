@@ -116,6 +116,7 @@ func migrate(db *sql.DB) error {
 	)`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS integration_poll_state (integration TEXT PRIMARY KEY, last_success_at DATETIME NOT NULL)`)
 	_, _ = db.Exec(`
 		INSERT OR IGNORE INTO factory_triggers(id, factory_name, integration, trigger_key, trigger_source, trigger_payload, claw_id, status, first_seen_at, last_seen_at, created_at, updated_at)
 		SELECT lower(hex(randomblob(16))), factory_name, 'linear', 'linear:' || linear_issue_id, 'migration', '{}', id, 'active', created_at, created_at, created_at, created_at
@@ -251,6 +252,10 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_factory_triggers_key ON factory_triggers(factory_name, integration, trigger_key);
 	CREATE INDEX IF NOT EXISTS idx_factory_triggers_claw ON factory_triggers(claw_id);
+	CREATE TABLE IF NOT EXISTS integration_poll_state (
+		integration TEXT PRIMARY KEY,
+		last_success_at DATETIME NOT NULL
+	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
