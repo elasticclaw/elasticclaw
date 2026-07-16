@@ -131,12 +131,20 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	}
 
 	prID := uuid.New().String()
-	if _, err := s.db.Exec(
-		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	// INSERT OR IGNORE: the [DONE] handler and the message scanner can race to
+	// register the same PR (both saw no row in the pre-check above). The loser
+	// hitting the (claw_id, pr_url) unique index means the PR is already
+	// tracked — idempotent success, not a persistence failure.
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
-	); err != nil {
+	)
+	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
 		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return nil // concurrent writer already registered this PR
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)

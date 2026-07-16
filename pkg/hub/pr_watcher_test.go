@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,5 +225,37 @@ func TestPRConditionsRemainEligibleWhenTransitionFails(t *testing.T) {
 	}
 	if fired != 0 {
 		t.Fatalf("pr_conditions_fired = %d, want 0 after failed transitions", fired)
+	}
+}
+
+// TestStorePRMentionConcurrentDuplicate exercises the race between the [DONE]
+// handler and the message scanner both registering the same PR: the loser of
+// the INSERT must treat the duplicate as idempotent success, not an error.
+func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-dup", "test-tenant-id", "claw-dup", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7")
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("storePRMention[%d] = %v, want nil", i, err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id='claw-dup'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("claw_prs rows = %d, want 1", count)
 	}
 }
