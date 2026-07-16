@@ -1153,20 +1153,24 @@ func (s *Server) moveIssueToWorkingStatusForPendingClaw(factory *types.FactoryCo
 	if githubIssueID != "" && githubToken != "" {
 		rest := strings.TrimPrefix(githubIssueID, "gh-")
 		lastSlash := strings.LastIndex(rest, "/")
-		if lastSlash > 0 {
-			repo := rest[:lastSlash]
-			var issueNum int
-			if _, err := fmt.Sscanf(rest[lastSlash+1:], "%d", &issueNum); err == nil {
-				base := s.githubBaseURL
-				if base == "" {
-					base = "https://api.github.com"
-				}
-				if err := moveGitHubIssue(githubToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
-					log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", githubIssueID, factory.WorkingStatus, err)
-				} else {
-					log.Printf("[factory] moved GitHub issue %s to working status '%s'", githubIssueID, factory.WorkingStatus)
-				}
-			}
+		if lastSlash <= 0 {
+			log.Printf("[factory] cannot move GitHub issue %s to working status '%s': malformed issue ID (want owner/repo/number)", githubIssueID, factory.WorkingStatus)
+			return
+		}
+		repo := rest[:lastSlash]
+		var issueNum int
+		if _, err := fmt.Sscanf(rest[lastSlash+1:], "%d", &issueNum); err != nil {
+			log.Printf("[factory] cannot move GitHub issue %s to working status '%s': malformed issue number: %v", githubIssueID, factory.WorkingStatus, err)
+			return
+		}
+		base := s.githubBaseURL
+		if base == "" {
+			base = "https://api.github.com"
+		}
+		if err := moveGitHubIssue(githubToken, repo, issueNum, factory.WorkingStatus, base); err != nil {
+			log.Printf("[factory] failed to move GitHub issue %s to working status '%s': %v", githubIssueID, factory.WorkingStatus, err)
+		} else {
+			log.Printf("[factory] moved GitHub issue %s to working status '%s'", githubIssueID, factory.WorkingStatus)
 		}
 		return
 	}
