@@ -33,7 +33,10 @@ func TestCheckPRMergedStopsAfterPermanentFailures(t *testing.T) {
 	for i := 0; i < prMergedPermanentFailureLimit; i++ {
 		s.checkPRMerged(pr, "token")
 	}
-	deadline := time.Now().Add(time.Second)
+	// stopAgentWithReason runs in a goroutine and may sleep up to 6s
+	// (clawStopRevaluationDelays) when the retry disposition is indeterminate
+	// under DB contention, so give it a generous deadline.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		var status string
 		_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, pr.clawID).Scan(&status)
