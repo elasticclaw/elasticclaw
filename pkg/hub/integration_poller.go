@@ -2,7 +2,6 @@ package hub
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -123,18 +122,15 @@ func (s *Server) pollSince(integration string, n time.Time) time.Time {
 	if hwm, ok := s.getPollHighWaterMark(integration); ok && hwm.Before(since) {
 		since = hwm
 	}
-	// first_seen_at is slightly after a tracker's updatedAt, so retain a safety margin.
-	// MIN() strips the column's DATETIME decltype, so the driver hands back a raw
-	// string; scan it and parse with the driver's sqlite time layout.
-	var failed sql.NullString
-	if err := s.db.QueryRow(`SELECT MIN(first_seen_at) FROM factory_triggers WHERE integration=? AND status='failed' AND claw_id='' AND first_seen_at >= ?`, integration, n.Add(-24*time.Hour)).Scan(&failed); err != nil {
+	// A failed trigger may have been first seen via catch-up long after the item's
+	// tracker updatedAt (up to the 24h catch-up clamp), so first_seen_at gives no
+	// usable lower bound on updatedAt. Poll the full 24h window until the trigger
+	// is reclaimed or ages out, so the item reappears and is retried.
+	var failed int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM factory_triggers WHERE integration=? AND status='failed' AND claw_id='' AND first_seen_at >= ?`, integration, n.Add(-24*time.Hour)).Scan(&failed); err != nil {
 		log.Printf("[poll] failed-trigger window query for %q: %v", integration, err)
-	} else if failed.Valid {
-		if t, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", failed.String); err != nil {
-			log.Printf("[poll] parse failed-trigger first_seen_at %q for %q: %v", failed.String, integration, err)
-		} else if t.Add(-5 * time.Minute).Before(since) {
-			since = t.Add(-5 * time.Minute)
-		}
+	} else if failed > 0 {
+		since = n.Add(-24 * time.Hour)
 	}
 	if min := n.Add(-24 * time.Hour); since.Before(min) {
 		since = min

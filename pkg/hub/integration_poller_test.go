@@ -22,8 +22,10 @@ func TestPollSinceHighWaterMarkAndFailedWindow(t *testing.T) {
 		{"clamp old high-water mark", func() { s.setPollHighWaterMark("linear", n.Add(-72*time.Hour)) }, n.Add(-24 * time.Hour)},
 		{"extend for failed trigger", func() {
 			s.setPollHighWaterMark("linear", n)
+			// A failed trigger first seen via catch-up carries no bound on the
+			// item's updatedAt, so the window opens to the full 24h clamp.
 			_, _ = s.db.Exec(`INSERT INTO factory_triggers(id,factory_name,integration,trigger_key,status,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, "failed-window", "code", "linear", "linear:ELA-1", "failed", n.Add(-time.Hour), n, n, n)
-		}, n.Add(-65 * time.Minute)},
+		}, n.Add(-24 * time.Hour)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
