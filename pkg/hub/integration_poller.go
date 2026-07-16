@@ -176,9 +176,10 @@ func (s *Server) pollLinear(factories []*types.FactoryConfig, linearCfgs []*type
 
 		issues, err := s.queryLinearIssues(li.Token, since)
 		if err != nil {
+			// Partial results (e.g. pagination cap) are still processed; ok=false
+			// keeps the high-water mark from advancing past the missing remainder.
 			log.Printf("[poll-linear] query failed for workspace %q: %v", ws, err)
 			ok = false
-			continue
 		}
 
 		for _, issue := range issues {
@@ -220,7 +221,6 @@ func (s *Server) pollLinearWorkflows(workspaces []*types.WorkspaceConfig, since 
 		if err != nil {
 			log.Printf("[poll-linear] workflow query failed: %v", err)
 			ok = false
-			continue
 		}
 		for _, issue := range issues {
 			s.processLinearWorkflowPollItem(issue, targets)
@@ -293,6 +293,9 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 			return nil, fmt.Errorf("linear API error %d: %s", resp.StatusCode, string(respBody))
 		}
 		var result struct {
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
 			Data struct {
 				Issues struct {
 					Nodes []struct {
@@ -328,6 +331,11 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 		if err := json.Unmarshal(respBody, &result); err != nil {
 			return nil, fmt.Errorf("parse linear response: %w", err)
 		}
+		// Linear returns HTTP 200 with a GraphQL errors array on failure; treat it
+		// as an error so the high-water mark does not advance past skipped items.
+		if len(result.Errors) > 0 {
+			return nil, fmt.Errorf("linear GraphQL error: %s", result.Errors[0].Message)
+		}
 		for _, n := range result.Data.Issues.Nodes {
 			li := linearPollIssue{
 				ID:          n.ID,
@@ -352,11 +360,11 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 			return issues, nil
 		}
 		after = result.Data.Issues.PageInfo.EndCursor
-		if page == 19 {
-			log.Printf("[poll-linear] pagination cap reached after fetching %d issues", len(issues))
-		}
 	}
-	return issues, nil
+	// Cap hit with hasNextPage still true: return the fetched issues so callers can
+	// process them, plus an error so the high-water mark does not advance past the
+	// unfetched remainder — the next tick resumes from the same window.
+	return issues, fmt.Errorf("pagination cap reached after fetching %d issues with more pages remaining", len(issues))
 }
 
 func (s *Server) processLinearPollItem(issue linearPollIssue, factories []*types.FactoryConfig, workspace string) {

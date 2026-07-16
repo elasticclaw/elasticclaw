@@ -40,6 +40,36 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 	}
 }
 
+func TestQueryLinearIssuesReturnsErrorAtPaginationCap(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}`))
+	}))
+	defer server.Close()
+	s := newFactoryTriggerTestServer(t)
+	s.linearBaseURL = server.URL
+	issues, err := s.queryLinearIssues("token", time.Now().UTC().Format(time.RFC3339))
+	if err == nil {
+		t.Fatal("expected error when pagination cap is hit with more pages remaining")
+	}
+	if pages != 20 || len(issues) != 20 {
+		t.Fatalf("pages = %d, issues = %d, want 20/20", pages, len(issues))
+	}
+}
+
+func TestQueryLinearIssuesReturnsGraphQLErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errors":[{"message":"rate limited"}],"data":null}`))
+	}))
+	defer server.Close()
+	s := newFactoryTriggerTestServer(t)
+	s.linearBaseURL = server.URL
+	if _, err := s.queryLinearIssues("token", time.Now().UTC().Format(time.RFC3339)); err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("err = %v, want GraphQL error", err)
+	}
+}
+
 func TestLinearPollQueryUsesExpectedSince(t *testing.T) {
 	var query string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
