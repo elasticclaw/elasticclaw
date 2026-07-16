@@ -734,8 +734,26 @@ func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
 	}
 }
 
+// stableGoroutineCount samples runtime.NumGoroutine until two consecutive
+// readings agree, so leak assertions start from a settled baseline instead of
+// a count inflated by goroutines still winding down from earlier tests.
+func stableGoroutineCount(t *testing.T) int {
+	t.Helper()
+	prev := runtime.NumGoroutine()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		cur := runtime.NumGoroutine()
+		if cur == prev {
+			return cur
+		}
+		prev = cur
+	}
+	return prev
+}
+
 func TestHubKeepalivesExitWhenConnectionContextIsCancelled(t *testing.T) {
-	before := runtime.NumGoroutine()
+	before := stableGoroutineCount(t)
 	for range 10 {
 		ctx, cancel := context.WithCancel(context.Background())
 		startHubKeepalives(ctx, func(context.Context) error { return nil }, func() {}, func() {})
@@ -784,11 +802,11 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
 	gwClient := &gatewayClient{addr: "127.0.0.1:0"}
-	gwSession := &gatewaySession{}
+	gwSession := &gatewaySession{pending: make(map[string]chan gwFrame)}
 	proxy := newHTTPProxy(nil)
 	queue := &msgQueue{}
 
-	before := runtime.NumGoroutine()
+	before := stableGoroutineCount(t)
 	const cycles = 5
 	for range cycles {
 		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue)

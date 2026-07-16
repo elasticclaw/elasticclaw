@@ -3617,6 +3617,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			go handleFileReadMessage(connCtx, conn, msg.Payload)
 
 		case "checkpoint_create":
+			// Intentionally uses the signal ctx, not connCtx: the handler reports
+			// back over HTTP (never writes to conn), and an in-progress checkpoint
+			// upload must survive hub reconnects.
 			go handleCheckpointCreate(ctx, msg.Payload)
 
 		case "volume_attach":
