@@ -66,6 +66,51 @@ type hubMsg struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
+func deliverInFlight(inf *inFlightState, result agentResult) {
+	select {
+	case inf.done <- result:
+	default:
+	}
+}
+
+func writeHubMessage(ctx context.Context, conn *websocket.Conn, msg hubMsg) error {
+	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return wsjson.Write(writeCtx, conn, msg)
+}
+
+func startHubKeepalives(ctx context.Context, ping func(context.Context) error, onPingFailure func(), heartbeat func()) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := ping(ctx); err != nil {
+					log.Printf("[hub] ping failed: %v", err)
+					onPingFailure()
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				heartbeat()
+			}
+		}
+	}()
+}
+
 // ─── Inbound message queue ───────────────────────────────────────────────────
 // Queues entries when the hub connection is temporarily unavailable. Unprocessed
 // user inputs older than msgQueueTTL are dropped to avoid starting a stale turn
@@ -953,8 +998,19 @@ func (gs *gatewaySession) getSessionKey() string {
 
 func (gs *gatewaySession) setSessionKey(key string) {
 	gs.sessionMu.Lock()
+	oldKey := gs.sessionKey
 	gs.sessionKey = key
 	gs.sessionMu.Unlock()
+
+	if oldKey == "" || oldKey == key {
+		return
+	}
+	gs.infMu.RLock()
+	inf := gs.inFlight
+	gs.infMu.RUnlock()
+	if inf != nil {
+		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway session key rotated")})
+	}
 }
 
 func (gs *gatewaySession) currentConn() *websocket.Conn {
@@ -1230,10 +1286,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			inf := gs.inFlight
 			gs.infMu.RUnlock()
 			if inf != nil {
-				select {
-				case inf.done <- agentResult{err: fmt.Errorf("gateway disconnected")}:
-				default:
-				}
+				deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway disconnected")})
 			}
 			if gs.client == nil {
 				return
@@ -1362,7 +1415,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				switch agentPayload.Data.Phase {
 				case "end":
 					log.Printf("[gateway] agent turn complete")
-					inf.done <- agentResult{text: strings.TrimSpace(inf.fullText.String())}
+					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.fullText.String())})
 				case "error":
 					msg := agentPayload.Data.Error
 					if msg == "" {
@@ -1373,7 +1426,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					}
 					log.Printf("[gateway] agent turn error: %s", msg)
 					inf.emitActivity(cleanAgentActivity(agentActivity{Kind: "session_error", Stream: "lifecycle", Phase: "error", Error: msg}))
-					inf.done <- agentResult{err: fmt.Errorf("%s", msg)}
+					deliverInFlight(inf, agentResult{err: fmt.Errorf("%s", msg)})
 				}
 			}
 		}
@@ -1656,10 +1709,7 @@ func markGatewayProcessExited() {
 	inf := gs.inFlight
 	gs.infMu.RUnlock()
 	if inf != nil {
-		select {
-		case inf.done <- agentResult{err: fmt.Errorf("gateway process exited")}:
-		default:
-		}
+		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway process exited")})
 	}
 }
 
@@ -3346,8 +3396,14 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 				case <-pingCtx.Done():
 					return
 				case <-ticker.C:
-					if err := conn.Ping(pingCtx); err != nil {
+					pingDeadlineCtx, pingDeadlineCancel := context.WithTimeout(pingCtx, 10*time.Second)
+					err := conn.Ping(pingDeadlineCtx)
+					pingDeadlineCancel()
+					if err != nil {
 						log.Printf("[status] ping failed: %v", err)
+						// Tear the connection down so the read loop unblocks and
+						// reconnects; a pong timeout does not close the conn itself.
+						conn.CloseNow()
 						return
 					}
 				}
@@ -3386,7 +3442,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		return fmt.Errorf("dial hub: %w", err)
 	}
 	conn.SetReadLimit(32 * 1024 * 1024) // 32MB
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
 	defer conn.CloseNow()
+	writeHub := func(msg hubMsg) error {
+		return writeHubMessage(connCtx, conn, msg)
+	}
 
 	// Register with the hub — gateway_ready=false until session is established
 	reg := hubMsg{
@@ -3399,7 +3460,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			"gateway_ready": gwSession.IsReady(),
 		}),
 	}
-	if err := wsjson.Write(ctx, conn, reg); err != nil {
+	if err := writeHub(reg); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 
@@ -3413,8 +3474,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
-	writeActivity := func(connCtx context.Context, activity agentActivity) {
-		_ = wsjson.Write(connCtx, conn, hubMsg{
+	writeActivity := func(activity agentActivity) {
+		_ = writeHub(hubMsg{
 			Type:    "agent_activity",
 			Payload: mustJSON(cleanAgentActivity(activity)),
 		})
@@ -3423,9 +3484,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	// Replay any queued entries that accumulated while we were disconnected.
 	// Completed replies/notices are delivered directly; only unprocessed inputs
 	// re-run an agent turn.
-	connCtx := ctx
 	deliver := func(role, content string) error {
-		return wsjson.Write(connCtx, conn, hubMsg{
+		return writeHub(hubMsg{
 			Type:    "message",
 			Payload: mustJSON(map[string]interface{}{"role": role, "content": content}),
 		})
@@ -3435,12 +3495,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer agentCancel()
 			reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
-				_ = wsjson.Write(connCtx, conn, hubMsg{
+				_ = writeHub(hubMsg{
 					Type:    "chunk",
 					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
 				})
 			}, func(activity agentActivity) {
-				writeActivity(connCtx, activity)
+				writeActivity(activity)
 			})
 			if agentErr != nil {
 				reply = fmt.Sprintf("⚠️ error: %v", agentErr)
@@ -3458,35 +3518,34 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	// Wire up the HTTP proxy send function for this connection
 	proxy.mu.Lock()
 	proxy.send = func(msg hubMsg) error {
-		return wsjson.Write(ctx, conn, msg)
+		return writeHub(msg)
 	}
 	proxy.mu.Unlock()
 
-	// Heartbeat goroutine — includes context_usage from persistent session
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Refresh context usage before sending heartbeat (best-effort)
-				go gwSession.refreshContextUsage(ctx)
-				health := !gatewayProcessExited() && checkGateway(gwClient.addr)
-				cu := gwSession.ContextUsage()
-				log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%%", health, gwSession.IsReady(), cu)
-				_ = wsjson.Write(ctx, conn, hubMsg{
-					Type: "heartbeat",
-					Payload: mustJSON(map[string]interface{}{
-						"gateway_healthy": health,
-						"gateway_ready":   gwSession.IsReady(),
-						"context_usage":   cu,
-					}),
-				})
-			}
-		}
-	}()
+	startHubKeepalives(connCtx, func(pingCtx context.Context) error {
+		pingCtx, cancel := context.WithTimeout(pingCtx, 10*time.Second)
+		defer cancel()
+		return conn.Ping(pingCtx)
+	}, func() {
+		// A failed ping means the connection is dead or half-open. The websocket
+		// library does not close the conn on a pong timeout, so tear it down
+		// explicitly to unblock the main read loop and trigger reconnection.
+		connCancel()
+		conn.CloseNow()
+	}, func() {
+		go gwSession.refreshContextUsage(connCtx)
+		health := !gatewayProcessExited() && checkGateway(gwClient.addr)
+		cu := gwSession.ContextUsage()
+		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%%", health, gwSession.IsReady(), cu)
+		_ = writeHub(hubMsg{
+			Type: "heartbeat",
+			Payload: mustJSON(map[string]interface{}{
+				"gateway_healthy": health,
+				"gateway_ready":   gwSession.IsReady(),
+				"context_usage":   cu,
+			}),
+		})
+	})
 
 	// Main read loop
 	for {
@@ -3498,7 +3557,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		log.Printf("recv type=%s", msg.Type)
 		switch msg.Type {
 		case "message":
-			go func(connCtx context.Context, payload json.RawMessage) {
+			go func(payload json.RawMessage) {
 				var m map[string]interface{}
 				if err := json.Unmarshal(payload, &m); err != nil {
 					log.Printf("payload unmarshal error: %v", err)
@@ -3520,7 +3579,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
 
 				reply, agentErr := gwSession.SendMessage(agentCtx, content, func(chunk string) {
-					_ = wsjson.Write(connCtx, conn, hubMsg{
+					_ = writeHub(hubMsg{
 						Type: "chunk",
 						Payload: mustJSON(map[string]interface{}{
 							"role":    "claw",
@@ -3528,7 +3587,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 						}),
 					})
 				}, func(activity agentActivity) {
-					writeActivity(connCtx, activity)
+					writeActivity(activity)
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
@@ -3543,7 +3602,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
 					queue.pushReply(reply)
 				}
-			}(ctx, msg.Payload)
+			}(msg.Payload)
 
 		case "http_proxy_res":
 			var res httpProxyRes
@@ -3552,19 +3611,22 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			}
 
 		case "file":
-			go handleFileMessage(ctx, conn, msg.Payload)
+			go handleFileMessage(connCtx, conn, msg.Payload)
 
 		case "file_read":
-			go handleFileReadMessage(ctx, conn, msg.Payload)
+			go handleFileReadMessage(connCtx, conn, msg.Payload)
 
 		case "checkpoint_create":
+			// Intentionally uses the signal ctx, not connCtx: the handler reports
+			// back over HTTP (never writes to conn), and an in-progress checkpoint
+			// upload must survive hub reconnects.
 			go handleCheckpointCreate(ctx, msg.Payload)
 
 		case "volume_attach":
-			go handleVolumeAttach(ctx, conn, msg.Payload)
+			go handleVolumeAttach(connCtx, conn, msg.Payload)
 
 		case "volume_sync":
-			go handleVolumeSync(ctx, conn, msg.Payload)
+			go handleVolumeSync(connCtx, conn, msg.Payload)
 
 		default:
 			// ignore unknown message types
