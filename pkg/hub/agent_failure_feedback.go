@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,7 +87,10 @@ func (s *Server) notifyWorkflowCreateFailure(workspace *types.WorkspaceConfig, w
 		log.Printf("[agent-failure-feedback] workflow %s/%s has no %s token; skipping failure feedback", workspace.Name, workflow.Name, ref.Integration)
 		return
 	}
-	s.handleAgentFailureFeedback(f, token)
+	// Feedback delivery retries status moves with backoff; run it off the
+	// caller's goroutine so webhook and poll handlers are never blocked on a
+	// slow or failing tracker.
+	go s.handleAgentFailureFeedback(f, token)
 }
 
 type linearGraphQLError struct {
@@ -169,11 +174,29 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 	return false
 }
 
+var trackerAPIErrStatusRe = regexp.MustCompile(`(?i)\bAPI error (\d{3})\b`)
+
+// isPermanentTrackerMoveErr reports whether a tracker move failed for a
+// reason retrying cannot fix (bad token, missing issue, insufficient scope),
+// so retryTrackerMove fails fast instead of sleeping through doomed attempts.
+func isPermanentTrackerMoveErr(err error) bool {
+	msg := err.Error()
+	if m := trackerAPIErrStatusRe.FindStringSubmatch(msg); m != nil {
+		code, _ := strconv.Atoi(m[1])
+		return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+	}
+	return strings.Contains(msg, "not found")
+}
+
 func (s *Server) retryTrackerMove(op string, fn func() error) error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err = fn(); err == nil {
 			return nil
+		}
+		if isPermanentTrackerMoveErr(err) {
+			log.Printf("[tracker-move] %s failed permanently, not retrying: %v", op, err)
+			return err
 		}
 		log.Printf("[tracker-move] %s attempt %d/3 failed: %v", op, attempt+1, err)
 		if attempt < 2 {

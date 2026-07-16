@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,9 +142,7 @@ func TestWorkflowPollCreateFailureFeedbackMovesAndComments(t *testing.T) {
 				tc.ref.JiraTracker = workspaceIssueTracker{BaseURL: tracker.URL, Username: "user", Token: "token"}
 			}
 			s.notifyWorkflowCreateFailure(workspace, workflow, tc.ref, triggerActor{}, fmt.Errorf("Bootstrap failed: HTTP 500"))
-			if tracker.comments != 1 || tracker.moves != 1 {
-				t.Fatalf("comments=%d moves=%d, want one of each", tracker.comments, tracker.moves)
-			}
+			tracker.waitForCounts(t, 1, 1)
 		})
 	}
 }
@@ -159,9 +158,7 @@ func TestJiraWebhookCreateFailureFeedbackMovesAndComments(t *testing.T) {
 	SaveWorkspaceForTest(t, ws, []*types.WorkflowConfig{w})
 	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", tracker.URL, "user", "token", "")
 	s.notifyWorkflowCreateFailure(ws, w, workflowIssueRef{Integration: "jira", IssueID: "PROJ-1", JiraTracker: workspaceIssueTracker{BaseURL: tracker.URL, Username: "user", Token: "token"}}, triggerActor{}, fmt.Errorf("Bootstrap failed"))
-	if tracker.comments != 1 || tracker.moves != 1 {
-		t.Fatalf("comments=%d moves=%d, want one of each", tracker.comments, tracker.moves)
-	}
+	tracker.waitForCounts(t, 1, 1)
 }
 
 func TestFactoryAgentStopMovesOnlyWhenErrorStatusConfigured(t *testing.T) {
@@ -174,8 +171,8 @@ func TestFactoryAgentStopMovesOnlyWhenErrorStatusConfigured(t *testing.T) {
 			s, _ := NewTestServerWithConfig(t, &types.HubConfig{Integrations: &types.IntegrationsConfig{Jira: []*types.JiraIntegrationConfig{{Workspace: "workspace", BaseURL: tracker.URL, Token: "token"}}}}, "", "", "")
 			s.trackerMoveBackoff = func(int) time.Duration { return 0 }
 			s.commentAgentStopToTracker("claw", &types.FactoryConfig{Integration: "jira", Workspace: "workspace", AgentStatusError: tc.status}, "PROJ-1", "failed")
-			if tracker.comments != 1 || tracker.moves != tc.wantMoves {
-				t.Fatalf("comments=%d moves=%d, want 1/%d", tracker.comments, tracker.moves, tc.wantMoves)
+			if c, m := tracker.comments.Load(), tracker.moves.Load(); c != 1 || m != int64(tc.wantMoves) {
+				t.Fatalf("comments=%d moves=%d, want 1/%d", c, m, tc.wantMoves)
 			}
 		})
 	}
@@ -185,8 +182,15 @@ func TestRetryTrackerMove(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
 		failures, wantCalls int
+		errMsg              string
 		wantErr             bool
-	}{{"succeeds third attempt", 2, 3, false}, {"gives up", 3, 3, true}} {
+	}{
+		{"succeeds third attempt", 2, 3, "temporary", false},
+		{"gives up", 3, 3, "temporary", true},
+		{"fails fast on permanent API error", 3, 1, "jira transition API error 404: gone", true},
+		{"fails fast on missing entity", 3, 1, "issue or state not found", true},
+		{"retries rate limiting", 3, 3, "github API error 429: slow down", true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
 			s.trackerMoveBackoff = func(int) time.Duration { return 0 }
@@ -194,7 +198,7 @@ func TestRetryTrackerMove(t *testing.T) {
 			err := s.retryTrackerMove("test", func() error {
 				calls++
 				if calls <= tc.failures {
-					return fmt.Errorf("no")
+					return fmt.Errorf("%s", tc.errMsg)
 				}
 				return nil
 			})
@@ -207,7 +211,24 @@ func TestRetryTrackerMove(t *testing.T) {
 
 type failureFeedbackTracker struct {
 	*httptest.Server
-	comments, moves int
+	comments, moves atomic.Int64
+}
+
+// waitForCounts polls until the tracker has received the expected number of
+// comment and move calls; feedback delivery runs on its own goroutine.
+func (m *failureFeedbackTracker) waitForCounts(t *testing.T, wantComments, wantMoves int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, mv := m.comments.Load(), m.moves.Load()
+		if c == wantComments && mv == wantMoves {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("comments=%d moves=%d, want %d/%d", c, mv, wantComments, wantMoves)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func newFailureFeedbackTracker(t *testing.T) *failureFeedbackTracker {
@@ -221,31 +242,31 @@ func newFailureFeedbackTracker(t *testing.T) *failureFeedbackTracker {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&q)
 			if strings.Contains(q.Query, "commentCreate") {
-				m.comments++
+				m.comments.Add(1)
 				json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"commentCreate": map[string]any{"success": true}}})
 				return
 			}
 			if strings.Contains(q.Query, "issueUpdate") {
-				m.moves++
+				m.moves.Add(1)
 				json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issueUpdate": map[string]any{"success": true}}})
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issue": map[string]any{"id": "id", "team": map[string]any{"states": map[string]any{"nodes": []map[string]string{{"id": "state", "name": "Error"}}}}}}})
 		case strings.Contains(r.URL.Path, "/comments") || strings.HasSuffix(r.URL.Path, "/comment"):
-			m.comments++
+			m.comments.Add(1)
 			w.WriteHeader(http.StatusCreated)
 		case strings.HasSuffix(r.URL.Path, "/labels"):
-			m.moves++
+			m.moves.Add(1)
 			json.NewEncoder(w).Encode([]string{"Error"})
 		case strings.HasSuffix(r.URL.Path, "/transitions") && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]any{"transitions": []map[string]any{{"id": "1", "name": "Error", "to": map[string]string{"name": "Error"}}}})
 		case strings.HasSuffix(r.URL.Path, "/transitions"):
-			m.moves++
+			m.moves.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		case r.URL.Path == "/api/v3/workflows":
 			json.NewEncoder(w).Encode([]map[string]any{{"states": []map[string]any{{"id": float64(1), "name": "Error"}}}})
 		case strings.Contains(r.URL.Path, "/api/v3/stories/") && r.Method == http.MethodPut:
-			m.moves++
+			m.moves.Add(1)
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
