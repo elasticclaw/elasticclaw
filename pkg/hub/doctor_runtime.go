@@ -11,17 +11,18 @@ const (
 	runtimeReaperHint             = " The periodic liveness reaper (pkg/hub/reaper.go) should clear these; a nonzero steady-state count means the reaper is broken or disabled."
 	runtimeBootReconciliationHint = " Boot reconciliation on hub restart (pkg/hub/reaper.go reconcileOnBoot) repairs these; a persistent count means they have survived restarts or the hub has not restarted since they got stuck."
 	runtimeAgeMarginHint          = " This check's threshold is twice the configured grace period to allow for the reaper's observation window."
+	runtimeCheckpointMarginHint   = " This check's threshold is twice the configured provisioning grace to avoid flagging healthy in-flight checkpoints."
 )
 
 // checkRuntimeState reports records which the liveness reaper should have repaired.
-func (s *Server) checkRuntimeState(_ context.Context) []DoctorCheck {
+func (s *Server) checkRuntimeState(ctx context.Context) []DoctorCheck {
 	cfg, current := s.livenessSettings(), s.reaperNow()
 	var checks []DoctorCheck
 
 	appendTimestampCheck := func(title, hint, query string, args ...any) {
 		var count int
 		var oldest sql.NullInt64
-		if err := s.db.QueryRow(query, args...).Scan(&count, &oldest); err != nil {
+		if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count, &oldest); err != nil {
 			checks = append(checks, runtimeQueryErrorCheck(title, err))
 			return
 		}
@@ -42,13 +43,13 @@ func (s *Server) checkRuntimeState(_ context.Context) []DoctorCheck {
 	appendTimestampCheck("Unassigned claimed factory triggers", runtimeReaperHint+runtimeAgeMarginHint, `
 		SELECT COUNT(*), MIN(CAST(strftime('%s', created_at) AS INTEGER)) FROM factory_triggers
 		WHERE status='claimed' AND claw_id='' AND created_at < ?`, current.Add(-2*cfg.claimTTL))
-	appendTimestampCheck("Stuck creating checkpoints", runtimeBootReconciliationHint+runtimeAgeMarginHint, `
+	appendTimestampCheck("Stuck creating checkpoints", runtimeBootReconciliationHint+runtimeCheckpointMarginHint, `
 		SELECT COUNT(*), MIN(CAST(strftime('%s', created_at) AS INTEGER)) FROM claw_checkpoints
 		WHERE status='creating' AND created_at < ?`, current.Add(-2*cfg.provisioningMaxAge))
 
 	var timeoutCount int
 	var oldestTimeout sql.NullInt64
-	if err := s.db.QueryRow(`
+	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*), MIN(tr.timeout_at) FROM task_runs tr
 		JOIN claws c ON c.id=tr.claw_id
 		WHERE tr.timeout_at > 0 AND tr.timeout_at < ?
