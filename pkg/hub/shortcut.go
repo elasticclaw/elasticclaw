@@ -385,6 +385,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 						continue
 					}
 					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
+					s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "shortcut", IssueID: storyID}, triggerActor{}, err)
 				}
 			}
 		}

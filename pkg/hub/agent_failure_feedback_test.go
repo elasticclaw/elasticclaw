@@ -283,6 +283,14 @@ func TestCommentWorkflowAgentStopToTrackerHandlesMissingTriggerConfig(t *testing
 	}
 }
 
+func TestFailureFeedbackWorkflowIntegrationsIncludeShortcut(t *testing.T) {
+	for _, integration := range []string{"github-issues", "linear", "shortcut", "jira"} {
+		if !isFailureFeedbackWorkflowIntegration(integration) {
+			t.Errorf("isFailureFeedbackWorkflowIntegration(%q) = false, want true", integration)
+		}
+	}
+}
+
 func TestAssignLinearIssueReportsGraphQLErrors(t *testing.T) {
 	srv := newAssignLinearIssueMock(t, func(w http.ResponseWriter) {
 		json.NewEncoder(w).Encode(map[string]interface{}{

@@ -1906,7 +1906,7 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 }
 
 func isFailureFeedbackWorkflowIntegration(integration string) bool {
-	return integration == "github-issues" || integration == "linear" || integration == "jira"
+	return integration == "github-issues" || integration == "linear" || integration == "shortcut" || integration == "jira"
 }
 
 func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineContext, reason string) {
@@ -1945,6 +1945,15 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		feedback.LinearIdentifier = ctx.IssueID
 		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Linear != nil {
 			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Linear.AgentStatusError)
+		}
+		s.handleAgentFailureFeedback(feedback, token)
+	case "shortcut":
+		token := s.resolveShortcutTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
+		if token == "" {
+			return
+		}
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Shortcut != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Shortcut.AgentStatusError)
 		}
 		s.handleAgentFailureFeedback(feedback, token)
 	case "jira":
