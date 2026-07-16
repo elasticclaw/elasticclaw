@@ -361,6 +361,8 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 					continue
 				}
 				log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
+				tracker, _ := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+				s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "jira", IssueID: payload.Issue.Key, JiraTracker: tracker}, triggerActor{}, err)
 			}
 		}
 		for _, workflow := range workspace.Workflows {
@@ -497,7 +499,10 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "jira", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
+		if s.cronScheduler != nil {
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
+		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
 	claimOpen = false
@@ -545,7 +550,10 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 		return err
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "jira", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
+		if s.cronScheduler != nil {
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
+		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false

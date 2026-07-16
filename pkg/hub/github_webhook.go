@@ -937,7 +937,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// the trigger claim active — permanently blocking re-creation for this PR. If
 	// the association fails, tear the claw down and release the claim so poll/webhook
 	// can retry.
-	if err := s.storePRMentionErr(clawID, repoFullName, prNumber, prURL); err != nil {
+	if err := s.storePRMention(clawID, repoFullName, prNumber, prURL); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())

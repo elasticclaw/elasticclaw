@@ -15,7 +15,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 func handleVolumeAttach(ctx context.Context, conn *websocket.Conn, payload json.RawMessage) {
@@ -29,7 +28,7 @@ func handleVolumeAttach(ctx context.Context, conn *websocket.Conn, payload json.
 	if err != nil {
 		ack.Error = err.Error()
 	}
-	_ = wsjson.Write(ctx, conn, hubMsg{Type: "volume_attach_ack", Payload: mustJSON(ack)})
+	_ = writeHubMessage(ctx, conn, hubMsg{Type: "volume_attach_ack", Payload: mustJSON(ack)})
 }
 
 func handleVolumeSync(ctx context.Context, conn *websocket.Conn, payload json.RawMessage) {
@@ -43,7 +42,7 @@ func handleVolumeSync(ctx context.Context, conn *websocket.Conn, payload json.Ra
 	if err != nil {
 		ack.Error = err.Error()
 	}
-	_ = wsjson.Write(ctx, conn, hubMsg{Type: "volume_sync_ack", Payload: mustJSON(ack)})
+	_ = writeHubMessage(ctx, conn, hubMsg{Type: "volume_sync_ack", Payload: mustJSON(ack)})
 }
 
 func attachVolume(ctx context.Context, req types.VolumeAttachPayload) error {
@@ -61,7 +60,7 @@ func attachVolume(ctx context.Context, req types.VolumeAttachPayload) error {
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
 	httpReq.Header.Set("X-Claw-ID", req.ClawID)
 	httpReq.Header.Set("X-Volume-Token", req.LeaseToken)
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := hubTransferHTTPClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -97,7 +96,7 @@ func syncVolume(ctx context.Context, req types.VolumeSyncPayload) error {
 	httpReq.Header.Set("X-Claw-Token", req.ClawToken)
 	httpReq.Header.Set("X-Claw-ID", req.ClawID)
 	httpReq.Header.Set("X-Volume-Token", req.LeaseToken)
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := hubTransferHTTPClient.Do(httpReq)
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		<-writeDone

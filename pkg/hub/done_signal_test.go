@@ -447,3 +447,36 @@ func TestHandleClawDoneSignal_IssueLessInteractiveClawIsNoOp(t *testing.T) {
 		t.Fatalf("status = %q, want connected", status)
 	}
 }
+
+func TestHandleClawDoneSignal_DoesNotMoveTrackerWhenTerminalTxFails(t *testing.T) {
+	requests := make(chan struct{}, 1)
+	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1"}}}`))
+	}))
+	t.Cleanup(tracker.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:        "test-token",
+		Integrations: &types.IntegrationsConfig{Linear: []*types.LinearIntegrationConfig{{Workspace: "workspace", Token: "token"}}},
+		Factories:    []*types.FactoryConfig{{Name: "factory", Integration: "linear", Workspace: "workspace", FinishedStatus: "Done"}},
+	}, "", tracker.URL, "")
+	const clawID = "claw-done-closed-db"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,linear_issue_id,tags,created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "test-claw", "base", "connected", "ENG-1", `["factory:factory"]`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_terminal_tx BEFORE UPDATE OF status ON claws WHEN NEW.status='idle' BEGIN SELECT RAISE(ABORT, 'terminal transaction failed'); END`); err != nil {
+		t.Fatalf("create terminal transaction failure trigger: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/42")
+
+	select {
+	case <-requests:
+		t.Fatal("tracker was called although terminal DB transaction failed")
+	default:
+	}
+}

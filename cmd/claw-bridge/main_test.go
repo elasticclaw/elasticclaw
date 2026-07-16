@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -699,6 +701,129 @@ func TestGatewayReadLoopFailsPendingRequestsOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestDeliverInFlightDoesNotBlockWhenTerminalResultRacesTeardown(t *testing.T) {
+	inf := &inFlightState{done: make(chan agentResult, 1)}
+	inf.done <- agentResult{text: "already complete"}
+
+	finished := make(chan struct{})
+	go func() {
+		deliverInFlight(inf, agentResult{text: "duplicate lifecycle end"})
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("terminal lifecycle delivery blocked on a full in-flight channel")
+	}
+}
+
+func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
+	inf := &inFlightState{done: make(chan agentResult, 1)}
+	gs := &gatewaySession{sessionKey: "old-session", inFlight: inf}
+
+	gs.setSessionKey("new-session")
+
+	select {
+	case result := <-inf.done:
+		if result.err == nil || !strings.Contains(result.err.Error(), "session key rotated") {
+			t.Fatalf("rotation result = %#v, want session key rotation error", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session key rotation did not fail the in-flight turn")
+	}
+}
+
+// stableGoroutineCount samples runtime.NumGoroutine until two consecutive
+// readings agree, so leak assertions start from a settled baseline instead of
+// a count inflated by goroutines still winding down from earlier tests.
+func stableGoroutineCount(t *testing.T) int {
+	t.Helper()
+	prev := runtime.NumGoroutine()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		cur := runtime.NumGoroutine()
+		if cur == prev {
+			return cur
+		}
+		prev = cur
+	}
+	return prev
+}
+
+func TestHubKeepalivesExitWhenConnectionContextIsCancelled(t *testing.T) {
+	before := stableGoroutineCount(t)
+	for range 10 {
+		ctx, cancel := context.WithCancel(context.Background())
+		startHubKeepalives(ctx, func(context.Context) error { return nil }, func() {}, func() {})
+		cancel()
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > before+2 {
+		t.Fatalf("goroutines after cancelled hub connections = %d, want at most %d", got, before+2)
+	}
+}
+
+// TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects drives the real
+// runHubLoop through several connect/disconnect cycles against an in-process
+// fake hub and asserts the keepalive goroutines started per connection do not
+// outlive it. This fails if the heartbeat/ping goroutines are keyed to the
+// process-lifetime context instead of the per-connection context.
+func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		var reg hubMsg
+		if err := wsjson.Read(r.Context(), conn, &reg); err != nil {
+			return
+		}
+		if reg.Type != "register" {
+			t.Errorf("first frame type = %q, want register", reg.Type)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
+			return
+		}
+		// Close immediately to force the bridge onto its reconnect path.
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	gwClient := &gatewayClient{addr: "127.0.0.1:0"}
+	gwSession := &gatewaySession{pending: make(map[string]chan gwFrame)}
+	proxy := newHTTPProxy(nil)
+	queue := &msgQueue{}
+
+	before := stableGoroutineCount(t)
+	const cycles = 5
+	for range cycles {
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue)
+		if err == nil {
+			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > before+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > before+2 {
+		t.Fatalf("goroutines after %d hub reconnect cycles = %d, want at most %d (baseline %d)", cycles, got, before+2, before)
+	}
+}
+
 func TestIsRecoverableSessionSendError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1007,3 +1132,149 @@ func testPEM(typ string) string {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestMsgQueueReplyNeverExpires(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("completed reply")
+	// Backdate well beyond the TTL — replies must still survive.
+	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
+
+	out := q.drain()
+	if len(out) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(out))
+	}
+	if out[0].kind != queuedReply || out[0].content != "completed reply" {
+		t.Fatalf("expected surviving reply, got kind=%d content=%q", out[0].kind, out[0].content)
+	}
+}
+
+func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
+	q := &msgQueue{}
+	q.pushInput("stale user input")
+	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
+
+	out := q.drain()
+	if len(out) != 1 {
+		t.Fatalf("expected 1 entry (notice only), got %d", len(out))
+	}
+	notice := out[0]
+	if notice.kind != queuedNotice {
+		t.Fatalf("expected queuedNotice, got kind=%d", notice.kind)
+	}
+	if notice.content == "stale user input" {
+		t.Fatalf("raw input must not be returned")
+	}
+	if !strings.Contains(notice.content, "dropped") {
+		t.Fatalf("notice should mention the drop: %q", notice.content)
+	}
+	if !strings.Contains(notice.content, "stale user input") {
+		t.Fatalf("notice should include the preview: %q", notice.content)
+	}
+}
+
+func TestMsgQueueOverflowEvictsOldestInputAndSurfacesNotice(t *testing.T) {
+	q := &msgQueue{}
+	for i := 0; i < msgQueueMax+5; i++ {
+		q.pushInput(fmt.Sprintf("input-%d", i))
+	}
+	if len(q.msgs) != msgQueueMax {
+		t.Fatalf("expected queue capped at %d, got %d", msgQueueMax, len(q.msgs))
+	}
+	// The 5 oldest inputs (input-0..input-4) must have been evicted.
+	if q.msgs[0].content != "input-5" {
+		t.Fatalf("expected oldest surviving input to be input-5, got %q", q.msgs[0].content)
+	}
+
+	out := q.drain()
+	if len(out) == 0 || out[0].kind != queuedNotice {
+		t.Fatalf("expected a leading notice about evictions")
+	}
+	if !strings.Contains(out[0].content, "5 queued message") {
+		t.Fatalf("notice should count the 5 evictions: %q", out[0].content)
+	}
+
+	// Replies must never be evicted, even when the queue is full.
+	q2 := &msgQueue{}
+	for i := 0; i < msgQueueMax; i++ {
+		q2.pushReply(fmt.Sprintf("reply-%d", i))
+	}
+	q2.pushReply("reply-overflow")
+	if len(q2.msgs) != msgQueueMax+1 {
+		t.Fatalf("expected replies to grow beyond cap, got %d", len(q2.msgs))
+	}
+	if q2.dropped != 0 {
+		t.Fatalf("expected no drops when queue is full of replies, got %d", q2.dropped)
+	}
+}
+
+func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("finished reply")
+
+	var delivered []string
+	deliver := func(role, content string) error {
+		if role != "claw" {
+			t.Fatalf("expected role claw, got %q", role)
+		}
+		delivered = append(delivered, content)
+		return nil
+	}
+	runTurn := func(content string) {
+		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if len(delivered) != 1 || delivered[0] != "finished reply" {
+		t.Fatalf("expected reply delivered exactly once, got %v", delivered)
+	}
+}
+
+func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
+	q := &msgQueue{}
+	q.pushReply("undelivered reply")
+	originalAt := q.msgs[0].queuedAt
+
+	deliver := func(role, content string) error {
+		return errString("hub write failed")
+	}
+	runTurn := func(content string) {
+		t.Fatalf("runTurn must not be called")
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if len(q.msgs) != 1 {
+		t.Fatalf("expected reply re-queued, got %d entries", len(q.msgs))
+	}
+	if q.msgs[0].kind != queuedReply || q.msgs[0].content != "undelivered reply" {
+		t.Fatalf("expected the reply back in the queue, got %+v", q.msgs[0])
+	}
+	if !q.msgs[0].queuedAt.Equal(originalAt) {
+		t.Fatalf("expected original queuedAt preserved: got %v want %v", q.msgs[0].queuedAt, originalAt)
+	}
+}
+
+func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
+	q := &msgQueue{}
+	q.pushInput("do the work")
+
+	var deliverCalled bool
+	deliver := func(role, content string) error {
+		deliverCalled = true
+		return nil
+	}
+	var ran []string
+	runTurn := func(content string) {
+		ran = append(ran, content)
+	}
+
+	replayQueued(q, deliver, runTurn)
+
+	if deliverCalled {
+		t.Fatalf("deliver must not be called for a queued input")
+	}
+	if len(ran) != 1 || ran[0] != "do the work" {
+		t.Fatalf("expected runTurn invoked with the input, got %v", ran)
+	}
+}

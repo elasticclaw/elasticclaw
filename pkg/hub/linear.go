@@ -412,28 +412,13 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 }
 
 func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, createErr error) {
-	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.Linear == nil {
-		return
-	}
-	token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
-	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
-		return
-	}
-	s.handleAgentFailureFeedback(agentFailureFeedback{
-		Integration:      "linear",
-		IssueID:          payload.Data.Identifier,
-		LinearIdentifier: payload.Data.Identifier,
-		TriggerActor: triggerActor{
-			ID:    payload.Actor.ID,
-			Type:  payload.Actor.Type,
-			Name:  payload.Actor.Name,
-			Email: payload.Actor.Email,
-			URL:   payload.Actor.URL,
-		},
-		AgentStatusError: strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError),
-		Failure:          classifyAgentFailure(createErr.Error()),
-	}, token)
+	s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "linear", IssueID: payload.Data.Identifier, LinearIdentifier: payload.Data.Identifier}, triggerActor{
+		ID:    payload.Actor.ID,
+		Type:  payload.Actor.Type,
+		Name:  payload.Actor.Name,
+		Email: payload.Actor.Email,
+		URL:   payload.Actor.URL,
+	}, createErr)
 }
 
 func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
@@ -496,9 +481,9 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "linear", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
@@ -573,9 +558,9 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return err
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
@@ -665,9 +650,12 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
-	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "canceled", "issue left trigger status", terminalTxOpts{})
+	if err != nil || !applied {
+		return
+	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "canceled", "issue left trigger status")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 	// Notify dashboards so the card disappears immediately
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -1129,7 +1117,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 			provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
 		} else {
 			providerID := "noop-vm-" + clawID[:8]
-			_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
+			_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
 		}
 	default:
 		provErr = fmt.Errorf("unsupported provider: %s", provider)
@@ -1314,7 +1302,14 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 
 	// Store all validated PRs (idempotent).
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
+			// Resend with ALL original URLs: earlier PRs in the list are already
+			// stored (idempotent), and the retried [DONE] must carry the full set
+			// so pipeline transitions and analytics see the complete PR list.
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
+			return
+		}
 	}
 
 	pipelineHandledDone := false
@@ -1347,6 +1342,17 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			}
 		}
 	}
+	// Persist completion before touching the tracker. This prevents a tracker
+	// move from surviving a process crash while the claw still looks active.
+	if !noPRDoneAllowed {
+		applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", terminalTxOpts{})
+		if err != nil || !applied {
+			return
+		}
+		if s.cronScheduler != nil {
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
+		}
+	}
 
 	// Move the issue to finished_status if configured (agent finished working)
 	// If no finished_status, fall back to done_status for backward compatibility
@@ -1355,60 +1361,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		targetStatus = factory.DoneStatus
 	}
 	if !pipelineHandledDone && targetStatus != "" {
-		switch factory.Integration {
-		case "jira":
-			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
-				if err := s.moveJiraIssue(tracker, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
-				}
-			}
-		case "shortcut":
-			// Shortcut story
-			scToken := s.resolveShortcutToken(factory.Workspace)
-			if scToken != "" {
-				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
-				}
-			}
-		case "github-issues":
-			// GitHub issue
-			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
-			if ghToken != "" {
-				// Parse gh-owner/repo/number from issueID
-				rest := strings.TrimPrefix(issueID, "gh-")
-				lastSlash := strings.LastIndex(rest, "/")
-				if lastSlash > 0 {
-					repo := rest[:lastSlash]
-					issueNumStr := rest[lastSlash+1:]
-					var issueNum int
-					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
-						base := s.githubBaseURL
-						if base == "" {
-							base = "https://api.github.com"
-						}
-						if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
-							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
-						} else {
-							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
-						}
-					}
-				}
-			}
-		default:
-			// Linear issue
-			linearToken := s.resolveLinearTokenForFactory(factory)
-			if linearToken != "" {
-				if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)
-				}
-			}
-		}
+		// The move is retried with backoff; run it off the done-signal path so
+		// a slow or failing tracker cannot delay marking the claw idle.
+		factoryCopy := *factory
+		go s.moveFactoryIssueToStatus(&factoryCopy, issueID, targetStatus)
 	}
 
 	// Keep the claw running — it stays connected to watch for CI failures,
@@ -1419,20 +1375,6 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if noPRDoneAllowed {
 		s.completeNoPRDoneClaw(clawID, tenantID, issueID)
 		return
-	}
-	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
-	if err != nil {
-		return
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil || rowsAffected == 0 {
-		if rowsAffected == 0 {
-			log.Printf("[factory] non-pr completion skipped for claw %s: already deleted or terminal", clawID[:8])
-		}
-		return
-	}
-	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -1454,6 +1396,65 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 }
 
+// moveFactoryIssueToStatus moves a factory-tracked issue to the given
+// tracker status, retrying with backoff on failure.
+func (s *Server) moveFactoryIssueToStatus(factory *types.FactoryConfig, issueID, targetStatus string) {
+	switch factory.Integration {
+	case "jira":
+		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if err := s.retryTrackerMove("move Jira issue", func() error { return s.moveJiraIssue(tracker, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
+			}
+		}
+	case "shortcut":
+		// Shortcut story
+		scToken := s.resolveShortcutToken(factory.Workspace)
+		if scToken != "" {
+			if err := s.retryTrackerMove("move Shortcut story", func() error { return moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
+			}
+		}
+	case "github-issues":
+		// GitHub issue
+		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+		if ghToken != "" {
+			// Parse gh-owner/repo/number from issueID
+			rest := strings.TrimPrefix(issueID, "gh-")
+			lastSlash := strings.LastIndex(rest, "/")
+			if lastSlash > 0 {
+				repo := rest[:lastSlash]
+				issueNumStr := rest[lastSlash+1:]
+				var issueNum int
+				if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					if err := s.retryTrackerMove("move GitHub issue", func() error { return moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base) }); err != nil {
+						log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
+					} else {
+						log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
+					}
+				}
+			}
+		}
+	default:
+		// Linear issue
+		linearToken := s.resolveLinearTokenForFactory(factory)
+		if linearToken != "" {
+			if err := s.retryTrackerMove("move Linear issue", func() error { return s.moveLinearIssueOnServer(linearToken, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)
+			}
+		}
+	}
+}
+
 // completeIssueLessDoneClaw completes a workflow/manual claw that has no
 // tracker issue. PR-bearing runs stay idle to watch their PRs; all other runs
 // use the normal non-PR teardown path.
@@ -1471,22 +1472,28 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 		return
 	}
 	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+			// A failed INSERT leaves the PR untracked, so the watcher would never
+			// detect its merge/close and the claw would stall in 'idle' forever.
+			// Nudge the claw to resend [DONE] instead of idling it.
+			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
+			// Resend with ALL original URLs: earlier PRs in the list are already
+			// stored (idempotent), and the retried [DONE] must carry the full set
+			// so pipeline transitions and analytics see the complete PR list.
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
+			return
+		}
 	}
 	if len(prURLs) == 0 {
 		s.completeNoPRDoneClaw(clawID, tenantID, "")
 		return
 	}
-	res, err := s.db.Exec(`UPDATE claws SET status='idle' WHERE id=? AND status NOT IN ('deleted','error')`, clawID)
-	if err != nil {
-		return
-	}
-	rowsAffected, _ := res.RowsAffected()
-	if rowsAffected == 0 {
+	applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", terminalTxOpts{})
+	if err != nil || !applied {
 		return
 	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -1496,14 +1503,11 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 
 func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	var provider, providerID string
-	_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID)
-	res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id=? AND tenant_id=? AND status NOT IN ('deleted','error')`, clawID, tenantID)
-	if err != nil {
-		log.Printf("[factory] failed to complete non-pr claw %s: %v", clawID, err)
+	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		return
 	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil || rowsAffected == 0 {
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", terminalTxOpts{})
+	if err != nil || !applied {
 		return
 	}
 	s.syncWorkflowVolumes(clawID)
@@ -1519,7 +1523,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		log.Printf("[task-run-analytics] failed to record non-pr completion for claw %s: %v", clawID, err)
 	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.finishRunByClawID(clawID, "completed", "success")
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -1534,7 +1538,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	go func() {
 		s.checkpointBeforeTermination(clawID, "task-completed")
 		if providerID != "" {
-			s.terminateVM(provider, providerID)
+			s.terminateVMForClaw(clawID, provider, providerID)
 		}
 		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id=?`, clawID)
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)

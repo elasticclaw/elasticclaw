@@ -386,6 +386,7 @@ func (s *Server) processShortcutWorkflowEvent(workspaces []*types.WorkspaceConfi
 						continue
 					}
 					log.Printf("[workflow:%s/%s] failed to create claw for %s: %v", workspace.Name, workflow.Name, storyID, err)
+					s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "shortcut", IssueID: storyID}, triggerActor{}, err)
 				}
 			}
 		}
@@ -760,9 +761,9 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("db insert: %w", err)
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
@@ -884,9 +885,9 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
-		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
-			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
 		return fmt.Errorf("complete workflow trigger: %w", err)
 	}
