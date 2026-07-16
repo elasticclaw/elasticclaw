@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,24 @@ func writeGatewayClientConfig(t *testing.T, home, config string) {
 	device := `{"deviceId":"device-1","publicKeyPem":"pub","privateKeyPem":"priv"}`
 	if err := os.WriteFile(filepath.Join(cfgDir, "identity", "device.json"), []byte(device), 0600); err != nil {
 		t.Fatalf("write device config: %v", err)
+	}
+}
+
+func TestMessageDeduperTracksDuplicatesAndEvictsOldest(t *testing.T) {
+	deduper := newMessageDeduper()
+	if deduper.seen("first") {
+		t.Fatal("fresh id reported as already seen")
+	}
+	if !deduper.seen("first") {
+		t.Fatal("repeated id was not reported as seen")
+	}
+	for i := 0; i < 128; i++ {
+		if deduper.seen(fmt.Sprintf("id-%d", i)) {
+			t.Fatalf("fresh id-%d reported as already seen", i)
+		}
+	}
+	if deduper.seen("first") {
+		t.Fatal("oldest id was not evicted after capacity was exceeded")
 	}
 }
 
