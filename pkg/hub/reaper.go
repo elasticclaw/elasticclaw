@@ -255,7 +255,7 @@ func (s *Server) reapOnce() {
 				continue
 			}
 			status, result := pipelineTerminalWorkflowRunResult(*stage.StageByID(c.stageID), true)
-			if applied, e := s.finishClawTerminalTx(c.id, "deleted", "", status, result, false); e == nil && applied {
+			if applied, e := s.finishClawTerminalTx(c.id, "deleted", "", status, result, terminalTxOpts{}); e == nil && applied {
 				log.Printf("[reaper] completed stranded terminal pipeline stage for claw %s", c.id)
 				if s.cronScheduler != nil {
 					s.cronScheduler.releaseClawWorkflowSlot(c.id)

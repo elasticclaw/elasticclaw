@@ -496,7 +496,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		return err
 	}
 	if err := s.completeFactoryTrigger(triggerOwner, "linear", triggerKey, clawID); err != nil {
-		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), false)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
 			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
@@ -573,7 +573,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 		return err
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
-		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), false)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
 			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}
@@ -665,7 +665,7 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "canceled", "issue left trigger status", false)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "canceled", "issue left trigger status", terminalTxOpts{})
 	if err != nil || !applied {
 		return
 	}
@@ -1284,7 +1284,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	// Persist completion before touching the tracker. This prevents a tracker
 	// move from surviving a process crash while the claw still looks active.
 	if !noPRDoneAllowed {
-		applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", false)
+		applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", terminalTxOpts{})
 		if err != nil || !applied {
 			return
 		}
@@ -1408,7 +1408,7 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 		s.completeNoPRDoneClaw(clawID, tenantID, "")
 		return
 	}
-	applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", false)
+	applied, err := s.finishClawTerminalTx(clawID, "idle", "", "completed", "success", terminalTxOpts{})
 	if err != nil || !applied {
 		return
 	}
@@ -1426,7 +1426,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		return
 	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", false)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", terminalTxOpts{})
 	if err != nil || !applied {
 		return
 	}

@@ -1517,7 +1517,7 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		s.syncWorkflowVolumes(clawID)
 
 		status, result := pipelineTerminalWorkflowRunResult(stage, stageActionsSucceeded)
-		applied, err := s.finishClawTerminalTx(clawID, "deleted", "", status, result, false)
+		applied, err := s.finishClawTerminalTx(clawID, "deleted", "", status, result, terminalTxOpts{})
 		if err != nil || !applied {
 			return transitioned, injectDelivered
 		}
@@ -1848,7 +1848,10 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 	// 1. Set terminal status and finish the workflow run atomically.
 	safeReason := firstUsefulFailureLines(sanitizeFailureDetails(reason), 4)
 	commentOwed := hasPipelineCtx && pipelineCtx.Workflow != nil && pipelineCtx.IssueID != "" && isFailureFeedbackWorkflowIntegration(pipelineCtx.Workflow.Integration) || factory != nil && issueID != ""
-	applied, updateErr := s.finishClawTerminalTx(clawID, "error", safeReason, "failed", safeReason, commentOwed)
+	applied, updateErr := s.finishClawTerminalTx(clawID, "error", safeReason, "failed", safeReason, terminalTxOpts{
+		setStopCommentPending: commentOwed,
+		clearProviderID:       skipVMTerminate && providerID != "",
+	})
 	if updateErr != nil {
 		return
 	}
@@ -1857,9 +1860,6 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 	}
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
-	}
-	if skipVMTerminate && providerID != "" {
-		_, _ = s.execStatusLogged("clear provider_id claw "+clawID, `UPDATE claws SET provider_id='' WHERE id=?`, clawID)
 	}
 	{
 		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{

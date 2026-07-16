@@ -28,9 +28,21 @@ func (s *Server) execTerminalStatus(opCtx, query string, args ...any) (sql.Resul
 	return res, retryErr
 }
 
+// terminalTxOpts tunes side effects applied inside the terminal transaction.
+type terminalTxOpts struct {
+	// setStopCommentPending marks the claw as owing an issue-tracker comment,
+	// so the reaper can re-drive delivery after a crash.
+	setStopCommentPending bool
+	// clearProviderID drops the VM handle in the same transaction, for callers
+	// that already know the VM is gone. Clearing it separately after commit
+	// would leave a crash window in which the reaper re-terminates the VM the
+	// caller meant to spare.
+	clearProviderID bool
+}
+
 // finishClawTerminalTx atomically changes a claw's terminal-ish state and its
 // running workflow run. A zero-row claw update is an idempotent no-op.
-func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus, runResult string, setStopCommentPending bool) (bool, error) {
+func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus, runResult string, opts terminalTxOpts) (bool, error) {
 	var last error
 	for attempt := 0; attempt < 2; attempt++ {
 		tx, err := s.db.Begin()
@@ -38,12 +50,12 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 			var res sql.Result
 			switch clawStatus {
 			case "deleted":
-				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='' WHERE id=? AND status != 'deleted'`, clawStatus, clawID)
+				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='' WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, clawID)
 			case "idle":
 				res, err = tx.Exec(`UPDATE claws SET status=? WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, clawID)
 			default:
 				pending := 0
-				if setStopCommentPending {
+				if opts.setStopCommentPending {
 					pending = 1
 				}
 				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='', bootstrap_diagnostic=?, stop_comment_pending=? WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, diagnostic, pending, clawID)
@@ -61,6 +73,9 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 					_ = tx.Rollback()
 					return false, nil
 				}
+			}
+			if err == nil && opts.clearProviderID {
+				_, err = tx.Exec(`UPDATE claws SET provider_id='' WHERE id=?`, clawID)
 			}
 			if err == nil {
 				_, err = tx.Exec(`UPDATE workflow_runs SET status=?, result=?, finished_at=? WHERE claw_id=? AND status='running'`, runStatus, runResult, time.Now().UTC(), clawID)

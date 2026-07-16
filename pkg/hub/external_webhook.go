@@ -328,7 +328,7 @@ func (s *Server) processExternalFactoryTrigger(factory *types.FactoryConfig, pay
 	}
 
 	if err := s.completeFactoryTrigger(factory.Name, "external", triggerKey, clawID); err != nil {
-		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), false)
+		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
 			s.cronScheduler.releaseClawWorkflowSlot(clawID)
 		}

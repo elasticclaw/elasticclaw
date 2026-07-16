@@ -1184,7 +1184,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	s.checkpointBeforeTermination(clawID, "pr-merged")
 
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "PR merged", false)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "PR merged", terminalTxOpts{})
 	if err != nil || !applied {
 		return false
 	}
