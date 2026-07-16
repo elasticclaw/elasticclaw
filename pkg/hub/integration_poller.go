@@ -262,8 +262,8 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 		base = "https://api.linear.app"
 	}
 
-	query := fmt.Sprintf(`query {
-		issues(filter: { updatedAt: { gt: "%s" } }) {
+	query := fmt.Sprintf(`query($after: String) {
+		issues(filter: { updatedAt: { gt: "%s" } }, first: 100, after: $after) {
 			nodes {
 				id
 				identifier
@@ -276,79 +276,89 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				labels { nodes { name } }
 				assignee { name }
 			}
+			pageInfo { hasNextPage endCursor }
 		}
 	}`, since)
-
-	body := map[string]interface{}{"query": query}
-	jsonBody, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", base+"/graphql", bytes.NewReader(jsonBody))
-	req.Header.Set("Authorization", token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("linear API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Data struct {
-			Issues struct {
-				Nodes []struct {
-					ID          string `json:"id"`
-					Identifier  string `json:"identifier"`
-					Title       string `json:"title"`
-					Description string `json:"description"`
-					URL         string `json:"url"`
-					UpdatedAt   string `json:"updatedAt"`
-					State       struct {
-						Name string `json:"name"`
-					} `json:"state"`
-					Team struct {
-						Key  string `json:"key"`
-						Name string `json:"name"`
-					} `json:"team"`
-					Labels struct {
-						Nodes []struct {
-							Name string `json:"name"`
-						} `json:"nodes"`
-					} `json:"labels"`
-					Assignee *struct {
-						Name string `json:"name"`
-					} `json:"assignee"`
-				} `json:"nodes"`
-			} `json:"issues"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse linear response: %w", err)
-	}
-
 	var issues []linearPollIssue
-	for _, n := range result.Data.Issues.Nodes {
-		li := linearPollIssue{
-			ID:          n.ID,
-			Identifier:  n.Identifier,
-			Title:       n.Title,
-			Description: n.Description,
-			URL:         n.URL,
-			UpdatedAt:   n.UpdatedAt,
-			State:       n.State,
-			Team:        n.Team,
-			Assignee:    n.Assignee,
+	after := interface{}(nil)
+	for page := 0; page < 20; page++ {
+		body := map[string]interface{}{"query": query, "variables": map[string]interface{}{"after": after}}
+		jsonBody, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", base+"/graphql", bytes.NewReader(jsonBody))
+		req.Header.Set("Authorization", token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
 		}
-		for _, l := range n.Labels.Nodes {
-			label := struct {
-				Name string `json:"name"`
-			}{Name: l.Name}
-			li.Labels = append(li.Labels, label)
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("linear API error %d: %s", resp.StatusCode, string(respBody))
 		}
-		issues = append(issues, li)
+		var result struct {
+			Data struct {
+				Issues struct {
+					Nodes []struct {
+						ID          string `json:"id"`
+						Identifier  string `json:"identifier"`
+						Title       string `json:"title"`
+						Description string `json:"description"`
+						URL         string `json:"url"`
+						UpdatedAt   string `json:"updatedAt"`
+						State       struct {
+							Name string `json:"name"`
+						} `json:"state"`
+						Team struct {
+							Key  string `json:"key"`
+							Name string `json:"name"`
+						} `json:"team"`
+						Labels struct {
+							Nodes []struct {
+								Name string `json:"name"`
+							} `json:"nodes"`
+						} `json:"labels"`
+						Assignee *struct {
+							Name string `json:"name"`
+						} `json:"assignee"`
+					} `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"issues"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("parse linear response: %w", err)
+		}
+		for _, n := range result.Data.Issues.Nodes {
+			li := linearPollIssue{
+				ID:          n.ID,
+				Identifier:  n.Identifier,
+				Title:       n.Title,
+				Description: n.Description,
+				URL:         n.URL,
+				UpdatedAt:   n.UpdatedAt,
+				State:       n.State,
+				Team:        n.Team,
+				Assignee:    n.Assignee,
+			}
+			for _, l := range n.Labels.Nodes {
+				label := struct {
+					Name string `json:"name"`
+				}{Name: l.Name}
+				li.Labels = append(li.Labels, label)
+			}
+			issues = append(issues, li)
+		}
+		if !result.Data.Issues.PageInfo.HasNextPage {
+			return issues, nil
+		}
+		after = result.Data.Issues.PageInfo.EndCursor
+		if page == 19 {
+			log.Printf("[poll-linear] pagination cap reached after fetching %d issues", len(issues))
+		}
 	}
 	return issues, nil
 }
