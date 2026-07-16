@@ -57,3 +57,41 @@ func TestPollHighWaterMarkAdvancesOnlyAfterSuccessfulLinearQuery(t *testing.T) {
 		t.Fatalf("failed query advanced high-water mark to %s", got)
 	}
 }
+
+func TestPollTickAdvancesLinearHighWaterMarkOnlyAfterSuccessfulQuery(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	initial := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	s.setPollHighWaterMark("linear", initial)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`))
+	}))
+	defer server.Close()
+
+	s.linearBaseURL = server.URL
+	s.hubCfg = &types.HubConfig{
+		Factories:    []*types.FactoryConfig{{Name: "code", Integration: "linear", Workspace: "eng"}},
+		Integrations: &types.IntegrationsConfig{Linear: []*types.LinearIntegrationConfig{{Workspace: "eng", Token: "token"}}},
+	}
+
+	s.pollTick()
+	got, ok := s.getPollHighWaterMark("linear")
+	if !ok || !got.Equal(initial) {
+		t.Fatalf("failed poll tick advanced high-water mark to %s, want %s", got, initial)
+	}
+
+	s.pollTick()
+	got, ok = s.getPollHighWaterMark("linear")
+	if !ok || !got.After(initial) {
+		t.Fatalf("successful poll tick high-water mark = %s, want after %s", got, initial)
+	}
+	if attempts != 2 {
+		t.Fatalf("Linear query attempts = %d, want 2", attempts)
+	}
+}
