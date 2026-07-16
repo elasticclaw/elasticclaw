@@ -4921,7 +4921,8 @@ func (s *Server) checkClawStatus() {
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
 			}
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "agent_typing", Payload: map[string]string{"claw_id": id, "status": "idle"}})
-			s.sendNextQueuedMessage(cc)
+			// The idle drain below delivers the next pending message; calling
+			// sendNextQueuedMessage here as well would send two back-to-back.
 			if escalate {
 				go s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false)
 			}
@@ -6783,9 +6784,11 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		return
 	}
 
-	// Re-check the claw is still idle and on the same connection before writing.
+	// Re-check the claw is still idle before writing. A reconnect always
+	// allocates a fresh clawConn, so cc.conn cannot change under us; a write
+	// to a dead socket fails and leaves the row pending for the new connection.
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.conn != conn {
+	if cc.isBusyLocked() {
 		cc.mu.Unlock()
 		return
 	}

@@ -3596,6 +3596,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					return
 				}
 				id, _ := m["id"].(string)
+				if id == "" {
+					log.Printf("[bridge] warning: message without id, dedup disabled for it")
+				}
 				if deduper.seen(id) {
 					log.Printf("[bridge] skipping duplicate message id=%s", id)
 					return

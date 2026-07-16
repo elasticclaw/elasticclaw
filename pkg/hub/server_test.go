@@ -2005,7 +2005,9 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	failedWS := connectTestClaw(t, ts, clawID)
+	s.mu.RLock()
 	cc := s.claws[clawID]
+	s.mu.RUnlock()
 	insertPendingMessage(t, db, clawID, "retry me", now())
 	// Sever the client side abruptly (no close handshake) so the server's
 	// next write to this connection fails, without touching cc.conn directly

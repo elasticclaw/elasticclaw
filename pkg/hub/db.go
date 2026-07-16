@@ -64,7 +64,11 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
-		_, _ = db.Exec(`UPDATE messages SET delivered_at = created_at`)
+		// A failed backfill must abort startup: the column now exists, so a
+		// later start would skip this branch and replay all history as pending.
+		if _, backfillErr := db.Exec(`UPDATE messages SET delivered_at = created_at`); backfillErr != nil {
+			return fmt.Errorf("backfill messages.delivered_at: %w", backfillErr)
+		}
 	}
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
