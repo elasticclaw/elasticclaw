@@ -66,6 +66,13 @@ type hubMsg struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
+func deliverInFlight(inf *inFlightState, result agentResult) {
+	select {
+	case inf.done <- result:
+	default:
+	}
+}
+
 // ─── Inbound message queue ───────────────────────────────────────────────────
 // Queues user messages when the hub connection is temporarily unavailable.
 // Messages older than msgQueueTTL are dropped to prevent unbounded growth.
@@ -864,8 +871,19 @@ func (gs *gatewaySession) getSessionKey() string {
 
 func (gs *gatewaySession) setSessionKey(key string) {
 	gs.sessionMu.Lock()
+	oldKey := gs.sessionKey
 	gs.sessionKey = key
 	gs.sessionMu.Unlock()
+
+	if oldKey == "" || oldKey == key {
+		return
+	}
+	gs.infMu.RLock()
+	inf := gs.inFlight
+	gs.infMu.RUnlock()
+	if inf != nil {
+		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway session key rotated")})
+	}
 }
 
 func (gs *gatewaySession) currentConn() *websocket.Conn {
@@ -1141,10 +1159,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			inf := gs.inFlight
 			gs.infMu.RUnlock()
 			if inf != nil {
-				select {
-				case inf.done <- agentResult{err: fmt.Errorf("gateway disconnected")}:
-				default:
-				}
+				deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway disconnected")})
 			}
 			if gs.client == nil {
 				return
@@ -1273,7 +1288,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				switch agentPayload.Data.Phase {
 				case "end":
 					log.Printf("[gateway] agent turn complete")
-					inf.done <- agentResult{text: strings.TrimSpace(inf.fullText.String())}
+					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.fullText.String())})
 				case "error":
 					msg := agentPayload.Data.Error
 					if msg == "" {
@@ -1284,7 +1299,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					}
 					log.Printf("[gateway] agent turn error: %s", msg)
 					inf.emitActivity(cleanAgentActivity(agentActivity{Kind: "session_error", Stream: "lifecycle", Phase: "error", Error: msg}))
-					inf.done <- agentResult{err: fmt.Errorf("%s", msg)}
+					deliverInFlight(inf, agentResult{err: fmt.Errorf("%s", msg)})
 				}
 			}
 		}
@@ -1567,10 +1582,7 @@ func markGatewayProcessExited() {
 	inf := gs.inFlight
 	gs.infMu.RUnlock()
 	if inf != nil {
-		select {
-		case inf.done <- agentResult{err: fmt.Errorf("gateway process exited")}:
-		default:
-		}
+		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway process exited")})
 	}
 }
 

@@ -699,6 +699,39 @@ func TestGatewayReadLoopFailsPendingRequestsOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestDeliverInFlightDoesNotBlockWhenTerminalResultRacesTeardown(t *testing.T) {
+	inf := &inFlightState{done: make(chan agentResult, 1)}
+	inf.done <- agentResult{text: "already complete"}
+
+	finished := make(chan struct{})
+	go func() {
+		deliverInFlight(inf, agentResult{text: "duplicate lifecycle end"})
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("terminal lifecycle delivery blocked on a full in-flight channel")
+	}
+}
+
+func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
+	inf := &inFlightState{done: make(chan agentResult, 1)}
+	gs := &gatewaySession{sessionKey: "old-session", inFlight: inf}
+
+	gs.setSessionKey("new-session")
+
+	select {
+	case result := <-inf.done:
+		if result.err == nil || !strings.Contains(result.err.Error(), "session key rotated") {
+			t.Fatalf("rotation result = %#v, want session key rotation error", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session key rotation did not fail the in-flight turn")
+	}
+}
+
 func TestIsRecoverableSessionSendError(t *testing.T) {
 	tests := []struct {
 		name string
