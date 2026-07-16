@@ -412,28 +412,13 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 }
 
 func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, createErr error) {
-	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.Linear == nil {
-		return
-	}
-	token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
-	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
-		return
-	}
-	s.handleAgentFailureFeedback(agentFailureFeedback{
-		Integration:      "linear",
-		IssueID:          payload.Data.Identifier,
-		LinearIdentifier: payload.Data.Identifier,
-		TriggerActor: triggerActor{
-			ID:    payload.Actor.ID,
-			Type:  payload.Actor.Type,
-			Name:  payload.Actor.Name,
-			Email: payload.Actor.Email,
-			URL:   payload.Actor.URL,
-		},
-		AgentStatusError: strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError),
-		Failure:          classifyAgentFailure(createErr.Error()),
-	}, token)
+	s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "linear", IssueID: payload.Data.Identifier, LinearIdentifier: payload.Data.Identifier}, triggerActor{
+		ID:    payload.Actor.ID,
+		Type:  payload.Actor.Type,
+		Name:  payload.Actor.Name,
+		Email: payload.Actor.Email,
+		URL:   payload.Actor.URL,
+	}, createErr)
 }
 
 func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
@@ -1289,7 +1274,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		switch factory.Integration {
 		case "jira":
 			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
-				if err := s.moveJiraIssue(tracker, issueID, targetStatus); err != nil {
+				if err := s.retryTrackerMove("move Jira issue", func() error { return s.moveJiraIssue(tracker, issueID, targetStatus) }); err != nil {
 					log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
 				} else {
 					log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
@@ -1299,7 +1284,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			// Shortcut story
 			scToken := s.resolveShortcutToken(factory.Workspace)
 			if scToken != "" {
-				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus); err != nil {
+				if err := s.retryTrackerMove("move Shortcut story", func() error { return moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus) }); err != nil {
 					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
 				} else {
 					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
@@ -1321,7 +1306,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 						if base == "" {
 							base = "https://api.github.com"
 						}
-						if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
+						if err := s.retryTrackerMove("move GitHub issue", func() error { return moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base) }); err != nil {
 							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
 						} else {
 							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
@@ -1333,7 +1318,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			// Linear issue
 			linearToken := s.resolveLinearTokenForFactory(factory)
 			if linearToken != "" {
-				if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
+				if err := s.retryTrackerMove("move Linear issue", func() error { return s.moveLinearIssueOnServer(linearToken, issueID, targetStatus) }); err != nil {
 					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
 				} else {
 					log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)

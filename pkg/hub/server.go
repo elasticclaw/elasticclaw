@@ -75,7 +75,8 @@ type Server struct {
 	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
 	shortcutBaseURL string
 	// jiraBaseURL overrides the Jira API base for testing.
-	jiraBaseURL string
+	jiraBaseURL        string
+	trackerMoveBackoff func(int) time.Duration
 	// fireworksBaseURL overrides the Fireworks API base for testing (default: https://api.fireworks.ai)
 	fireworksBaseURL          string
 	fireworksModelsMu         sync.Mutex

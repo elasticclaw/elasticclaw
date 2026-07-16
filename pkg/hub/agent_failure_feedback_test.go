@@ -105,6 +105,156 @@ func TestBuildAgentFailureFeedbackCommentDoesNotClaimBotAssignment(t *testing.T)
 	}
 }
 
+// Keep all tracker-specific create-failure feedback assertions at the shared
+// notifier boundary: it is used by both webhook and poll paths.
+func TestWorkflowPollCreateFailureFeedbackMovesAndComments(t *testing.T) {
+	for _, tc := range []struct {
+		name, integration string
+		configure         func(*types.WorkflowTrigger)
+		ref               workflowIssueRef
+	}{
+		{"linear", "linear", func(tr *types.WorkflowTrigger) { tr.Linear = &types.LinearWorkflowTrigger{AgentStatusError: "Error"} }, workflowIssueRef{Integration: "linear", IssueID: "ELA-1", LinearIdentifier: "ELA-1"}},
+		{"shortcut", "shortcut", func(tr *types.WorkflowTrigger) {
+			tr.Shortcut = &types.ShortcutWorkflowTrigger{AgentStatusError: "Error"}
+		}, workflowIssueRef{Integration: "shortcut", IssueID: "sc-1"}},
+		{"github", "github-issues", func(tr *types.WorkflowTrigger) {
+			tr.GitHubIssues = &types.GitHubIssuesWorkflowTrigger{AgentStatusError: "Error"}
+		}, workflowIssueRef{Integration: "github-issues", IssueID: "acme/repo/1", GitHubRepo: "acme/repo", GitHubIssueNum: 1}},
+		{"jira", "jira", func(tr *types.WorkflowTrigger) { tr.Jira = &types.JiraWorkflowTrigger{AgentStatusError: "Error"} }, workflowIssueRef{Integration: "jira", IssueID: "PROJ-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+			tracker := newFailureFeedbackTracker(t)
+			s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, tracker.URL, tracker.URL, tracker.URL)
+			s.jiraBaseURL = tracker.URL
+			s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+			workflow := &types.WorkflowConfig{Name: "workflow", Integration: tc.integration, TriggerStatus: "In Progress", Trigger: &types.WorkflowTrigger{}}
+			tc.configure(workflow.Trigger)
+			workspace := &types.WorkspaceConfig{Name: "workspace"}
+			SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+			if tc.integration == "jira" {
+				SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", tracker.URL, "user", "token", "")
+			} else {
+				SaveWorkspaceIssueTrackerForTest(t, "workspace", tc.integration, "default", "token", "")
+			}
+			if tc.integration == "jira" {
+				tc.ref.JiraTracker = workspaceIssueTracker{BaseURL: tracker.URL, Username: "user", Token: "token"}
+			}
+			s.notifyWorkflowCreateFailure(workspace, workflow, tc.ref, triggerActor{}, fmt.Errorf("Bootstrap failed: HTTP 500"))
+			if tracker.comments != 1 || tracker.moves != 1 {
+				t.Fatalf("comments=%d moves=%d, want one of each", tracker.comments, tracker.moves)
+			}
+		})
+	}
+}
+
+func TestJiraWebhookCreateFailureFeedbackMovesAndComments(t *testing.T) {
+	// Jira carries its resolved tracker into the shared notifier.
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	tracker := newFailureFeedbackTracker(t)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL, s.trackerMoveBackoff = tracker.URL, func(int) time.Duration { return 0 }
+	w := &types.WorkflowConfig{Name: "jira", Integration: "jira", Trigger: &types.WorkflowTrigger{Jira: &types.JiraWorkflowTrigger{AgentStatusError: "Error"}}}
+	ws := &types.WorkspaceConfig{Name: "workspace"}
+	SaveWorkspaceForTest(t, ws, []*types.WorkflowConfig{w})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", tracker.URL, "user", "token", "")
+	s.notifyWorkflowCreateFailure(ws, w, workflowIssueRef{Integration: "jira", IssueID: "PROJ-1", JiraTracker: workspaceIssueTracker{BaseURL: tracker.URL, Username: "user", Token: "token"}}, triggerActor{}, fmt.Errorf("Bootstrap failed"))
+	if tracker.comments != 1 || tracker.moves != 1 {
+		t.Fatalf("comments=%d moves=%d, want one of each", tracker.comments, tracker.moves)
+	}
+}
+
+func TestFactoryAgentStopMovesOnlyWhenErrorStatusConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		wantMoves    int
+	}{{"configured", "Error", 1}, {"unset", "", 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := newFailureFeedbackTracker(t)
+			s, _ := NewTestServerWithConfig(t, &types.HubConfig{Integrations: &types.IntegrationsConfig{Jira: []*types.JiraIntegrationConfig{{Workspace: "workspace", BaseURL: tracker.URL, Token: "token"}}}}, "", "", "")
+			s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+			s.commentAgentStopToTracker("claw", &types.FactoryConfig{Integration: "jira", Workspace: "workspace", AgentStatusError: tc.status}, "PROJ-1", "failed")
+			if tracker.comments != 1 || tracker.moves != tc.wantMoves {
+				t.Fatalf("comments=%d moves=%d, want 1/%d", tracker.comments, tracker.moves, tc.wantMoves)
+			}
+		})
+	}
+}
+
+func TestRetryTrackerMove(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		failures, wantCalls int
+		wantErr             bool
+	}{{"succeeds third attempt", 2, 3, false}, {"gives up", 3, 3, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+			s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+			calls := 0
+			err := s.retryTrackerMove("test", func() error {
+				calls++
+				if calls <= tc.failures {
+					return fmt.Errorf("no")
+				}
+				return nil
+			})
+			if calls != tc.wantCalls || (err != nil) != tc.wantErr {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+type failureFeedbackTracker struct {
+	*httptest.Server
+	comments, moves int
+}
+
+func newFailureFeedbackTracker(t *testing.T) *failureFeedbackTracker {
+	t.Helper()
+	m := &failureFeedbackTracker{}
+	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/graphql":
+			var q struct {
+				Query string `json:"query"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&q)
+			if strings.Contains(q.Query, "commentCreate") {
+				m.comments++
+				json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"commentCreate": map[string]any{"success": true}}})
+				return
+			}
+			if strings.Contains(q.Query, "issueUpdate") {
+				m.moves++
+				json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issueUpdate": map[string]any{"success": true}}})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issue": map[string]any{"id": "id", "team": map[string]any{"states": map[string]any{"nodes": []map[string]string{{"id": "state", "name": "Error"}}}}}}})
+		case strings.Contains(r.URL.Path, "/comments") || strings.HasSuffix(r.URL.Path, "/comment"):
+			m.comments++
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasSuffix(r.URL.Path, "/labels"):
+			m.moves++
+			json.NewEncoder(w).Encode([]string{"Error"})
+		case strings.HasSuffix(r.URL.Path, "/transitions") && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{"transitions": []map[string]any{{"id": "1", "name": "Error", "to": map[string]string{"name": "Error"}}}})
+		case strings.HasSuffix(r.URL.Path, "/transitions"):
+			m.moves++
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/api/v3/workflows":
+			json.NewEncoder(w).Encode([]map[string]any{{"states": []map[string]any{{"id": float64(1), "name": "Error"}}}})
+		case strings.Contains(r.URL.Path, "/api/v3/stories/") && r.Method == http.MethodPut:
+			m.moves++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(m.Close)
+	return m
+}
+
 func TestCommentWorkflowAgentStopToTrackerHandlesMissingTriggerConfig(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	ghi := newStopFeedbackGitHubMock(t)

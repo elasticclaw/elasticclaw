@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 var issueTrackerHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -32,6 +34,58 @@ type agentFailureFeedback struct {
 	AgentStatusError string
 	Failure          agentFailureMessage
 	ClawID           string
+	JiraTracker      workspaceIssueTracker
+}
+
+// workflowIssueRef contains the tracker-native identity needed to report workflow failures.
+type workflowIssueRef struct {
+	Integration, IssueID, LinearIdentifier, GitHubRepo string
+	GitHubIssueNum                                     int
+	JiraTracker                                        workspaceIssueTracker
+}
+
+func (s *Server) notifyWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, ref workflowIssueRef, actor triggerActor, createErr error) {
+	if workspace == nil || workflow == nil || workflow.Trigger == nil {
+		return
+	}
+	f := agentFailureFeedback{Integration: ref.Integration, IssueID: ref.IssueID, LinearIdentifier: ref.LinearIdentifier, GitHubRepo: ref.GitHubRepo, GitHubIssueNum: ref.GitHubIssueNum, JiraTracker: ref.JiraTracker, TriggerActor: actor, Failure: classifyAgentFailure(createErr.Error())}
+	var token string
+	switch ref.Integration {
+	case "linear":
+		if workflow.Trigger.Linear == nil {
+			return
+		}
+		token = s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError)
+	case "github-issues":
+		if workflow.Trigger.GitHubIssues == nil {
+			return
+		}
+		token = s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.GitHubIssues.AgentStatusError)
+	case "shortcut":
+		if workflow.Trigger.Shortcut == nil {
+			return
+		}
+		token = s.resolveShortcutTokenForWorkflow(workspace.Name, workflow)
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Shortcut.AgentStatusError)
+	case "jira":
+		if workflow.Trigger.Jira == nil {
+			return
+		}
+		if f.JiraTracker.Token == "" {
+			f.JiraTracker, _ = s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+		}
+		token = f.JiraTracker.Token
+		f.AgentStatusError = strings.TrimSpace(workflow.Trigger.Jira.AgentStatusError)
+	default:
+		return
+	}
+	if token == "" {
+		log.Printf("[agent-failure-feedback] workflow %s/%s has no %s token; skipping failure feedback", workspace.Name, workflow.Name, ref.Integration)
+		return
+	}
+	s.handleAgentFailureFeedback(f, token)
 }
 
 type linearGraphQLError struct {
@@ -54,7 +108,9 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 			log.Printf("[agent-failure-feedback] failed to comment GitHub issue %s#%d: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, err)
 		}
 		if feedback.AgentStatusError != "" {
-			if err := githubAPIAddLabel(base, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, token); err != nil {
+			if err := s.retryTrackerMove("mark GitHub issue", func() error {
+				return githubAPIAddLabel(base, feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, token)
+			}); err != nil {
 				log.Printf("[agent-failure-feedback] failed to mark GitHub issue %s#%d with label %q: %v", feedback.GitHubRepo, feedback.GitHubIssueNum, feedback.AgentStatusError, err)
 			}
 		}
@@ -68,7 +124,9 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 			log.Printf("[agent-failure-feedback] failed to comment Linear issue %s: %v", feedback.LinearIdentifier, err)
 		}
 		if feedback.AgentStatusError != "" {
-			if err := s.moveLinearIssueOnServer(token, feedback.LinearIdentifier, feedback.AgentStatusError); err != nil {
+			if err := s.retryTrackerMove("move Linear issue", func() error {
+				return s.moveLinearIssueOnServer(token, feedback.LinearIdentifier, feedback.AgentStatusError)
+			}); err != nil {
 				log.Printf("[agent-failure-feedback] failed to mark Linear issue %s with status %q: %v", feedback.LinearIdentifier, feedback.AgentStatusError, err)
 			}
 		}
@@ -77,7 +135,52 @@ func (s *Server) handleAgentFailureFeedback(feedback agentFailureFeedback, token
 				log.Printf("[agent-failure-feedback] failed to assign Linear issue %s to %q: %v", feedback.LinearIdentifier, feedback.TriggerActor.ID, err)
 			}
 		}
+	case "shortcut":
+		if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, feedback.IssueID, comment); err != nil {
+			log.Printf("[agent-failure-feedback] failed to comment Shortcut story %s: %v", feedback.IssueID, err)
+		}
+		if feedback.AgentStatusError != "" {
+			if err := s.retryTrackerMove("move Shortcut story", func() error {
+				return moveShortcutStory(s.resolveShortcutBaseURL(), token, feedback.IssueID, feedback.AgentStatusError)
+			}); err != nil {
+				log.Printf("[agent-failure-feedback] failed to mark Shortcut story %s: %v", feedback.IssueID, err)
+			}
+		}
+	case "jira":
+		if err := s.commentJiraIssue(feedback.JiraTracker, feedback.IssueID, comment); err != nil {
+			log.Printf("[agent-failure-feedback] failed to comment Jira issue %s: %v", feedback.IssueID, err)
+		}
+		if feedback.AgentStatusError != "" {
+			if err := s.retryTrackerMove("move Jira issue", func() error {
+				return s.moveJiraIssue(feedback.JiraTracker, feedback.IssueID, feedback.AgentStatusError)
+			}); err != nil {
+				log.Printf("[agent-failure-feedback] failed to mark Jira issue %s: %v", feedback.IssueID, err)
+			}
+		}
 	}
+}
+
+func (s *Server) retryTrackerMove(op string, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		log.Printf("[tracker-move] %s attempt %d/3 failed: %v", op, attempt+1, err)
+		if attempt < 2 {
+			d := time.Duration(0)
+			if s.trackerMoveBackoff != nil {
+				d = s.trackerMoveBackoff(attempt)
+			} else if attempt == 0 {
+				d = time.Second
+			} else {
+				d = 4 * time.Second
+			}
+			time.Sleep(d)
+		}
+	}
+	log.Printf("[tracker-move] giving up %s after 3 attempts", op)
+	return err
 }
 
 func (s *Server) triggerActorForClaw(clawID string) triggerActor {

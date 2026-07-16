@@ -399,23 +399,7 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 }
 
 func (s *Server) notifyGitHubIssueWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, createErr error) {
-	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.GitHubIssues == nil {
-		return
-	}
-	token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
-	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no GitHub Issues token; skipping failure feedback", workspace.Name, workflow.Name)
-		return
-	}
-	s.handleAgentFailureFeedback(agentFailureFeedback{
-		Integration:      "github-issues",
-		IssueID:          fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number),
-		GitHubRepo:       payload.Repository.FullName,
-		GitHubIssueNum:   payload.Issue.Number,
-		TriggerActor:     triggerActor{Login: payload.Sender.Login, Type: payload.Sender.Type},
-		AgentStatusError: strings.TrimSpace(workflow.Trigger.GitHubIssues.AgentStatusError),
-		Failure:          classifyAgentFailure(createErr.Error()),
-	}, token)
+	s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "github-issues", IssueID: fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number), GitHubRepo: payload.Repository.FullName, GitHubIssueNum: payload.Issue.Number}, triggerActor{Login: payload.Sender.Login, Type: payload.Sender.Type}, createErr)
 }
 
 func githubIssuesWorkflowTriggerMatches(trigger *types.WorkflowTrigger, payload githubIssuesWebhookPayload, currentStatus string, issueLabels map[string]bool) bool {

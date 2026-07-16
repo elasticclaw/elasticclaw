@@ -395,6 +395,7 @@ func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []
 		log.Printf("[workflow:%s/%s] Linear issue %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, entityID)
 		if err := s.createClawForLinearWorkflow(workspace, workflow, payload, "poll"); err != nil {
 			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, entityID, err)
+			s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "linear", IssueID: entityID, LinearIdentifier: entityID}, triggerActor{}, err)
 		}
 	}
 }
@@ -687,6 +688,7 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 		log.Printf("[workflow:%s/%s] Shortcut story %s matched workflow trigger via poll — creating claw", workspace.Name, workflow.Name, storyID)
 		if err := s.createClawForShortcutWorkflow(workspace, workflow, action, storyID, "poll"); err != nil {
 			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, storyID, err)
+			s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "shortcut", IssueID: storyID}, triggerActor{}, err)
 		}
 	}
 }
@@ -1035,6 +1037,8 @@ func (s *Server) processGitHubIssueWorkflowPollItem(issue githubIssuesPollItem, 
 				continue
 			}
 			log.Printf("[workflow:%s/%s] failed to create claw for %s via poll: %v", workspace.Name, workflow.Name, issueID, err)
+			repo, num, _ := parseGitHubIssueWorkflowID(issueID)
+			s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "github-issues", IssueID: issueID, GitHubRepo: repo, GitHubIssueNum: num}, triggerActor{}, err)
 		}
 	}
 }
@@ -1396,6 +1400,8 @@ func (s *Server) processJiraWorkflowPollItem(issue jiraPollIssue, targets []jira
 				continue
 			}
 			log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s via poll: %v", workspace.Name, workflow.Name, issue.Key, err)
+			tracker, _ := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+			s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "jira", IssueID: issue.Key, JiraTracker: tracker}, triggerActor{}, err)
 		}
 	}
 }
