@@ -8,6 +8,9 @@ import (
 func TestDoneSignalRejectedWhenPRPersistenceFails(t *testing.T) {
 	s := newDoneTestServer(t, "")
 	const clawID = "claw-persistence-failure"
+	if _, err := s.db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,?)`, "test-tenant-id", "Test", "token", "claw-token", now()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,linear_issue_id,created_at) VALUES(?,?,?,?,?,?,?)`, clawID, "test-tenant-id", "test", "elasticclaw", "connected", "LIN-1", now()); err != nil {
 		t.Fatal(err)
 	}
