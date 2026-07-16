@@ -55,6 +55,8 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
+	gatewayRestartCounts map[string]int
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
@@ -226,20 +228,21 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:                db,
-		addr:              addr,
-		hubCfg:            hubCfg,
-		identity:          id,
-		artifacts:         artifacts,
-		claws:             make(map[string]*clawConn),
-		users:             make(map[string]*userConn),
-		dependencyStatus:  newDependencyStatusService(hubCfg),
-		fileAckWaiters:    make(map[string]chan types.FileAck),
-		fileReadWaiters:   make(map[string]chan types.FileReadResp),
-		checkpointWaiters: make(map[string]chan error),
-		webhookDedup:      make(map[string]time.Time),
-		reaperFirstSeen:   make(map[string]time.Time),
-		nowFunc:           now,
+		db:                   db,
+		addr:                 addr,
+		hubCfg:               hubCfg,
+		identity:             id,
+		artifacts:            artifacts,
+		claws:                make(map[string]*clawConn),
+		users:                make(map[string]*userConn),
+		gatewayRestartCounts: make(map[string]int),
+		dependencyStatus:     newDependencyStatusService(hubCfg),
+		fileAckWaiters:       make(map[string]chan types.FileAck),
+		fileReadWaiters:      make(map[string]chan types.FileReadResp),
+		checkpointWaiters:    make(map[string]chan error),
+		webhookDedup:         make(map[string]time.Time),
+		reaperFirstSeen:      make(map[string]time.Time),
+		nowFunc:              now,
 	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
@@ -2173,6 +2176,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
 	s.mu.Lock()
+	if s.gatewayRestartCounts != nil {
+		cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
+	}
 	if old, ok := s.claws[clawID]; ok {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
@@ -2297,10 +2303,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// Log only on status changes, not every heartbeat
 						prevUsage = cc.contextUsage
 						cc.contextUsage = hb.ContextUsage
-						if hb.RestartCount > cc.gatewayRestartCount {
-							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
+						if s.gatewayRestartCounts == nil {
+							s.gatewayRestartCounts = make(map[string]int)
 						}
-						cc.gatewayRestartCount = hb.RestartCount
+						lastRestartCount := s.gatewayRestartCounts[clawID]
+						if hb.RestartCount > lastRestartCount {
+							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
+							s.gatewayRestartCounts[clawID] = hb.RestartCount
+						}
+						cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 						// Promote from 'starting' to 'connected' once gateway is ready.
 						// nil means field absent (old bridge) — treat as ready.
 						if gatewayReadyBool(hb.GatewayReady) {
@@ -3698,8 +3709,10 @@ func daytonaBridgeRunningCommand() string {
 	return `export HOME=/home/daytona
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  echo "claw-bridge running pid=$(cat "$PIDFILE")"
-  exit 0
+  if pgrep -x claw-bridge >/dev/null 2>&1; then
+    echo "claw-bridge running pid=$(cat "$PIDFILE")"
+    exit 0
+  fi
 fi
 if pgrep -x claw-bridge >/dev/null 2>&1; then
   echo "claw-bridge running"
@@ -3835,14 +3848,19 @@ PIDFILE="$1"
 LOG="$2"
 echo $$ > "$PIDFILE"
 trap '\''rm -f "$PIDFILE"'\'' 0
-trap '\''exit 0'\'' TERM INT
+child=""
+trap '\''if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0'\'' TERM INT
 restarts=0
+total_restarts=0
 backoff=5
 while :; do
   started_at=$(date +%%s)
-  export ELASTICCLAW_BRIDGE_RESTARTS="$restarts"
-  /usr/local/bin/claw-bridge >> "$LOG" 2>&1
+  export ELASTICCLAW_BRIDGE_RESTARTS="$total_restarts"
+  /usr/local/bin/claw-bridge >> "$LOG" 2>&1 &
+  child=$!
+  wait "$child"
   rc=$?
+  child=""
   if [ "$rc" -eq 0 ]; then
     echo "[supervisor] claw-bridge exited cleanly" >> "$LOG"
     exit 0
@@ -3857,6 +3875,7 @@ while :; do
     exit 1
   fi
   restarts=$((restarts + 1))
+  total_restarts=$((total_restarts + 1))
   echo "[supervisor] claw-bridge exited (code=$rc); restarting (attempt $restarts/3) in ${backoff}s" >> "$LOG"
   sleep "$backoff"
   backoff=$((backoff * 2))

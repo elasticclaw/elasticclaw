@@ -39,6 +39,9 @@ func TestBootstrapScript_ContainsBootstrapMode(t *testing.T) {
 	assertContains(t, script, `cat > "$HOME/.claw-bridge-supervisor.sh" <<'EOF'`, "writes bootstrap supervisor")
 	assertContains(t, script, `nohup "$HOME/.claw-bridge-supervisor.sh" >> "$HOME/claw-bridge.log" 2>&1 </dev/null &`, "supervisor backgrounded in bootstrap mode")
 	assertContains(t, script, "ELASTICCLAW_BRIDGE_RESTARTS", "supervisor reports cumulative restart count")
+	assertContains(t, script, "total_restarts=0", "supervisor keeps a cumulative counter separate from its retry budget")
+	assertContains(t, script, "unset ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "only the first supervised bridge runs bootstrap")
+	assertContains(t, script, "#!/bin/bash", "persisted bash-quoted environment is sourced by bash")
 	assertContains(t, script, "restarting (attempt $restarts/3)", "supervisor caps restarts")
 	assertContains(t, script, "sleep \"$backoff\"", "supervisor backs off restarts")
 	assertContains(t, script, "ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE", "bootstrap completion notify file set")
@@ -71,6 +74,9 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, cmd, "trap", "installs supervisor exit trap")
 	assertContains(t, cmd, `rm -f "$PIDFILE"`, "removes supervisor pid file on exit")
 	assertContains(t, cmd, "ELASTICCLAW_BRIDGE_RESTARTS", "exports restart count to bridge")
+	assertContains(t, cmd, "total_restarts=0", "keeps a cumulative restart count")
+	assertContains(t, cmd, "child=$!", "supervisor tracks its bridge child")
+	assertContains(t, cmd, "kill \"$child\"", "supervisor forwards termination to its bridge child")
 	assertContains(t, cmd, "restart budget exhausted after 3 attempts", "caps rapid restart flapping")
 	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID='claw-123'`, "passes claw id to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
@@ -78,6 +84,7 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 
 	assertContains(t, running, "claw-bridge.pid", "retry guard checks bridge pid file")
 	assertContains(t, running, "pgrep -x claw-bridge", "retry guard detects already running bridge")
+	assertContains(t, running, "if pgrep -x claw-bridge", "pidfile alone does not mask a crash-looping supervisor")
 }
 
 func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {

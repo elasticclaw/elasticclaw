@@ -329,15 +329,19 @@ export ELASTICCLAW_BOOTSTRAP=1
 export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
 rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
 cat > "$HOME/.claw-bridge-supervisor.sh" <<'EOF'
-#!/bin/sh
+#!/bin/bash
 . "$HOME/.claw-bridge.env"
 export ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
 restarts=0
+total_restarts=0
 backoff=5
 while :; do
   started_at=$(date +%%s)
-  export ELASTICCLAW_BRIDGE_RESTARTS="$restarts"
-  /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1
+  export ELASTICCLAW_BRIDGE_RESTARTS="$total_restarts"
+  /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
+  child=$!
+  trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM INT
+  wait "$child"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "[supervisor] claw-bridge exited cleanly"
@@ -353,7 +357,9 @@ while :; do
     exit 1
   fi
   restarts=$((restarts + 1))
+  total_restarts=$((total_restarts + 1))
   echo "[supervisor] claw-bridge exited (code=$rc); restarting (attempt $restarts/3) in ${backoff}s"
+  unset ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
   sleep "$backoff"
   backoff=$((backoff * 2))
 done
