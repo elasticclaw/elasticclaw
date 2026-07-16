@@ -52,12 +52,14 @@ func TestQueryLinearIssuesDrainsBurstAcrossMultiplePages(t *testing.T) {
 			} `json:"variables"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		page := 0
 		if request.Variables.After != nil {
 			if _, err := fmt.Sscanf(*request.Variables.After, "cursor-%d", &page); err != nil {
-				t.Fatalf("invalid cursor %q: %v", *request.Variables.After, err)
+				t.Errorf("invalid cursor %q: %v", *request.Variables.After, err)
+				return
 			}
 			page++
 		}
