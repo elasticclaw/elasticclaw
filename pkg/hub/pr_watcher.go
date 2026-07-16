@@ -49,12 +49,24 @@ func extractPRs(content string) []struct {
 }
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
-// Also tracks analytics for the first detection of a PR open.
+// Also tracks analytics for the first detection of a PR open. Insert failures are
+// logged and swallowed; callers that must treat the association as a prerequisite
+// (e.g. factory-trigger completion) should use storePRMentionErr instead.
 func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) {
+	if err := s.storePRMentionErr(clawID, repo, prNumber, prURL); err != nil {
+		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
+	}
+}
+
+// storePRMentionErr is the error-returning form of storePRMention. It returns a
+// non-nil error only when the claw_prs association cannot be persisted, so callers
+// can treat the association as a hard prerequisite. Analytics failures remain
+// logged and swallowed.
+func (s *Server) storePRMentionErr(clawID, repo string, prNumber int, prURL string) error {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
-		return
+		return nil
 	}
 
 	// Track analytics: PR was opened (detected for the first time)
@@ -112,8 +124,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
 	); err != nil {
-		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
-		return
+		return fmt.Errorf("persist claw_prs for PR %s#%d: %w", repo, prNumber, err)
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -131,6 +142,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
+	return nil
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.

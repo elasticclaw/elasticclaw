@@ -931,8 +931,19 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		return fmt.Errorf("db insert: %w", err)
 	}
 
-	// Store the PR immediately so the watcher picks it up
-	s.storePRMention(clawID, repoFullName, prNumber, prURL)
+	// Store the PR immediately so the watcher picks it up. This claw_prs row is a
+	// hard prerequisite for completing the claim: the PR watcher and the existence
+	// checks both JOIN claw_prs, so a claw without it is invisible yet would leave
+	// the trigger claim active — permanently blocking re-creation for this PR. If
+	// the association fails, tear the claw down and release the claim so poll/webhook
+	// can retry.
+	if err := s.storePRMentionErr(clawID, repoFullName, prNumber, prURL); err != nil {
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		if s.cronScheduler != nil {
+			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
+		}
+		return fmt.Errorf("associate PR with claw: %w", err)
+	}
 	if err := s.completeFactoryTrigger(factory.Name, "github-pr", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
