@@ -364,6 +364,14 @@ func (cs *cronScheduler) finishRunByClawID(clawID, status, result string) {
 		log.Printf("[cron] failed to finish run for claw %s: %v", clawID, err)
 	}
 
+	cs.releaseClawWorkflowSlot(clawID)
+}
+
+// releaseClawWorkflowSlot performs the in-memory half of finishing a run.
+func (cs *cronScheduler) releaseClawWorkflowSlot(clawID string) {
+	if cs == nil {
+		return
+	}
 	// Decrement the running counter for this workflow so overlap policy
 	// is enforced against actual claw execution time, not creation time.
 	cs.clawWorkflowMu.Lock()
