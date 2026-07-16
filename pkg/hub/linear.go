@@ -412,28 +412,13 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 }
 
 func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, createErr error) {
-	if workspace == nil || workflow == nil || workflow.Trigger == nil || workflow.Trigger.Linear == nil {
-		return
-	}
-	token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow)
-	if token == "" {
-		log.Printf("[agent-failure-feedback] workflow %s/%s has no Linear token; skipping failure feedback", workspace.Name, workflow.Name)
-		return
-	}
-	s.handleAgentFailureFeedback(agentFailureFeedback{
-		Integration:      "linear",
-		IssueID:          payload.Data.Identifier,
-		LinearIdentifier: payload.Data.Identifier,
-		TriggerActor: triggerActor{
-			ID:    payload.Actor.ID,
-			Type:  payload.Actor.Type,
-			Name:  payload.Actor.Name,
-			Email: payload.Actor.Email,
-			URL:   payload.Actor.URL,
-		},
-		AgentStatusError: strings.TrimSpace(workflow.Trigger.Linear.AgentStatusError),
-		Failure:          classifyAgentFailure(createErr.Error()),
-	}, token)
+	s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "linear", IssueID: payload.Data.Identifier, LinearIdentifier: payload.Data.Identifier}, triggerActor{
+		ID:    payload.Actor.ID,
+		Type:  payload.Actor.Type,
+		Name:  payload.Actor.Name,
+		Email: payload.Actor.Email,
+		URL:   payload.Actor.URL,
+	}, createErr)
 }
 
 func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
@@ -1307,60 +1292,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		targetStatus = factory.DoneStatus
 	}
 	if !pipelineHandledDone && targetStatus != "" {
-		switch factory.Integration {
-		case "jira":
-			if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
-				if err := s.moveJiraIssue(tracker, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
-				}
-			}
-		case "shortcut":
-			// Shortcut story
-			scToken := s.resolveShortcutToken(factory.Workspace)
-			if scToken != "" {
-				if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
-				}
-			}
-		case "github-issues":
-			// GitHub issue
-			ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
-			if ghToken != "" {
-				// Parse gh-owner/repo/number from issueID
-				rest := strings.TrimPrefix(issueID, "gh-")
-				lastSlash := strings.LastIndex(rest, "/")
-				if lastSlash > 0 {
-					repo := rest[:lastSlash]
-					issueNumStr := rest[lastSlash+1:]
-					var issueNum int
-					if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
-						base := s.githubBaseURL
-						if base == "" {
-							base = "https://api.github.com"
-						}
-						if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base); err != nil {
-							log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
-						} else {
-							log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
-						}
-					}
-				}
-			}
-		default:
-			// Linear issue
-			linearToken := s.resolveLinearTokenForFactory(factory)
-			if linearToken != "" {
-				if err := s.moveLinearIssueOnServer(linearToken, issueID, targetStatus); err != nil {
-					log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
-				} else {
-					log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)
-				}
-			}
-		}
+		// The move is retried with backoff; run it off the done-signal path so
+		// a slow or failing tracker cannot delay marking the claw idle.
+		factoryCopy := *factory
+		go s.moveFactoryIssueToStatus(&factoryCopy, issueID, targetStatus)
 	}
 
 	// Keep the claw running — it stays connected to watch for CI failures,
@@ -1389,6 +1324,65 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			issueTracker = "Linear issue"
 		}
 		s.injectUserMessage(clawID, fmt.Sprintf("PR created and %s updated. Staying connected to watch for CI failures and review comments. Will terminate when PR is merged; if it is closed without merge, I'll notify you and decide next steps.", issueTracker))
+	}
+}
+
+// moveFactoryIssueToStatus moves a factory-tracked issue to the given
+// tracker status, retrying with backoff on failure.
+func (s *Server) moveFactoryIssueToStatus(factory *types.FactoryConfig, issueID, targetStatus string) {
+	switch factory.Integration {
+	case "jira":
+		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if err := s.retryTrackerMove("move Jira issue", func() error { return s.moveJiraIssue(tracker, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move Jira issue %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved Jira issue %s to '%s'", issueID, targetStatus)
+			}
+		}
+	case "shortcut":
+		// Shortcut story
+		scToken := s.resolveShortcutToken(factory.Workspace)
+		if scToken != "" {
+			if err := s.retryTrackerMove("move Shortcut story", func() error { return moveShortcutStory(s.resolveShortcutBaseURL(), scToken, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move story %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved story %s to '%s'", issueID, targetStatus)
+			}
+		}
+	case "github-issues":
+		// GitHub issue
+		ghToken := s.resolveGitHubIssuesTokenForFactory(factory)
+		if ghToken != "" {
+			// Parse gh-owner/repo/number from issueID
+			rest := strings.TrimPrefix(issueID, "gh-")
+			lastSlash := strings.LastIndex(rest, "/")
+			if lastSlash > 0 {
+				repo := rest[:lastSlash]
+				issueNumStr := rest[lastSlash+1:]
+				var issueNum int
+				if _, err := fmt.Sscanf(issueNumStr, "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					if err := s.retryTrackerMove("move GitHub issue", func() error { return moveGitHubIssue(ghToken, repo, issueNum, targetStatus, base) }); err != nil {
+						log.Printf("[factory] failed to move GitHub issue %s to '%s': %v", issueID, targetStatus, err)
+					} else {
+						log.Printf("[factory] moved GitHub issue %s to '%s'", issueID, targetStatus)
+					}
+				}
+			}
+		}
+	default:
+		// Linear issue
+		linearToken := s.resolveLinearTokenForFactory(factory)
+		if linearToken != "" {
+			if err := s.retryTrackerMove("move Linear issue", func() error { return s.moveLinearIssueOnServer(linearToken, issueID, targetStatus) }); err != nil {
+				log.Printf("[factory] failed to move issue %s to '%s': %v", issueID, targetStatus, err)
+			} else {
+				log.Printf("[factory] moved issue %s to '%s'", issueID, targetStatus)
+			}
+		}
 	}
 }
 

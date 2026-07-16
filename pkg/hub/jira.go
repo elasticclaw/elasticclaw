@@ -361,6 +361,8 @@ func (s *Server) processJiraWorkflowEvent(workspaces []*types.WorkspaceConfig, p
 					continue
 				}
 				log.Printf("[workflow:%s/%s] failed to create claw for Jira issue %s: %v", workspace.Name, workflow.Name, payload.Issue.Key, err)
+				tracker, _ := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow)
+				s.notifyWorkflowCreateFailure(workspace, workflow, workflowIssueRef{Integration: "jira", IssueID: payload.Issue.Key, JiraTracker: tracker}, triggerActor{}, err)
 			}
 		}
 		for _, workflow := range workspace.Workflows {

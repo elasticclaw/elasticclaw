@@ -1913,7 +1913,7 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 }
 
 func isFailureFeedbackWorkflowIntegration(integration string) bool {
-	return integration == "github-issues" || integration == "linear" || integration == "jira"
+	return integration == "github-issues" || integration == "linear" || integration == "shortcut" || integration == "jira"
 }
 
 // dispatchStopComment claims a pending notification before starting network I/O.
@@ -1996,6 +1996,20 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		} else {
 			retry()
 		}
+	case "shortcut":
+		token := s.resolveShortcutTokenForWorkflow(ctx.Workspace.Name, ctx.Workflow)
+		if token == "" {
+			clear()
+			return
+		}
+		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Shortcut != nil {
+			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Shortcut.AgentStatusError)
+		}
+		if s.handleAgentFailureFeedback(feedback, token) {
+			clear()
+		} else {
+			retry()
+		}
 	case "jira":
 		tracker, ok := s.resolveJiraTrackerForWorkflow(ctx.Workspace.Name, ctx.Workflow)
 		if !ok || tracker.Token == "" {
@@ -2005,14 +2019,11 @@ func (s *Server) commentWorkflowAgentStopToTracker(clawID string, ctx pipelineCo
 		if ctx.Workflow.Trigger != nil && ctx.Workflow.Trigger.Jira != nil {
 			feedback.AgentStatusError = strings.TrimSpace(ctx.Workflow.Trigger.Jira.AgentStatusError)
 		}
-		if feedback.AgentStatusError != "" {
-			_ = s.moveJiraIssue(tracker, ctx.IssueID, feedback.AgentStatusError)
-		}
-		if err := s.commentJiraIssue(tracker, ctx.IssueID, s.buildAgentStopComment(clawID, reason)); err != nil {
-			log.Printf("[stopAgent] failed to comment Jira issue %s: %v", ctx.IssueID, err)
-			retry()
-		} else {
+		feedback.JiraTracker = tracker
+		if s.handleAgentFailureFeedback(feedback, tracker.Token) {
 			clear()
+		} else {
+			retry()
 		}
 	}
 }
@@ -2051,6 +2062,11 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 	case "linear":
 		token := s.resolveLinearTokenForFactory(factory)
 		if token != "" {
+			if factory.AgentStatusError != "" {
+				if err := s.retryTrackerMove("move Linear issue", func() error { return s.moveLinearIssueOnServer(token, issueID, factory.AgentStatusError) }); err != nil {
+					log.Printf("[stopAgent] failed to move Linear issue %s: %v", issueID, err)
+				}
+			}
 			if err := s.commentLinearIssue(token, issueID, getCommentBody()); err != nil {
 				log.Printf("[stopAgent] failed to comment Linear issue %s: %v", issueID, err)
 			} else {
@@ -2061,6 +2077,13 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 	case "shortcut":
 		token := s.resolveShortcutToken(factory.Workspace)
 		if token != "" {
+			if factory.AgentStatusError != "" {
+				if err := s.retryTrackerMove("move Shortcut story", func() error {
+					return moveShortcutStory(s.resolveShortcutBaseURL(), token, issueID, factory.AgentStatusError)
+				}); err != nil {
+					log.Printf("[stopAgent] failed to move Shortcut story %s: %v", issueID, err)
+				}
+			}
 			if err := commentShortcutIssue(s.resolveShortcutBaseURL(), token, issueID, getCommentBody()); err != nil {
 				log.Printf("[stopAgent] failed to comment Shortcut story %s: %v", issueID, err)
 			} else {
@@ -2076,6 +2099,15 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 				repo := parts[0] + "/" + parts[1]
 				var issueNum int
 				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+					if factory.AgentStatusError != "" {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						if err := s.retryTrackerMove("mark GitHub issue", func() error { return githubAPIAddLabel(base, repo, issueNum, factory.AgentStatusError, token) }); err != nil {
+							log.Printf("[stopAgent] failed to mark GitHub issue %s: %v", issueID, err)
+						}
+					}
 					if err := commentGitHubIssue(token, repo, issueNum, getCommentBody()); err != nil {
 						log.Printf("[stopAgent] failed to comment GitHub issue %s: %v", issueID, err)
 					} else {
@@ -2087,6 +2119,11 @@ func (s *Server) commentAgentStopToTracker(clawID string, factory *types.Factory
 		}
 	case "jira":
 		if tracker, ok := s.resolveJiraTrackerForFactory(factory); ok {
+			if factory.AgentStatusError != "" {
+				if err := s.retryTrackerMove("move Jira issue", func() error { return s.moveJiraIssue(tracker, issueID, factory.AgentStatusError) }); err != nil {
+					log.Printf("[stopAgent] failed to move Jira issue %s: %v", issueID, err)
+				}
+			}
 			if err := s.commentJiraIssue(tracker, issueID, getCommentBody()); err != nil {
 				log.Printf("[stopAgent] failed to comment Jira issue %s: %v", issueID, err)
 			} else {
