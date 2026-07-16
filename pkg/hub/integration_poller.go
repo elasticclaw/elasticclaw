@@ -74,34 +74,50 @@ func (s *Server) pollTick() {
 	}
 
 	// === SHORTCUT ===
-	since := now.Add(-2 * time.Minute).Format(time.RFC3339)
+	shortcutSince := s.pollSince("shortcut", now).Format(time.RFC3339)
+	shortcutOK := true
 	if integrations != nil && len(integrations.Shortcut) > 0 {
-		s.pollShortcut(factories, integrations.Shortcut, since)
+		shortcutOK = s.pollShortcut(factories, integrations.Shortcut, shortcutSince)
 	}
 	if len(shortcutWorkflowWorkspaces) > 0 {
-		s.pollShortcutWorkflows(shortcutWorkflowWorkspaces, since)
+		shortcutOK = s.pollShortcutWorkflows(shortcutWorkflowWorkspaces, shortcutSince) && shortcutOK
+	}
+	if ((integrations != nil && len(integrations.Shortcut) > 0) || len(shortcutWorkflowWorkspaces) > 0) && shortcutOK {
+		s.setPollHighWaterMark("shortcut", now)
 	}
 
 	// === GITHUB ISSUES ===
+	ghIssuesSince := s.pollSince("github-issues", now).Format(time.RFC3339)
+	ghIssuesOK := true
 	if integrations != nil && len(integrations.GitHubIssues) > 0 {
-		s.pollGitHubIssues(factories, integrations.GitHubIssues, since)
+		ghIssuesOK = s.pollGitHubIssues(factories, integrations.GitHubIssues, ghIssuesSince)
 	}
 	if len(githubIssueWorkflowWorkspaces) > 0 {
-		s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, since)
+		ghIssuesOK = s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, ghIssuesSince) && ghIssuesOK
+	}
+	if ((integrations != nil && len(integrations.GitHubIssues) > 0) || len(githubIssueWorkflowWorkspaces) > 0) && ghIssuesOK {
+		s.setPollHighWaterMark("github-issues", now)
 	}
 
 	// === JIRA ===
+	jiraSince := s.pollSince("jira", now)
+	jiraOK := true
 	if integrations != nil && len(integrations.Jira) > 0 {
-		s.pollJira(factories, integrations.Jira, now.Add(-2*time.Minute))
+		jiraOK = s.pollJira(factories, integrations.Jira, jiraSince)
 	}
 	if len(jiraWorkflowWorkspaces) > 0 {
-		s.pollJiraWorkflows(jiraWorkflowWorkspaces, now.Add(-2*time.Minute))
+		jiraOK = s.pollJiraWorkflows(jiraWorkflowWorkspaces, jiraSince) && jiraOK
+	}
+	if ((integrations != nil && len(integrations.Jira) > 0) || len(jiraWorkflowWorkspaces) > 0) && jiraOK {
+		s.setPollHighWaterMark("jira", now)
 	}
 
 	// === GITHUB PRs ===
 	// Use factories with integration=="github" to discover repos
 	if len(factories) > 0 {
-		s.pollGitHubPRs(factories, since)
+		if s.pollGitHubPRs(factories, s.pollSince("github", now).Format(time.RFC3339)) {
+			s.setPollHighWaterMark("github", now)
+		}
 	}
 }
 
@@ -489,7 +505,8 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 
 // ── SHORTCUT POLLER ─────────────────────────────────────────────────────────
 
-func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*types.ShortcutIntegrationConfig, since string) {
+func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*types.ShortcutIntegrationConfig, since string) bool {
+	ok := true
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "shortcut" {
@@ -521,6 +538,7 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		stories, err := s.queryShortcutStories(sc.Token, since)
 		if err != nil {
 			log.Printf("[poll-shortcut] query failed for workspace %q: %v", ws, err)
+			ok = false
 			continue
 		}
 
@@ -529,12 +547,14 @@ func (s *Server) pollShortcut(factories []*types.FactoryConfig, shortcutCfgs []*
 		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), sc.Token)
 		if len(stateNameMap) == 0 {
 			log.Printf("[poll-shortcut] failed to load workflow states for workspace %q — skipping %d stories", ws, len(stories))
+			ok = false
 			continue
 		}
 		for _, story := range stories {
 			s.processShortcutPollItem(story, wsFactories, ws, sc.Token, stateNameMap)
 		}
 	}
+	return ok
 }
 
 type shortcutPollStory struct {
@@ -583,7 +603,8 @@ func (s *Server) queryShortcutStories(token, since string) ([]shortcutPollStory,
 	return stories, nil
 }
 
-func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, since string) bool {
+	ok := true
 	tokenTargets := map[string][]shortcutWorkflowPollTarget{}
 	for _, workspace := range workspaces {
 		if workspace == nil {
@@ -608,17 +629,20 @@ func (s *Server) pollShortcutWorkflows(workspaces []*types.WorkspaceConfig, sinc
 		stories, err := s.queryShortcutStories(token, since)
 		if err != nil {
 			log.Printf("[poll-shortcut] workflow query failed: %v", err)
+			ok = false
 			continue
 		}
 		stateNameMap := buildShortcutStateMap(s.resolveShortcutBaseURL(), token)
 		if len(stateNameMap) == 0 {
 			log.Printf("[poll-shortcut] failed to load workflow states for workflow polling — skipping %d stories", len(stories))
+			ok = false
 			continue
 		}
 		for _, story := range stories {
 			s.processShortcutWorkflowPollItem(story, targets, token, stateNameMap)
 		}
 	}
+	return ok
 }
 
 func (s *Server) processShortcutPollItem(story shortcutPollStory, factories []*types.FactoryConfig, workspace, token string, stateNameMap map[int64]string) {
@@ -755,7 +779,8 @@ func (s *Server) processShortcutWorkflowPollItem(story shortcutPollStory, target
 
 // ── GITHUB ISSUES POLLER ────────────────────────────────────────────────────
 
-func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs []*types.GitHubIssuesIntegrationConfig, since string) {
+func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs []*types.GitHubIssuesIntegrationConfig, since string) bool {
+	ok := true
 	// Discover repos to poll from factory configs
 	repoFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
@@ -803,6 +828,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 		issues, err := s.queryGitHubIssues(repo, token, since, base)
 		if err != nil {
 			log.Printf("[poll-github-issues] query failed for repo %q: %v", repo, err)
+			ok = false
 			continue
 		}
 
@@ -810,6 +836,7 @@ func (s *Server) pollGitHubIssues(factories []*types.FactoryConfig, ghIssueCfgs 
 			s.processGitHubIssuesPollItem(issue, repoFactories, repo, token, base)
 		}
 	}
+	return ok
 }
 
 type githubIssueWorkflowPollTarget struct {
@@ -818,7 +845,8 @@ type githubIssueWorkflowPollTarget struct {
 	token     string
 }
 
-func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) {
+func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, since string) bool {
+	ok := true
 	type repoTokenKey struct {
 		repo  string
 		token string
@@ -869,12 +897,14 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 		issues, err := s.queryGitHubIssues(key.repo, key.token, since, base)
 		if err != nil {
 			log.Printf("[poll-github-issues] workflow query failed for repo %q: %v", key.repo, err)
+			ok = false
 			continue
 		}
 		for _, issue := range issues {
 			s.processGitHubIssueWorkflowPollItem(issue, targets, key.repo, key.token, base)
 		}
 	}
+	return ok
 }
 
 func githubIssuesPollingRepos(factory *types.FactoryConfig) []string {
@@ -1281,7 +1311,8 @@ func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, act
 
 // ── JIRA POLLER ─────────────────────────────────────────────────────────────
 
-func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.JiraIntegrationConfig, since time.Time) {
+func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.JiraIntegrationConfig, since time.Time) bool {
+	ok := true
 	workspaceFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "jira" {
@@ -1308,12 +1339,14 @@ func (s *Server) pollJira(factories []*types.FactoryConfig, jiraCfgs []*types.Ji
 		issues, err := s.queryJiraIssues(tracker, since, projects)
 		if err != nil {
 			log.Printf("[poll-jira] query failed for workspace %q: %v", ji.Workspace, err)
+			ok = false
 			continue
 		}
 		for _, issue := range issues {
 			s.processJiraPollItem(issue, factories, tracker)
 		}
 	}
+	return ok
 }
 
 type jiraWorkflowPollTarget struct {
@@ -1322,7 +1355,8 @@ type jiraWorkflowPollTarget struct {
 	tracker   workspaceIssueTracker
 }
 
-func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since time.Time) {
+func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since time.Time) bool {
+	ok := true
 	type trackerKey struct {
 		baseURL  string
 		username string
@@ -1357,12 +1391,14 @@ func (s *Server) pollJiraWorkflows(workspaces []*types.WorkspaceConfig, since ti
 		issues, err := s.queryJiraIssues(tracker, since, jiraWorkflowProjects(targets))
 		if err != nil {
 			log.Printf("[poll-jira] workflow query failed: %v", err)
+			ok = false
 			continue
 		}
 		for _, issue := range issues {
 			s.processJiraWorkflowPollItem(issue, targets)
 		}
 	}
+	return ok
 }
 
 func jiraFactoryProjects(factories []*types.FactoryConfig) []string {
@@ -1472,7 +1508,8 @@ func jiraPollPayload(issue jiraPollIssue) jiraWebhookPayload {
 
 // ── GITHUB PRs POLLER ─────────────────────────────────────────────────────────
 
-func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
+func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) bool {
+	ok := true
 	repoFactories := map[string][]*types.FactoryConfig{}
 	for _, f := range factories {
 		if f.Integration != "github" {
@@ -1510,6 +1547,7 @@ func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 		prs, err := s.queryGitHubPRs(repo, token, since, base)
 		if err != nil {
 			log.Printf("[poll-github-prs] query failed for repo %q: %v", repo, err)
+			ok = false
 			continue
 		}
 
@@ -1517,6 +1555,7 @@ func (s *Server) pollGitHubPRs(factories []*types.FactoryConfig, since string) {
 			s.processGitHubPRPollItem(pr, repoFactories, repo, base)
 		}
 	}
+	return ok
 }
 
 type githubPRPollItem struct {
