@@ -165,7 +165,7 @@ export interface CostOverview {
 export interface GeneralStatMetric {
   avgMs: number | null
   samples: number
-  authoritative?: boolean
+  authoritativeSamples?: number
 }
 
 export interface GeneralStats {

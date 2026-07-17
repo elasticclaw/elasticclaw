@@ -233,9 +233,9 @@ type taskRunAnalyticsFilters struct {
 }
 
 type taskRunGeneralStat struct {
-	AvgMs         *int64 `json:"avgMs"`
-	Samples       int    `json:"samples"`
-	Authoritative *bool  `json:"authoritative,omitempty"`
+	AvgMs                *int64 `json:"avgMs"`
+	Samples              int    `json:"samples"`
+	AuthoritativeSamples *int   `json:"authoritativeSamples,omitempty"`
 }
 
 type taskRunGeneralStatsResponse struct {
@@ -270,8 +270,7 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 	}
 	defer rows.Close()
 	var ticketSum, prSum, aiSum int64
-	var ticketN, prN, aiN int
-	authoritative := true
+	var ticketN, ticketAuthN, prN, aiN int
 	for rows.Next() {
 		var issue, started, agent, opened, merged int64
 		if err := rows.Scan(&issue, &started, &agent, &opened, &merged); err != nil {
@@ -288,8 +287,8 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 			if opened >= base {
 				ticketSum += opened - base
 				ticketN++
-				if fallback {
-					authoritative = false
+				if !fallback {
+					ticketAuthN++
 				}
 			}
 		}
@@ -313,7 +312,7 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 		return &value
 	}
 	return taskRunGeneralStatsResponse{
-		TicketToPr:    taskRunGeneralStat{AvgMs: average(ticketSum, ticketN), Samples: ticketN, Authoritative: &authoritative},
+		TicketToPr:    taskRunGeneralStat{AvgMs: average(ticketSum, ticketN), Samples: ticketN, AuthoritativeSamples: &ticketAuthN},
 		PROpenToMerge: taskRunGeneralStat{AvgMs: average(prSum, prN), Samples: prN},
 		AIImpl:        taskRunGeneralStat{AvgMs: average(aiSum, aiN), Samples: aiN},
 	}, nil

@@ -187,7 +187,7 @@ func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	}
 	var response taskRunGeneralStatsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5500 || response.TicketToPr.Samples != 2 || response.TicketToPr.Authoritative == nil || *response.TicketToPr.Authoritative {
+	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5500 || response.TicketToPr.Samples != 2 || response.TicketToPr.AuthoritativeSamples == nil || *response.TicketToPr.AuthoritativeSamples != 1 {
 		t.Fatalf("ticket stats: %#v", response.TicketToPr)
 	}
 	if response.PROpenToMerge.AvgMs == nil || *response.PROpenToMerge.AvgMs != 3666 || response.PROpenToMerge.Samples != 3 {
@@ -198,7 +198,7 @@ func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	}
 }
 
-func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
+func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritativeSamples(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 
 	// No qualifying rows: every avgMs must serialize as JSON null with samples 0.
@@ -207,20 +207,20 @@ func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `"ticketToPrMs":{"avgMs":null,"samples":0,"authoritative":true}`) ||
+	if !strings.Contains(body, `"ticketToPrMs":{"avgMs":null,"samples":0,"authoritativeSamples":0}`) ||
 		!strings.Contains(body, `"prOpenToMergeMs":{"avgMs":null,"samples":0}`) ||
 		!strings.Contains(body, `"aiImplMs":{"avgMs":null,"samples":0}`) {
 		t.Fatalf("unexpected empty-stats body: %s", body)
 	}
 
-	// A single run with issue_created_at set keeps authoritative=true.
+	// A single run with issue_created_at set contributes one authoritative sample.
 	base := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-auth-only", AttemptID: "attempt-stats-auth-only", ClawID: "claw-stats-auth-only", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
 	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=? WHERE run_id='stats-auth-only'`, base-2000, base+3000); err != nil {
 		t.Fatal(err)
 	}
 	// A fallback row with a negative delta is skipped, not sampled, so it must
-	// not flip authoritative to false either.
+	// not affect either ticket sample count.
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-github-skip", AttemptID: "attempt-stats-github-skip", ClawID: "claw-stats-github-skip", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base + 10000, PRCount: 1})
 	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=? WHERE run_id='stats-github-skip'`, base+8000); err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
 	var response taskRunGeneralStatsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
 	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.TicketToPr.Samples != 1 ||
-		response.TicketToPr.Authoritative == nil || !*response.TicketToPr.Authoritative {
+		response.TicketToPr.AuthoritativeSamples == nil || *response.TicketToPr.AuthoritativeSamples != 1 {
 		t.Fatalf("ticket stats: %#v", response.TicketToPr)
 	}
 }
