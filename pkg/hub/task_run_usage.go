@@ -96,8 +96,11 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if err != nil {
 		return err
 	}
+	// A negative cost correction (gateway cost replacing a higher hub_pricing
+	// estimate) may land on a later day than the estimate it corrects; clamp
+	// the bucket at zero so per-day stats never go negative.
 	day := now().UTC().Format("2006-01-02")
-	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cost_usd=cost_usd+excluded.cost_usd,updated_at=excluded.updated_at`, tenant, day, workspace, factory, workflow, snapshot.Model, din, dout, dtotal, dcost, ts)
+	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,MAX(0,?),?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cost_usd=MAX(0,cost_usd+?),updated_at=excluded.updated_at`, tenant, day, workspace, factory, workflow, snapshot.Model, din, dout, dtotal, dcost, ts, dcost)
 	if err != nil {
 		return err
 	}

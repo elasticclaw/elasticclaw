@@ -169,6 +169,30 @@ func TestTaskRunUsageGatewayCostCorrectsHubEstimate(t *testing.T) {
 	}
 }
 
+func TestTaskRunUsageCrossDayCostCorrectionClampsAtZero(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// HB1: hub_pricing estimates $18.
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a day rollover: the estimate sits in yesterday's bucket.
+	if _, err := db.Exec(`DELETE FROM usage_daily`); err != nil {
+		t.Fatal(err)
+	}
+	// HB2: gateway reports a lower real cost; the negative correction lands on
+	// a fresh bucket and must clamp at zero instead of seeding a negative cost.
+	snap := usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")
+	snap.EstimatedCostUSD = ptr(3.0)
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, dailyCost := queryUsageDaily(t, db)
+	if dailyCost != 0 {
+		t.Fatalf("usage_daily cost = %v, want 0 (never negative)", dailyCost)
+	}
+}
+
 func TestTaskRunUsageUnknownModelGetsNoEstimatedCost(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
