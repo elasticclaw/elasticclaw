@@ -75,7 +75,9 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_attempts ADD COLUMN restored_checkpoint_id TEXT`)
 	_, _ = db.Exec(`ALTER TABLE task_runs ADD COLUMN issue_title TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_runs ADD COLUMN issue_created_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN issue_title TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN issue_created_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0`)
@@ -306,6 +308,7 @@ func migrate(db *sql.DB) error {
 		external_trigger_id   TEXT NOT NULL DEFAULT '',
 		issue_id              TEXT NOT NULL DEFAULT '',
 		issue_title           TEXT NOT NULL DEFAULT '',
+		issue_created_at      INTEGER NOT NULL DEFAULT 0,
 		claw_id               TEXT NOT NULL DEFAULT '',
 		model                 TEXT NOT NULL DEFAULT '',
 		llm_key               TEXT NOT NULL DEFAULT '',
@@ -449,6 +452,7 @@ func migrate(db *sql.DB) error {
 		integration_workspace   TEXT NOT NULL DEFAULT '',
 		issue_id                TEXT NOT NULL DEFAULT '',
 		issue_title             TEXT NOT NULL DEFAULT '',
+		issue_created_at        INTEGER NOT NULL DEFAULT 0,
 		claw_id                 TEXT NOT NULL DEFAULT '',
 		model                   TEXT NOT NULL DEFAULT '',
 		input_tokens            INTEGER NOT NULL DEFAULT 0,

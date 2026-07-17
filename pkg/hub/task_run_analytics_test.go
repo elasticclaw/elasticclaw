@@ -50,7 +50,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	assertColumns(t, db, "task_runs", []string{
 		"id", "tenant_id", "initial_attempt_id", "current_attempt_id", "attempt_count", "run_kind",
 		"owner_type", "workspace_name", "workflow_name", "factory_name", "owner_id", "owner_display_name",
-		"integration", "integration_workspace", "trigger_id", "external_trigger_id", "issue_id", "claw_id", "model", "llm_key", "tags",
+		"integration", "integration_workspace", "trigger_id", "external_trigger_id", "issue_id", "issue_created_at", "claw_id", "model", "llm_key", "tags",
 		"analytics_enabled", "requires_pr", "excluded_reason", "timeout_at", "created_at", "updated_at",
 	})
 	assertColumns(t, db, "task_run_attempts", []string{
@@ -72,7 +72,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	assertColumns(t, db, "task_run_summaries", []string{
 		"id", "tenant_id", "run_id", "status", "phase", "attempt_count", "owner_type",
 		"workspace_name", "workflow_name", "factory_name", "owner_id", "owner_display_name",
-		"run_kind", "integration", "integration_workspace", "issue_id", "claw_id",
+		"run_kind", "integration", "integration_workspace", "issue_id", "issue_created_at", "claw_id",
 		"model", "llm_key", "repo", "primary_pr_url", "pr_count", "open_pr_count", "merged_pr_count",
 		"closed_pr_count", "warning_types", "failure_type", "human_interaction_count",
 		"started_at", "queued_at", "provision_started_at", "agent_started_at", "pr_opened_at",
@@ -81,6 +81,8 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	})
 
 	assertColumnDefault(t, db, "task_runs", "tags", "'[]'")
+	assertExecSucceeds(t, db, `UPDATE task_runs SET issue_created_at=123 WHERE id='missing'`)
+	assertExecSucceeds(t, db, `UPDATE task_run_summaries SET issue_created_at=123 WHERE run_id='missing'`)
 
 	now := int64(1760000000000)
 	insertValidRun(t, db, "run-valid", now)
@@ -493,6 +495,81 @@ func TestTaskRunDetailSanitizationRedactsNestedText(t *testing.T) {
 	}
 	if !strings.Contains(detail, `"redacted":true`) {
 		t.Fatalf("detail missing redaction marker: %s", detail)
+	}
+}
+
+func TestTaskRunSummaryPrefersAuthoritativePROpenedAt(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-auth-open")
+	runID, _ := startTaskRunForTest(t, s, "claw-auth-open", "auth-open")
+
+	// Detection-time association: zero OccurredAt falls back to now() and is write-once.
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 7, URL: "https://github.com/elastic/claw/pull/7", State: taskRunPRStateOpen}); err != nil {
+		t.Fatalf("fallback associate: %v", err)
+	}
+	var detectedAt int64
+	if err := db.QueryRow(`SELECT opened_at FROM task_run_prs WHERE run_id=?`, runID).Scan(&detectedAt); err != nil {
+		t.Fatalf("read opened_at: %v", err)
+	}
+	if detectedAt == 0 {
+		t.Fatal("expected fallback opened_at to be stamped")
+	}
+
+	// GitHub's authoritative created_at (earlier) overwrites the detection time.
+	authoritative := time.UnixMilli(detectedAt - 60000).UTC()
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 7, URL: "https://github.com/elastic/claw/pull/7", State: taskRunPRStateOpen, OccurredAt: authoritative}); err != nil {
+		t.Fatalf("authoritative associate: %v", err)
+	}
+	var openedAt, summaryOpenedAt int64
+	if err := db.QueryRow(`SELECT opened_at FROM task_run_prs WHERE run_id=?`, runID).Scan(&openedAt); err != nil {
+		t.Fatalf("read opened_at: %v", err)
+	}
+	if openedAt != epochMillis(authoritative) {
+		t.Fatalf("opened_at=%d want %d", openedAt, epochMillis(authoritative))
+	}
+	if err := db.QueryRow(`SELECT pr_opened_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&summaryOpenedAt); err != nil {
+		t.Fatalf("read summary pr_opened_at: %v", err)
+	}
+	if summaryOpenedAt != epochMillis(authoritative) {
+		t.Fatalf("summary pr_opened_at=%d want %d", summaryOpenedAt, epochMillis(authoritative))
+	}
+
+	// A later fallback re-association must not clobber the authoritative value.
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 7, URL: "https://github.com/elastic/claw/pull/7", State: taskRunPRStateOpen}); err != nil {
+		t.Fatalf("redelivered associate: %v", err)
+	}
+	if err := db.QueryRow(`SELECT opened_at FROM task_run_prs WHERE run_id=?`, runID).Scan(&openedAt); err != nil {
+		t.Fatalf("read opened_at: %v", err)
+	}
+	if openedAt != epochMillis(authoritative) {
+		t.Fatalf("redelivery clobbered opened_at: %d want %d", openedAt, epochMillis(authoritative))
+	}
+}
+
+func TestRecordTaskRunIssueCreatedAtBackfillsRunAndSummary(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-issue-created")
+	runID, _ := startTaskRunForTest(t, s, "claw-issue-created", "issue-created")
+
+	created := time.UnixMilli(1760000000000).UTC()
+	s.recordTaskRunIssueCreatedAt("claw-issue-created", created)
+
+	var runValue, summaryValue int64
+	if err := db.QueryRow(`SELECT issue_created_at FROM task_runs WHERE id=?`, runID).Scan(&runValue); err != nil {
+		t.Fatalf("read task run: %v", err)
+	}
+	if err := db.QueryRow(`SELECT issue_created_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&summaryValue); err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if runValue != 1760000000000 || summaryValue != 1760000000000 {
+		t.Fatalf("issue_created_at run=%d summary=%d want 1760000000000", runValue, summaryValue)
+	}
+
+	// Write-once: a second backfill must not overwrite the stored value.
+	s.recordTaskRunIssueCreatedAt("claw-issue-created", created.Add(time.Hour))
+	if err := db.QueryRow(`SELECT issue_created_at FROM task_runs WHERE id=?`, runID).Scan(&runValue); err != nil {
+		t.Fatalf("read task run: %v", err)
+	}
+	if runValue != 1760000000000 {
+		t.Fatalf("second backfill overwrote issue_created_at: %d", runValue)
 	}
 }
 

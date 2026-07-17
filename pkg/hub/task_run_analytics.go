@@ -124,6 +124,7 @@ type TaskRunStart struct {
 	TriggerID            string
 	ExternalTriggerID    string
 	IssueID              string
+	IssueCreatedAt       time.Time
 	Model                string
 	LLMKey               string
 	Source               string
@@ -278,12 +279,12 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 		INSERT INTO task_runs(
 			id, tenant_id, initial_attempt_id, current_attempt_id, attempt_count, run_kind,
 			owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name,
-			integration, integration_workspace, trigger_id, external_trigger_id, issue_id, issue_title, claw_id, model, llm_key, tags,
+			integration, integration_workspace, trigger_id, external_trigger_id, issue_id, issue_title, issue_created_at, claw_id, model, llm_key, tags,
 			analytics_enabled, requires_pr, excluded_reason, timeout_at, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, opts.TenantID, attemptID, attemptID, 1, opts.RunKind, opts.OwnerType, opts.WorkspaceName,
 		opts.WorkflowName, opts.FactoryName, opts.OwnerID, opts.OwnerDisplayName, opts.Integration, opts.IntegrationWorkspace,
-		opts.TriggerID, opts.ExternalTriggerID, opts.IssueID, clawIssueTitle, clawID, opts.Model, opts.LLMKey, tags, analyticsEnabled, requiresPR,
+		opts.TriggerID, opts.ExternalTriggerID, opts.IssueID, clawIssueTitle, epochMillisOrZero(opts.IssueCreatedAt), clawID, opts.Model, opts.LLMKey, tags, analyticsEnabled, requiresPR,
 		opts.ExcludedReason, timeoutAt, ts, ts,
 	); err != nil {
 		return "", "", err
@@ -389,6 +390,10 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if input.State == "" {
 		input.State = taskRunPRStateOpen
 	}
+	// A caller-supplied OccurredAt is an authoritative provider timestamp and
+	// may overwrite an earlier detection-time opened_at; the now() fallback is
+	// write-once so it never clobbers an authoritative value.
+	authoritativeOpen := input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero()
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = now()
 	}
@@ -416,7 +421,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			base_branch=excluded.base_branch,
 			state=CASE WHEN task_run_prs.merged = 1 OR task_run_prs.state = 'closed' THEN task_run_prs.state ELSE excluded.state END,
 			merged=CASE WHEN excluded.merged = 1 THEN 1 ELSE task_run_prs.merged END,
-			opened_at=CASE WHEN task_run_prs.opened_at = 0 THEN excluded.opened_at ELSE task_run_prs.opened_at END,
+			opened_at=CASE WHEN excluded.opened_at != 0 AND (task_run_prs.opened_at = 0 OR ?) THEN excluded.opened_at ELSE task_run_prs.opened_at END,
 			closed_at=CASE WHEN excluded.closed_at != 0 THEN excluded.closed_at ELSE task_run_prs.closed_at END,
 			merged_at=CASE WHEN excluded.merged_at != 0 THEN excluded.merged_at ELSE task_run_prs.merged_at END,
 			merged_by_login=CASE WHEN excluded.merged_by_login != '' THEN excluded.merged_by_login ELSE task_run_prs.merged_by_login END,
@@ -424,6 +429,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
 		input.HeadSHA, input.HeadBranch, input.BaseBranch, input.State, boolInt(input.Merged),
 		openedAt, closedAt, mergedAt, input.MergedByLogin, at, at,
+		boolInt(authoritativeOpen),
 	); err != nil {
 		return err
 	}
@@ -506,6 +512,26 @@ func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptI
 		return tenantID, "", "", false, nil
 	}
 	return tenantID, runID, attemptID, true, nil
+}
+
+// recordTaskRunIssueCreatedAt backfills the authoritative issue-creation time
+// on the task run for a claw and refreshes its summary. Best-effort: analytics
+// must never fail the calling flow.
+func (s *Server) recordTaskRunIssueCreatedAt(clawID string, issueCreatedAt time.Time) {
+	if issueCreatedAt.IsZero() {
+		return
+	}
+	_, runID, _, ok, err := s.taskRunContextForClaw(clawID)
+	if err != nil || !ok {
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE task_runs SET issue_created_at=? WHERE id=? AND issue_created_at=0`, epochMillis(issueCreatedAt), runID); err != nil {
+		log.Printf("[task-run-analytics] failed to record issue creation time for claw %s: %v", clawID, err)
+		return
+	}
+	if err := s.materializeTaskRun(runID); err != nil {
+		log.Printf("[task-run-analytics] failed to materialize run %s after issue creation backfill: %v", runID, err)
+	}
 }
 
 func loadTaskRunTenantTx(tx *sql.Tx, runID string) (string, error) {
@@ -859,6 +885,14 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 
 	counts := taskRunPRCounts(prs)
 	phaseTimes := taskRunPhaseTimes(events)
+	// task_run_prs.opened_at may carry GitHub's authoritative created_at
+	// (backfilled by the PR watcher or webhook), while pr_opened events are
+	// stamped at detection time and never updated. Use the earliest known time.
+	for _, pr := range prs {
+		if pr.openedAt > 0 && (phaseTimes.prOpenedAt == 0 || pr.openedAt < phaseTimes.prOpenedAt) {
+			phaseTimes.prOpenedAt = pr.openedAt
+		}
+	}
 	if counts.merged > 0 && counts.closed > 0 {
 		warnings[taskRunWarningPRReplaced] = true
 	}
@@ -896,13 +930,13 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		INSERT INTO task_run_summaries(
 			id, tenant_id, run_id, initial_attempt_id, current_attempt_id, status, phase,
 			attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id,
-			owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, claw_id,
+			owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id,
 			model, llm_key, repo, primary_pr_url,
 			pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type,
 			human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at,
 			pr_opened_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
 			analytics_enabled, requires_pr, excluded_reason
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id) DO UPDATE SET
 			initial_attempt_id=excluded.initial_attempt_id,
 			current_attempt_id=excluded.current_attempt_id,
@@ -920,6 +954,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			integration_workspace=excluded.integration_workspace,
 			issue_id=excluded.issue_id,
 			issue_title=excluded.issue_title,
+			issue_created_at=excluded.issue_created_at,
 			claw_id=excluded.claw_id,
 			model=excluded.model,
 			llm_key=excluded.llm_key,
@@ -947,7 +982,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			excluded_reason=excluded.excluded_reason`,
 		uuid.New().String(), meta.tenantID, runID, meta.initialAttemptID, meta.currentAttemptID, status, phase, meta.attemptCount, meta.ownerType,
 		meta.workspaceName, meta.workflowName, meta.factoryName, meta.ownerID, meta.ownerDisplayName,
-		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.clawID,
+		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.issueCreatedAt, meta.clawID,
 		meta.model, meta.llmKey, counts.primaryRepo, primaryPRURL, counts.total, counts.open, counts.merged, counts.closed,
 		warningTypes, failureType, humanInteractions, meta.createdAt, phaseTimes.queuedAt, phaseTimes.provisionStartedAt,
 		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
@@ -1066,6 +1101,7 @@ type taskRunMeta struct {
 	integrationWorkspace string
 	issueID              string
 	issueTitle           string
+	issueCreatedAt       int64
 	model                string
 	llmKey               string
 	analyticsEnabled     int
@@ -1083,7 +1119,7 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		       tr.attempt_count, tr.owner_type, tr.workspace_name,
 		       tr.workflow_name, tr.factory_name, tr.owner_id, tr.owner_display_name,
 		       tr.integration,
-		       tr.integration_workspace, tr.issue_id, COALESCE(NULLIF(tr.issue_title,''), c.issue_title, ''), COALESCE(c.status,''), COALESCE(NULLIF(tr.model,''), c.default_model, ''),
+		       tr.integration_workspace, tr.issue_id, COALESCE(NULLIF(tr.issue_title,''), c.issue_title, ''), tr.issue_created_at, COALESCE(c.status,''), COALESCE(NULLIF(tr.model,''), c.default_model, ''),
 		       COALESCE(NULLIF(tr.llm_key,''), c.llm_key, ''), tr.analytics_enabled, tr.requires_pr, tr.excluded_reason,
 		       tr.timeout_at, tr.created_at, tr.updated_at
 		  FROM task_runs tr
@@ -1092,7 +1128,7 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		&meta.tenantID, &meta.clawID, &meta.runKind, &meta.initialAttemptID, &meta.currentAttemptID,
 		&meta.attemptCount, &meta.ownerType,
 		&meta.workspaceName, &meta.workflowName, &meta.factoryName, &meta.ownerID, &meta.ownerDisplayName,
-		&meta.integration, &meta.integrationWorkspace, &meta.issueID, &meta.issueTitle, &meta.clawStatus, &meta.model, &meta.llmKey,
+		&meta.integration, &meta.integrationWorkspace, &meta.issueID, &meta.issueTitle, &meta.issueCreatedAt, &meta.clawStatus, &meta.model, &meta.llmKey,
 		&meta.analyticsEnabled, &meta.requiresPR, &meta.excludedReason,
 		&meta.timeoutAt, &meta.createdAt, &meta.updatedAt,
 	)

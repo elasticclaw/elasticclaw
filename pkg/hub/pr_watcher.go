@@ -148,14 +148,16 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 	} else if ok {
+		// OccurredAt is intentionally left zero: this is a detection time, so
+		// associateTaskRunPR treats it as a write-once fallback rather than an
+		// authoritative provider timestamp.
 		if err := s.associateTaskRunPR(TaskRunPR{
-			RunID:      runID,
-			Repo:       repo,
-			PRNumber:   prNumber,
-			URL:        prURL,
-			HeadSHA:    headSHA,
-			State:      taskRunPRStateOpen,
-			OccurredAt: now(),
+			RunID:    runID,
+			Repo:     repo,
+			PRNumber: prNumber,
+			URL:      prURL,
+			HeadSHA:  headSHA,
+			State:    taskRunPRStateOpen,
 		}); err != nil {
 			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
 		}
@@ -1103,6 +1105,10 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
+	mergedAtValue, _ := data["merged_at"].(string)
+	createdAtValue, _ := data["created_at"].(string)
+	mergedAt := parseRFC3339Timestamp(mergedAtValue)
+	createdAt := parseRFC3339Timestamp(createdAtValue)
 
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
@@ -1151,7 +1157,19 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// Track analytics for PR merge
 	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
 	if hasMergeCtx {
-		s.trackPRMerged(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber)
+		s.trackPRMergedAt(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
+	} else {
+		s.trackPRMergedAt("", "", clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
+	}
+	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
+		if !createdAt.IsZero() {
+			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, OccurredAt: createdAt}); err != nil {
+				log.Printf("[pr-watcher] failed to backfill opened_at for run %s: %v", runID, err)
+			}
+		}
+		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateClosed, Merged: true, OccurredAt: firstNonZeroTime(mergedAt, now())}); err != nil {
+			log.Printf("[pr-watcher] failed to record merge for run %s: %v", runID, err)
+		}
 	}
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)

@@ -13,6 +13,16 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+func TestGitHubPRPayloadParsesAuthoritativeTimestamps(t *testing.T) {
+	var payload githubPRPayload
+	if err := json.Unmarshal([]byte(`{"action":"closed","number":7,"pull_request":{"created_at":"2025-01-02T03:04:05Z","merged_at":"2025-01-03T04:05:06Z","merged":true}}`), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.PullRequest.Merged || payload.PullRequest.CreatedAt != "2025-01-02T03:04:05Z" || payload.PullRequest.MergedAt != "2025-01-03T04:05:06Z" {
+		t.Fatalf("timestamps not parsed: %#v", payload.PullRequest)
+	}
+}
+
 func TestGitHubPRFactoryExcludeLabelsUsesBackingIssueLabels(t *testing.T) {
 	ghi := newGitHubIssueLabelMock(t)
 	ghi.setIssueLabels("elastic/claw", 42, []string{"Bug"})

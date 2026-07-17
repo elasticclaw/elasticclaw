@@ -295,7 +295,15 @@ func (s *Server) trackPROpened(factoryName, issueID, clawID, repo string, prNumb
 
 // trackPRMerged logs a PR merge for analytics.
 func (s *Server) trackPRMerged(factoryName, issueID, clawID, repo string, prNumber int) {
-	s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_merged", fmt.Sprintf("%s#%d", repo, prNumber), "success")
+	s.trackPRMergedAt(factoryName, issueID, clawID, repo, prNumber, now())
+}
+
+func (s *Server) trackPRMergedAt(factoryName, issueID, clawID, repo string, prNumber int, occurredAt time.Time) {
+	// The task-run event is recorded even without pipeline context, but
+	// per-factory analytics rows keyed by an empty factory name are noise.
+	if factoryName != "" {
+		s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_merged", fmt.Sprintf("%s#%d", repo, prNumber), "success")
+	}
 	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        fmt.Sprintf("pr_merged:%s#%d", repo, prNumber),
 		Source:          taskRunSourceGitHub,
@@ -305,7 +313,7 @@ func (s *Server) trackPRMerged(factoryName, issueID, clawID, repo string, prNumb
 		TargetType:      "pull_request",
 		TargetID:        fmt.Sprintf("%s#%d", repo, prNumber),
 		Detail:          map[string]any{"repo": repo, "prNumber": prNumber},
-		OccurredAt:      now(),
+		OccurredAt:      occurredAt,
 	}); err != nil {
 		log.Printf("[task-run-analytics] failed to record PR merge for claw %s: %v", clawID, err)
 	}
