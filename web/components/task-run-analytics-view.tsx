@@ -423,6 +423,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                   <TableHead>Warnings</TableHead>
                   <TableHead className="text-right">Cost</TableHead>
                   <TableHead className="text-right">Tokens</TableHead>
+                  <TableHead className="text-right">Duration</TableHead>
                   <TableHead className="text-right">PRs</TableHead>
                   <TableHead className="text-right">Started</TableHead>
                 </TableRow>
@@ -446,8 +447,8 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                     <TableCell><StatusBadge status={run.status} /></TableCell>
                     <TableCell>
                       <div className="min-w-[180px]">
-                        <div className="font-medium">{run.ownerDisplayName || run.factoryName || run.workflowName || run.ownerType}</div>
-                        <div className="text-xs text-muted-foreground">{run.workspaceName || run.integration || "unknown"}</div>
+                        <div className="font-medium">{run.ownerDisplayName || run.factoryName || run.ownerType}</div>
+                        <div className="text-xs text-muted-foreground">{ownerSecondaryLine(run)}</div>
                       </div>
                     </TableCell>
                     <TableCell>
@@ -470,13 +471,14 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatUSD(run.estimatedCostUsd)}</TableCell>
                     <TableCell className="text-right tabular-nums text-muted-foreground">{formatCompactTokens(run.totalTokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums text-muted-foreground">{formatDurationMs(runDurationMs(run))}</TableCell>
                     <TableCell className="text-right">{run.mergedPrCount}/{run.prCount}</TableCell>
                     <TableCell className="text-right text-muted-foreground">{formatTime(run.startedAt)}</TableCell>
                   </TableRow>
                 ))}
                 {!loading && runs.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
+                    <TableCell colSpan={11} className="h-32 text-center text-muted-foreground">
                       <Search className="mx-auto mb-2 size-5" />
                       No task runs match the current filters.
                     </TableCell>
@@ -618,7 +620,9 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
           <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
           <DetailItem label="Issue" value={run.issueId ? (run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId) : "None"} />
+          <DetailItem label="Workflow" value={run.workflowName || "None"} />
           <DetailItem label="Started" value={formatTime(run.startedAt)} />
+          <DetailItem label="Duration" value={formatDurationMs(runDurationMs(run))} />
           <DetailItem label="Failure" value={run.failureType ? formatLabel(run.failureType) : "None"} />
           <DetailItem label="Human" value={String(run.humanInteractionCount)} />
         </section>
@@ -634,6 +638,7 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
             </div>
           </section>
         )}
+        <TimingSection run={run} />
         <section>
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Pull Requests</h3>
           <div className="space-y-2">
@@ -652,15 +657,21 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         <section>
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Attempts</h3>
           <div className="space-y-2">
-            {(details?.attempts ?? []).map((attempt) => (
-              <div key={attempt.id} className="rounded-md border border-border px-3 py-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span>Attempt {attempt.attemptNumber}</span>
-                  <Badge variant="outline">{attempt.status}</Badge>
+            {(details?.attempts ?? []).map((attempt) => {
+              const attemptDurationMs = durationBetween(attempt.startedAt, attempt.finishedAt)
+              return (
+                <div key={attempt.id} className="rounded-md border border-border px-3 py-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span>Attempt {attempt.attemptNumber}</span>
+                    <Badge variant="outline">{attempt.status}</Badge>
+                  </div>
+                  {attemptDurationMs !== undefined && (
+                    <div className="mt-1 text-xs text-muted-foreground">{formatDurationMs(attemptDurationMs)}</div>
+                  )}
+                  {attempt.failureType && <div className="mt-1 text-xs text-muted-foreground">{formatLabel(attempt.failureType)}</div>}
                 </div>
-                {attempt.failureType && <div className="mt-1 text-xs text-muted-foreground">{formatLabel(attempt.failureType)}</div>}
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
         <section>
@@ -679,6 +690,21 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         </section>
       </div>
     </aside>
+  )
+}
+
+function TimingSection({ run }: { run: TaskRunSummary }) {
+  const phases = runTimingPhases(run)
+  if (phases.length === 0) return null
+  return (
+    <section>
+      <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Timing</h3>
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        {phases.map((phase) => (
+          <DetailItem key={phase.label} label={phase.label} value={formatDurationMs(phase.ms)} />
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -762,6 +788,32 @@ function formatDurationMs(ms: number | null | undefined) {
   const days = Math.floor(totalHours / 24)
   const hours = totalHours % 24
   return hours ? `${days}d ${hours}h` : `${days}d`
+}
+
+function durationBetween(start: number | null | undefined, end: number | null | undefined) {
+  if (!start || !end) return undefined
+  const ms = end - start
+  return ms >= 0 ? ms : undefined
+}
+
+function runDurationMs(run: TaskRunSummary) {
+  return durationBetween(run.startedAt, run.finishedAt)
+}
+
+function ownerSecondaryLine(run: TaskRunSummary) {
+  const parts = [run.workflowName, run.workspaceName || run.integration].filter(Boolean)
+  return parts.length > 0 ? parts.join(" · ") : "unknown"
+}
+
+function runTimingPhases(run: TaskRunSummary) {
+  const phases: { label: string; ms: number }[] = []
+  const push = (label: string, ms: number | undefined) => {
+    if (ms !== undefined) phases.push({ label, ms })
+  }
+  push("Queued wait", durationBetween(run.queuedAt, run.agentStartedAt))
+  push("Implementation", durationBetween(run.agentStartedAt, run.prOpenedAt))
+  push("PR to merge", durationBetween(run.prOpenedAt, run.mergedAt))
+  return phases
 }
 
 function formatChartDate(value: string) {
