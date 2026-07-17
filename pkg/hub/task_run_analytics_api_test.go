@@ -164,6 +164,34 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-authoritative", AttemptID: "attempt-stats-authoritative", ClawID: "claw-stats-authoritative", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-fallback", AttemptID: "attempt-stats-fallback", ClawID: "claw-stats-fallback", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base + 1000, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, agent_started_at=?, pr_opened_at=?, merged_at=? WHERE run_id='stats-authoritative'`, base-1000, base+100, base+5000, base+9000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET agent_started_at=?, pr_opened_at=?, merged_at=? WHERE run_id='stats-fallback'`, base+1100, base+6000, base+10000); err != nil {
+		t.Fatal(err)
+	}
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5500 || response.TicketToPr.Samples != 2 || response.TicketToPr.Authoritative == nil || *response.TicketToPr.Authoritative {
+		t.Fatalf("ticket stats: %#v", response.TicketToPr)
+	}
+	if response.PROpenToMerge.AvgMs == nil || *response.PROpenToMerge.AvgMs != 4000 || response.PROpenToMerge.Samples != 2 {
+		t.Fatalf("merge stats: %#v", response.PROpenToMerge)
+	}
+	if response.AIImpl.AvgMs == nil || *response.AIImpl.AvgMs != 4900 || response.AIImpl.Samples != 2 {
+		t.Fatalf("AI stats: %#v", response.AIImpl)
+	}
+}
+
 func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	ts := int64(1760000000000)

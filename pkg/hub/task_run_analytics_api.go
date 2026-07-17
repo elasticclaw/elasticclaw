@@ -227,6 +227,86 @@ type taskRunAnalyticsFilters struct {
 	AnalyticsEnabled *bool
 }
 
+type taskRunGeneralStat struct {
+	AvgMs         *int64 `json:"avgMs"`
+	Samples       int    `json:"samples"`
+	Authoritative *bool  `json:"authoritative,omitempty"`
+}
+
+type taskRunGeneralStatsResponse struct {
+	TicketToPr    taskRunGeneralStat `json:"ticketToPrMs"`
+	PROpenToMerge taskRunGeneralStat `json:"prOpenToMergeMs"`
+	AIImpl        taskRunGeneralStat `json:"aiImplMs"`
+}
+
+func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	filters, err := parseTaskRunAnalyticsFilters(r)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	response, err := s.readTaskRunAnalyticsGeneralStats(filters)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	jsonOK(w, response)
+}
+
+func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilters) (taskRunGeneralStatsResponse, error) {
+	where, args := taskRunAnalyticsSummaryWhere(filters)
+	rows, err := s.db.Query(`SELECT issue_created_at, started_at, agent_started_at, pr_opened_at, merged_at FROM task_run_summaries `+where, args...)
+	if err != nil {
+		return taskRunGeneralStatsResponse{}, err
+	}
+	defer rows.Close()
+	var ticketSum, prSum, aiSum int64
+	var ticketN, prN, aiN int
+	authoritative := true
+	for rows.Next() {
+		var issue, started, agent, opened, merged int64
+		if err := rows.Scan(&issue, &started, &agent, &opened, &merged); err != nil {
+			return taskRunGeneralStatsResponse{}, err
+		}
+		if opened > 0 && started > 0 {
+			base := issue
+			if base == 0 {
+				base = started
+				authoritative = false
+			}
+			ticketSum += opened - base
+			ticketN++
+		}
+		if opened > 0 && merged > 0 {
+			prSum += merged - opened
+			prN++
+		}
+		if agent > 0 && opened > 0 {
+			aiSum += opened - agent
+			aiN++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return taskRunGeneralStatsResponse{}, err
+	}
+	average := func(sum int64, samples int) *int64 {
+		if samples == 0 {
+			return nil
+		}
+		value := sum / int64(samples)
+		return &value
+	}
+	return taskRunGeneralStatsResponse{
+		TicketToPr:    taskRunGeneralStat{AvgMs: average(ticketSum, ticketN), Samples: ticketN, Authoritative: &authoritative},
+		PROpenToMerge: taskRunGeneralStat{AvgMs: average(prSum, prN), Samples: prN},
+		AIImpl:        taskRunGeneralStat{AvgMs: average(aiSum, aiN), Samples: aiN},
+	}, nil
+}
+
 func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
