@@ -56,6 +56,7 @@ func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
 		{"low", time.Date(2026, time.July, 3, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "low"},
 		{"medium", time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
 		{"high", time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "high"},
+		{"medium downgrade from high variance", time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			s, db := newTaskRunAnalyticsAPITestServer(t)
