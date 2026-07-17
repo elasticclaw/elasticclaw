@@ -498,6 +498,7 @@ func (s *Server) createClawForJiraWorkflow(workspace *types.WorkspaceConfig, wor
 	if err != nil {
 		return err
 	}
+	s.setClawIssueTitle(clawID, payload.Issue.Fields.Summary)
 	if err := s.completeFactoryTrigger(triggerOwner, "jira", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
@@ -549,6 +550,7 @@ func (s *Server) createClawForJiraIssue(factory *types.FactoryConfig, payload ji
 	if err != nil {
 		return err
 	}
+	s.setClawIssueTitle(clawID, payload.Issue.Fields.Summary)
 	if err := s.completeFactoryTrigger(factory.Name, "jira", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {

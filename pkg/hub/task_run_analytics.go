@@ -191,6 +191,19 @@ func rfc3339FromEpochMillis(ms int64) string {
 	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
+// setClawIssueTitle persists the tracker issue/story title on the claw and its
+// task run so it flows into task_run_summaries via the materializer. Best
+// effort: a missing title never fails claw creation.
+func (s *Server) setClawIssueTitle(clawID, title string) {
+	title = strings.TrimSpace(title)
+	if clawID == "" || title == "" {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE claws SET issue_title=? WHERE id=?`, title, clawID)
+	_, _ = s.db.Exec(`UPDATE task_runs SET issue_title=? WHERE claw_id=?`, title, clawID)
+	_, _ = s.db.Exec(`UPDATE task_run_summaries SET issue_title=? WHERE run_id IN (SELECT id FROM task_runs WHERE claw_id=?)`, title, clawID)
+}
+
 func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string, string, error) {
 	if s == nil || s.db == nil {
 		return "", "", fmt.Errorf("ensure task run: missing server db")
@@ -209,13 +222,13 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 	}
 	defer tx.Rollback()
 
-	var tenantID, existingRunID, rawTags, clawModel, clawLLMKey, clawFactory, externalTriggerID, linearIssue, githubIssue, shortcutStory, jiraIssue, clawStatus string
+	var tenantID, existingRunID, rawTags, clawModel, clawLLMKey, clawFactory, externalTriggerID, linearIssue, githubIssue, shortcutStory, jiraIssue, clawStatus, clawIssueTitle string
 	err = tx.QueryRow(`
 		SELECT tenant_id, COALESCE(task_run_id,''), COALESCE(tags,'[]'), COALESCE(default_model,''),
 		       COALESCE(llm_key,''), COALESCE(factory_name,''), COALESCE(external_trigger_id,''),
-		       COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,''), COALESCE(status,'')
+		       COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,''), COALESCE(status,''), COALESCE(issue_title,'')
 		  FROM claws
-		 WHERE id=?`, clawID).Scan(&tenantID, &existingRunID, &rawTags, &clawModel, &clawLLMKey, &clawFactory, &externalTriggerID, &linearIssue, &githubIssue, &shortcutStory, &jiraIssue, &clawStatus)
+		 WHERE id=?`, clawID).Scan(&tenantID, &existingRunID, &rawTags, &clawModel, &clawLLMKey, &clawFactory, &externalTriggerID, &linearIssue, &githubIssue, &shortcutStory, &jiraIssue, &clawStatus, &clawIssueTitle)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", "", fmt.Errorf("ensure task run: claw %s not found", clawID)
@@ -266,12 +279,12 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 		INSERT INTO task_runs(
 			id, tenant_id, initial_attempt_id, current_attempt_id, attempt_count, run_kind,
 			owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name,
-			integration, integration_workspace, trigger_id, external_trigger_id, issue_id, issue_created_at, claw_id, model, llm_key, tags,
+			integration, integration_workspace, trigger_id, external_trigger_id, issue_id, issue_title, issue_created_at, claw_id, model, llm_key, tags,
 			analytics_enabled, requires_pr, excluded_reason, timeout_at, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, opts.TenantID, attemptID, attemptID, 1, opts.RunKind, opts.OwnerType, opts.WorkspaceName,
 		opts.WorkflowName, opts.FactoryName, opts.OwnerID, opts.OwnerDisplayName, opts.Integration, opts.IntegrationWorkspace,
-		opts.TriggerID, opts.ExternalTriggerID, opts.IssueID, epochMillisOrZero(opts.IssueCreatedAt), clawID, opts.Model, opts.LLMKey, tags, analyticsEnabled, requiresPR,
+		opts.TriggerID, opts.ExternalTriggerID, opts.IssueID, clawIssueTitle, epochMillisOrZero(opts.IssueCreatedAt), clawID, opts.Model, opts.LLMKey, tags, analyticsEnabled, requiresPR,
 		opts.ExcludedReason, timeoutAt, ts, ts,
 	); err != nil {
 		return "", "", err
@@ -917,13 +930,13 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		INSERT INTO task_run_summaries(
 			id, tenant_id, run_id, initial_attempt_id, current_attempt_id, status, phase,
 			attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id,
-			owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_created_at, claw_id,
+			owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id,
 			model, llm_key, repo, primary_pr_url,
 			pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type,
 			human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at,
 			pr_opened_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
 			analytics_enabled, requires_pr, excluded_reason
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id) DO UPDATE SET
 			initial_attempt_id=excluded.initial_attempt_id,
 			current_attempt_id=excluded.current_attempt_id,
@@ -940,6 +953,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			integration=excluded.integration,
 			integration_workspace=excluded.integration_workspace,
 			issue_id=excluded.issue_id,
+			issue_title=excluded.issue_title,
 			issue_created_at=excluded.issue_created_at,
 			claw_id=excluded.claw_id,
 			model=excluded.model,
@@ -968,7 +982,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			excluded_reason=excluded.excluded_reason`,
 		uuid.New().String(), meta.tenantID, runID, meta.initialAttemptID, meta.currentAttemptID, status, phase, meta.attemptCount, meta.ownerType,
 		meta.workspaceName, meta.workflowName, meta.factoryName, meta.ownerID, meta.ownerDisplayName,
-		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueCreatedAt, meta.clawID,
+		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.issueCreatedAt, meta.clawID,
 		meta.model, meta.llmKey, counts.primaryRepo, primaryPRURL, counts.total, counts.open, counts.merged, counts.closed,
 		warningTypes, failureType, humanInteractions, meta.createdAt, phaseTimes.queuedAt, phaseTimes.provisionStartedAt,
 		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
@@ -1086,6 +1100,7 @@ type taskRunMeta struct {
 	integration          string
 	integrationWorkspace string
 	issueID              string
+	issueTitle           string
 	issueCreatedAt       int64
 	model                string
 	llmKey               string
@@ -1104,7 +1119,7 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		       tr.attempt_count, tr.owner_type, tr.workspace_name,
 		       tr.workflow_name, tr.factory_name, tr.owner_id, tr.owner_display_name,
 		       tr.integration,
-		       tr.integration_workspace, tr.issue_id, tr.issue_created_at, COALESCE(c.status,''), COALESCE(NULLIF(tr.model,''), c.default_model, ''),
+		       tr.integration_workspace, tr.issue_id, COALESCE(NULLIF(tr.issue_title,''), c.issue_title, ''), tr.issue_created_at, COALESCE(c.status,''), COALESCE(NULLIF(tr.model,''), c.default_model, ''),
 		       COALESCE(NULLIF(tr.llm_key,''), c.llm_key, ''), tr.analytics_enabled, tr.requires_pr, tr.excluded_reason,
 		       tr.timeout_at, tr.created_at, tr.updated_at
 		  FROM task_runs tr
@@ -1113,7 +1128,7 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		&meta.tenantID, &meta.clawID, &meta.runKind, &meta.initialAttemptID, &meta.currentAttemptID,
 		&meta.attemptCount, &meta.ownerType,
 		&meta.workspaceName, &meta.workflowName, &meta.factoryName, &meta.ownerID, &meta.ownerDisplayName,
-		&meta.integration, &meta.integrationWorkspace, &meta.issueID, &meta.issueCreatedAt, &meta.clawStatus, &meta.model, &meta.llmKey,
+		&meta.integration, &meta.integrationWorkspace, &meta.issueID, &meta.issueTitle, &meta.issueCreatedAt, &meta.clawStatus, &meta.model, &meta.llmKey,
 		&meta.analyticsEnabled, &meta.requiresPR, &meta.excludedReason,
 		&meta.timeoutAt, &meta.createdAt, &meta.updatedAt,
 	)

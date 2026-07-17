@@ -2264,12 +2264,22 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == "heartbeat" {
 				payload, _ := json.Marshal(msg.Payload)
 				var hb struct {
-					GatewayHealthy bool  `json:"gateway_healthy"`
-					GatewayReady   *bool `json:"gateway_ready,omitempty"`
-					ContextUsage   int   `json:"context_usage"`
-					RestartCount   int   `json:"restart_count"`
+					GatewayHealthy   bool     `json:"gateway_healthy"`
+					GatewayReady     *bool    `json:"gateway_ready,omitempty"`
+					ContextUsage     int      `json:"context_usage"`
+					RestartCount     int      `json:"restart_count"`
+					SessionKey       string   `json:"session_key"`
+					InputTokens      *int     `json:"input_tokens"`
+					OutputTokens     *int     `json:"output_tokens"`
+					TotalTokens      *int     `json:"total_tokens"`
+					EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
+					Model            string   `json:"model"`
+					ModelProvider    string   `json:"model_provider"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
+					if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider}); err != nil {
+						log.Printf("[usage] heartbeat for %s: %v", clawID, err)
+					}
 					gatewayUnhealthyMax := s.livenessSettings().gatewayUnhealthyMax
 					var wakeConn *clawConn
 					var shouldWake bool

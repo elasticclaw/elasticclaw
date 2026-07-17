@@ -561,6 +561,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	if err != nil {
 		return "", false, err
 	}
+	s.setClawIssueTitle(clawID, payload.Issue.Title)
 	if err := s.completeFactoryTrigger(triggerOwner, "github-issues", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
@@ -856,6 +857,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
+	s.setClawIssueTitle(clawID, payload.Issue.Title)
 
 	log.Printf("[factory] created claw %s (%s) for GitHub issue %s (status=%s, reason=%s)", clawName, clawID[:8], issueID, initialStatus, reason)
 	// Notify connected dashboards immediately so the card appears

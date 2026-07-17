@@ -54,6 +54,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restore_checkpoint_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN restored_from_checkpoint_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN issue_title TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
@@ -73,8 +74,19 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_attempts ADD COLUMN restored_checkpoint_id TEXT`)
+	_, _ = db.Exec(`ALTER TABLE task_runs ADD COLUMN issue_title TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_runs ADD COLUMN issue_created_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN issue_title TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN issue_created_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN estimated_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN usage_updated_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_input_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_output_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -219,6 +231,7 @@ func migrate(db *sql.DB) error {
 		github_issue_id  TEXT NOT NULL DEFAULT '',
 		shortcut_story_id TEXT NOT NULL DEFAULT '',
 		jira_issue_id    TEXT NOT NULL DEFAULT '',
+		issue_title      TEXT NOT NULL DEFAULT '',
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
 		bootstrap_ok        INTEGER NOT NULL DEFAULT 0,
@@ -294,6 +307,7 @@ func migrate(db *sql.DB) error {
 		trigger_id            TEXT NOT NULL DEFAULT '',
 		external_trigger_id   TEXT NOT NULL DEFAULT '',
 		issue_id              TEXT NOT NULL DEFAULT '',
+		issue_title           TEXT NOT NULL DEFAULT '',
 		issue_created_at      INTEGER NOT NULL DEFAULT 0,
 		claw_id               TEXT NOT NULL DEFAULT '',
 		model                 TEXT NOT NULL DEFAULT '',
@@ -311,6 +325,21 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_runs_claw ON task_runs(claw_id);
 	CREATE INDEX IF NOT EXISTS idx_task_runs_trigger ON task_runs(trigger_id);
 	CREATE INDEX IF NOT EXISTS idx_task_runs_owner ON task_runs(workspace_name, owner_type, owner_display_name, created_at DESC);
+
+	CREATE TABLE IF NOT EXISTS task_run_usage (
+		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+		session_key TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', model_provider TEXT NOT NULL DEFAULT '',
+		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+		committed_input_tokens INTEGER NOT NULL DEFAULT 0, committed_output_tokens INTEGER NOT NULL DEFAULT 0, committed_total_tokens INTEGER NOT NULL DEFAULT 0, committed_cost_usd REAL NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER, cache_write_tokens INTEGER, estimated_cost_usd REAL, cost_source TEXT NOT NULL DEFAULT 'gateway' CHECK(cost_source IN ('gateway','hub_pricing')),
+		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
+	);
+	CREATE TABLE IF NOT EXISTS usage_daily (
+		tenant_id TEXT NOT NULL, day TEXT NOT NULL, workspace_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+		PRIMARY KEY(tenant_id, day, workspace_name, factory_name, workflow_name, model)
+	);
+	CREATE TABLE IF NOT EXISTS model_prices (model TEXT PRIMARY KEY, input_cost_per_token REAL NOT NULL, output_cost_per_token REAL NOT NULL, cache_read_cost_per_token REAL NOT NULL, cache_write_cost_per_token REAL NOT NULL, source TEXT NOT NULL, updated_at INTEGER NOT NULL);
 
 	CREATE TABLE IF NOT EXISTS task_run_attempts (
 		id             TEXT PRIMARY KEY,
@@ -422,9 +451,15 @@ func migrate(db *sql.DB) error {
 		integration             TEXT NOT NULL DEFAULT '',
 		integration_workspace   TEXT NOT NULL DEFAULT '',
 		issue_id                TEXT NOT NULL DEFAULT '',
+		issue_title             TEXT NOT NULL DEFAULT '',
 		issue_created_at        INTEGER NOT NULL DEFAULT 0,
 		claw_id                 TEXT NOT NULL DEFAULT '',
 		model                   TEXT NOT NULL DEFAULT '',
+		input_tokens            INTEGER NOT NULL DEFAULT 0,
+		output_tokens           INTEGER NOT NULL DEFAULT 0,
+		total_tokens            INTEGER NOT NULL DEFAULT 0,
+		estimated_cost_usd      REAL NOT NULL DEFAULT 0,
+		usage_updated_at        INTEGER NOT NULL DEFAULT 0,
 		llm_key                 TEXT NOT NULL DEFAULT '',
 		repo                    TEXT NOT NULL DEFAULT '',
 		primary_pr_url          TEXT NOT NULL DEFAULT '',
@@ -600,7 +635,25 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(tenant_id, status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_claw ON workflow_runs(claw_id);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, p := range []struct {
+		model   string
+		in, out float64
+	}{
+		{"claude-fable-5", 10, 50}, {"claude-opus-4-8", 5, 25}, {"claude-opus-4-7", 5, 25}, {"claude-opus-4-6", 5, 25},
+		{"claude-sonnet-5", 3, 15}, {"claude-sonnet-4-6", 3, 15}, {"claude-haiku-4-5", 1, 5},
+	} {
+		// Upsert so price corrections in the static seed reach existing
+		// databases; rows from other sources are left untouched.
+		_, err = db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.in/1e7, p.in*1.25/1e6, "static", now().UnixMilli())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pruneFactoryAnalytics deletes factory_analytics rows older than 1 year.
