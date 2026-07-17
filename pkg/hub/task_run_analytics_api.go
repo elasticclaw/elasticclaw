@@ -136,6 +136,11 @@ type taskRunAnalyticsRunView struct {
 	AnalyticsEnabled      bool     `json:"analyticsEnabled"`
 	RequiresPR            bool     `json:"requiresPr"`
 	ExcludedReason        string   `json:"excludedReason"`
+	InputTokens           int64    `json:"inputTokens,omitempty"`
+	OutputTokens          int64    `json:"outputTokens,omitempty"`
+	TotalTokens           int64    `json:"totalTokens,omitempty"`
+	EstimatedCostUsd      float64  `json:"estimatedCostUsd,omitempty"`
+	IssueTitle            string   `json:"issueTitle,omitempty"`
 }
 
 type taskRunAnalyticsAttemptView struct {
@@ -1181,7 +1186,8 @@ func taskRunAnalyticsRunColumns() string {
 		primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types,
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
 		agent_started_at, pr_opened_at, merged_at, finished_at, timeout_at, last_event_at,
-		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason`
+		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason,
+		input_tokens, output_tokens, total_tokens, estimated_cost_usd, issue_title`
 }
 
 func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error) {
@@ -1198,7 +1204,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.MergedAt, &run.FinishedAt,
 			&run.TimeoutAt, &run.LastEventAt, &run.MaterializedAt, &run.UpdatedAt, &analyticsEnabled, &requiresPR,
-			&run.ExcludedReason,
+			&run.ExcludedReason, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.EstimatedCostUsd, &run.IssueTitle,
 		); err != nil {
 			return nil, err
 		}
