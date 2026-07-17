@@ -307,3 +307,25 @@ func TestHeartbeatIngestsTaskRunUsage(t *testing.T) {
 		return sumTotal == 140
 	}, "summary usage columns updated")
 }
+
+func TestMigrateBackfillsUsageDayFromUpdatedAt(t *testing.T) {
+	s, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	_ = s
+	// Simulate a pre-migration row: usage_day was introduced with DEFAULT ''.
+	updatedAt := time.Date(2026, 7, 10, 15, 30, 0, 0, time.UTC).UnixMilli()
+	if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		uuid.NewString(), "tenant", "run-usage", "sess-legacy", "claude-sonnet-5", "anthropic", 10, 5, 15, 10, 5, 15, 0.01, 0.01, "hub_pricing", "", updatedAt, updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var day string
+	if err := db.QueryRow(`SELECT usage_day FROM task_run_usage WHERE session_key='sess-legacy'`).Scan(&day); err != nil {
+		t.Fatal(err)
+	}
+	if day != "2026-07-10" {
+		t.Fatalf("usage_day = %q, want 2026-07-10", day)
+	}
+}

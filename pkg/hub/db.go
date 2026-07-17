@@ -640,6 +640,11 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	// Backfill rows that predate the usage_day column so cost corrections land
+	// on the day the run's usage was last applied, not on the correction's day.
+	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
+		return fmt.Errorf("backfill task_run_usage.usage_day: %w", err)
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
