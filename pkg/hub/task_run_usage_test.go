@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,9 +75,13 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	if initialIn != 60_000 || initialOut != 3_000 || initialCost != 0.25 {
 		t.Fatalf("first two runs = %d/%d cost=%v, want 60000/3000 cost=0.25", initialIn, initialOut, initialCost)
 	}
-	run3 := usageSnapshot("a", 5_000, 500, 123_456, "claude-sonnet-5")
-	run3.EstimatedCostUSD = ptr(0.01)
-	for _, snap := range []taskRunUsageSnapshot{run3, usageSnapshot("b", 3_000, 300, 42, "claude-sonnet-5")} {
+	// This run's raw total grows from run2's 7, but it is still a distinct
+	// per-reply total rather than a cumulative counter.
+	run3 := usageSnapshot("a", 60_000, 2_500, 60_000, "claude-sonnet-5")
+	run3.EstimatedCostUSD = ptr(0.30)
+	run4 := usageSnapshot("a", 5_000, 500, 123_456, "claude-sonnet-5")
+	run4.EstimatedCostUSD = ptr(0.01)
+	for _, snap := range []taskRunUsageSnapshot{run3, run4, usageSnapshot("b", 3_000, 300, 42, "claude-sonnet-5")} {
 		if err := s.recordTaskRunUsage(claw, snap); err != nil {
 			t.Fatal(err)
 		}
@@ -88,11 +93,12 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	}
 	// Each changed input/output snapshot is a complete run. Raw total_tokens
 	// is context occupancy and is deliberately absent from these sums.
-	if in != 68_000 || out != 3_800 || total != 71_800 {
-		t.Fatalf("summary = %d/%d/%d, want 68000/3800/71800", in, out, total)
+	if in != 128_000 || out != 6_300 || total != 134_300 {
+		t.Fatalf("summary = %d/%d/%d, want 128000/6300/134300", in, out, total)
 	}
-	if cost <= 0.26 { // includes $0.25 gateway costs plus priced session b
-		t.Fatalf("expected accumulated cost, got %v", cost)
+	const wantCost = 0.5735 // $0.56 gateway costs + $0.0135 hub pricing for session b.
+	if math.Abs(cost-wantCost) > 1e-9 {
+		t.Fatalf("summary cost = %v, want %v", cost, wantCost)
 	}
 	var rows int
 	if err := db.QueryRow(`SELECT count(*) FROM task_run_usage`).Scan(&rows); err != nil {
@@ -101,9 +107,12 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	if rows != 2 {
 		t.Fatalf("usage rows=%d, want 2", rows)
 	}
-	din, dout, dtotal, _ := queryUsageDaily(t, db)
-	if din != 68_000 || dout != 3_800 || dtotal != 71_800 {
-		t.Fatalf("usage_daily = %d/%d/%d, want 68000/3800/71800", din, dout, dtotal)
+	din, dout, dtotal, dailyCost := queryUsageDaily(t, db)
+	if din != 128_000 || dout != 6_300 || dtotal != 134_300 {
+		t.Fatalf("usage_daily = %d/%d/%d, want 128000/6300/134300", din, dout, dtotal)
+	}
+	if math.Abs(dailyCost-wantCost) > 1e-9 {
+		t.Fatalf("usage_daily cost = %v, want %v", dailyCost, wantCost)
 	}
 }
 
@@ -131,6 +140,21 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	}
 	if source != "gateway" {
 		t.Fatalf("cost_source = %q, want gateway", source)
+	}
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 10, model)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3 || source != "gateway" {
+		t.Fatalf("omitted-cost heartbeat changed stored cost to %v/%q, want 3/gateway", cost, source)
+	}
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3 {
+		t.Fatalf("summary cost = %v, want 3", cost)
 	}
 	_, _, _, dailyCost := queryUsageDaily(t, db)
 	if dailyCost != 3 {

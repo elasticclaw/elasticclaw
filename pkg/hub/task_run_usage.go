@@ -73,14 +73,14 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 			dcost = cost.Float64
 			comCost += dcost
 		}
-	} else if cost.Valid && (!oldCost.Valid || cost.Float64 != oldCost.Float64) {
+	} else if cost.Valid && (!oldCost.Valid || cost.Float64 != oldCost.Float64) && !(oldSource == "gateway" && source == "hub_pricing") {
 		// A real gateway cost can replace a hub estimate for the same run.
 		dcost = cost.Float64
 		if oldCost.Valid {
 			dcost -= oldCost.Float64
 		}
 		comCost += dcost
-	} else if !cost.Valid {
+	} else if !cost.Valid || (oldSource == "gateway" && source == "hub_pricing") {
 		cost = oldCost
 		source = oldSource
 	}
