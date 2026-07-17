@@ -716,7 +716,7 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		INSERT INTO task_run_summaries(
 			id, tenant_id, run_id, initial_attempt_id, current_attempt_id, status, phase, attempt_count,
 			owner_type, workspace_name, workflow_name, factory_name, owner_display_name, run_kind,
-		integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
+			integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
 			merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count,
 			started_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
 			analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,

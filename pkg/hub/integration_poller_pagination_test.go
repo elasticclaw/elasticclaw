@@ -21,7 +21,7 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 		}
 		cursors = append(cursors, request.Variables["after"])
 		if request.Variables["after"] == nil {
-			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`))
+			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","createdAt":"2026-07-01T10:00:00.000Z","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"2","identifier":"ELA-2","title":"two","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`))
@@ -35,6 +35,9 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 	}
 	if len(issues) != 2 || issues[0].Identifier != "ELA-1" || issues[1].Identifier != "ELA-2" {
 		t.Fatalf("issues = %#v", issues)
+	}
+	if issues[0].CreatedAt != "2026-07-01T10:00:00.000Z" {
+		t.Fatalf("issues[0].CreatedAt = %q, want createdAt propagated from GraphQL response", issues[0].CreatedAt)
 	}
 	if len(cursors) != 2 || cursors[0] != nil || cursors[1] != "cursor-1" {
 		t.Fatalf("cursor variables = %#v", cursors)
