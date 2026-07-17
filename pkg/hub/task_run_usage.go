@@ -45,10 +45,6 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	effectiveModel := snapshot.Model
-	if effectiveModel == "" && found {
-		effectiveModel = oldModel
-	}
 	in, out, total := oldIn, oldOut, oldTotal
 	if snapshot.InputTokens != nil {
 		in = *snapshot.InputTokens
@@ -58,6 +54,16 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	if snapshot.TotalTokens != nil {
 		total = *snapshot.TotalTokens
+	}
+	// OpenClaw overwrites a session entry after each reply with that run's
+	// totals. total_tokens is context occupancy, not billed token usage.
+	newRun := !found || in != oldIn || out != oldOut
+	// On cost-only heartbeats keep the stored model so corrections target the
+	// usage_daily bucket that received the run's tokens; a model change takes
+	// effect with the next run's snapshot.
+	effectiveModel := snapshot.Model
+	if found && (!newRun || effectiveModel == "") {
+		effectiveModel = oldModel
 	}
 	var cost sql.NullFloat64
 	source := oldSource
@@ -73,9 +79,6 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 			log.Printf("[usage] no static price for model %s", effectiveModel)
 		}
 	}
-	// OpenClaw overwrites a session entry after each reply with that run's
-	// totals. total_tokens is context occupancy, not billed token usage.
-	newRun := !found || in != oldIn || out != oldOut
 	din, dout, dtotal, dcost := 0, 0, 0, 0.0
 	if newRun {
 		din, dout, dtotal = in, out, in+out
@@ -97,10 +100,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		cost = oldCost
 		source = oldSource
 	}
-	usageNow := now()
-	if s.nowFunc != nil {
-		usageNow = s.nowFunc()
-	}
+	usageNow := s.reaperNow()
 	ts := usageNow.UnixMilli()
 	day := usageNow.UTC().Format("2006-01-02")
 	usageDay := oldUsageDay

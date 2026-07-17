@@ -255,6 +255,49 @@ func TestTaskRunUsageAttributesChangedRunToNewModel(t *testing.T) {
 	}
 }
 
+func TestTaskRunUsageCostCorrectionTargetsOriginalModelBucket(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// Run recorded under sonnet with a hub_pricing estimate (no gateway cost).
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 100, 40, 140, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	// Same-token correction arrives with a gateway cost under a different
+	// model name: the delta must hit the sonnet bucket, not open an opus one.
+	correction := usageSnapshot("a", 100, 40, 140, "claude-opus-4-8")
+	correction.EstimatedCostUSD = ptr(0.0001)
+	if err := s.recordTaskRunUsage(claw, correction); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT model,cost_usd FROM usage_daily WHERE tenant_id='tenant'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]float64{}
+	for rows.Next() {
+		var model string
+		var cost float64
+		if err := rows.Scan(&model, &cost); err != nil {
+			t.Fatal(err)
+		}
+		got[model] = cost
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || math.Abs(got["claude-sonnet-5"]-0.0001) > 1e-9 {
+		t.Fatalf("usage_daily buckets = %#v, want only claude-sonnet-5 holding the corrected cost", got)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT model FROM task_run_usage WHERE session_key='a'`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-sonnet-5" {
+		t.Fatalf("stored model = %q, want claude-sonnet-5 until the next run", model)
+	}
+}
+
 func TestTaskRunUsageUnknownModelGetsNoEstimatedCost(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
