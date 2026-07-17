@@ -27,6 +27,7 @@ type linearWebhookPayload struct {
 	CreatedAt string `json:"createdAt"` // ISO 8601 timestamp of the webhook event
 	Data      struct {
 		ID          string `json:"id"`
+		CreatedAt   string `json:"createdAt"`
 		Identifier  string `json:"identifier"` // e.g. "ELA-123"
 		Title       string `json:"title"`
 		Description string `json:"description"`
@@ -423,6 +424,7 @@ func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceCon
 
 func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, reason string) error {
 	issueID := payload.Data.Identifier
+	issueCreatedAt := parseRFC3339Timestamp(payload.Data.CreatedAt)
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
@@ -466,6 +468,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 		workspaceFiles:       templateFiles,
 		clawName:             clawName,
 		linearIssueID:        issueID,
+		issueCreatedAt:       issueCreatedAt,
 		issueLabels:          linearPayloadLabels(payload),
 		issueLabelsAvailable: true,
 		reason:               reason,

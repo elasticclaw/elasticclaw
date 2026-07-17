@@ -252,6 +252,7 @@ type linearPollIssue struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
 	State       struct {
 		Name string `json:"name"`
@@ -282,6 +283,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				title
 				description
 				url
+				createdAt
 				updatedAt
 				state { name }
 				team { key name }
@@ -322,6 +324,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 						Title       string `json:"title"`
 						Description string `json:"description"`
 						URL         string `json:"url"`
+						CreatedAt   string `json:"createdAt"`
 						UpdatedAt   string `json:"updatedAt"`
 						State       struct {
 							Name string `json:"name"`
@@ -362,6 +365,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				Title:       n.Title,
 				Description: n.Description,
 				URL:         n.URL,
+				CreatedAt:   n.CreatedAt,
 				UpdatedAt:   n.UpdatedAt,
 				State:       n.State,
 				Team:        n.Team,
@@ -490,6 +494,7 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 	payload.Data.Title = issue.Title
 	payload.Data.Description = issue.Description
 	payload.Data.URL = issue.URL
+	payload.Data.CreatedAt = issue.CreatedAt
 	payload.Data.State.Name = issue.State.Name
 	payload.Data.Team.Key = issue.Team.Key
 	payload.Data.Team.Name = issue.Team.Name
@@ -926,6 +931,7 @@ type githubIssuesPollItem struct {
 	Body      string `json:"body"`
 	HTMLURL   string `json:"html_url"`
 	State     string `json:"state"`
+	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 	Labels    []struct {
 		Name string `json:"name"`
@@ -1299,6 +1305,7 @@ func buildGitHubIssuesPollPayloadForAction(issue githubIssuesPollItem, repo, act
 	payload.Issue.Body = issue.Body
 	payload.Issue.HTMLURL = issue.HTMLURL
 	payload.Issue.State = issue.State
+	payload.Issue.CreatedAt = issue.CreatedAt
 	payload.Issue.User.Login = issue.User.Login
 	for _, l := range issue.Labels {
 		label := struct {
