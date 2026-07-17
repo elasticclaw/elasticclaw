@@ -246,7 +246,7 @@ func TestTaskRunAnalyticsAPIGeneralStatsIssueCreatedAtAtRunCreation(t *testing.T
 	var response taskRunGeneralStatsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
 	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.TicketToPr.Samples != 1 ||
-		response.TicketToPr.Authoritative == nil || !*response.TicketToPr.Authoritative {
+		response.TicketToPr.AuthoritativeSamples == nil || *response.TicketToPr.AuthoritativeSamples != 1 {
 		t.Fatalf("ticket stats: %#v", response.TicketToPr)
 	}
 }
@@ -299,6 +299,51 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	notFoundRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-other-tenant", "test-token")
 	if notFoundRR.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant detail status = %d, body = %s", notFoundRR.Code, notFoundRR.Body.String())
+	}
+}
+
+func TestTaskRunAnalyticsAPIUsageDistinguishesRecordedZeroFromMissing(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	ts := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-usage-zero", AttemptID: "attempt-usage-zero", ClawID: "claw-usage-zero", TenantID: "test-tenant-id",
+		OwnerType: taskRunOwnerFactory, StartedAt: ts + 1, UsageUpdatedAt: ts + 1,
+	})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-usage-missing", AttemptID: "attempt-usage-missing", ClawID: "claw-usage-missing", TenantID: "test-tenant-id",
+		OwnerType: taskRunOwnerFactory, StartedAt: ts,
+	})
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
+	var response struct {
+		Runs []map[string]json.RawMessage `json:"runs"`
+	}
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if len(response.Runs) != 2 {
+		t.Fatalf("run count = %d, want 2", len(response.Runs))
+	}
+	assertTaskRunAnalyticsUsageJSON(t, response.Runs[0], true)
+	assertTaskRunAnalyticsUsageJSON(t, response.Runs[1], false)
+
+	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-usage-zero", "test-token")
+	var detail struct {
+		Run map[string]json.RawMessage `json:"run"`
+	}
+	decodeTaskRunAnalyticsAPI(t, detailRR, &detail)
+	assertTaskRunAnalyticsUsageJSON(t, detail.Run, true)
+}
+
+func assertTaskRunAnalyticsUsageJSON(t *testing.T, run map[string]json.RawMessage, recorded bool) {
+	t.Helper()
+	for _, field := range []string{"inputTokens", "outputTokens", "totalTokens", "estimatedCostUsd"} {
+		value, ok := run[field]
+		if ok != recorded {
+			t.Errorf("%s present = %t, want %t; run = %v", field, ok, recorded, run)
+			continue
+		}
+		if recorded && string(value) != "0" {
+			t.Errorf("%s = %s, want 0", field, value)
+		}
 	}
 }
 
@@ -641,6 +686,7 @@ type apiRunFixture struct {
 	OutputTokens      int64
 	TotalTokens       int64
 	EstimatedCostUsd  float64
+	UsageUpdatedAt    int64
 	IssueTitle        string
 }
 
@@ -719,9 +765,9 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 			integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
 			merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count,
 			started_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
-			analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,
-			estimated_cost_usd, issue_title
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,
+			estimated_cost_usd, usage_updated_at, issue_title
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"summary-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.AttemptID, fixture.AttemptID,
 		fixture.Status, fixture.Phase, 1, fixture.OwnerType, fixture.Workspace, fixture.Workflow, fixture.Factory,
 		firstNonEmpty(fixture.Workflow, fixture.Factory), taskRunKindPRTask, fixture.Integration,
@@ -730,7 +776,7 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		fixture.MergedPRCount, fixture.ClosedPRCount, warningsJSON, fixture.FailureType,
 		fixture.HumanInteractions, fixture.StartedAt, fixture.MergedAt, fixture.FinishedAt,
 		fixture.StartedAt, fixture.StartedAt, fixture.StartedAt, boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
-		fixture.InputTokens, fixture.OutputTokens, fixture.TotalTokens, fixture.EstimatedCostUsd, fixture.IssueTitle,
+		fixture.InputTokens, fixture.OutputTokens, fixture.TotalTokens, fixture.EstimatedCostUsd, fixture.UsageUpdatedAt, fixture.IssueTitle,
 	)
 	if err != nil {
 		t.Fatalf("insert task run summary %s: %v", fixture.RunID, err)

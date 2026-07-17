@@ -108,12 +108,12 @@ func TestTaskRunAnalyticsCostsHandler(t *testing.T) {
 
 func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, IssueTitle: "Fix the thing"})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, UsageUpdatedAt: 1, IssueTitle: "Fix the thing"})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "zero", AttemptID: "zero-attempt", ClawID: "zero-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 2})
 	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
 	var response taskRunAnalyticsRunsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	if len(response.Runs) != 2 || response.Runs[0].RunID != "zero" || response.Runs[1].InputTokens != 10 || response.Runs[1].OutputTokens != 20 || response.Runs[1].TotalTokens != 30 || response.Runs[1].EstimatedCostUsd != 1.25 || response.Runs[1].IssueTitle != "Fix the thing" {
+	if len(response.Runs) != 2 || response.Runs[0].RunID != "zero" || response.Runs[1].InputTokens == nil || *response.Runs[1].InputTokens != 10 || response.Runs[1].OutputTokens == nil || *response.Runs[1].OutputTokens != 20 || response.Runs[1].TotalTokens == nil || *response.Runs[1].TotalTokens != 30 || response.Runs[1].EstimatedCostUsd == nil || *response.Runs[1].EstimatedCostUsd != 1.25 || response.Runs[1].IssueTitle != "Fix the thing" {
 		t.Fatalf("unexpected usage fields: %#v", response.Runs)
 	}
 	if strings.Contains(rr.Body.String(), `"inputTokens":0`) || strings.Contains(rr.Body.String(), `"issueTitle":""`) {
@@ -122,7 +122,7 @@ func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/usage", "test-token")
 	var detail taskRunAnalyticsRunDetailResponse
 	decodeTaskRunAnalyticsAPI(t, detailRR, &detail)
-	if detail.Run.TotalTokens != 30 || detail.Run.IssueTitle != "Fix the thing" {
+	if detail.Run.TotalTokens == nil || *detail.Run.TotalTokens != 30 || detail.Run.IssueTitle != "Fix the thing" {
 		t.Fatalf("unexpected detail usage fields: %#v", detail.Run)
 	}
 }
