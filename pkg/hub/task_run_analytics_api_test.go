@@ -619,6 +619,11 @@ type apiRunFixture struct {
 	AnalyticsEnabled  *bool
 	RequiresPR        *bool
 	ExcludedReason    string
+	InputTokens       int64
+	OutputTokens      int64
+	TotalTokens       int64
+	EstimatedCostUsd  float64
+	IssueTitle        string
 }
 
 func newTaskRunAnalyticsAPITestServer(t *testing.T) (*Server, *sql.DB) {
@@ -696,8 +701,9 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 			integration, issue_id, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
 			merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count,
 			started_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
-			analytics_enabled, requires_pr, excluded_reason
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,
+			estimated_cost_usd, issue_title
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"summary-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.AttemptID, fixture.AttemptID,
 		fixture.Status, fixture.Phase, 1, fixture.OwnerType, fixture.Workspace, fixture.Workflow, fixture.Factory,
 		firstNonEmpty(fixture.Workflow, fixture.Factory), taskRunKindPRTask, fixture.Integration,
@@ -706,6 +712,7 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		fixture.MergedPRCount, fixture.ClosedPRCount, warningsJSON, fixture.FailureType,
 		fixture.HumanInteractions, fixture.StartedAt, fixture.MergedAt, fixture.FinishedAt,
 		fixture.StartedAt, fixture.StartedAt, fixture.StartedAt, boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
+		fixture.InputTokens, fixture.OutputTokens, fixture.TotalTokens, fixture.EstimatedCostUsd, fixture.IssueTitle,
 	)
 	if err != nil {
 		t.Fatalf("insert task run summary %s: %v", fixture.RunID, err)

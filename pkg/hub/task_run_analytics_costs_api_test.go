@@ -1,0 +1,112 @@
+package hub
+
+import (
+	"database/sql"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestTaskRunAnalyticsCostsAggregatesFiltersAndTenantScope(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eng", "gpt-5", 10, 100)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now.AddDate(0, 0, -1), "eng", "gpt-5", 5, 50)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now.AddDate(0, 0, -5), "eng", "gpt-5", 7, 70)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now.AddDate(0, 0, -20), "eng", "gpt-5", 3, 30)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "other", "gpt-4", 100, 1000)
+	seedTaskRunAnalyticsUsage(t, db, "other-tenant-id", now, "eng", "gpt-5", 1000, 10000)
+
+	response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Workspace: []string{"eng"}, Model: []string{"gpt-5"}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Today.CostUsd != 10 || response.Today.TotalTokens != 100 || response.Week.CostUsd != 22 || response.Month.CostUsd != 22 {
+		t.Fatalf("unexpected aggregates: %#v", response)
+	}
+	if response.Today.DeltaPctVsYesterday == nil || *response.Today.DeltaPctVsYesterday != 100 {
+		t.Fatalf("unexpected delta: %#v", response.Today.DeltaPctVsYesterday)
+	}
+	if len(response.DailySeries) != 31 || response.DailySeries[0].Date != "2026-06-15" || response.DailySeries[0].CostUsd != 0 || response.DailySeries[30].CostUsd != 10 {
+		t.Fatalf("unexpected daily series: %#v", response.DailySeries)
+	}
+}
+
+func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
+	t.Run("null delta and no data projection", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsAPITestServer(t)
+		now := time.Date(2026, time.July, 3, 0, 0, 0, 0, time.UTC)
+		response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+		if err != nil || response.ProjectedMonth != nil {
+			t.Fatalf("response = %#v, err = %v", response, err)
+		}
+		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eng", "gpt-5", 2, 20)
+		response, err = s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+		if err != nil || response.Today.DeltaPctVsYesterday != nil {
+			t.Fatalf("response = %#v, err = %v", response, err)
+		}
+	})
+	for _, test := range []struct {
+		name  string
+		now   time.Time
+		costs []float64
+		want  string
+	}{
+		{"low", time.Date(2026, time.July, 3, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "low"},
+		{"medium", time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
+		{"high", time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "high"},
+		{"medium downgrade from high variance", time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, db := newTaskRunAnalyticsAPITestServer(t)
+			for i, cost := range test.costs {
+				seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", test.now.AddDate(0, 0, -7+i), "eng", "gpt-5", cost, 1)
+			}
+			response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, test.now)
+			if err != nil || response.ProjectedMonth == nil || response.ProjectedMonth.Confidence != test.want {
+				t.Fatalf("response = %#v, err = %v", response, err)
+			}
+		})
+	}
+}
+
+func TestTaskRunAnalyticsCostsHandler(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", time.Now().UTC(), "eng", "gpt-5", 12.5, 123)
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs", "test-token")
+	var response taskRunAnalyticsCostsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.Today.CostUsd != 12.5 || response.Today.TotalTokens != 123 {
+		t.Fatalf("unexpected handler response: %#v", response.Today)
+	}
+}
+
+func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, IssueTitle: "Fix the thing"})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "zero", AttemptID: "zero-attempt", ClawID: "zero-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 2})
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
+	var response taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if len(response.Runs) != 2 || response.Runs[0].RunID != "zero" || response.Runs[1].InputTokens != 10 || response.Runs[1].OutputTokens != 20 || response.Runs[1].TotalTokens != 30 || response.Runs[1].EstimatedCostUsd != 1.25 || response.Runs[1].IssueTitle != "Fix the thing" {
+		t.Fatalf("unexpected usage fields: %#v", response.Runs)
+	}
+	if strings.Contains(rr.Body.String(), `"inputTokens":0`) || strings.Contains(rr.Body.String(), `"issueTitle":""`) {
+		t.Fatalf("zero usage fields were not omitted: %s", rr.Body.String())
+	}
+	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/usage", "test-token")
+	var detail taskRunAnalyticsRunDetailResponse
+	decodeTaskRunAnalyticsAPI(t, detailRR, &detail)
+	if detail.Run.TotalTokens != 30 || detail.Run.IssueTitle != "Fix the thing" {
+		t.Fatalf("unexpected detail usage fields: %#v", detail.Run)
+	}
+}
+
+func seedTaskRunAnalyticsUsage(t *testing.T, db *sql.DB, tenant string, day time.Time, workspace, model string, cost float64, tokens int64) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO usage_daily(tenant_id, day, workspace_name, factory_name, workflow_name, model, total_tokens, cost_usd, updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, tenant, day.UTC().Format("2006-01-02"), workspace, "factory", "workflow", model, tokens, cost, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
