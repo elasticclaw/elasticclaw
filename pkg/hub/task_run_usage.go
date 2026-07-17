@@ -32,13 +32,18 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		return err
 	}
 	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal int
+	var oldModel, oldUsageDay string
 	var oldCost sql.NullFloat64
 	var comCost float64
 	oldSource := "gateway"
-	err = tx.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource)
+	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay)
 	found := err == nil
 	if err != nil && err != sql.ErrNoRows {
 		return err
+	}
+	effectiveModel := snapshot.Model
+	if effectiveModel == "" && found {
+		effectiveModel = oldModel
 	}
 	in, out, total := oldIn, oldOut, oldTotal
 	if snapshot.InputTokens != nil {
@@ -55,7 +60,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if snapshot.EstimatedCostUSD != nil {
 		cost = sql.NullFloat64{Float64: *snapshot.EstimatedCostUSD, Valid: true}
 		source = "gateway"
-	} else if estimated, ok := taskRunPrice(tx, snapshot.Model, in, out); ok {
+	} else if estimated, ok := taskRunPrice(tx, effectiveModel, in, out); ok {
 		// The gateway did not report a cost; estimate this run from its tokens.
 		cost = sql.NullFloat64{Float64: estimated, Valid: true}
 		source = "hub_pricing"
@@ -84,16 +89,21 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		cost = oldCost
 		source = oldSource
 	}
-	ts := now().UnixMilli()
-	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, snapshot.Model, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, ts, ts)
+	usageNow := now()
+	if s.nowFunc != nil {
+		usageNow = s.nowFunc()
+	}
+	ts := usageNow.UnixMilli()
+	day := usageNow.UTC().Format("2006-01-02")
+	usageDay := oldUsageDay
+	if newRun || usageDay == "" {
+		usageDay = day
+	}
+	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,usage_day=excluded.usage_day,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, effectiveModel, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, usageDay, ts, ts)
 	if err != nil {
 		return err
 	}
-	// A negative cost correction (gateway cost replacing a higher hub_pricing
-	// estimate) may land on a later day than the estimate it corrects; clamp
-	// the bucket at zero so per-day stats never go negative.
-	day := now().UTC().Format("2006-01-02")
-	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,MAX(0,?),?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cost_usd=MAX(0,cost_usd+?),updated_at=excluded.updated_at`, tenant, day, workspace, factory, workflow, snapshot.Model, din, dout, dtotal, dcost, ts, dcost)
+	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cost_usd=cost_usd+excluded.cost_usd,updated_at=excluded.updated_at`, tenant, usageDay, workspace, factory, workflow, effectiveModel, din, dout, dtotal, dcost, ts)
 	if err != nil {
 		return err
 	}
