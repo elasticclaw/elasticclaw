@@ -36,6 +36,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	var comCost float64
 	oldSource := "gateway"
 	err = tx.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource)
+	found := err == nil
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
@@ -49,47 +50,39 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if snapshot.TotalTokens != nil {
 		total = *snapshot.TotalTokens
 	}
-	// A drop in any cumulative counter means the gateway reset the session
-	// stats; treat the whole snapshot as a fresh baseline and fold the
-	// pre-reset totals into the committed_* columns so run summaries keep
-	// counting them.
-	reset := in < oldIn || out < oldOut || total < oldTotal
-	din, dout, dtotal := in-oldIn, out-oldOut, total-oldTotal
-	if reset {
-		din, dout, dtotal = in, out, total
-		comIn += oldIn
-		comOut += oldOut
-		comTotal += oldTotal
-		if oldCost.Valid {
-			comCost += oldCost.Float64
-			oldCost = sql.NullFloat64{}
-		}
-	}
 	var cost sql.NullFloat64
 	source := oldSource
 	if snapshot.EstimatedCostUSD != nil {
 		cost = sql.NullFloat64{Float64: *snapshot.EstimatedCostUSD, Valid: true}
 		source = "gateway"
 	} else if estimated, ok := taskRunPrice(tx, snapshot.Model, in, out); ok {
-		// The gateway did not report a cost (older gateway / empty pricing
-		// cache); estimate the cumulative cost from the cumulative tokens so
-		// the estimate keeps growing across heartbeats.
+		// The gateway did not report a cost; estimate this run from its tokens.
 		cost = sql.NullFloat64{Float64: estimated, Valid: true}
 		source = "hub_pricing"
 	}
-	dcost := 0.0
-	if cost.Valid {
-		if reset || !oldCost.Valid {
+	// OpenClaw overwrites a session entry after each reply with that run's
+	// totals. total_tokens is context occupancy, not billed token usage.
+	newRun := !found || in != oldIn || out != oldOut
+	din, dout, dtotal, dcost := 0, 0, 0, 0.0
+	if newRun {
+		din, dout, dtotal = in, out, in+out
+		comIn += in
+		comOut += out
+		comTotal += in + out
+		if cost.Valid {
 			dcost = cost.Float64
-		} else {
-			// Signed delta: when a real (lower) gateway cost replaces a prior
-			// hub_pricing estimate the negative correction converges
-			// usage_daily to the true cumulative cost. Cost resets only
-			// happen together with token resets, which the reset flag covers.
-			dcost = cost.Float64 - oldCost.Float64
+			comCost += dcost
 		}
-	} else {
+	} else if cost.Valid && (!oldCost.Valid || cost.Float64 != oldCost.Float64) && !(oldSource == "gateway" && source == "hub_pricing") {
+		// A real gateway cost can replace a hub estimate for the same run.
+		dcost = cost.Float64
+		if oldCost.Valid {
+			dcost -= oldCost.Float64
+		}
+		comCost += dcost
+	} else if !cost.Valid || (oldSource == "gateway" && source == "hub_pricing") {
 		cost = oldCost
+		source = oldSource
 	}
 	ts := now().UnixMilli()
 	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, snapshot.Model, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, ts, ts)
@@ -104,7 +97,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(input_tokens+committed_input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(output_tokens+committed_output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(total_tokens+committed_total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(COALESCE(estimated_cost_usd,0)+committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
+	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(committed_input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(committed_output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(committed_total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
 	if err != nil {
 		return err
 	}
@@ -118,8 +111,8 @@ func nullFloat(v sql.NullFloat64) interface{} {
 	return nil
 }
 
-// taskRunPrice estimates the cumulative cost of a session from cumulative
-// token counts using the seeded model_prices table. Gateway model ids are
+// taskRunPrice estimates a run's cost from its token counts using the seeded
+// model_prices table. Gateway model ids are
 // matched loosely: lowercased, provider prefixes stripped, and the longest
 // seeded model name that prefixes the id wins.
 func taskRunPrice(tx *sql.Tx, model string, in, out int) (float64, bool) {

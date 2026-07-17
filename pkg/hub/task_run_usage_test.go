@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -54,15 +55,33 @@ func queryUsageDaily(t *testing.T, db *sql.DB) (in, out, total int, cost float64
 	return
 }
 
-func TestTaskRunUsageSnapshotsAndReset(t *testing.T) {
+func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
-	for _, snap := range []taskRunUsageSnapshot{
-		usageSnapshot("a", 10, 5, 15, "claude-sonnet-5"),
-		usageSnapshot("a", 10, 5, 15, "claude-sonnet-5"), // idempotent re-delivery: no delta
-		usageSnapshot("b", 3, 2, 5, "claude-sonnet-5"),
-		usageSnapshot("a", 2, 1, 3, "claude-sonnet-5"), // gateway reset: new values become the delta
-	} {
+	run1 := usageSnapshot("a", 10_000, 1_000, 99_999, "claude-sonnet-5")
+	run1.EstimatedCostUSD = ptr(0.05)
+	run2 := usageSnapshot("a", 50_000, 2_000, 7, "claude-sonnet-5")
+	run2.EstimatedCostUSD = ptr(0.20)
+	for _, snap := range []taskRunUsageSnapshot{run1, run1, run2} { // repeated heartbeat
+		if err := s.recordTaskRunUsage(claw, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var initialIn, initialOut int
+	var initialCost float64
+	if err := db.QueryRow(`SELECT input_tokens,output_tokens,estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&initialIn, &initialOut, &initialCost); err != nil {
+		t.Fatal(err)
+	}
+	if initialIn != 60_000 || initialOut != 3_000 || initialCost != 0.25 {
+		t.Fatalf("first two runs = %d/%d cost=%v, want 60000/3000 cost=0.25", initialIn, initialOut, initialCost)
+	}
+	// This run's raw total grows from run2's 7, but it is still a distinct
+	// per-reply total rather than a cumulative counter.
+	run3 := usageSnapshot("a", 60_000, 2_500, 60_000, "claude-sonnet-5")
+	run3.EstimatedCostUSD = ptr(0.30)
+	run4 := usageSnapshot("a", 5_000, 500, 123_456, "claude-sonnet-5")
+	run4.EstimatedCostUSD = ptr(0.01)
+	for _, snap := range []taskRunUsageSnapshot{run3, run4, usageSnapshot("b", 3_000, 300, 42, "claude-sonnet-5")} {
 		if err := s.recordTaskRunUsage(claw, snap); err != nil {
 			t.Fatal(err)
 		}
@@ -72,13 +91,14 @@ func TestTaskRunUsageSnapshotsAndReset(t *testing.T) {
 	if err := db.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&in, &out, &total, &cost); err != nil {
 		t.Fatal(err)
 	}
-	// Summary keeps pre-reset usage: session a = 10/5/15 committed + 2/1/3
-	// current, session b = 3/2/5.
-	if in != 15 || out != 8 || total != 23 {
-		t.Fatalf("summary = %d/%d/%d, want 15/8/23", in, out, total)
+	// Each changed input/output snapshot is a complete run. Raw total_tokens
+	// is context occupancy and is deliberately absent from these sums.
+	if in != 128_000 || out != 6_300 || total != 134_300 {
+		t.Fatalf("summary = %d/%d/%d, want 128000/6300/134300", in, out, total)
 	}
-	if cost <= 0 {
-		t.Fatalf("expected pricing fallback cost, got %v", cost)
+	const wantCost = 0.5735 // $0.56 gateway costs + $0.0135 hub pricing for session b.
+	if math.Abs(cost-wantCost) > 1e-6 {
+		t.Fatalf("summary cost = %v, want %v", cost, wantCost)
 	}
 	var rows int
 	if err := db.QueryRow(`SELECT count(*) FROM task_run_usage`).Scan(&rows); err != nil {
@@ -87,85 +107,58 @@ func TestTaskRunUsageSnapshotsAndReset(t *testing.T) {
 	if rows != 2 {
 		t.Fatalf("usage rows=%d, want 2", rows)
 	}
-	// usage_daily accumulates deltas: 10/5/15 + 0 (idempotent) + 3/2/5 + 2/1/3 (reset).
-	din, dout, dtotal, _ := queryUsageDaily(t, db)
-	if din != 15 || dout != 8 || dtotal != 23 {
-		t.Fatalf("usage_daily = %d/%d/%d, want 15/8/23", din, dout, dtotal)
+	din, dout, dtotal, dailyCost := queryUsageDaily(t, db)
+	if din != 128_000 || dout != 6_300 || dtotal != 134_300 {
+		t.Fatalf("usage_daily = %d/%d/%d, want 128000/6300/134300", din, dout, dtotal)
+	}
+	if math.Abs(dailyCost-wantCost) > 1e-6 {
+		t.Fatalf("usage_daily cost = %v, want %v", dailyCost, wantCost)
 	}
 }
 
-func TestTaskRunUsagePartialResetTreatedAsFullReset(t *testing.T) {
+func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
-	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 10, 5, 15, "claude-sonnet-5")); err != nil {
-		t.Fatal(err)
-	}
-	// input drops (reset) but output is higher than before: the whole snapshot
-	// must be treated as a fresh baseline, not mixed per-field deltas.
-	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 4, 9, 13, "claude-sonnet-5")); err != nil {
-		t.Fatal(err)
-	}
-	din, dout, dtotal, _ := queryUsageDaily(t, db)
-	if din != 14 || dout != 14 || dtotal != 28 {
-		t.Fatalf("usage_daily = %d/%d/%d, want 14/14/28", din, dout, dtotal)
-	}
-}
-
-func TestTaskRunUsagePricingFallbackKeepsGrowing(t *testing.T) {
-	s, db, claw := newUsageTestServer(t)
-	defer db.Close()
-	// Provider-qualified gateway model id must still match the seeded price.
 	const model = "anthropic/claude-sonnet-5-20260203"
 	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, model)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 2_000_000, 2_000_000, 4_000_000, model)); err != nil {
-		t.Fatal(err)
-	}
-	var cost float64
-	var source string
-	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
-		t.Fatal(err)
-	}
-	// claude-sonnet-5 is $3/$15 per MTok: 2 MTok in + 2 MTok out = $36.
-	if cost < 35.99 || cost > 36.01 {
-		t.Fatalf("cumulative estimated cost = %v, want ~36 (estimate must keep growing)", cost)
-	}
-	if source != "hub_pricing" {
-		t.Fatalf("cost_source = %q, want hub_pricing", source)
-	}
-	_, _, _, dailyCost := queryUsageDaily(t, db)
-	if dailyCost < 35.99 || dailyCost > 36.01 {
-		t.Fatalf("usage_daily cost = %v, want ~36", dailyCost)
-	}
-}
-
-func TestTaskRunUsageGatewayCostCorrectsHubEstimate(t *testing.T) {
-	s, db, claw := newUsageTestServer(t)
-	defer db.Close()
-	// HB1: gateway omits cost, hub_pricing estimates $18 (1 MTok in + 1 MTok
-	// out on claude-sonnet-5).
-	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")); err != nil {
-		t.Fatal(err)
-	}
-	// HB2: gateway reports the real cumulative cost, lower than the estimate
-	// (cache discounts). usage_daily must converge to it, not add it on top.
-	snap := usageSnapshot("a", 1_100_000, 1_100_000, 2_200_000, "claude-sonnet-5")
+	snap := usageSnapshot("a", 1_000_000, 1_000_000, 9, model)
 	snap.EstimatedCostUSD = ptr(3.0)
 	if err := s.recordTaskRunUsage(claw, snap); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, dailyCost := queryUsageDaily(t, db)
-	if dailyCost < 2.99 || dailyCost > 3.01 {
-		t.Fatalf("usage_daily cost = %v, want ~3 (negative correction must apply)", dailyCost)
-	}
 	var cost float64
 	var source string
 	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
 		t.Fatal(err)
 	}
-	if cost != 3.0 || source != "gateway" {
-		t.Fatalf("snapshot cost=%v source=%q, want 3.0/gateway", cost, source)
+	// claude-sonnet-5 prices the omitted-cost run at $18, then the gateway
+	// correction replaces rather than adds to that amount.
+	if cost != 3 {
+		t.Fatalf("estimated cost = %v, want 3", cost)
+	}
+	if source != "gateway" {
+		t.Fatalf("cost_source = %q, want gateway", source)
+	}
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 10, model)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3 || source != "gateway" {
+		t.Fatalf("omitted-cost heartbeat changed stored cost to %v/%q, want 3/gateway", cost, source)
+	}
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3 {
+		t.Fatalf("summary cost = %v, want 3", cost)
+	}
+	_, _, _, dailyCost := queryUsageDaily(t, db)
+	if dailyCost != 3 {
+		t.Fatalf("usage_daily cost = %v, want 3", dailyCost)
 	}
 }
 
