@@ -976,10 +976,18 @@ type gatewaySession struct {
 	// context usage (0-100), updated after each turn
 	ctxMu        sync.RWMutex
 	contextUsage int
+	usage        gatewayUsage
 
 	// ready is true once the gateway session is established and ready for messages
 	readyMu sync.RWMutex
 	ready   bool
+}
+
+type gatewayUsage struct {
+	sessionKey                             string
+	inputTokens, outputTokens, totalTokens *int
+	estimatedCostUSD                       *float64
+	model                                  string
 }
 
 // newGatewaySession creates a gatewaySession, establishes the gateway
@@ -1684,23 +1692,28 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	}
 	var payload struct {
 		Session struct {
-			TotalTokens   int `json:"totalTokens"`
-			ContextTokens int `json:"contextTokens"`
+			InputTokens      *int     `json:"inputTokens"`
+			OutputTokens     *int     `json:"outputTokens"`
+			TotalTokens      *int     `json:"totalTokens"`
+			EstimatedCostUSD *float64 `json:"estimatedCostUsd"`
+			Model            string   `json:"model"`
+			ModelProvider    string   `json:"modelProvider"`
+			ContextTokens    int      `json:"contextTokens"`
 		} `json:"session"`
 	}
 	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
 		log.Printf("[session] unmarshal sessions.describe response: %v", err)
 		return
 	}
-	if payload.Session.ContextTokens == 0 {
-		return
-	}
-	usage := payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
-	if usage > 100 {
-		usage = 100
-	}
 	gs.ctxMu.Lock()
-	gs.contextUsage = usage
+	gs.usage = gatewayUsage{sessionKey: gs.getSessionKey(), inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model}
+	if payload.Session.ContextTokens > 0 && payload.Session.TotalTokens != nil {
+		usage := *payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
+		if usage > 100 {
+			usage = 100
+		}
+		gs.contextUsage = usage
+	}
 	gs.ctxMu.Unlock()
 }
 
@@ -1709,6 +1722,12 @@ func (gs *gatewaySession) ContextUsage() int {
 	gs.ctxMu.RLock()
 	defer gs.ctxMu.RUnlock()
 	return gs.contextUsage
+}
+
+func (gs *gatewaySession) Usage() gatewayUsage {
+	gs.ctxMu.RLock()
+	defer gs.ctxMu.RUnlock()
+	return gs.usage
 }
 
 // IsReady returns true once the persistent gateway session is established.
@@ -3661,17 +3680,29 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		go gwSession.refreshContextUsage(connCtx)
 		health := !gatewayProcessExited() && checkGateway(gwClient.addr)
 		cu := gwSession.ContextUsage()
+		usage := gwSession.Usage()
 		restarts := gatewayRestartBase + gatewayRestartCount()
 		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d", health, gwSession.IsReady(), cu, restarts)
-		_ = writeHub(hubMsg{
-			Type: "heartbeat",
-			Payload: mustJSON(map[string]interface{}{
-				"gateway_healthy": health,
-				"gateway_ready":   gwSession.IsReady(),
-				"context_usage":   cu,
-				"restart_count":   restarts,
-			}),
-		})
+		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
+		if usage.sessionKey != "" {
+			heartbeatPayload["session_key"] = usage.sessionKey
+		}
+		if usage.inputTokens != nil {
+			heartbeatPayload["input_tokens"] = usage.inputTokens
+		}
+		if usage.outputTokens != nil {
+			heartbeatPayload["output_tokens"] = usage.outputTokens
+		}
+		if usage.totalTokens != nil {
+			heartbeatPayload["total_tokens"] = usage.totalTokens
+		}
+		if usage.estimatedCostUSD != nil {
+			heartbeatPayload["estimated_cost_usd"] = usage.estimatedCostUSD
+		}
+		if usage.model != "" {
+			heartbeatPayload["model"] = usage.model
+		}
+		_ = writeHub(hubMsg{Type: "heartbeat", Payload: mustJSON(heartbeatPayload)})
 	})
 
 	// Main read loop
