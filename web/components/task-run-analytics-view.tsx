@@ -128,6 +128,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   const [error, setError] = useState<string | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const optionsRef = useRef<TaskRunFilterOptions | null>(null)
+  const loadCancellationRef = useRef<Cancellation | null>(null)
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.runId === selectedRunId) ?? null,
@@ -181,6 +182,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
 
   useEffect(() => {
     const cancellation: Cancellation = { cancelled: false }
+    loadCancellationRef.current = cancellation
     queueMicrotask(() => {
       if (cancellation.cancelled) return
       void load(undefined, false, cancellation)
@@ -475,7 +477,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           </div>
           {nextCursor && (
             <div className="mt-3 flex justify-center">
-              <Button variant="outline" size="sm" onClick={() => load(nextCursor, true)} disabled={loading}>
+              <Button variant="outline" size="sm" onClick={() => load(nextCursor, true, loadCancellationRef.current ?? undefined)} disabled={loading}>
                 Load more
               </Button>
             </div>
