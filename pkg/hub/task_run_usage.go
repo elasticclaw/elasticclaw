@@ -79,9 +79,13 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	dcost := 0.0
 	if cost.Valid {
-		if reset || !oldCost.Valid || cost.Float64 < oldCost.Float64 {
+		if reset || !oldCost.Valid {
 			dcost = cost.Float64
 		} else {
+			// Signed delta: when a real (lower) gateway cost replaces a prior
+			// hub_pricing estimate the negative correction converges
+			// usage_daily to the true cumulative cost. Cost resets only
+			// happen together with token resets, which the reset flag covers.
 			dcost = cost.Float64 - oldCost.Float64
 		}
 	} else {

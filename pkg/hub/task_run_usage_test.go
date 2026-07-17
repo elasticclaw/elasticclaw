@@ -140,6 +140,35 @@ func TestTaskRunUsagePricingFallbackKeepsGrowing(t *testing.T) {
 	}
 }
 
+func TestTaskRunUsageGatewayCostCorrectsHubEstimate(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// HB1: gateway omits cost, hub_pricing estimates $18 (1 MTok in + 1 MTok
+	// out on claude-sonnet-5).
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	// HB2: gateway reports the real cumulative cost, lower than the estimate
+	// (cache discounts). usage_daily must converge to it, not add it on top.
+	snap := usageSnapshot("a", 1_100_000, 1_100_000, 2_200_000, "claude-sonnet-5")
+	snap.EstimatedCostUSD = ptr(3.0)
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, dailyCost := queryUsageDaily(t, db)
+	if dailyCost < 2.99 || dailyCost > 3.01 {
+		t.Fatalf("usage_daily cost = %v, want ~3 (negative correction must apply)", dailyCost)
+	}
+	var cost float64
+	var source string
+	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3.0 || source != "gateway" {
+		t.Fatalf("snapshot cost=%v source=%q, want 3.0/gateway", cost, source)
+	}
+}
+
 func TestTaskRunUsageUnknownModelGetsNoEstimatedCost(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
