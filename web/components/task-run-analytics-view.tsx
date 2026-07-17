@@ -265,6 +265,17 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     [costOverview]
   )
 
+  const ignoredCostFilters = useMemo(() => {
+    const labels: string[] = []
+    if (filters.repo) labels.push("repo")
+    if (filters.status) labels.push("status")
+    if (filters.warningType) labels.push("warning")
+    if (filters.failureType) labels.push("failure")
+    if (filters.humanTouched !== undefined) labels.push("human touched")
+    if (filters.mergedPrs !== undefined) labels.push("merged PRs")
+    return labels
+  }, [filters.repo, filters.status, filters.warningType, filters.failureType, filters.humanTouched, filters.mergedPrs])
+
   const activeKpi = useMemo<KpiFilter | null>(() => {
     if (filters.humanTouched === true) return "humanTouches"
     if (filters.mergedPrs === true) return "mergedPrs"
@@ -293,8 +304,13 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
+              {ignoredCostFilters.length > 0 && (
+                <span className="text-xs italic text-muted-foreground">Ignores {formatFilterList(ignoredCostFilters)} filters</span>
+              )}
+            </div>
+            <div className={cn("grid gap-2 sm:grid-cols-2 xl:grid-cols-4", ignoredCostFilters.length > 0 && "opacity-75")}>
               <CostCard
                 label="Today's Cost"
                 value={
@@ -682,6 +698,12 @@ function StatusBadge({ status }: { status: string }) {
 
 function hasUsageData(run: TaskRunSummary) {
   return run.inputTokens !== undefined || run.outputTokens !== undefined || run.totalTokens !== undefined || run.estimatedCostUsd !== undefined
+}
+
+const filterListFormatter = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" })
+
+function formatFilterList(labels: string[]) {
+  return filterListFormatter.format(labels)
 }
 
 function formatLabel(value: string) {
