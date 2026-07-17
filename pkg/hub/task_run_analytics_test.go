@@ -50,7 +50,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	assertColumns(t, db, "task_runs", []string{
 		"id", "tenant_id", "initial_attempt_id", "current_attempt_id", "attempt_count", "run_kind",
 		"owner_type", "workspace_name", "workflow_name", "factory_name", "owner_id", "owner_display_name",
-		"integration", "integration_workspace", "trigger_id", "external_trigger_id", "issue_id", "claw_id", "model", "llm_key", "tags",
+		"integration", "integration_workspace", "trigger_id", "external_trigger_id", "issue_id", "issue_created_at", "claw_id", "model", "llm_key", "tags",
 		"analytics_enabled", "requires_pr", "excluded_reason", "timeout_at", "created_at", "updated_at",
 	})
 	assertColumns(t, db, "task_run_attempts", []string{
@@ -72,7 +72,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	assertColumns(t, db, "task_run_summaries", []string{
 		"id", "tenant_id", "run_id", "status", "phase", "attempt_count", "owner_type",
 		"workspace_name", "workflow_name", "factory_name", "owner_id", "owner_display_name",
-		"run_kind", "integration", "integration_workspace", "issue_id", "claw_id",
+		"run_kind", "integration", "integration_workspace", "issue_id", "issue_created_at", "claw_id",
 		"model", "llm_key", "repo", "primary_pr_url", "pr_count", "open_pr_count", "merged_pr_count",
 		"closed_pr_count", "warning_types", "failure_type", "human_interaction_count",
 		"started_at", "queued_at", "provision_started_at", "agent_started_at", "pr_opened_at",
@@ -81,6 +81,8 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	})
 
 	assertColumnDefault(t, db, "task_runs", "tags", "'[]'")
+	assertExecSucceeds(t, db, `UPDATE task_runs SET issue_created_at=123 WHERE id='missing'`)
+	assertExecSucceeds(t, db, `UPDATE task_run_summaries SET issue_created_at=123 WHERE run_id='missing'`)
 
 	now := int64(1760000000000)
 	insertValidRun(t, db, "run-valid", now)
