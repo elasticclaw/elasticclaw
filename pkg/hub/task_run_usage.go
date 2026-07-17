@@ -2,10 +2,14 @@ package hub
 
 import (
 	"database/sql"
+	"log"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
+
+var unmatchedUsagePriceModels sync.Map
 
 type taskRunUsageSnapshot struct {
 	SessionKey                             string
@@ -64,6 +68,10 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		// The gateway did not report a cost; estimate this run from its tokens.
 		cost = sql.NullFloat64{Float64: estimated, Valid: true}
 		source = "hub_pricing"
+	} else if effectiveModel != "" {
+		if _, loaded := unmatchedUsagePriceModels.LoadOrStore(effectiveModel, struct{}{}); !loaded {
+			log.Printf("[usage] no static price for model %s", effectiveModel)
+		}
 	}
 	// OpenClaw overwrites a session entry after each reply with that run's
 	// totals. total_tokens is context occupancy, not billed token usage.

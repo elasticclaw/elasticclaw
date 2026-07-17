@@ -641,16 +641,18 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	for _, p := range []struct {
-		model   string
-		in, out float64
+		model                          string
+		in, out, cacheRead, cacheWrite float64
 	}{
-		{"claude-fable-5", 10, 50}, {"claude-opus-4-8", 5, 25}, {"claude-opus-4-7", 5, 25}, {"claude-opus-4-6", 5, 25},
-		{"claude-sonnet-5", 3, 15}, {"claude-sonnet-4-6", 3, 15}, {"claude-haiku-4-5", 1, 5},
+		{"claude-fable-5", 10, 50, 1, 12.5}, {"claude-opus-4-8", 5, 25, .5, 6.25}, {"claude-opus-4-7", 5, 25, .5, 6.25}, {"claude-opus-4-6", 5, 25, .5, 6.25},
+		{"claude-sonnet-5", 3, 15, .3, 3.75}, {"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
+		{"gpt-5", 1.25, 10, .125, 0}, {"gpt-5-mini", .25, 2, .025, 0}, {"gpt-5-nano", .05, .40, .005, 0},
+		{"gpt-5.1", 1.25, 10, .125, 0}, {"gpt-5.6", 1.25, 10, .125, 0},
 	} {
 		// Upsert so price corrections in the static seed reach existing
 		// databases; rows from other sources are left untouched.
 		_, err = db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
-			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.in/1e7, p.in*1.25/1e6, "static", now().UnixMilli())
+			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.cacheRead/1e6, p.cacheWrite/1e6, "static", now().UnixMilli())
 		if err != nil {
 			return err
 		}
