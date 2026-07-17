@@ -573,6 +573,55 @@ func TestRecordTaskRunIssueCreatedAtBackfillsRunAndSummary(t *testing.T) {
 	}
 }
 
+func TestWorkflowTaskRunStoresIssueCreatedAtAtCreation(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	workspace := &types.WorkspaceConfig{
+		SchemaVersion: "v1",
+		Name:          "issue-created-workspace",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: issue-created-workspace\nprovider: noop\n",
+		},
+	}
+	workflow := &types.WorkflowConfig{Name: "issue-created-workflow", Provider: "noop"}
+	created := time.UnixMilli(1760000000000).UTC()
+
+	for _, tc := range []struct {
+		name    string
+		created time.Time
+		want    int64
+	}{
+		{name: "set", created: created, want: created.UnixMilli()},
+		{name: "unset", want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+				issueCreatedAt: tc.created,
+				reason:         "test",
+			})
+			if err != nil {
+				t.Fatalf("create workflow claw: %v", err)
+			}
+			var runValue, summaryValue int64
+			if err := db.QueryRow(`SELECT issue_created_at FROM task_runs WHERE claw_id=?`, clawID).Scan(&runValue); err != nil {
+				t.Fatalf("read task run: %v", err)
+			}
+			if err := db.QueryRow(`SELECT issue_created_at FROM task_run_summaries WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?)`, clawID).Scan(&summaryValue); err != nil {
+				t.Fatalf("read task run summary: %v", err)
+			}
+			if runValue != tc.want || summaryValue != tc.want {
+				t.Fatalf("issue_created_at run=%d summary=%d want %d", runValue, summaryValue, tc.want)
+			}
+		})
+	}
+}
+
 func newTaskRunAnalyticsTestServer(t *testing.T, clawID string) (*Server, *sql.DB) {
 	t.Helper()
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")

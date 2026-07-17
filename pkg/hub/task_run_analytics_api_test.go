@@ -234,6 +234,23 @@ func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsAPIGeneralStatsIssueCreatedAtAtRunCreation(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-created-at-run-start", AttemptID: "attempt-stats-created-at-run-start", ClawID: "claw-stats-created-at-run-start", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, IssueCreatedAt: base - 2000, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=? WHERE run_id='stats-created-at-run-start'`, base+3000); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	var response taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.TicketToPr.Samples != 1 ||
+		response.TicketToPr.Authoritative == nil || !*response.TicketToPr.Authoritative {
+		t.Fatalf("ticket stats: %#v", response.TicketToPr)
+	}
+}
+
 func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	ts := int64(1760000000000)
@@ -609,6 +626,7 @@ type apiRunFixture struct {
 	WarningTypes      []string
 	FailureType       string
 	StartedAt         int64
+	IssueCreatedAt    int64
 	MergedAt          int64
 	FinishedAt        int64
 	HumanInteractions int
@@ -667,11 +685,11 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		INSERT INTO task_runs(
 			id, tenant_id, initial_attempt_id, current_attempt_id, run_kind, owner_type,
 			workspace_name, workflow_name, factory_name, owner_display_name, integration,
-			issue_id, claw_id, model, tags, analytics_enabled, requires_pr, excluded_reason, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			issue_id, issue_created_at, claw_id, model, tags, analytics_enabled, requires_pr, excluded_reason, created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		fixture.RunID, fixture.TenantID, fixture.AttemptID, fixture.AttemptID, taskRunKindPRTask, fixture.OwnerType,
 		fixture.Workspace, fixture.Workflow, fixture.Factory, firstNonEmpty(fixture.Workflow, fixture.Factory),
-		fixture.Integration, "ISSUE-"+fixture.RunID, fixture.ClawID, fixture.Model, "[]", boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
+		fixture.Integration, "ISSUE-"+fixture.RunID, fixture.IssueCreatedAt, fixture.ClawID, fixture.Model, "[]", boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
 		fixture.StartedAt, fixture.StartedAt,
 	)
 	if err != nil {
@@ -698,16 +716,16 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		INSERT INTO task_run_summaries(
 			id, tenant_id, run_id, initial_attempt_id, current_attempt_id, status, phase, attempt_count,
 			owner_type, workspace_name, workflow_name, factory_name, owner_display_name, run_kind,
-			integration, issue_id, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
+		integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
 			merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count,
 			started_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
 			analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,
 			estimated_cost_usd, issue_title
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"summary-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.AttemptID, fixture.AttemptID,
 		fixture.Status, fixture.Phase, 1, fixture.OwnerType, fixture.Workspace, fixture.Workflow, fixture.Factory,
 		firstNonEmpty(fixture.Workflow, fixture.Factory), taskRunKindPRTask, fixture.Integration,
-		"ISSUE-"+fixture.RunID, fixture.ClawID, fixture.Model, fixture.Repo,
+		"ISSUE-"+fixture.RunID, fixture.IssueCreatedAt, fixture.ClawID, fixture.Model, fixture.Repo,
 		"https://github.com/"+fixture.Repo+"/pull/1", fixture.PRCount, fixture.OpenPRCount,
 		fixture.MergedPRCount, fixture.ClosedPRCount, warningsJSON, fixture.FailureType,
 		fixture.HumanInteractions, fixture.StartedAt, fixture.MergedAt, fixture.FinishedAt,

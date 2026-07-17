@@ -252,6 +252,7 @@ type linearPollIssue struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
 	State       struct {
 		Name string `json:"name"`
@@ -282,6 +283,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				title
 				description
 				url
+				createdAt
 				updatedAt
 				state { name }
 				team { key name }
@@ -490,6 +492,7 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 	payload.Data.Title = issue.Title
 	payload.Data.Description = issue.Description
 	payload.Data.URL = issue.URL
+	payload.Data.CreatedAt = issue.CreatedAt
 	payload.Data.State.Name = issue.State.Name
 	payload.Data.Team.Key = issue.Team.Key
 	payload.Data.Team.Name = issue.Team.Name

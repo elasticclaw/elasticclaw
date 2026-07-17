@@ -24,6 +24,7 @@ type workflowCreateOptions struct {
 	jiraIssueID          string
 	issueLabels          []string
 	issueLabelsAvailable bool
+	issueCreatedAt       time.Time
 	reason               string
 	triggerActor         *triggerActor
 }
@@ -276,6 +277,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		WorkflowName:     workflow.Name,
 		Integration:      workflow.Integration,
 		IssueID:          firstNonEmpty(opts.githubIssueID, opts.linearIssueID, opts.shortcutStoryID, opts.jiraIssueID),
+		IssueCreatedAt:   opts.issueCreatedAt,
 		Model:            defaultModel,
 		LLMKey:           llmKey,
 		Source:           taskRunSourceWorkflow,
