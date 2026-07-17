@@ -702,7 +702,8 @@ function hasUsageData(run: TaskRunSummary) {
   return run.inputTokens !== undefined || run.outputTokens !== undefined || run.totalTokens !== undefined || run.estimatedCostUsd !== undefined
 }
 
-const filterListFormatter = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" })
+// Pinned to "en" so the conjunction matches the English filter labels and SSR/client output agree.
+const filterListFormatter = new Intl.ListFormat("en", { style: "long", type: "conjunction" })
 
 function formatFilterList(labels: string[]) {
   return filterListFormatter.format(labels)
