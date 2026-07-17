@@ -116,7 +116,7 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	}
 }
 
-func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
+func TestTaskRunUsageGatewayCostSurvivesCostlessHeartbeat(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
 	const model = "anthropic/claude-sonnet-5-20260203"
@@ -128,7 +128,7 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	if err := s.recordTaskRunUsage(claw, snap); err != nil {
 		t.Fatal(err)
 	}
-	var cost float64
+	var cost, committedCost float64
 	var source string
 	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
 		t.Fatal(err)
@@ -149,6 +149,12 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	}
 	if cost != 3 || source != "gateway" {
 		t.Fatalf("omitted-cost heartbeat changed stored cost to %v/%q, want 3/gateway", cost, source)
+	}
+	if err := db.QueryRow(`SELECT committed_cost_usd FROM task_run_usage WHERE session_key='a'`).Scan(&committedCost); err != nil {
+		t.Fatal(err)
+	}
+	if committedCost != 3 {
+		t.Fatalf("omitted-cost heartbeat changed committed cost to %v, want 3", committedCost)
 	}
 	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&cost); err != nil {
 		t.Fatal(err)
