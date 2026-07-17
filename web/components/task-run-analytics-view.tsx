@@ -351,7 +351,17 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             <div className="flex flex-col gap-2">
               <h3 className="text-xs font-medium uppercase text-muted-foreground">General Stats</h3>
               <div className="grid gap-2 sm:grid-cols-3">
-                <CostCard label="Avg ticket to PR" value={formatDurationMs(generalStats.ticketToPrMs.avgMs)} />
+                <CostCard
+                  label="Avg ticket to PR"
+                  value={formatDurationMs(generalStats.ticketToPrMs.avgMs)}
+                  sub={
+                    generalStats.ticketToPrMs.samples > 0 &&
+                    typeof generalStats.ticketToPrMs.authoritativeSamples === "number" &&
+                    generalStats.ticketToPrMs.authoritativeSamples < generalStats.ticketToPrMs.samples
+                      ? `${generalStats.ticketToPrMs.authoritativeSamples} of ${generalStats.ticketToPrMs.samples} samples use real ticket creation time`
+                      : undefined
+                  }
+                />
                 <CostCard label="Avg PR to merged" value={formatDurationMs(generalStats.prOpenToMergeMs.avgMs)} />
                 <CostCard label="Avg AI implementation time" value={formatDurationMs(generalStats.aiImplMs.avgMs)} />
               </div>
