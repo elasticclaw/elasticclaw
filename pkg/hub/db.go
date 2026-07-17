@@ -10,7 +10,7 @@ import (
 )
 
 func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_time_format=sqlite&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", path+"?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
