@@ -1163,8 +1163,12 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 		if !createdAt.IsZero() {
-			_, _ = s.db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE tenant_id=? AND run_id=? AND repo=? AND pr_number=?`, epochMillis(createdAt), tenantID, runID, pr.repo, pr.prNumber)
-			_ = s.materializeTaskRun(runID)
+			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, OccurredAt: createdAt}); err != nil {
+				log.Printf("[pr-watcher] failed to backfill opened_at for run %s: %v", runID, err)
+			}
+		}
+		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateClosed, Merged: true, OccurredAt: firstNonZeroTime(mergedAt, now())}); err != nil {
+			log.Printf("[pr-watcher] failed to record merge for run %s: %v", runID, err)
 		}
 	}
 

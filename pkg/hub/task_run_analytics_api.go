@@ -272,20 +272,27 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 		if err := rows.Scan(&issue, &started, &agent, &opened, &merged); err != nil {
 			return taskRunGeneralStatsResponse{}, err
 		}
+		// Negative deltas are skipped: for GitHub-triggered claws the PR
+		// pre-dates the run, so opened-started/opened-agent are meaningless.
 		if opened > 0 && started > 0 {
 			base := issue
-			if base == 0 {
+			fallback := base == 0
+			if fallback {
 				base = started
-				authoritative = false
 			}
-			ticketSum += opened - base
-			ticketN++
+			if opened >= base {
+				ticketSum += opened - base
+				ticketN++
+				if fallback {
+					authoritative = false
+				}
+			}
 		}
-		if opened > 0 && merged > 0 {
+		if opened > 0 && merged > 0 && merged >= opened {
 			prSum += merged - opened
 			prN++
 		}
-		if agent > 0 && opened > 0 {
+		if agent > 0 && opened > 0 && opened >= agent {
 			aiSum += opened - agent
 			aiN++
 		}

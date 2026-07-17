@@ -175,6 +175,12 @@ func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	if _, err := db.Exec(`UPDATE task_run_summaries SET agent_started_at=?, pr_opened_at=?, merged_at=? WHERE run_id='stats-fallback'`, base+1100, base+6000, base+10000); err != nil {
 		t.Fatal(err)
 	}
+	// GitHub-triggered shape: the PR pre-dates the run, so opened-started and
+	// opened-agent are negative and must be skipped; merged-opened still counts.
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-github", AttemptID: "attempt-stats-github", ClawID: "claw-stats-github", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base + 20000, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET agent_started_at=?, pr_opened_at=?, merged_at=? WHERE run_id='stats-github'`, base+20100, base+15000, base+18000); err != nil {
+		t.Fatal(err)
+	}
 	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -184,7 +190,7 @@ func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5500 || response.TicketToPr.Samples != 2 || response.TicketToPr.Authoritative == nil || *response.TicketToPr.Authoritative {
 		t.Fatalf("ticket stats: %#v", response.TicketToPr)
 	}
-	if response.PROpenToMerge.AvgMs == nil || *response.PROpenToMerge.AvgMs != 4000 || response.PROpenToMerge.Samples != 2 {
+	if response.PROpenToMerge.AvgMs == nil || *response.PROpenToMerge.AvgMs != 3666 || response.PROpenToMerge.Samples != 3 {
 		t.Fatalf("merge stats: %#v", response.PROpenToMerge)
 	}
 	if response.AIImpl.AvgMs == nil || *response.AIImpl.AvgMs != 4900 || response.AIImpl.Samples != 2 {
@@ -211,6 +217,12 @@ func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
 	base := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-auth-only", AttemptID: "attempt-stats-auth-only", ClawID: "claw-stats-auth-only", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
 	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=? WHERE run_id='stats-auth-only'`, base-2000, base+3000); err != nil {
+		t.Fatal(err)
+	}
+	// A fallback row with a negative delta is skipped, not sampled, so it must
+	// not flip authoritative to false either.
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-github-skip", AttemptID: "attempt-stats-github-skip", ClawID: "claw-stats-github-skip", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base + 10000, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=? WHERE run_id='stats-github-skip'`, base+8000); err != nil {
 		t.Fatal(err)
 	}
 	rr = requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
