@@ -629,18 +629,21 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         <section>
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Attempts</h3>
           <div className="space-y-2">
-            {(details?.attempts ?? []).map((attempt) => (
-              <div key={attempt.id} className="rounded-md border border-border px-3 py-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span>Attempt {attempt.attemptNumber}</span>
-                  <Badge variant="outline">{attempt.status}</Badge>
+            {(details?.attempts ?? []).map((attempt) => {
+              const attemptDurationMs = durationBetween(attempt.startedAt, attempt.finishedAt)
+              return (
+                <div key={attempt.id} className="rounded-md border border-border px-3 py-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span>Attempt {attempt.attemptNumber}</span>
+                    <Badge variant="outline">{attempt.status}</Badge>
+                  </div>
+                  {attemptDurationMs !== undefined && (
+                    <div className="mt-1 text-xs text-muted-foreground">{formatDurationMs(attemptDurationMs)}</div>
+                  )}
+                  {attempt.failureType && <div className="mt-1 text-xs text-muted-foreground">{formatLabel(attempt.failureType)}</div>}
                 </div>
-                {durationBetween(attempt.startedAt, attempt.finishedAt) !== undefined && (
-                  <div className="mt-1 text-xs text-muted-foreground">{formatDurationMs(durationBetween(attempt.startedAt, attempt.finishedAt))}</div>
-                )}
-                {attempt.failureType && <div className="mt-1 text-xs text-muted-foreground">{formatLabel(attempt.failureType)}</div>}
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
         <section>
@@ -775,7 +778,6 @@ function runTimingPhases(run: TaskRunSummary) {
   push("Queued wait", durationBetween(run.queuedAt, run.agentStartedAt))
   push("Implementation", durationBetween(run.agentStartedAt, run.prOpenedAt))
   push("PR to merge", durationBetween(run.prOpenedAt, run.mergedAt))
-  push("Total", durationBetween(run.startedAt, run.finishedAt))
   return phases
 }
 
