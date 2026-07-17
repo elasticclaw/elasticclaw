@@ -81,6 +81,10 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN estimated_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN usage_updated_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_input_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_output_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -323,6 +327,7 @@ func migrate(db *sql.DB) error {
 		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		session_key TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', model_provider TEXT NOT NULL DEFAULT '',
 		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+		committed_input_tokens INTEGER NOT NULL DEFAULT 0, committed_output_tokens INTEGER NOT NULL DEFAULT 0, committed_total_tokens INTEGER NOT NULL DEFAULT 0, committed_cost_usd REAL NOT NULL DEFAULT 0,
 		cache_read_tokens INTEGER, cache_write_tokens INTEGER, estimated_cost_usd REAL, cost_source TEXT NOT NULL DEFAULT 'gateway' CHECK(cost_source IN ('gateway','hub_pricing')),
 		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
 	);

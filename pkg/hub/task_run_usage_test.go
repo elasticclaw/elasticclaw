@@ -72,8 +72,10 @@ func TestTaskRunUsageSnapshotsAndReset(t *testing.T) {
 	if err := db.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&in, &out, &total, &cost); err != nil {
 		t.Fatal(err)
 	}
-	if in != 5 || out != 3 || total != 8 {
-		t.Fatalf("summary = %d/%d/%d, want 5/3/8", in, out, total)
+	// Summary keeps pre-reset usage: session a = 10/5/15 committed + 2/1/3
+	// current, session b = 3/2/5.
+	if in != 15 || out != 8 || total != 23 {
+		t.Fatalf("summary = %d/%d/%d, want 15/8/23", in, out, total)
 	}
 	if cost <= 0 {
 		t.Fatalf("expected pricing fallback cost, got %v", cost)

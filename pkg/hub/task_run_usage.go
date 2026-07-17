@@ -3,7 +3,6 @@ package hub
 import (
 	"database/sql"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -32,10 +31,11 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		}
 		return err
 	}
-	var oldIn, oldOut, oldTotal int
+	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal int
 	var oldCost sql.NullFloat64
+	var comCost float64
 	oldSource := "gateway"
-	err = tx.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,estimated_cost_usd,cost_source FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldIn, &oldOut, &oldTotal, &oldCost, &oldSource)
+	err = tx.QueryRow(`SELECT input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
@@ -50,11 +50,20 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		total = *snapshot.TotalTokens
 	}
 	// A drop in any cumulative counter means the gateway reset the session
-	// stats; treat the whole snapshot as a fresh baseline.
+	// stats; treat the whole snapshot as a fresh baseline and fold the
+	// pre-reset totals into the committed_* columns so run summaries keep
+	// counting them.
 	reset := in < oldIn || out < oldOut || total < oldTotal
 	din, dout, dtotal := in-oldIn, out-oldOut, total-oldTotal
 	if reset {
 		din, dout, dtotal = in, out, total
+		comIn += oldIn
+		comOut += oldOut
+		comTotal += oldTotal
+		if oldCost.Valid {
+			comCost += oldCost.Float64
+			oldCost = sql.NullFloat64{}
+		}
 	}
 	var cost sql.NullFloat64
 	source := oldSource
@@ -79,16 +88,16 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		cost = oldCost
 	}
 	ts := now().UnixMilli()
-	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,estimated_cost_usd,cost_source,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, snapshot.Model, snapshot.ModelProvider, in, out, total, nullFloat(cost), source, ts, ts)
+	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, snapshot.Model, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, ts, ts)
 	if err != nil {
 		return err
 	}
-	day := time.Now().UTC().Format("2006-01-02")
+	day := now().UTC().Format("2006-01-02")
 	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cost_usd=cost_usd+excluded.cost_usd,updated_at=excluded.updated_at`, tenant, day, workspace, factory, workflow, snapshot.Model, din, dout, dtotal, dcost, ts)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(estimated_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
+	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(input_tokens+committed_input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(output_tokens+committed_output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(total_tokens+committed_total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(COALESCE(estimated_cost_usd,0)+committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
 	if err != nil {
 		return err
 	}
