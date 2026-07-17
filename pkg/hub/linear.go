@@ -534,11 +534,14 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	// Verify we can read the issue before spending money on a sandbox.
 	// Non-negotiable: if the issue is unreadable, we can't do any work.
 	linearToken := s.resolveLinearTokenForFactory(factory)
+	var issueCreatedAt time.Time
 	if linearToken != "" {
-		if _, err := s.fetchLinearIssueDetails(linearToken, issueID); err != nil {
+		details, err := s.fetchLinearIssueDetails(linearToken, issueID)
+		if err != nil {
 			log.Printf("[factory:%s] pre-flight FAILED for %s: %v", factory.Name, issueID, err)
 			return fmt.Errorf("cannot read issue %s from Linear (check token/workspace access): %w", issueID, err)
 		}
+		issueCreatedAt = parseRFC3339Timestamp(details.CreatedAt)
 	} else {
 		log.Printf("[factory:%s] warning: no Linear token, skipping pre-flight issue read for %s", factory.Name, issueID)
 	}
@@ -557,6 +560,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	if err != nil {
 		return err
 	}
+	s.recordTaskRunIssueCreatedAt(clawID, issueCreatedAt)
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
@@ -2031,6 +2035,7 @@ type linearIssueDetails struct {
 	Title       string `json:"title"`
 	URL         string `json:"url"`
 	Description string `json:"description"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 // fetchLinearIssueDetails looks up an issue by its Linear identifier (e.g. "CAN-61")
@@ -2055,7 +2060,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
 	queryBody := map[string]interface{}{
-		"query": "query($id: String!) { issue(id: $id) { identifier title url description } }",
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description createdAt } }",
 		"variables": map[string]string{
 			"id": issueIdentifier,
 		},

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -28,9 +29,12 @@ type githubPRPayload struct {
 		Type  string `json:"type"` // "Bot", "User", "Organization"
 	} `json:"sender"`
 	PullRequest struct {
-		HTMLURL string `json:"html_url"`
-		Title   string `json:"title"`
-		User    struct {
+		HTMLURL   string `json:"html_url"`
+		Title     string `json:"title"`
+		CreatedAt string `json:"created_at"`
+		MergedAt  string `json:"merged_at"`
+		Merged    bool   `json:"merged"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Head struct {
@@ -231,6 +235,15 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		// Check if a claw already exists for this PR
 		existingClawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL)
 		if existingClawID != "" {
+			if payload.Action == "closed" {
+				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
+					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
+					if !payload.PullRequest.Merged {
+						at = time.Time{}
+					}
+					_ = s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at})
+				}
+			}
 			switch payload.Action {
 			case "closed":
 				// Let the pr_watcher handle merged/closed — don't double-inject
@@ -930,6 +943,19 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	if err != nil {
 		return fmt.Errorf("db insert: %w", err)
 	}
+	analyticsEnabled, requiresPR, excludedReason := taskRunAnalyticsContractForFactory(factory)
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind: taskRunKindForFactory(factory), OwnerType: taskRunOwnerFactory, OwnerName: factory.Name,
+		OwnerDisplayName: factory.Name, WorkspaceName: factory.Workspace, FactoryName: factory.Name,
+		Integration: factory.Integration, Model: defaultModel, LLMKey: llmKey, Source: taskRunSourceFactory,
+		AnalyticsEnabled: analyticsEnabled, RequiresPR: requiresPR, ExcludedReason: excludedReason, StartedAt: createdAt,
+		EventKey: "task_start:claw:" + clawID,
+	}); err != nil {
+		// Tear the claw down so the orphaned 'provisioning' row doesn't linger;
+		// the deferred failFactoryTrigger releases the claim so poll/webhook can retry.
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
+		return fmt.Errorf("task run analytics: %w", err)
+	}
 
 	// Store the PR immediately so the watcher picks it up. This claw_prs row is a
 	// hard prerequisite for completing the claim: the PR watcher and the existence
@@ -943,6 +969,12 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
 		}
 		return fmt.Errorf("associate PR with claw: %w", err)
+	}
+	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
+		occurredAt := parseRFC3339Timestamp(pr.PullRequest.CreatedAt)
+		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: prNumber, URL: prURL, HeadSHA: pr.PullRequest.Head.SHA, HeadBranch: pr.PullRequest.Head.Ref, BaseBranch: pr.PullRequest.Base.Ref, State: taskRunPRStateOpen, OccurredAt: occurredAt}); err != nil {
+			log.Printf("[task-run-analytics] failed to record GitHub PR: %v", err)
+		}
 	}
 	if err := s.completeFactoryTrigger(factory.Name, "github-pr", triggerKey, clawID); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
@@ -1019,6 +1051,16 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}()
 
 	return nil
+}
+
+// parseRFC3339Timestamp parses an RFC3339 timestamp (as sent by GitHub and
+// Linear), returning the zero time when the value is absent or malformed.
+func parseRFC3339Timestamp(value string) time.Time {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // buildGitHubPRContext builds the BOOTSTRAP.md context for a GitHub PR assignment.
