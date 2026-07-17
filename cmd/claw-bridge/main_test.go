@@ -201,6 +201,24 @@ func writeGatewayClientConfig(t *testing.T, home, config string) {
 	}
 }
 
+func TestMessageDeduperTracksDuplicatesAndEvictsOldest(t *testing.T) {
+	deduper := newMessageDeduper()
+	if deduper.seen("first") {
+		t.Fatal("fresh id reported as already seen")
+	}
+	if !deduper.seen("first") {
+		t.Fatal("repeated id was not reported as seen")
+	}
+	for i := 0; i < 128; i++ {
+		if deduper.seen(fmt.Sprintf("id-%d", i)) {
+			t.Fatalf("fresh id-%d reported as already seen", i)
+		}
+	}
+	if deduper.seen("first") {
+		t.Fatal("oldest id was not evicted after capacity was exceeded")
+	}
+}
+
 func TestLoadGatewayClientUsesRemotePasswordFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -975,7 +993,7 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	before := stableGoroutineCount(t)
 	const cycles = 5
 	for range cycles {
-		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue)
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue, newMessageDeduper())
 		if err == nil {
 			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
 		}

@@ -149,6 +149,33 @@ type msgQueue struct {
 	droppedPreviews []string
 }
 
+type messageDeduper struct {
+	mu    sync.Mutex
+	ids   map[string]struct{}
+	order []string
+}
+
+func newMessageDeduper() *messageDeduper { return &messageDeduper{ids: make(map[string]struct{})} }
+
+// seen records id and reports whether it has already been processed.
+func (d *messageDeduper) seen(id string) bool {
+	if id == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.ids[id]; ok {
+		return true
+	}
+	d.ids[id] = struct{}{}
+	d.order = append(d.order, id)
+	if len(d.order) > 128 {
+		delete(d.ids, d.order[0])
+		d.order = d.order[1:]
+	}
+	return false
+}
+
 // recordDropLocked notes a dropped input for the reconnect notice. Caller holds mu.
 func (q *msgQueue) recordDropLocked(content string) {
 	q.dropped++
@@ -3354,6 +3381,7 @@ func main() {
 	// via http://localhost:18790 without needing a public hub URL.
 	proxy := newHTTPProxy(nil) // send func wired up in runHubLoop
 	queue := &msgQueue{}
+	deduper := newMessageDeduper()
 	go func() {
 		log.Printf("[bridge] local HTTP proxy on 127.0.0.1:18790")
 		if err := http.ListenAndServe("127.0.0.1:18790", proxy); err != nil {
@@ -3399,7 +3427,7 @@ func main() {
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue, deduper); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -3528,7 +3556,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -3664,6 +3692,14 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				}
 				content, _ := m["content"].(string)
 				if content == "" {
+					return
+				}
+				id, _ := m["id"].(string)
+				if id == "" {
+					log.Printf("[bridge] warning: message without id, dedup disabled for it")
+				}
+				if deduper.seen(id) {
+					log.Printf("[bridge] skipping duplicate message id=%s", id)
 					return
 				}
 				if !gwSession.IsReady() {

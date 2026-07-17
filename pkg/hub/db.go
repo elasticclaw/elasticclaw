@@ -63,6 +63,13 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
+		// A failed backfill must abort startup: the column now exists, so a
+		// later start would skip this branch and replay all history as pending.
+		if _, backfillErr := db.Exec(`UPDATE messages SET delivered_at = created_at`); backfillErr != nil {
+			return fmt.Errorf("backfill messages.delivered_at: %w", backfillErr)
+		}
+	}
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN task_run_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE factory_triggers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_attempts ADD COLUMN restored_checkpoint_id TEXT`)
@@ -235,7 +242,8 @@ func migrate(db *sql.DB) error {
 		role       TEXT NOT NULL,
 		content    TEXT NOT NULL,
 		format     TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL
+		created_at DATETIME NOT NULL,
+		delivered_at DATETIME
 	);
 
 	CREATE TABLE IF NOT EXISTS factory_triggers (
@@ -263,6 +271,7 @@ func migrate(db *sql.DB) error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
 
 	CREATE TABLE IF NOT EXISTS task_runs (

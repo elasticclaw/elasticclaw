@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1934,23 +1935,201 @@ func TestInjectUserMessageQueuesWhenActivityOnlyTurnIsBusy(t *testing.T) {
 
 	s.injectUserMessage("claw-1", "New greptile review comment on PR #339")
 
-	cc.mu.Lock()
-	if len(cc.messageQueue) != 1 {
-		t.Fatalf("expected 1 queued message, got %d", len(cc.messageQueue))
-	}
-	queued := cc.messageQueue[0]
-	cc.mu.Unlock()
-	if queued.Role != "user" || queued.Content != "New greptile review comment on PR #339" {
-		t.Fatalf("queued message = %#v", queued)
-	}
-
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, "claw-1", queued.Content).Scan(&count); err != nil {
+	var role, content string
+	var deliveredAt interface{}
+	if err := db.QueryRow(`SELECT role, content, delivered_at FROM messages WHERE claw_id=? AND content=?`, "claw-1", "New greptile review comment on PR #339").Scan(&role, &content, &deliveredAt); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("expected persisted injected message, got count %d", count)
+	if role != "user" || content != "New greptile review comment on PR #339" || deliveredAt != nil {
+		t.Fatalf("pending message = role=%q content=%q delivered_at=%v", role, content, deliveredAt)
 	}
+}
+
+func TestReconnectDeliversQueuedMessagesInOrder(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-reconnect-pending"
+	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
+	insertPendingMessage(t, db, clawID, "second", now())
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	clawWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+
+	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
+		t.Fatalf("first delivered content = %q, want first", got)
+	}
+	// A completed agent turn is the normal driver for the next queued message.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, clawWS, types.WSMessage{Type: "message", Payload: types.HubMessage{Content: "turn complete"}}); err != nil {
+		t.Fatalf("write completed turn: %v", err)
+	}
+	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
+		t.Fatalf("second delivered content = %q, want second", got)
+	}
+	waitForMessagesDelivered(t, db, clawID, 2)
+}
+
+func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-redeliver-pending"
+	insertPendingMessage(t, db, clawID, "deliver me again", now())
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	firstWS := connectTestClaw(t, ts, clawID)
+	if got := readTestHubMessage(t, firstWS).Content; got != "deliver me again" {
+		t.Fatalf("initial delivered content = %q", got)
+	}
+	// The hub marks delivered_at after the WS write, so the frame can arrive
+	// here before the UPDATE runs. Wait for the mark before resetting it, or
+	// the hub's late UPDATE (WHERE delivered_at IS NULL) would re-mark the row.
+	waitForMessagesDelivered(t, db, clawID, 1)
+	// Model a hub crash after the bridge accepted the write but before the
+	// delivered_at update was committed.
+	if _, err := db.Exec(`UPDATE messages SET delivered_at=NULL WHERE claw_id=?`, clawID); err != nil {
+		t.Fatalf("restore unmarked delivery: %v", err)
+	}
+	_ = firstWS.Close(websocket.StatusNormalClosure, "restart hub")
+	waitForTestClawDisconnect(t, s, clawID)
+
+	clawWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if got := readTestHubMessage(t, clawWS).Content; got != "deliver me again" {
+		t.Fatalf("redelivered content = %q", got)
+	}
+	waitForMessagesDelivered(t, db, clawID, 1)
+}
+
+func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-write-failure"
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	failedWS := connectTestClaw(t, ts, clawID)
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	insertPendingMessage(t, db, clawID, "retry me", now())
+	// Sever the client side abruptly (no close handshake) so the server's
+	// next write to this connection fails, without touching cc.conn directly
+	// (which would race the server's own read/close goroutines).
+	if err := failedWS.CloseNow(); err != nil {
+		t.Fatalf("close client websocket: %v", err)
+	}
+	waitForTestClawDisconnect(t, s, clawID)
+	// The closed peer makes the write fail; the row must remain eligible.
+	s.sendNextQueuedMessage(cc)
+	assertMessagesDelivered(t, db, clawID, 0)
+
+	retryWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = retryWS.Close(websocket.StatusNormalClosure, "done") })
+	if got := readTestHubMessage(t, retryWS).Content; got != "retry me" {
+		t.Fatalf("retried content = %q", got)
+	}
+	waitForMessagesDelivered(t, db, clawID, 1)
+}
+
+func insertPendingMessage(t *testing.T, db *sql.DB, clawID, content string, createdAt time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT OR IGNORE INTO claws(id,tenant_id,name,tags,created_at,status) VALUES(?,?,?,?,?,?)`, clawID, "test-tenant-id", clawID, `[]`, createdAt, "offline"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, "pending-"+content, clawID, "test-tenant-id", "user", content, createdAt); err != nil {
+		t.Fatalf("insert pending message: %v", err)
+	}
+}
+
+func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw websocket: %v", err)
+	}
+	ready := true
+	if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{ClawID: clawID, Name: clawID, Template: "elasticclaw", Token: "claw-token", GatewayReady: &ready}}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(ctx, conn, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+	if registered.Type != "registered" {
+		t.Fatalf("registration ack type = %q, want registered", registered.Type)
+	}
+	return conn
+}
+
+func readTestHubMessage(t *testing.T, conn *websocket.Conn) types.HubMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The connection bootstrap may deliver unrelated frames (e.g. an async
+	// checkpoint_create request) before the queued message; skip those.
+	var message types.WSMessage
+	for {
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			t.Fatalf("read delivered message: %v", err)
+		}
+		if message.Type == "message" {
+			break
+		}
+	}
+	payload, err := json.Marshal(message.Payload)
+	if err != nil {
+		t.Fatalf("marshal message payload: %v", err)
+	}
+	var hubMessage types.HubMessage
+	if err := json.Unmarshal(payload, &hubMessage); err != nil {
+		t.Fatalf("decode message payload: %v", err)
+	}
+	return hubMessage
+}
+
+func assertMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND delivered_at IS NOT NULL`, clawID).Scan(&got); err != nil {
+		t.Fatalf("count delivered messages: %v", err)
+	}
+	if got != want {
+		t.Fatalf("delivered messages = %d, want %d", got, want)
+	}
+}
+
+func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var got int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND delivered_at IS NOT NULL`, clawID).Scan(&got); err != nil {
+			t.Fatalf("count delivered messages: %v", err)
+		}
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d delivered messages", want)
+}
+
+func waitForTestClawDisconnect(t *testing.T, s *Server, clawID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		_, connected := s.claws[clawID]
+		s.mu.RUnlock()
+		if !connected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for claw disconnect")
 }
 
 func TestInaccessibleGitHubReposMessage(t *testing.T) {

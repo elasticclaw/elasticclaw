@@ -146,7 +146,7 @@ func TestHeartbeatRestartCountChangeDetectedInBothDirections(t *testing.T) {
 }
 
 func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
-	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-force-finish"
 	conn := watchdogClaw(t, s, clawID)
 	cc := watchdogClawConn(t, s, clawID)
@@ -154,8 +154,10 @@ func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	cc.streamingStartedAt = time.Now().Add(-defaultBusyTurnMax - time.Minute)
 	cc.streamingMsgID = "partial-turn"
 	cc.streamingBuf.WriteString("partial response")
-	cc.messageQueue = []types.HubMessage{{ID: "queued-message", ClawID: clawID, TenantID: "test-tenant-id", Role: "user", Content: "next request", CreatedAt: time.Now()}}
 	cc.mu.Unlock()
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`, "queued-message", clawID, "test-tenant-id", "user", "next request", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	s.checkClawStatus()
 	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -172,8 +174,12 @@ func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	}
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if cc.isBusyLocked() || cc.forcedFinishCount != 1 || len(cc.messageQueue) != 0 {
-		t.Fatalf("turn not force-finished cleanly: busy=%v forced=%d queued=%d", cc.isBusyLocked(), cc.forcedFinishCount, len(cc.messageQueue))
+	if cc.isBusyLocked() || cc.forcedFinishCount != 1 {
+		t.Fatalf("turn not force-finished cleanly: busy=%v forced=%d", cc.isBusyLocked(), cc.forcedFinishCount)
+	}
+	var deliveredAt interface{}
+	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE id=?`, "queued-message").Scan(&deliveredAt); err != nil || deliveredAt == nil {
+		t.Fatalf("queued message not marked delivered: delivered_at=%v err=%v", deliveredAt, err)
 	}
 }
 
