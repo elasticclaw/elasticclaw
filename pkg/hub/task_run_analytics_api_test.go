@@ -192,6 +192,36 @@ func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsAPIGeneralStatsEmptyAndAuthoritative(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+
+	// No qualifying rows: every avgMs must serialize as JSON null with samples 0.
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"ticketToPrMs":{"avgMs":null,"samples":0,"authoritative":true}`) ||
+		!strings.Contains(body, `"prOpenToMergeMs":{"avgMs":null,"samples":0}`) ||
+		!strings.Contains(body, `"aiImplMs":{"avgMs":null,"samples":0}`) {
+		t.Fatalf("unexpected empty-stats body: %s", body)
+	}
+
+	// A single run with issue_created_at set keeps authoritative=true.
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "stats-auth-only", AttemptID: "attempt-stats-auth-only", ClawID: "claw-stats-auth-only", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=? WHERE run_id='stats-auth-only'`, base-2000, base+3000); err != nil {
+		t.Fatal(err)
+	}
+	rr = requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	var response taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.TicketToPr.Samples != 1 ||
+		response.TicketToPr.Authoritative == nil || !*response.TicketToPr.Authoritative {
+		t.Fatalf("ticket stats: %#v", response.TicketToPr)
+	}
+}
+
 func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	ts := int64(1760000000000)

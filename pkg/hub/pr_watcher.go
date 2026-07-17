@@ -148,14 +148,16 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 	} else if ok {
+		// OccurredAt is intentionally left zero: this is a detection time, so
+		// associateTaskRunPR treats it as a write-once fallback rather than an
+		// authoritative provider timestamp.
 		if err := s.associateTaskRunPR(TaskRunPR{
-			RunID:      runID,
-			Repo:       repo,
-			PRNumber:   prNumber,
-			URL:        prURL,
-			HeadSHA:    headSHA,
-			State:      taskRunPRStateOpen,
-			OccurredAt: now(),
+			RunID:    runID,
+			Repo:     repo,
+			PRNumber: prNumber,
+			URL:      prURL,
+			HeadSHA:  headSHA,
+			State:    taskRunPRStateOpen,
 		}); err != nil {
 			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
 		}
@@ -1105,8 +1107,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	merged, _ := data["merged"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
-	mergedAt := parseGitHubTimestamp(mergedAtValue)
-	createdAt := parseGitHubTimestamp(createdAtValue)
+	mergedAt := parseRFC3339Timestamp(mergedAtValue)
+	createdAt := parseRFC3339Timestamp(createdAtValue)
 
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 

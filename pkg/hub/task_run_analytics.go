@@ -377,6 +377,10 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if input.State == "" {
 		input.State = taskRunPRStateOpen
 	}
+	// A caller-supplied OccurredAt is an authoritative provider timestamp and
+	// may overwrite an earlier detection-time opened_at; the now() fallback is
+	// write-once so it never clobbers an authoritative value.
+	authoritativeOpen := input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero()
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = now()
 	}
@@ -404,7 +408,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			base_branch=excluded.base_branch,
 			state=CASE WHEN task_run_prs.merged = 1 OR task_run_prs.state = 'closed' THEN task_run_prs.state ELSE excluded.state END,
 			merged=CASE WHEN excluded.merged = 1 THEN 1 ELSE task_run_prs.merged END,
-			opened_at=CASE WHEN excluded.opened_at != 0 THEN excluded.opened_at ELSE task_run_prs.opened_at END,
+			opened_at=CASE WHEN excluded.opened_at != 0 AND (task_run_prs.opened_at = 0 OR ?) THEN excluded.opened_at ELSE task_run_prs.opened_at END,
 			closed_at=CASE WHEN excluded.closed_at != 0 THEN excluded.closed_at ELSE task_run_prs.closed_at END,
 			merged_at=CASE WHEN excluded.merged_at != 0 THEN excluded.merged_at ELSE task_run_prs.merged_at END,
 			merged_by_login=CASE WHEN excluded.merged_by_login != '' THEN excluded.merged_by_login ELSE task_run_prs.merged_by_login END,
@@ -412,6 +416,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
 		input.HeadSHA, input.HeadBranch, input.BaseBranch, input.State, boolInt(input.Merged),
 		openedAt, closedAt, mergedAt, input.MergedByLogin, at, at,
+		boolInt(authoritativeOpen),
 	); err != nil {
 		return err
 	}
@@ -494,6 +499,26 @@ func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptI
 		return tenantID, "", "", false, nil
 	}
 	return tenantID, runID, attemptID, true, nil
+}
+
+// recordTaskRunIssueCreatedAt backfills the authoritative issue-creation time
+// on the task run for a claw and refreshes its summary. Best-effort: analytics
+// must never fail the calling flow.
+func (s *Server) recordTaskRunIssueCreatedAt(clawID string, issueCreatedAt time.Time) {
+	if issueCreatedAt.IsZero() {
+		return
+	}
+	_, runID, _, ok, err := s.taskRunContextForClaw(clawID)
+	if err != nil || !ok {
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE task_runs SET issue_created_at=? WHERE id=? AND issue_created_at=0`, epochMillis(issueCreatedAt), runID); err != nil {
+		log.Printf("[task-run-analytics] failed to record issue creation time for claw %s: %v", clawID, err)
+		return
+	}
+	if err := s.materializeTaskRun(runID); err != nil {
+		log.Printf("[task-run-analytics] failed to materialize run %s after issue creation backfill: %v", runID, err)
+	}
 }
 
 func loadTaskRunTenantTx(tx *sql.Tx, runID string) (string, error) {
@@ -847,6 +872,14 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 
 	counts := taskRunPRCounts(prs)
 	phaseTimes := taskRunPhaseTimes(events)
+	// task_run_prs.opened_at may carry GitHub's authoritative created_at
+	// (backfilled by the PR watcher or webhook), while pr_opened events are
+	// stamped at detection time and never updated. Use the earliest known time.
+	for _, pr := range prs {
+		if pr.openedAt > 0 && (phaseTimes.prOpenedAt == 0 || pr.openedAt < phaseTimes.prOpenedAt) {
+			phaseTimes.prOpenedAt = pr.openedAt
+		}
+	}
 	if counts.merged > 0 && counts.closed > 0 {
 		warnings[taskRunWarningPRReplaced] = true
 	}

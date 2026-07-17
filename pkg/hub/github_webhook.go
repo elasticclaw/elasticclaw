@@ -237,7 +237,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		if existingClawID != "" {
 			if payload.Action == "closed" {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
-					at := parseGitHubTimestamp(payload.PullRequest.MergedAt)
+					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 					if !payload.PullRequest.Merged {
 						at = time.Time{}
 					}
@@ -951,6 +951,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		AnalyticsEnabled: analyticsEnabled, RequiresPR: requiresPR, ExcludedReason: excludedReason, StartedAt: createdAt,
 		EventKey: "task_start:claw:" + clawID,
 	}); err != nil {
+		// Tear the claw down so the orphaned 'provisioning' row doesn't linger;
+		// the deferred failFactoryTrigger releases the claim so poll/webhook can retry.
+		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		return fmt.Errorf("task run analytics: %w", err)
 	}
 
@@ -968,7 +971,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		return fmt.Errorf("associate PR with claw: %w", err)
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
-		occurredAt := parseGitHubTimestamp(pr.PullRequest.CreatedAt)
+		occurredAt := parseRFC3339Timestamp(pr.PullRequest.CreatedAt)
 		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: prNumber, URL: prURL, HeadSHA: pr.PullRequest.Head.SHA, HeadBranch: pr.PullRequest.Head.Ref, BaseBranch: pr.PullRequest.Base.Ref, State: taskRunPRStateOpen, OccurredAt: occurredAt}); err != nil {
 			log.Printf("[task-run-analytics] failed to record GitHub PR: %v", err)
 		}
@@ -1050,7 +1053,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	return nil
 }
 
-func parseGitHubTimestamp(value string) time.Time {
+// parseRFC3339Timestamp parses an RFC3339 timestamp (as sent by GitHub and
+// Linear), returning the zero time when the value is absent or malformed.
+func parseRFC3339Timestamp(value string) time.Time {
 	t, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return time.Time{}

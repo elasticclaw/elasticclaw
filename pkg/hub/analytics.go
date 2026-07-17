@@ -299,7 +299,11 @@ func (s *Server) trackPRMerged(factoryName, issueID, clawID, repo string, prNumb
 }
 
 func (s *Server) trackPRMergedAt(factoryName, issueID, clawID, repo string, prNumber int, occurredAt time.Time) {
-	s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_merged", fmt.Sprintf("%s#%d", repo, prNumber), "success")
+	// The task-run event is recorded even without pipeline context, but
+	// per-factory analytics rows keyed by an empty factory name are noise.
+	if factoryName != "" {
+		s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_merged", fmt.Sprintf("%s#%d", repo, prNumber), "success")
+	}
 	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        fmt.Sprintf("pr_merged:%s#%d", repo, prNumber),
 		Source:          taskRunSourceGitHub,
