@@ -133,6 +133,9 @@ func (s *Server) readTaskRunAnalyticsCosts(filters taskRunAnalyticsFilters, now 
 }
 
 func averageTaskRunAnalyticsCosts(costs []float64) float64 {
+	if len(costs) == 0 {
+		return 0
+	}
 	var total float64
 	for _, cost := range costs {
 		total += cost
