@@ -589,7 +589,7 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         <section className="grid grid-cols-2 gap-2 text-sm">
           <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
-          <DetailItem label="Issue" value={run.issueId || "None"} />
+          <DetailItem label="Issue" value={run.issueId ? (run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId) : "None"} />
           <DetailItem label="Started" value={formatTime(run.startedAt)} />
           <DetailItem label="Failure" value={run.failureType ? formatLabel(run.failureType) : "None"} />
           <DetailItem label="Human" value={String(run.humanInteractionCount)} />
@@ -681,7 +681,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function hasUsageData(run: TaskRunSummary) {
-  return Boolean(run.inputTokens || run.outputTokens || run.totalTokens || run.estimatedCostUsd)
+  return run.inputTokens !== undefined || run.outputTokens !== undefined || run.totalTokens !== undefined || run.estimatedCostUsd !== undefined
 }
 
 function formatLabel(value: string) {
