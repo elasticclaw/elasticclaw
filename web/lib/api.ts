@@ -1,8 +1,10 @@
 import type {
   ApiClaw,
   ApiMessage,
+  CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
+  GeneralStats,
   TaskRunAnalyticsFilters,
   TaskRunAnalyticsSummary,
   TaskRunAttempt,
@@ -391,6 +393,14 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
 
 export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFilters): Promise<TaskRunAnalyticsSummary> {
   return apiFetch<TaskRunAnalyticsSummary>(`/api/analytics/summary${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchCostOverview(filters?: TaskRunAnalyticsFilters): Promise<CostOverview> {
+  return apiFetch<CostOverview>(`/api/analytics/costs${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchGeneralStats(filters?: TaskRunAnalyticsFilters): Promise<GeneralStats> {
+  return apiFetch<GeneralStats>(`/api/analytics/general-stats${taskRunAnalyticsQuery(filters)}`)
 }
 
 export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters): Promise<TaskRunsResponse> {

@@ -132,6 +132,48 @@ export interface TaskRunAnalyticsSummary {
   }
 }
 
+export interface CostBucket {
+  costUsd: number
+}
+
+export interface CostToday {
+  costUsd: number
+  totalTokens: number
+  deltaPctVsYesterday: number | null
+}
+
+export interface CostProjection {
+  costUsd: number
+  confidence: "high" | "medium" | "low"
+  basis: string
+}
+
+export interface CostDailyPoint {
+  date: string
+  costUsd: number
+  totalTokens: number
+}
+
+export interface CostOverview {
+  today: CostToday
+  week: CostBucket
+  month: CostBucket
+  projectedMonth: CostProjection | null
+  dailySeries: CostDailyPoint[]
+}
+
+export interface GeneralStatMetric {
+  avgMs: number | null
+  samples: number
+  authoritative?: boolean
+}
+
+export interface GeneralStats {
+  ticketToPrMs: GeneralStatMetric
+  prOpenToMergeMs: GeneralStatMetric
+  aiImplMs: GeneralStatMetric
+}
+
 export interface TaskRunSummary {
   runId: string
   initialAttemptId: string
@@ -175,6 +217,11 @@ export interface TaskRunSummary {
   analyticsEnabled: boolean
   requiresPr: boolean
   excludedReason: string | null
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+  estimatedCostUsd?: number
+  issueTitle?: string
 }
 
 export interface TaskRunsResponse {

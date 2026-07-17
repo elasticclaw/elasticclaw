@@ -2,8 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, RefreshCw, Search, XCircle } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
+import { Bar, BarChart, XAxis } from "recharts"
 import {
+  fetchCostOverview,
+  fetchGeneralStats,
   fetchTaskRunAnalyticsSummary,
   fetchTaskRunAttempts,
   fetchTaskRunEvents,
@@ -12,6 +15,8 @@ import {
   fetchTaskRuns,
 } from "@/lib/api"
 import type {
+  CostOverview,
+  GeneralStats,
   TaskRunAnalyticsFilters,
   TaskRunAnalyticsSummary,
   TaskRunAttempt,
@@ -22,11 +27,16 @@ import type {
 } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { RunLogsDialog } from "@/components/run-logs-dialog"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
+
+const costChartConfig = {
+  costUsd: { label: "Cost", color: "var(--chart-1)" },
+} satisfies ChartConfig
 
 type DetailState = {
   attempts: TaskRunAttempt[]
@@ -106,6 +116,8 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     ...(workspaceScope ? { workspace: workspaceScope } : {}),
   }), [workspaceScope])
   const [kpiSummary, setKpiSummary] = useState<TaskRunAnalyticsSummary | null>(null)
+  const [costOverview, setCostOverview] = useState<CostOverview | null>(null)
+  const [generalStats, setGeneralStats] = useState<GeneralStats | null>(null)
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
   const [options, setOptions] = useState<TaskRunFilterOptions | null>(null)
   const [nextCursor, setNextCursor] = useState<string | undefined>()
@@ -136,13 +148,19 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
         return
       }
 
-      const [kpiSummaryData, runsData, optionsData] = await Promise.all([
+      const overviewFilters = { ...filters, cursor: undefined }
+      const [kpiSummaryData, runsData, optionsData, costData, statsData] = await Promise.all([
         fetchTaskRunAnalyticsSummary(kpiFilters),
         fetchTaskRuns(query),
         optionsRef.current ? Promise.resolve(optionsRef.current) : fetchTaskRunFilterOptions(),
+        // Cost and general-stats failures must not break the main load.
+        fetchCostOverview(overviewFilters).catch(() => null),
+        fetchGeneralStats(overviewFilters).catch(() => null),
       ])
       if (cancellation?.cancelled) return
       setKpiSummary(kpiSummaryData)
+      setCostOverview(costData)
+      setGeneralStats(statsData)
       setRuns(runsData.runs)
       setNextCursor(runsData.nextCursor)
       if (!optionsRef.current) {
@@ -242,6 +260,11 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     replaceFilterParams(updates)
   }
 
+  const hasCostChartData = useMemo(
+    () => (costOverview?.dailySeries ?? []).some((point) => point.costUsd > 0),
+    [costOverview]
+  )
+
   const activeKpi = useMemo<KpiFilter | null>(() => {
     if (filters.humanTouched === true) return "humanTouches"
     if (filters.mergedPrs === true) return "mergedPrs"
@@ -269,6 +292,71 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
               </Button>
             </div>
           </div>
+          <div className="flex flex-col gap-2">
+            <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <CostCard
+                label="Today's Cost"
+                value={
+                  <>
+                    <span>{formatUSD(costOverview?.today.costUsd)}</span>
+                    {costOverview?.today.deltaPctVsYesterday != null && (
+                      <DeltaIndicator pct={costOverview.today.deltaPctVsYesterday} />
+                    )}
+                  </>
+                }
+              />
+              <CostCard label="Weekly Cost" value={formatUSD(costOverview?.week.costUsd)} />
+              <CostCard label="Monthly Cost" value={formatUSD(costOverview?.month.costUsd)} />
+              <CostCard
+                label="Projected Monthly Cost"
+                value={
+                  <>
+                    <span>{formatUSD(costOverview?.projectedMonth?.costUsd)}</span>
+                    {costOverview?.projectedMonth && (
+                      <ConfidenceBadge confidence={costOverview.projectedMonth.confidence} />
+                    )}
+                  </>
+                }
+                sub={costOverview?.projectedMonth ? "based on current daily average" : undefined}
+              />
+            </div>
+            {costOverview && hasCostChartData && (
+              <ChartContainer config={costChartConfig} className="aspect-auto h-24 w-full">
+                <BarChart data={costOverview.dailySeries} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
+                  <XAxis
+                    dataKey="date"
+                    tickLine={false}
+                    axisLine={false}
+                    tickMargin={6}
+                    minTickGap={24}
+                    tickFormatter={formatChartDate}
+                  />
+                  <ChartTooltip
+                    cursor={false}
+                    content={
+                      <ChartTooltipContent
+                        hideIndicator
+                        labelFormatter={(value) => formatChartDate(value as string)}
+                        formatter={(value) => formatUSD(value as number)}
+                      />
+                    }
+                  />
+                  <Bar dataKey="costUsd" fill="var(--color-costUsd)" radius={2} />
+                </BarChart>
+              </ChartContainer>
+            )}
+          </div>
+          {generalStats && (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-xs font-medium uppercase text-muted-foreground">General Stats</h3>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <CostCard label="Avg ticket to PR" value={formatDurationMs(generalStats.ticketToPrMs.avgMs)} />
+                <CostCard label="Avg PR to merged" value={formatDurationMs(generalStats.prOpenToMergeMs.avgMs)} />
+                <CostCard label="Avg AI implementation time" value={formatDurationMs(generalStats.aiImplMs.avgMs)} />
+              </div>
+            </div>
+          )}
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
             <Metric label="Clean" value={kpiSummary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
@@ -301,9 +389,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                 <TableRow>
                   <TableHead className="w-[140px]">Status</TableHead>
                   <TableHead>Owner</TableHead>
+                  <TableHead>Ticket</TableHead>
                   <TableHead>Repo</TableHead>
                   <TableHead>Model</TableHead>
                   <TableHead>Warnings</TableHead>
+                  <TableHead className="text-right">Cost</TableHead>
+                  <TableHead className="text-right">Tokens</TableHead>
                   <TableHead className="text-right">PRs</TableHead>
                   <TableHead className="text-right">Started</TableHead>
                 </TableRow>
@@ -331,6 +422,15 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                         <div className="text-xs text-muted-foreground">{run.workspaceName || run.integration || "unknown"}</div>
                       </div>
                     </TableCell>
+                    <TableCell>
+                      {run.issueId ? (
+                        <span className="block max-w-[200px] truncate">
+                          {run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">None</span>
+                      )}
+                    </TableCell>
                     <TableCell>{run.repo || <span className="text-muted-foreground">None</span>}</TableCell>
                     <TableCell>{run.model || <span className="text-muted-foreground">Unknown</span>}</TableCell>
                     <TableCell>
@@ -340,13 +440,15 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                         ) : run.warningTypes.map((warning) => <Badge key={warning} variant="outline">{formatLabel(warning)}</Badge>)}
                       </div>
                     </TableCell>
+                    <TableCell className="text-right tabular-nums">{formatUSD(run.estimatedCostUsd)}</TableCell>
+                    <TableCell className="text-right tabular-nums text-muted-foreground">{formatCompactTokens(run.totalTokens)}</TableCell>
                     <TableCell className="text-right">{run.mergedPrCount}/{run.prCount}</TableCell>
                     <TableCell className="text-right text-muted-foreground">{formatTime(run.startedAt)}</TableCell>
                   </TableRow>
                 ))}
                 {!loading && runs.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
+                    <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
                       <Search className="mx-auto mb-2 size-5" />
                       No task runs match the current filters.
                     </TableCell>
@@ -389,6 +491,54 @@ function Metric({ label, value, tone, active, onClick }: { label: string; value:
         tone === "danger" && "text-red-600 dark:text-red-400"
       )}>{value}</div>
     </button>
+  )
+}
+
+function CostCard({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
+  return (
+    <div className="rounded-md border border-border bg-card px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 flex items-baseline gap-2 text-xl font-semibold">{value}</div>
+      {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+    </div>
+  )
+}
+
+function DeltaIndicator({ pct }: { pct: number }) {
+  const flat = pct === 0
+  const up = pct > 0
+  const Icon = flat ? Minus : up ? ArrowUp : ArrowDown
+  return (
+    <span
+      className={cn(
+        "flex items-center gap-0.5 text-xs font-medium",
+        // A spend increase is worse (red); a decrease is better (emerald); flat is neutral.
+        flat
+          ? "text-muted-foreground"
+          : up
+            ? "text-red-600 dark:text-red-400"
+            : "text-emerald-600 dark:text-emerald-400"
+      )}
+    >
+      <Icon className="size-3" />
+      {Math.abs(pct).toFixed(1)}%
+    </span>
+  )
+}
+
+function ConfidenceBadge({ confidence }: { confidence: "high" | "medium" | "low" }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "text-xs font-normal",
+        confidence === "high" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
+        confidence === "medium" && "border-amber-500/50 text-amber-700 dark:text-amber-300",
+        confidence === "low" && "text-muted-foreground"
+      )}
+    >
+      {formatLabel(confidence)}
+    </Badge>
   )
 }
 
@@ -439,11 +589,23 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         <section className="grid grid-cols-2 gap-2 text-sm">
           <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
-          <DetailItem label="Issue" value={run.issueId || "None"} />
+          <DetailItem label="Issue" value={run.issueId ? (run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId) : "None"} />
           <DetailItem label="Started" value={formatTime(run.startedAt)} />
           <DetailItem label="Failure" value={run.failureType ? formatLabel(run.failureType) : "None"} />
           <DetailItem label="Human" value={String(run.humanInteractionCount)} />
         </section>
+        {hasUsageData(run) && (
+          <section>
+            <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Usage</h3>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <DetailItem label="Prompt tokens" value={formatCompactTokens(run.inputTokens)} />
+              <DetailItem label="Completion tokens" value={formatCompactTokens(run.outputTokens)} />
+              <DetailItem label="Total tokens" value={formatCompactTokens(run.totalTokens)} />
+              <DetailItem label="Estimated cost" value={formatUSD(run.estimatedCostUsd)} />
+              <DetailItem label="Model" value={run.model || "Unknown"} />
+            </div>
+          </section>
+        )}
         <section>
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Pull Requests</h3>
           <div className="space-y-2">
@@ -518,8 +680,61 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+function hasUsageData(run: TaskRunSummary) {
+  return run.inputTokens !== undefined || run.outputTokens !== undefined || run.totalTokens !== undefined || run.estimatedCostUsd !== undefined
+}
+
 function formatLabel(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase())
+}
+
+const usdFormatter = new Intl.NumberFormat(undefined, {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+function formatUSD(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—"
+  return usdFormatter.format(value)
+}
+
+const compactTokenFormatter = new Intl.NumberFormat(undefined, {
+  notation: "compact",
+  maximumFractionDigits: 1,
+})
+
+function formatCompactTokens(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—"
+  return compactTokenFormatter.format(value)
+}
+
+function formatDurationMs(ms: number | null | undefined) {
+  if (ms === null || ms === undefined || Number.isNaN(ms)) return "—"
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60
+    return seconds ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`
+  }
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 24) {
+    const minutes = totalMinutes % 60
+    return minutes ? `${totalHours}h ${minutes}m` : `${totalHours}h`
+  }
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  return hours ? `${days}d ${hours}h` : `${days}d`
+}
+
+function formatChartDate(value: string) {
+  // Daily series dates are "YYYY-MM-DD"; render a short month/day tick.
+  const parts = value.split("-").map(Number)
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return value
+  const [year, month, day] = parts
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(year, month - 1, day))
 }
 
 function formatTime(value: number | null | undefined) {
