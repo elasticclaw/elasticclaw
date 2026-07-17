@@ -768,6 +768,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		return fmt.Errorf("complete factory trigger: %w", err)
 	}
 	claimOpen = false
+	s.setClawIssueTitle(clawID, action.Name)
 
 	log.Printf("[factory] created claw %s (%s) for Shortcut story %s (status=%s, reason=%s)", clawName, clawID[:8], storyID, initialStatus, reason)
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -884,6 +885,7 @@ func (s *Server) createClawForShortcutWorkflow(workspace *types.WorkspaceConfig,
 	if err != nil {
 		return err
 	}
+	s.setClawIssueTitle(clawID, action.Name)
 	if err := s.completeFactoryTrigger(triggerOwner, "shortcut", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {

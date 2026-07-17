@@ -988,6 +988,7 @@ type gatewayUsage struct {
 	inputTokens, outputTokens, totalTokens *int
 	estimatedCostUSD                       *float64
 	model                                  string
+	modelProvider                          string
 }
 
 // newGatewaySession creates a gatewaySession, establishes the gateway
@@ -1685,7 +1686,10 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := gs.sendReq(pollCtx, "sessions.describe", map[string]string{"key": gs.getSessionKey()})
+	// Capture the key once so the stored snapshot is attributed to the session
+	// we actually described, even if the session rotates while we wait.
+	sessionKey := gs.getSessionKey()
+	resp, err := gs.sendReq(pollCtx, "sessions.describe", map[string]string{"key": sessionKey})
 	if err != nil {
 		log.Printf("[session] sessions.describe for context usage: %v", err)
 		return
@@ -1706,7 +1710,7 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		return
 	}
 	gs.ctxMu.Lock()
-	gs.usage = gatewayUsage{sessionKey: gs.getSessionKey(), inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model}
+	gs.usage = gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
 	if payload.Session.ContextTokens > 0 && payload.Session.TotalTokens != nil {
 		usage := *payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
 		if usage > 100 {
@@ -3701,6 +3705,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		}
 		if usage.model != "" {
 			heartbeatPayload["model"] = usage.model
+		}
+		if usage.modelProvider != "" {
+			heartbeatPayload["model_provider"] = usage.modelProvider
 		}
 		_ = writeHub(hubMsg{Type: "heartbeat", Payload: mustJSON(heartbeatPayload)})
 	})

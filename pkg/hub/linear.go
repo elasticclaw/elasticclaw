@@ -480,6 +480,7 @@ func (s *Server) createClawForLinearWorkflow(workspace *types.WorkspaceConfig, w
 	if err != nil {
 		return err
 	}
+	s.setClawIssueTitle(clawID, payload.Data.Title)
 	if err := s.completeFactoryTrigger(triggerOwner, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {
@@ -559,11 +560,7 @@ func (s *Server) createClawForIssue(factory *types.FactoryConfig, payload linear
 	}
 	// Keep the tracker title with the run; the dashboard can then display it
 	// without another tracker request.
-	if payload.Data.Title != "" {
-		_, _ = s.db.Exec(`UPDATE claws SET issue_title=? WHERE id=?`, payload.Data.Title, clawID)
-		_, _ = s.db.Exec(`UPDATE task_runs SET issue_title=? WHERE claw_id=?`, payload.Data.Title, clawID)
-		_, _ = s.db.Exec(`UPDATE task_run_summaries SET issue_title=? WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?)`, payload.Data.Title, clawID)
-	}
+	s.setClawIssueTitle(clawID, payload.Data.Title)
 	if err := s.completeFactoryTrigger(factory.Name, "linear", triggerKey, clawID); err != nil {
 		_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed", err.Error(), terminalTxOpts{})
 		if s.cronScheduler != nil {

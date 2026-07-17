@@ -636,7 +636,10 @@ func migrate(db *sql.DB) error {
 		{"claude-fable-5", 10, 50}, {"claude-opus-4-8", 5, 25}, {"claude-opus-4-7", 5, 25}, {"claude-opus-4-6", 5, 25},
 		{"claude-sonnet-5", 3, 15}, {"claude-sonnet-4-6", 3, 15}, {"claude-haiku-4-5", 1, 5},
 	} {
-		_, err = db.Exec(`INSERT OR IGNORE INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)`, p.model, p.in/1e6, p.out/1e6, p.in/1e7, p.in*1.25/1e6, "static", now().UnixMilli())
+		// Upsert so price corrections in the static seed reach existing
+		// databases; rows from other sources are left untouched.
+		_, err = db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.in/1e7, p.in*1.25/1e6, "static", now().UnixMilli())
 		if err != nil {
 			return err
 		}

@@ -2273,9 +2273,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					TotalTokens      *int     `json:"total_tokens"`
 					EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
 					Model            string   `json:"model"`
+					ModelProvider    string   `json:"model_provider"`
 				}
 				if err := json.Unmarshal(payload, &hb); err == nil {
-					if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model}); err != nil {
+					if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider}); err != nil {
 						log.Printf("[usage] heartbeat for %s: %v", clawID, err)
 					}
 					gatewayUnhealthyMax := s.livenessSettings().gatewayUnhealthyMax
