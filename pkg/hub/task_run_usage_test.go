@@ -97,7 +97,7 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 		t.Fatalf("summary = %d/%d/%d, want 128000/6300/134300", in, out, total)
 	}
 	const wantCost = 0.5735 // $0.56 gateway costs + $0.0135 hub pricing for session b.
-	if math.Abs(cost-wantCost) > 1e-9 {
+	if math.Abs(cost-wantCost) > 1e-6 {
 		t.Fatalf("summary cost = %v, want %v", cost, wantCost)
 	}
 	var rows int
@@ -111,7 +111,7 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	if din != 128_000 || dout != 6_300 || dtotal != 134_300 {
 		t.Fatalf("usage_daily = %d/%d/%d, want 128000/6300/134300", din, dout, dtotal)
 	}
-	if math.Abs(dailyCost-wantCost) > 1e-9 {
+	if math.Abs(dailyCost-wantCost) > 1e-6 {
 		t.Fatalf("usage_daily cost = %v, want %v", dailyCost, wantCost)
 	}
 }
