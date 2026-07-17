@@ -30,6 +30,7 @@ type githubIssuesWebhookPayload struct {
 		Title       string `json:"title"`
 		Body        string `json:"body"`
 		HTMLURL     string `json:"html_url"`
+		CreatedAt   string `json:"created_at"`
 		State       string `json:"state"`                  // "open", "closed"
 		StateReason string `json:"state_reason,omitempty"` // "completed", "not_planned", "reopened"
 		Labels      []struct {
@@ -506,6 +507,7 @@ func assignedToMatches(filter, assignee string) bool {
 
 func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) (string, bool, error) {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
+	issueCreatedAt := parseRFC3339Timestamp(payload.Issue.CreatedAt)
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') LIMIT 1`, issueID).Scan(&existing)
 	if existing != "" {
@@ -550,6 +552,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 		workspaceFiles:       templateFiles,
 		clawName:             clawName,
 		githubIssueID:        issueID,
+		issueCreatedAt:       issueCreatedAt,
 		issueLabels:          githubIssuePayloadLabels(payload),
 		issueLabelsAvailable: true,
 		reason:               reason,
