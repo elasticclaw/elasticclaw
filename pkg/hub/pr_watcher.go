@@ -1103,6 +1103,10 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
+	mergedAtValue, _ := data["merged_at"].(string)
+	createdAtValue, _ := data["created_at"].(string)
+	mergedAt := parseGitHubTimestamp(mergedAtValue)
+	createdAt := parseGitHubTimestamp(createdAtValue)
 
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
@@ -1151,7 +1155,15 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// Track analytics for PR merge
 	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
 	if hasMergeCtx {
-		s.trackPRMerged(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber)
+		s.trackPRMergedAt(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
+	} else {
+		s.trackPRMergedAt("", "", clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
+	}
+	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
+		if !createdAt.IsZero() {
+			_, _ = s.db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE tenant_id=? AND run_id=? AND repo=? AND pr_number=?`, epochMillis(createdAt), tenantID, runID, pr.repo, pr.prNumber)
+			_ = s.materializeTaskRun(runID)
+		}
 	}
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
