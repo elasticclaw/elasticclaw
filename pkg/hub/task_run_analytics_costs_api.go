@@ -122,10 +122,11 @@ func (s *Server) readTaskRunAnalyticsCosts(filters taskRunAnalyticsFilters, now 
 	if hasProjectionData {
 		mean := averageTaskRunAnalyticsCosts(last7Costs)
 		daysInMonth := time.Date(today.Year(), today.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
-		remainingDays := daysInMonth - today.Day()
+		// Project today as a full mean day because its recorded spend is still partial.
+		projectedCost := (response.Month.CostUsd - todayTotals.costUsd) + mean*float64(daysInMonth-today.Day()+1)
 		response.ProjectedMonth = &taskRunAnalyticsProjection{
-			CostUsd:    response.Month.CostUsd + mean*float64(remainingDays),
-			Confidence: taskRunAnalyticsProjectionConfidence(today.Day(), last7Costs, mean),
+			CostUsd:    projectedCost,
+			Confidence: taskRunAnalyticsProjectionConfidence(today.Day()-1, last7Costs, mean),
 			Basis:      "7d-avg",
 		}
 	}
@@ -149,7 +150,7 @@ func taskRunAnalyticsProjectionConfidence(elapsed int, costs []float64, mean flo
 		for _, cost := range costs {
 			variance += (cost - mean) * (cost - mean)
 		}
-		if math.Sqrt(variance/float64(len(costs)))/mean < 0.35 {
+		if len(costs) > 1 && math.Sqrt(variance/float64(len(costs)-1))/mean < 0.35 {
 			return "high"
 		}
 	}
