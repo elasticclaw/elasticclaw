@@ -128,6 +128,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   const [error, setError] = useState<string | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const optionsRef = useRef<TaskRunFilterOptions | null>(null)
+  const loadCancellationRef = useRef<Cancellation | null>(null)
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.runId === selectedRunId) ?? null,
@@ -181,6 +182,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
 
   useEffect(() => {
     const cancellation: Cancellation = { cancelled: false }
+    loadCancellationRef.current = cancellation
     queueMicrotask(() => {
       if (cancellation.cancelled) return
       void load(undefined, false, cancellation)
@@ -265,6 +267,17 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     [costOverview]
   )
 
+  const ignoredCostFilters = useMemo(() => {
+    const labels: string[] = []
+    if (filters.repo) labels.push("repo")
+    if (filters.status) labels.push("status")
+    if (filters.warningType) labels.push("warning")
+    if (filters.failureType) labels.push("failure")
+    if (filters.humanTouched !== undefined) labels.push("human touched")
+    if (filters.mergedPrs !== undefined) labels.push("merged PRs")
+    return labels
+  }, [filters.repo, filters.status, filters.warningType, filters.failureType, filters.humanTouched, filters.mergedPrs])
+
   const activeKpi = useMemo<KpiFilter | null>(() => {
     if (filters.humanTouched === true) return "humanTouches"
     if (filters.mergedPrs === true) return "mergedPrs"
@@ -293,8 +306,13 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
+              {ignoredCostFilters.length > 0 && (
+                <span className="text-xs italic text-muted-foreground">Ignores {formatFilterList(ignoredCostFilters)} filters</span>
+              )}
+            </div>
+            <div className={cn("grid gap-2 sm:grid-cols-2 xl:grid-cols-4", ignoredCostFilters.length > 0 && "opacity-75")}>
               <CostCard
                 label="Today's Cost"
                 value={
@@ -459,7 +477,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           </div>
           {nextCursor && (
             <div className="mt-3 flex justify-center">
-              <Button variant="outline" size="sm" onClick={() => load(nextCursor, true)} disabled={loading}>
+              <Button variant="outline" size="sm" onClick={() => load(nextCursor, true, loadCancellationRef.current ?? undefined)} disabled={loading}>
                 Load more
               </Button>
             </div>
@@ -682,6 +700,13 @@ function StatusBadge({ status }: { status: string }) {
 
 function hasUsageData(run: TaskRunSummary) {
   return run.inputTokens !== undefined || run.outputTokens !== undefined || run.totalTokens !== undefined || run.estimatedCostUsd !== undefined
+}
+
+// Pinned to "en" so the conjunction matches the English filter labels and SSR/client output agree.
+const filterListFormatter = new Intl.ListFormat("en", { style: "long", type: "conjunction" })
+
+function formatFilterList(labels: string[]) {
+  return filterListFormatter.format(labels)
 }
 
 function formatLabel(value: string) {
