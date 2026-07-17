@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, RefreshCw, Search, XCircle } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
 import { Bar, BarChart, XAxis } from "recharts"
 import {
   fetchCostOverview,
@@ -505,14 +505,19 @@ function CostCard({ label, value, sub }: { label: string; value: ReactNode; sub?
 }
 
 function DeltaIndicator({ pct }: { pct: number }) {
-  const up = pct >= 0
-  const Icon = up ? ArrowUp : ArrowDown
+  const flat = pct === 0
+  const up = pct > 0
+  const Icon = flat ? Minus : up ? ArrowUp : ArrowDown
   return (
     <span
       className={cn(
         "flex items-center gap-0.5 text-xs font-medium",
-        // A spend increase is worse (red); a decrease is better (emerald).
-        up ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+        // A spend increase is worse (red); a decrease is better (emerald); flat is neutral.
+        flat
+          ? "text-muted-foreground"
+          : up
+            ? "text-red-600 dark:text-red-400"
+            : "text-emerald-600 dark:text-emerald-400"
       )}
     >
       <Icon className="size-3" />
