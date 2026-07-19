@@ -793,7 +793,7 @@ func buildModelAuthRestoreShell(modelAuthEnv string) string {
 	}
 	return modelAuthEnv + `
 python3 <<'PYEOF'
-import base64, json, os
+import base64, datetime, json, os
 state = os.environ.get('ELASTICCLAW_MODEL_AUTH_STATE', '')
 if state:
     bundle = json.loads(base64.b64decode(state).decode())
@@ -807,6 +807,65 @@ if state:
         with open(path, 'wb') as f:
             f.write(base64.b64decode(encoded))
         os.chmod(path, 0o600)
+
+    # ElasticClaw historically stored Grok device auth only in the Grok CLI's
+    # auth file. OpenClaw 2026.6.x has a native xAI OAuth provider, so migrate
+    # that restored credential into its canonical per-agent auth store. This
+    # also upgrades auth profiles captured before native xAI support was wired
+    # into claw bootstrap.
+    if os.environ.get('ELASTICCLAW_MODEL_AUTH_PROVIDER') == 'grok':
+        grok_auth_path = os.path.join(home, '.grok', 'auth.json')
+        try:
+            with open(grok_auth_path) as f:
+                grok_auth = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            grok_auth = {}
+
+        entry = next((
+            value for value in grok_auth.values()
+            if isinstance(value, dict) and value.get('key') and value.get('refresh_token')
+        ), None)
+        if entry:
+            expires = 0
+            expires_at = entry.get('expires_at', '')
+            if isinstance(expires_at, str) and expires_at:
+                try:
+                    expires = int(datetime.datetime.fromisoformat(expires_at.replace('Z', '+00:00')).timestamp() * 1000)
+                except ValueError:
+                    pass
+
+            issuer = entry.get('oidc_issuer', 'https://auth.x.ai').rstrip('/')
+            credential = {
+                'type': 'oauth',
+                'provider': 'xai',
+                'access': entry['key'],
+                'refresh': entry['refresh_token'],
+                'expires': expires,
+                'issuer': issuer,
+                'tokenEndpoint': issuer + '/oauth2/token',
+            }
+            for source, target in (
+                ('email', 'email'),
+                ('user_id', 'accountId'),
+            ):
+                if entry.get(source):
+                    credential[target] = entry[source]
+
+            auth_path = os.path.join(home, '.openclaw', 'agents', 'main', 'agent', 'auth-profiles.json')
+            os.makedirs(os.path.dirname(auth_path), exist_ok=True)
+            try:
+                with open(auth_path) as f:
+                    auth = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                auth = {}
+            auth['version'] = 1
+            auth.setdefault('profiles', {})['xai:default'] = credential
+            temp_path = auth_path + '.tmp'
+            with open(temp_path, 'w') as f:
+                json.dump(auth, f, indent=2)
+                f.write('\n')
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, auth_path)
 PYEOF
 `
 }

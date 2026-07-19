@@ -2412,7 +2412,103 @@ func restoreCLIModelAuth() error {
 			return fmt.Errorf("write auth file %s: %w", rel, err)
 		}
 	}
+	if os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER") == "grok" {
+		if err := migrateGrokOAuthToOpenClaw(home); err != nil {
+			return fmt.Errorf("migrate Grok OAuth to OpenClaw: %w", err)
+		}
+	}
 	log.Printf("[bootstrap] restored %d CLI auth files for %s", len(bundle.Files), os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER"))
+	return nil
+}
+
+func migrateGrokOAuthToOpenClaw(home string) error {
+	type grokAuthEntry struct {
+		Key          string `json:"key"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresAt    string `json:"expires_at"`
+		Email        string `json:"email"`
+		UserID       string `json:"user_id"`
+		OIDCIssuer   string `json:"oidc_issuer"`
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var grokAuth map[string]grokAuthEntry
+	if err := json.Unmarshal(data, &grokAuth); err != nil {
+		return fmt.Errorf("parse Grok auth: %w", err)
+	}
+	var selected grokAuthEntry
+	for _, entry := range grokAuth {
+		if entry.Key != "" && entry.RefreshToken != "" {
+			selected = entry
+			break
+		}
+	}
+	if selected.Key == "" || selected.RefreshToken == "" {
+		return nil
+	}
+
+	expires := int64(0)
+	if parsed, err := time.Parse(time.RFC3339Nano, selected.ExpiresAt); err == nil {
+		expires = parsed.UnixMilli()
+	}
+	issuer := strings.TrimRight(selected.OIDCIssuer, "/")
+	if issuer == "" {
+		issuer = "https://auth.x.ai"
+	}
+	credential := map[string]interface{}{
+		"type":          "oauth",
+		"provider":      "xai",
+		"access":        selected.Key,
+		"refresh":       selected.RefreshToken,
+		"expires":       expires,
+		"issuer":        issuer,
+		"tokenEndpoint": issuer + "/oauth2/token",
+	}
+	if selected.Email != "" {
+		credential["email"] = selected.Email
+	}
+	if selected.UserID != "" {
+		credential["accountId"] = selected.UserID
+	}
+
+	authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+	authStore := map[string]interface{}{}
+	if existing, err := os.ReadFile(authPath); err == nil {
+		if err := json.Unmarshal(existing, &authStore); err != nil {
+			return fmt.Errorf("parse OpenClaw auth profiles: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	profiles, _ := authStore["profiles"].(map[string]interface{})
+	if profiles == nil {
+		profiles = map[string]interface{}{}
+	}
+	profiles["xai:default"] = credential
+	authStore["version"] = 1
+	authStore["profiles"] = profiles
+
+	encoded, err := json.MarshalIndent(authStore, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
+		return err
+	}
+	tempPath := authPath + ".tmp"
+	if err := os.WriteFile(tempPath, encoded, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, authPath); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -74,6 +74,11 @@ func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types
 func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
+	grokOAuth := activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" && activeKey.APIKey == ""
+	grokOAuthLiteral := "False"
+	if grokOAuth {
+		grokOAuthLiteral = "True"
+	}
 
 	anthropicEnvVar := ""
 	if activeKey != nil && activeKey.Provider == "anthropic" {
@@ -125,6 +130,8 @@ except FileNotFoundError:
 except Exception:
     config = {}
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
+if %s and model.startswith('grok/'):
+    model = 'xai/' + model.split('/', 1)[1]
 agent_defaults = config.setdefault('agents', {}).setdefault('defaults', {})
 agent_defaults['model'] = model
 agent_models = agent_defaults.get('models')
@@ -186,7 +193,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, anthropicPatch)
+PYEOF`, grokOAuthLiteral, anthropicPatch)
 }
 
 // buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists
@@ -419,6 +426,9 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 	case "codex":
 		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
 	case "grok":
+		if active.AuthProfile != "" && active.APIKey == "" {
+			return `--auth-choice skip`
+		}
 		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "ollama":
 		model := active.DefaultModel
