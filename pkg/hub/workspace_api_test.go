@@ -192,6 +192,47 @@ func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	}
 }
 
+func TestWorkflowPushPreservesAndSerializesLinearProjects(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	workspaceBody := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(workspaceBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	workflowBody := `{"workflows":[{"schemaVersion":"v1","name":"linear-project","trigger":{"linear":{"event":"status_changed","team":"ADV","projects":["Adversary Labs"],"states":["Todo"]}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(workflowBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"projects":["Adversary Labs"]`) {
+		t.Fatalf("workflow API response does not expose projects: %s", rr.Body.String())
+	}
+
+	workspace, err := loadExternalWorkspace("engineering")
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	if len(workspace.Workflows) != 1 || workspace.Workflows[0].Trigger == nil || workspace.Workflows[0].Trigger.Linear == nil {
+		t.Fatalf("Linear workflow not preserved: %#v", workspace.Workflows)
+	}
+	projects := workspace.Workflows[0].Trigger.Linear.Projects
+	if len(projects) != 1 || projects[0] != "Adversary Labs" {
+		t.Fatalf("persisted projects = %#v, want Adversary Labs", projects)
+	}
+}
+
 func TestWorkflowPushReloadsCronScheduler(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")

@@ -1,0 +1,42 @@
+schema_version: v1
+name: linear-issue
+
+trigger:
+  linear:
+    event: status_changed
+    team: ADV
+    projects:
+      - Adversary Labs
+    states:
+      - Todo
+
+concurrency_group: example-linear-issue
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      move_issue: In Progress
+      inject: |
+        Issue: {{.Issue.Identifier}} - {{.Issue.Title}}
+        URL: {{.Issue.URL}}
+
+        Read the issue and CONTEXT.md, then start working on it.
+        Narrate your progress as you go. Keep me updated.
+
+  - id: merged
+    label: Merged
+    triggers:
+      - pr_merged: {}
+    on_enter:
+      move_issue: Done
+    terminal: true
+
+  - id: closed_no_merge
+    label: Closed Without Merge
+    triggers:
+      - pr_closed: {}
+    on_enter:
+      move_issue: Canceled
+    terminal: true

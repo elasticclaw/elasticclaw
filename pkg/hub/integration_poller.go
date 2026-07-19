@@ -261,7 +261,8 @@ type linearPollIssue struct {
 		Key  string `json:"key"`
 		Name string `json:"name"`
 	} `json:"team"`
-	Labels []struct {
+	Project *linearProjectRef `json:"project"`
+	Labels  []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignee *struct {
@@ -287,6 +288,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				updatedAt
 				state { name }
 				team { key name }
+				project { id name }
 				labels { nodes { name } }
 				assignee { name }
 			}
@@ -333,7 +335,8 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 							Key  string `json:"key"`
 							Name string `json:"name"`
 						} `json:"team"`
-						Labels struct {
+						Project *linearProjectRef `json:"project"`
+						Labels  struct {
 							Nodes []struct {
 								Name string `json:"name"`
 							} `json:"nodes"`
@@ -369,6 +372,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				UpdatedAt:   n.UpdatedAt,
 				State:       n.State,
 				Team:        n.Team,
+				Project:     n.Project,
 				Assignee:    n.Assignee,
 			}
 			for _, l := range n.Labels.Nodes {
@@ -464,16 +468,12 @@ func (s *Server) processLinearWorkflowPollItem(issue linearPollIssue, targets []
 		if workspace == nil || workflow == nil {
 			continue
 		}
-		if workflow.Team != "" && !strings.EqualFold(workflow.Team, issue.Team.Key) {
-			continue
+		projectID, projectName := "", ""
+		if issue.Project != nil {
+			projectID = issue.Project.ID
+			projectName = issue.Project.Name
 		}
-		if workflow.TriggerStatus == "" || !strings.EqualFold(currentStatus, workflow.TriggerStatus) {
-			continue
-		}
-		if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, currentAssignee) {
-			continue
-		}
-		if !labelSetAllowed(currentLabels, workflow.Labels, workflow.ExcludeLabels) {
+		if !linearWorkflowMatchesIssue(workflow, issue.Team.Key, currentStatus, projectID, projectName, currentLabels, currentAssignee) {
 			continue
 		}
 
@@ -498,6 +498,10 @@ func (s *Server) buildLinearPollPayload(issue linearPollIssue) linearWebhookPayl
 	payload.Data.State.Name = issue.State.Name
 	payload.Data.Team.Key = issue.Team.Key
 	payload.Data.Team.Name = issue.Team.Name
+	payload.Data.Project = issue.Project
+	if issue.Project != nil {
+		payload.Data.ProjectID = issue.Project.ID
+	}
 	for _, l := range issue.Labels {
 		label := struct {
 			Name string `json:"name"`

@@ -40,6 +40,7 @@ type WorkflowView struct {
 	IntegrationWorkspace string                 `json:"integrationWorkspace,omitempty"`
 	TriggerStatus        string                 `json:"triggerStatus,omitempty"`
 	DoneStatus           string                 `json:"doneStatus,omitempty"`
+	Projects             []string               `json:"projects,omitempty"`
 	Labels               []string               `json:"labels,omitempty"`
 	ExcludeLabels        []string               `json:"exclude_labels,omitempty"`
 	AssignedTo           string                 `json:"assignedTo,omitempty"`
@@ -479,6 +480,10 @@ func workspaceEnvNames(env types.WorkspaceEnv) []string {
 }
 
 func workflowToView(workspaceName string, workflow *types.WorkflowConfig) WorkflowView {
+	var projects []string
+	if workflow.Integration == "linear" || (workflow.Trigger != nil && workflow.Trigger.Linear != nil) {
+		projects = append([]string(nil), linearWorkflowProjects(workflow)...)
+	}
 	return WorkflowView{
 		Name:                 workflow.Name,
 		WorkspaceName:        workspaceName,
@@ -486,6 +491,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		Integration:          workflow.Integration,
 		IntegrationWorkspace: workflow.Workspace,
 		TriggerStatus:        workflow.TriggerStatus,
+		Projects:             projects,
 		Labels:               append([]string(nil), workflow.Labels...),
 		ExcludeLabels:        append([]string(nil), workflow.ExcludeLabels...),
 		AssignedTo:           workflow.AssignedTo,

@@ -132,6 +132,7 @@ type LinearWorkflowTrigger struct {
 	Event            string   `yaml:"event,omitempty" json:"event,omitempty"`
 	Workspace        string   `yaml:"workspace,omitempty" json:"workspace,omitempty"`
 	Team             string   `yaml:"team,omitempty" json:"team,omitempty"`
+	Projects         []string `yaml:"projects,omitempty" json:"projects,omitempty"`
 	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
 	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	ExcludeLabels    []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`

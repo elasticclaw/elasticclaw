@@ -427,6 +427,11 @@ func validateLinearWorkflowTrigger(workflowName string, trigger *LinearWorkflowT
 			return fmt.Errorf("workflow %q: trigger.linear.states[%d] cannot be empty", workflowName, i)
 		}
 	}
+	for i, project := range trigger.Projects {
+		if strings.TrimSpace(project) == "" {
+			return fmt.Errorf("workflow %q: trigger.linear.projects[%d] cannot be blank", workflowName, i)
+		}
+	}
 	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
 		return fmt.Errorf("workflow %q: trigger.linear.agent_status_error cannot be blank", workflowName)
 	}

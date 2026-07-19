@@ -21,6 +21,11 @@ import (
 )
 
 // linearWebhookPayload is the relevant subset of a Linear webhook event.
+type linearProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type linearWebhookPayload struct {
 	Action    string `json:"action"`    // "create", "update", "remove"
 	Type      string `json:"type"`      // "Issue", "IssueLabel", etc.
@@ -39,7 +44,9 @@ type linearWebhookPayload struct {
 			Key  string `json:"key"`
 			Name string `json:"name"`
 		} `json:"team"`
-		Labels []struct {
+		Project   *linearProjectRef `json:"project,omitempty"`
+		ProjectID string            `json:"projectId,omitempty"`
+		Labels    []struct {
 			Name string `json:"name"`
 		} `json:"labels,omitempty"`
 		Assignee *struct {
@@ -368,6 +375,7 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 	if payload.Data.Assignee != nil {
 		assignee = payload.Data.Assignee.Name
 	}
+	projectID, projectName := linearWebhookProject(payload)
 
 	matched := false
 	for _, workspace := range workspaces {
@@ -378,13 +386,7 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			if workflow.Team != "" && !strings.EqualFold(workflow.Team, teamKey) {
-				continue
-			}
-			if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
-				continue
-			}
-			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
+			if !linearWorkflowFiltersMatch(workflow, teamKey, projectID, projectName, issueLabels, assignee) {
 				continue
 			}
 			if workflow.TriggerStatus == "" {
@@ -410,6 +412,72 @@ func (s *Server) processLinearWorkflowEvent(workspaces []*types.WorkspaceConfig,
 		}
 	}
 	return matched
+}
+
+func linearWebhookProject(payload linearWebhookPayload) (string, string) {
+	projectID := strings.TrimSpace(payload.Data.ProjectID)
+	if payload.Data.Project == nil {
+		return projectID, ""
+	}
+	if nestedID := strings.TrimSpace(payload.Data.Project.ID); nestedID != "" {
+		projectID = nestedID
+	}
+	return projectID, strings.TrimSpace(payload.Data.Project.Name)
+}
+
+func linearWorkflowProjects(workflow *types.WorkflowConfig) []string {
+	if workflow == nil {
+		return nil
+	}
+	if workflow.Trigger != nil && workflow.Trigger.Linear != nil {
+		return workflow.Trigger.Linear.Projects
+	}
+	// Compatibility for already-normalized workflow values.
+	return workflow.TriggerRepos
+}
+
+func linearProjectMatches(projectID, projectName string, projects []string) bool {
+	if len(projects) == 0 {
+		return true
+	}
+	projectID = strings.TrimSpace(projectID)
+	projectName = strings.TrimSpace(projectName)
+	if projectID == "" && projectName == "" {
+		return false
+	}
+	for _, configured := range projects {
+		configured = strings.TrimSpace(configured)
+		if projectID != "" && configured == projectID {
+			return true
+		}
+		if projectName != "" && strings.EqualFold(configured, projectName) {
+			return true
+		}
+	}
+	return false
+}
+
+func linearWorkflowFiltersMatch(workflow *types.WorkflowConfig, teamKey, projectID, projectName string, issueLabels map[string]bool, assignee string) bool {
+	if workflow == nil {
+		return false
+	}
+	if workflow.Team != "" && !strings.EqualFold(workflow.Team, teamKey) {
+		return false
+	}
+	if !linearProjectMatches(projectID, projectName, linearWorkflowProjects(workflow)) {
+		return false
+	}
+	if !labelSetAllowed(issueLabels, workflow.Labels, workflow.ExcludeLabels) {
+		return false
+	}
+	return workflow.AssignedTo == "" || assignedToMatches(workflow.AssignedTo, assignee)
+}
+
+func linearWorkflowMatchesIssue(workflow *types.WorkflowConfig, teamKey, state, projectID, projectName string, issueLabels map[string]bool, assignee string) bool {
+	if workflow == nil || workflow.TriggerStatus == "" || !strings.EqualFold(workflow.TriggerStatus, state) {
+		return false
+	}
+	return linearWorkflowFiltersMatch(workflow, teamKey, projectID, projectName, issueLabels, assignee)
 }
 
 func (s *Server) notifyLinearWorkflowCreateFailure(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload linearWebhookPayload, createErr error) {

@@ -21,7 +21,7 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 		}
 		cursors = append(cursors, request.Variables["after"])
 		if request.Variables["after"] == nil {
-			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","createdAt":"2026-07-01T10:00:00.000Z","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`))
+			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"1","identifier":"ELA-1","title":"one","createdAt":"2026-07-01T10:00:00.000Z","state":{"name":"Todo"},"team":{"key":"ELA"},"project":{"id":"project-1","name":"Adversary Labs"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"2","identifier":"ELA-2","title":"two","state":{"name":"Todo"},"team":{"key":"ELA"}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`))
@@ -38,6 +38,9 @@ func TestQueryLinearIssuesPaginatesWithCursorVariable(t *testing.T) {
 	}
 	if issues[0].CreatedAt != "2026-07-01T10:00:00.000Z" {
 		t.Fatalf("issues[0].CreatedAt = %q, want createdAt propagated from GraphQL response", issues[0].CreatedAt)
+	}
+	if issues[0].Project == nil || issues[0].Project.ID != "project-1" || issues[0].Project.Name != "Adversary Labs" {
+		t.Fatalf("issues[0].Project = %#v, want project ID and name", issues[0].Project)
 	}
 	if len(cursors) != 2 || cursors[0] != nil || cursors[1] != "cursor-1" {
 		t.Fatalf("cursor variables = %#v", cursors)
@@ -180,5 +183,8 @@ func TestLinearPollQueryUsesExpectedSince(t *testing.T) {
 	}
 	if !strings.Contains(query, since) {
 		t.Fatalf("query %q does not contain since %q", query, since)
+	}
+	if !strings.Contains(query, "project { id name }") {
+		t.Fatalf("query %q does not request Linear project ID and name", query)
 	}
 }
