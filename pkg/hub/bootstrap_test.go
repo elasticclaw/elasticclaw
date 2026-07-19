@@ -228,6 +228,17 @@ func TestBootstrapScript_OpenClawAPIKeyAuthSyncInjected(t *testing.T) {
 	assertNotContains(t, script, "sk-ant-test", "does not embed the API key in the auth sync script")
 }
 
+func TestBootstrapScript_OpenClawOAuthAuthSyncInjected(t *testing.T) {
+	p := baseParams()
+	p.OAuthAuthSync = buildOpenClawOAuthAuthSyncShell(types.LLMKeysList{
+		{Name: "grok-main", Provider: "grok", AuthProfile: "grok-oauth", Default: true},
+	}, "grok-main")
+
+	script := GenerateReplicatedBootstrapScript(p)
+	assertContains(t, script, "ELASTICCLAW_OAUTH_AUTH_SYNC", "exports OAuth auth sync script for claw-bridge")
+	assertContains(t, script, "auth_profile_store", "includes SQLite auth-store migration")
+}
+
 func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
 	p := baseParams()
 	p.OnboardFlags = buildOnboardFlags(nil, "", p.DefaultModel)
@@ -416,6 +427,116 @@ func TestBuildOpenClawAPIKeyAuthSyncShellSkipsNonAnthropicKeys(t *testing.T) {
 
 	if shell != "" {
 		t.Fatalf("expected no auth sync shell for non-Anthropic key, got %q", shell)
+	}
+}
+
+func TestBuildOpenClawOAuthAuthSyncShellMigratesGrokIntoSQLite(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	if out, err := exec.Command("node", "-e", `require('node:sqlite')`).CombinedOutput(); err != nil {
+		t.Skipf("node:sqlite unavailable: %v: %s", err, out)
+	}
+
+	shell := buildOpenClawOAuthAuthSyncShell(types.LLMKeysList{
+		{Name: "grok-main", Provider: "grok", AuthProfile: "grok-oauth", Default: true},
+	}, "grok-main")
+	assertContains(t, shell, "auth_profile_store", "writes OpenClaw SQLite auth store")
+	assertContains(t, shell, "models auth paste-token --provider xai", "lets OpenClaw initialize its SQLite schema")
+	assertContains(t, shell, `auth.profiles["xai:default"]`, "sets xAI profile metadata")
+	assertContains(t, shell, `"mode":"oauth"`, "marks migrated profile as OAuth")
+	if strings.Contains(shell, "doctor --fix") {
+		t.Fatalf("OAuth sync must not run broad OpenClaw repairs:\n%s", shell)
+	}
+
+	home := t.TempDir()
+	grokDir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(grokDir, 0700); err != nil {
+		t.Fatalf("create Grok auth dir: %v", err)
+	}
+	grokAuth := `{"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token","expires_at":"2030-01-02T03:04:05Z"}}`
+	if err := os.WriteFile(filepath.Join(grokDir, "auth.json"), []byte(grokAuth), 0600); err != nil {
+		t.Fatalf("write Grok auth: %v", err)
+	}
+
+	agentDir := filepath.Join(home, ".openclaw", "agents", "main", "agent")
+	if err := os.MkdirAll(agentDir, 0700); err != nil {
+		t.Fatalf("create OpenClaw agent dir: %v", err)
+	}
+	dbPath := filepath.Join(agentDir, "openclaw-agent.sqlite")
+	existingStore := `{"version":1,"profiles":{"anthropic:default":{"type":"api_key","provider":"anthropic","key":"keep-me"}}}`
+	setup := exec.Command("node", "-e", `
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.argv[1]);
+db.exec('CREATE TABLE auth_profile_store (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+db.prepare('INSERT INTO auth_profile_store (store_key, store_json, updated_at) VALUES (?, ?, ?)').run('primary', process.argv[2], Date.now());
+db.close();
+`, dbPath, existingStore)
+	setup.Env = append(os.Environ(), "NODE_NO_WARNINGS=1")
+	if out, err := setup.CombinedOutput(); err != nil {
+		t.Fatalf("create SQLite auth fixture: %v\n%s", err, out)
+	}
+
+	fakeBin := t.TempDir()
+	fakeOpenClaw := filepath.Join(fakeBin, "openclaw")
+	if err := os.WriteFile(fakeOpenClaw, []byte("#!/bin/sh\nprintf '%s\\n' '{\"profiles\":[{\"id\":\"xai:default\",\"type\":\"oauth\"}]}'\n"), 0755); err != nil {
+		t.Fatalf("write fake openclaw: %v", err)
+	}
+	cmd := exec.Command("bash", "-c", shell)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"NODE_NO_WARNINGS=1",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run OAuth auth sync: %v\n%s", err, out)
+	}
+
+	read := exec.Command("node", "-e", `
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.argv[1], { readOnly: true });
+console.log(db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'").get().store_json);
+db.close();
+`, dbPath)
+	read.Env = append(os.Environ(), "NODE_NO_WARNINGS=1")
+	out, err := read.Output()
+	if err != nil {
+		t.Fatalf("read SQLite auth store: %v", err)
+	}
+	var store struct {
+		Profiles map[string]struct {
+			Type     string `json:"type"`
+			Provider string `json:"provider"`
+			Access   string `json:"access"`
+			Refresh  string `json:"refresh"`
+			Expires  int64  `json:"expires"`
+			Key      string `json:"key"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(out, &store); err != nil {
+		t.Fatalf("parse SQLite auth store: %v\n%s", err, out)
+	}
+	xai := store.Profiles["xai:default"]
+	if xai.Type != "oauth" || xai.Provider != "xai" || xai.Access != "access-token" || xai.Refresh != "refresh-token" || xai.Expires != 1893553445000 {
+		t.Fatalf("unexpected migrated xAI auth: %#v", xai)
+	}
+	if got := store.Profiles["anthropic:default"].Key; got != "keep-me" {
+		t.Fatalf("existing auth profile was not preserved: key=%q", got)
+	}
+}
+
+func TestBuildOpenClawOAuthAuthSyncShellSkipsNonOAuthGrok(t *testing.T) {
+	tests := []types.LLMKeysList{
+		{{Name: "grok-api", Provider: "grok", APIKey: "xai-test", Default: true}},
+		{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-ant-test", Default: true}},
+	}
+	for _, keys := range tests {
+		if shell := buildOpenClawOAuthAuthSyncShell(keys, keys[0].Name); shell != "" {
+			t.Fatalf("unexpected OAuth sync for %#v:\n%s", keys[0], shell)
+		}
 	}
 }
 

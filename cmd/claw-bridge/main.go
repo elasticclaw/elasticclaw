@@ -2584,6 +2584,18 @@ func syncOpenClawAPIKeyAuth() error {
 	return nil
 }
 
+func syncOpenClawOAuthAuth() error {
+	script := strings.TrimSpace(os.Getenv("ELASTICCLAW_OAUTH_AUTH_SYNC"))
+	if script == "" {
+		return nil
+	}
+	log.Printf("[bootstrap] syncing OpenClaw OAuth auth...")
+	if err := runShell(script); err != nil {
+		return fmt.Errorf("sync OpenClaw OAuth auth: %w", err)
+	}
+	return nil
+}
+
 var openClawWorkspaceManagedFiles = map[string]bool{
 	"elasticclaw-config.yaml": true,
 	"SOUL.md":                 true,
@@ -3268,6 +3280,9 @@ func runBootstrap() error {
 		}
 	} else {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+	if err := syncOpenClawOAuthAuth(); err != nil {
+		return err
 	}
 
 	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
