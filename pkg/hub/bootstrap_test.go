@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -370,6 +371,18 @@ func TestBuildOnboardFlagsSkipsBlankExternalKeys(t *testing.T) {
 	assertNotContains(t, flags, "openai-api-key", "does not select blank OpenAI key")
 }
 
+func TestBuildOnboardFlagsGrokOAuthSkipsAPIKeyOnboarding(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "grok-main", Provider: "grok", AuthProfile: "grok-oauth", Default: true},
+	}
+
+	flags := buildOnboardFlags(keys, "grok-main", "grok/grok-build-0.1")
+
+	if flags != "--auth-choice skip" {
+		t.Fatalf("flags = %q, want OAuth bootstrap to skip API-key onboarding", flags)
+	}
+}
+
 func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	keys := []*types.LLMKeyConfig{
 		{Name: "openai-empty", Provider: "openai", Default: true},
@@ -427,6 +440,71 @@ func TestBuildModelAuthRestoreShellRejectsParentDirectory(t *testing.T) {
 
 	assertContains(t, shell, "clean == '..'", "rejects exact parent directory path")
 	assertContains(t, shell, "clean.startswith('../')", "rejects nested parent directory path")
+}
+
+func TestBuildModelAuthRestoreShellMigratesGrokOAuthToOpenClaw(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	grokAuth := `{"stale":{"key":"stale-token"},"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token","expires_at":"2030-01-02T03:04:05Z","email":"dev@example.com","user_id":"user-123","oidc_issuer":"https://auth.x.ai/"}}`
+	bundle, err := json.Marshal(map[string]any{
+		"files": map[string]string{
+			".grok/auth.json": base64.StdEncoding.EncodeToString([]byte(grokAuth)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal auth bundle: %v", err)
+	}
+	state := base64.StdEncoding.EncodeToString(bundle)
+	modelAuthEnv := "export ELASTICCLAW_MODEL_AUTH_PROVIDER=\"grok\"\nexport ELASTICCLAW_MODEL_AUTH_STATE=\"" + state + "\"\n"
+	shell := buildModelAuthRestoreShell(modelAuthEnv)
+
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", shell)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run auth restore shell: %v\n%s", err, string(out))
+	}
+
+	authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+	authData, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read OpenClaw auth profile: %v", err)
+	}
+	var auth struct {
+		Version  int `json:"version"`
+		Profiles map[string]struct {
+			Type      string `json:"type"`
+			Provider  string `json:"provider"`
+			Access    string `json:"access"`
+			Refresh   string `json:"refresh"`
+			Expires   int64  `json:"expires"`
+			Email     string `json:"email"`
+			AccountID string `json:"accountId"`
+			Issuer    string `json:"issuer"`
+			Endpoint  string `json:"tokenEndpoint"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(authData, &auth); err != nil {
+		t.Fatalf("parse OpenClaw auth profile: %v", err)
+	}
+	credential := auth.Profiles["xai:default"]
+	if auth.Version != 1 || credential.Type != "oauth" || credential.Provider != "xai" {
+		t.Fatalf("unexpected OpenClaw auth profile: %#v", auth)
+	}
+	if credential.Access != "access-token" || credential.Refresh != "refresh-token" {
+		t.Fatalf("OAuth tokens were not migrated: %#v", credential)
+	}
+	if credential.Expires != 1893553445000 || credential.Email != "dev@example.com" || credential.AccountID != "user-123" {
+		t.Fatalf("OAuth metadata was not migrated: %#v", credential)
+	}
+	if credential.Issuer != "https://auth.x.ai" || credential.Endpoint != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("OAuth issuer URLs were not normalized: %#v", credential)
+	}
 }
 
 func TestResolveModelAndLLMKeyReplacesUnusableSelectedKey(t *testing.T) {
@@ -516,6 +594,50 @@ func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
 	assertContains(t, snippet, "'baseUrl': 'https://api.x.ai/v1'", "uses xAI OpenAI-compatible base URL")
 	assertContains(t, snippet, "'apiKey': 'XAI_API_KEY'", "uses Grok API key env var")
 	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")
+}
+
+func TestBuildOpenClawProviderConfig_UsesNativeXAIForGrokOAuth(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	keys := []*types.LLMKeyConfig{
+		{Name: "grok-main", Provider: "grok", AuthProfile: "grok-oauth", Default: true},
+	}
+	snippet := buildOpenClawProviderConfig(keys, "grok-main")
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OPENCLAW_DEFAULT_MODEL=grok/grok-build-0.1",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, string(out))
+	}
+
+	configData, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	agents := config["agents"].(map[string]any)
+	defaults := agents["defaults"].(map[string]any)
+	if defaults["model"] != "xai/grok-build-0.1" {
+		t.Fatalf("default model = %#v, want native xAI model", defaults["model"])
+	}
+	if models, ok := config["models"].(map[string]any); ok {
+		if providers, ok := models["providers"].(map[string]any); ok {
+			if _, ok := providers["grok"]; ok {
+				t.Fatalf("OAuth config retained legacy Grok API-key provider: %#v", providers)
+			}
+		}
+	}
 }
 
 func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T) {
