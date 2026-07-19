@@ -2291,12 +2291,11 @@ func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
 	script := `
 set -euo pipefail
-node_major() {
-  if command -v node >/dev/null 2>&1; then
-    node --version | sed -E 's/^v([0-9]+).*/\1/'
-  fi
+node_compatible() {
+  command -v node >/dev/null 2>&1 &&
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)'
 }
-if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$(node_major)" = "24" ]; then
+if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
   echo "Git: $(git --version)"
   exit 0
@@ -2305,7 +2304,7 @@ fi
 # dpkg state corruption from multiple overlapping install calls.
 sudo apt-get update -qq
 sudo apt-get install -y --fix-broken curl ca-certificates git gnupg
-if ! command -v npm >/dev/null 2>&1 || [ "$(node_major)" != "24" ]; then
+if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   if [ ! -f /etc/apt/sources.list.d/nodesource.sources ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
     sudo mkdir -p /etc/apt/keyrings
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \

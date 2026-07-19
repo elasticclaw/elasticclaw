@@ -5,7 +5,10 @@ import (
 	"strings"
 )
 
-const OpenClawVersion = "2026.6.9"
+const (
+	OpenClawVersion      = "2026.7.1-2"
+	OpenClawImageVersion = "2026.7.1"
+)
 
 func FromEnv(envName, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {

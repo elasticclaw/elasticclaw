@@ -25,7 +25,7 @@ func TestNewDefaultsToPinnedOpenClawImage(t *testing.T) {
 		t.Fatalf("new provider: %v", err)
 	}
 
-	if got, want := provider.cfg.Image, "ghcr.io/openclaw/openclaw:"+cliversion.OpenClawVersion; got != want {
+	if got, want := provider.cfg.Image, "ghcr.io/openclaw/openclaw:"+cliversion.OpenClawImageVersion; got != want {
 		t.Fatalf("default image = %q, want %q", got, want)
 	}
 }
