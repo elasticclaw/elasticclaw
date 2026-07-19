@@ -40,6 +40,7 @@ type BootstrapParams struct {
 	LLMKeyEnv      string // pre-built export lines
 	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
 	APIKeyAuthSync string // shell script that persists API-key auth into OpenClaw's auth store
+	OAuthAuthSync  string // shell script that persists restored OAuth auth into OpenClaw's auth store
 	LinearEnv      string // pre-built export line
 	ProviderConfig string // python snippet to patch OpenClaw config
 	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
@@ -211,6 +212,95 @@ func buildOpenClawAPIKeyAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyNam
 fi`, envVar, envVar)
 }
 
+// buildOpenClawOAuthAuthSyncShell returns a post-onboarding shell snippet that
+// imports restored Grok CLI OAuth into OpenClaw's per-agent SQLite auth store.
+// OpenClaw 2026.7.1-2 no longer reads credentials from auth-profiles.json at
+// runtime, and its broad `doctor --fix` migration also changes unrelated config.
+func buildOpenClawOAuthAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	activeKey := resolveActiveKey(keys, selectedKeyName)
+	if activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "" || activeKey.APIKey != "" {
+		return ""
+	}
+	return `set -euo pipefail
+# Let OpenClaw create and migrate its own SQLite schema. The short-lived
+# placeholder is replaced below before any gateway or model process starts.
+printf '%s\n' 'elasticclaw-auth-store-initializer' | openclaw models auth paste-token --provider xai --profile-id xai:default --expires-in 1m >/dev/null
+node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const { DatabaseSync } = require('node:sqlite');
+
+const home = process.env.HOME;
+const grokAuthPath = path.join(home, '.grok', 'auth.json');
+const grokAuth = JSON.parse(fs.readFileSync(grokAuthPath, 'utf8'));
+const source = Object.values(grokAuth).find((entry) =>
+  entry && typeof entry === 'object' && entry.key && entry.refresh_token
+);
+if (!source) {
+  throw new Error('restored Grok OAuth credential is missing access or refresh token');
+}
+
+const dbPath = path.join(home, '.openclaw', 'agents', 'main', 'agent', 'openclaw-agent.sqlite');
+if (!fs.existsSync(dbPath)) {
+  throw new Error('OpenClaw agent auth database does not exist after auth-store initialization');
+}
+const db = new DatabaseSync(dbPath);
+const table = db.prepare(
+  "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth_profile_store'"
+).get();
+if (!table) {
+  throw new Error('OpenClaw agent auth database has no auth_profile_store table');
+}
+
+const existing = db.prepare(
+  "SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'"
+).get();
+const store = existing ? JSON.parse(existing.store_json) : { version: 1, profiles: {} };
+store.version = 1;
+if (!store.profiles || typeof store.profiles !== 'object') store.profiles = {};
+const parsedExpires = Date.parse(source.expires_at || '');
+if (!Number.isFinite(parsedExpires)) {
+  throw new Error('restored Grok OAuth credential is missing a valid expires_at timestamp');
+}
+store.profiles['xai:default'] = {
+  type: 'oauth',
+  provider: 'xai',
+  access: source.key,
+  refresh: source.refresh_token,
+  expires: parsedExpires,
+};
+
+const now = Date.now();
+db.exec('BEGIN IMMEDIATE');
+try {
+  db.prepare(
+    'INSERT INTO auth_profile_store (store_key, store_json, updated_at) ' +
+    'VALUES (?, ?, ?) ' +
+    'ON CONFLICT(store_key) DO UPDATE SET ' +
+    'store_json = excluded.store_json, updated_at = excluded.updated_at'
+  ).run('primary', JSON.stringify(store), now);
+  db.exec('COMMIT');
+} catch (error) {
+  db.exec('ROLLBACK');
+  throw error;
+} finally {
+  db.close();
+}
+NODE
+openclaw config set 'auth.profiles["xai:default"]' '{"provider":"xai","mode":"oauth"}' --strict-json >/dev/null
+openclaw models auth list --provider xai --json | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const result = JSON.parse(input);
+  if (!Array.isArray(result.profiles) || !result.profiles.some((profile) => profile.id === "xai:default" && profile.type === "oauth")) {
+    throw new Error("OpenClaw did not load the migrated xai:default OAuth profile");
+  }
+});
+'`
+}
+
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads
 // claw-bridge and execs it with --bootstrap. All VM setup logic now lives inside
 // claw-bridge itself (runBootstrap in cmd/claw-bridge/main.go).
@@ -243,6 +333,11 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		apiKeyAuthSyncLine = fmt.Sprintf("export ELASTICCLAW_API_KEY_AUTH_SYNC=%s",
 			shellQuote(p.APIKeyAuthSync))
 	}
+	oauthAuthSyncLine := "# No OAuth auth sync"
+	if p.OAuthAuthSync != "" {
+		oauthAuthSyncLine = fmt.Sprintf("export ELASTICCLAW_OAUTH_AUTH_SYNC=%s",
+			shellQuote(p.OAuthAuthSync))
+	}
 
 	linearEnvLine := p.LinearEnv
 	if linearEnvLine == "" {
@@ -262,6 +357,7 @@ export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
 export OPENCLAW_DEFAULT_MODEL=%s
 export ELASTICCLAW_NIX=%s
 export ELASTICCLAW_DOCKER=%s
+%s
 %s
 %s
 %s
@@ -392,7 +488,7 @@ exit 1
 `,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
-		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
+		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
 	)
 }
