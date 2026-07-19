@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultImage   = "ghcr.io/openclaw/openclaw:" + cliversion.OpenClawImageVersion
+	defaultImage   = cliversion.OpenClawImage
 	containerLabel = "elasticclaw.claw"
 )
 
