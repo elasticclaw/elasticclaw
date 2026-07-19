@@ -3753,7 +3753,7 @@ func daytonaInstallCodingModelCLICommand(model string) string {
 	var packageSpec, binary string
 	switch {
 	case strings.HasPrefix(model, "codex/"):
-		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", "0.141.0")
+		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", cliversion.CodexCLIVersion)
 		binary = "codex"
 	case strings.HasPrefix(model, "grok/"):
 		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", cliversion.GrokCLIVersion)
