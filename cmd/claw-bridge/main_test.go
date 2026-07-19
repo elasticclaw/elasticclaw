@@ -698,6 +698,55 @@ func TestRestoreCLIModelAuthWritesBundleFiles(t *testing.T) {
 	}
 }
 
+func TestRestoreCLIModelAuthMigratesGrokOAuthToOpenClaw(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bundle := cliAuthBundle{
+		Files: map[string]string{
+			".grok/auth.json": base64.StdEncoding.EncodeToString([]byte(`{"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token","expires_at":"2030-01-02T03:04:05Z","email":"dev@example.com","user_id":"user-123","oidc_issuer":"https://auth.x.ai"}}`)),
+		},
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_PROVIDER", "grok")
+	t.Setenv("ELASTICCLAW_MODEL_AUTH_STATE", base64.StdEncoding.EncodeToString(data))
+
+	if err := restoreCLIModelAuth(); err != nil {
+		t.Fatalf("restore auth: %v", err)
+	}
+	authData, err := os.ReadFile(filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json"))
+	if err != nil {
+		t.Fatalf("read OpenClaw auth profile: %v", err)
+	}
+	var auth struct {
+		Version  int `json:"version"`
+		Profiles map[string]struct {
+			Type      string `json:"type"`
+			Provider  string `json:"provider"`
+			Access    string `json:"access"`
+			Refresh   string `json:"refresh"`
+			Expires   int64  `json:"expires"`
+			Email     string `json:"email"`
+			AccountID string `json:"accountId"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(authData, &auth); err != nil {
+		t.Fatalf("parse OpenClaw auth profile: %v", err)
+	}
+	credential := auth.Profiles["xai:default"]
+	if auth.Version != 1 || credential.Type != "oauth" || credential.Provider != "xai" {
+		t.Fatalf("unexpected OpenClaw auth profile: %#v", auth)
+	}
+	if credential.Access != "access-token" || credential.Refresh != "refresh-token" || credential.Expires != 1893553445000 {
+		t.Fatalf("OAuth tokens were not migrated: %#v", credential)
+	}
+	if credential.Email != "dev@example.com" || credential.AccountID != "user-123" {
+		t.Fatalf("OAuth metadata was not migrated: %#v", credential)
+	}
+}
+
 func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
 	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
 	got := sanitizeActivityText(input)
