@@ -450,7 +450,7 @@ func TestBuildModelAuthRestoreShellMigratesGrokOAuthToOpenClaw(t *testing.T) {
 		t.Skip("python3 not in PATH")
 	}
 
-	grokAuth := `{"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token","expires_at":"2030-01-02T03:04:05Z","email":"dev@example.com","user_id":"user-123","oidc_issuer":"https://auth.x.ai"}}`
+	grokAuth := `{"stale":{"key":"stale-token"},"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token","expires_at":"2030-01-02T03:04:05Z","email":"dev@example.com","user_id":"user-123","oidc_issuer":"https://auth.x.ai/"}}`
 	bundle, err := json.Marshal(map[string]any{
 		"files": map[string]string{
 			".grok/auth.json": base64.StdEncoding.EncodeToString([]byte(grokAuth)),
@@ -485,6 +485,8 @@ func TestBuildModelAuthRestoreShellMigratesGrokOAuthToOpenClaw(t *testing.T) {
 			Expires   int64  `json:"expires"`
 			Email     string `json:"email"`
 			AccountID string `json:"accountId"`
+			Issuer    string `json:"issuer"`
+			Endpoint  string `json:"tokenEndpoint"`
 		} `json:"profiles"`
 	}
 	if err := json.Unmarshal(authData, &auth); err != nil {
@@ -499,6 +501,9 @@ func TestBuildModelAuthRestoreShellMigratesGrokOAuthToOpenClaw(t *testing.T) {
 	}
 	if credential.Expires != 1893553445000 || credential.Email != "dev@example.com" || credential.AccountID != "user-123" {
 		t.Fatalf("OAuth metadata was not migrated: %#v", credential)
+	}
+	if credential.Issuer != "https://auth.x.ai" || credential.Endpoint != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("OAuth issuer URLs were not normalized: %#v", credential)
 	}
 }
 

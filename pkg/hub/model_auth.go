@@ -821,8 +821,11 @@ if state:
         except (FileNotFoundError, json.JSONDecodeError):
             grok_auth = {}
 
-        entry = next((value for value in grok_auth.values() if isinstance(value, dict)), None)
-        if entry and entry.get('key') and entry.get('refresh_token'):
+        entry = next((
+            value for value in grok_auth.values()
+            if isinstance(value, dict) and value.get('key') and value.get('refresh_token')
+        ), None)
+        if entry:
             expires = 0
             expires_at = entry.get('expires_at', '')
             if isinstance(expires_at, str) and expires_at:
@@ -831,14 +834,15 @@ if state:
                 except ValueError:
                     pass
 
+            issuer = entry.get('oidc_issuer', 'https://auth.x.ai').rstrip('/')
             credential = {
                 'type': 'oauth',
                 'provider': 'xai',
                 'access': entry['key'],
                 'refresh': entry['refresh_token'],
                 'expires': expires,
-                'issuer': entry.get('oidc_issuer', 'https://auth.x.ai'),
-                'tokenEndpoint': entry.get('oidc_issuer', 'https://auth.x.ai').rstrip('/') + '/oauth2/token',
+                'issuer': issuer,
+                'tokenEndpoint': issuer + '/oauth2/token',
             }
             for source, target in (
                 ('email', 'email'),
