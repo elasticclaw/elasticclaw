@@ -291,7 +291,7 @@ func assertNoLinearClawCreated(t *testing.T, db interface {
 	QueryRow(string, ...interface{}) *sql.Row
 }, issueID string) {
 	t.Helper()
-	deadline := time.Now().Add(300 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {

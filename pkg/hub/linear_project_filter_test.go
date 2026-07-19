@@ -15,7 +15,7 @@ func TestLinearProjectMatches(t *testing.T) {
 		want        bool
 	}{
 		{name: "omitted filter matches project", projectName: "Anything", want: true},
-		{name: "empty filter matches no project", configured: []string{}, want: true},
+		{name: "empty configured filter is a wildcard including no project", configured: []string{}, want: true},
 		{name: "configured filter rejects no project", configured: []string{"Adversary Labs"}, want: false},
 		{name: "stable ID", projectID: "68f0d971-0db2-4c27-b3b6-cf1f67d827a5", projectName: "Renamed", configured: []string{"68f0d971-0db2-4c27-b3b6-cf1f67d827a5"}, want: true},
 		{name: "name ignores case and whitespace", projectName: " Adversary Labs ", configured: []string{"  adversary labs  "}, want: true},
