@@ -3137,6 +3137,7 @@ function WorkflowSummaryRow({
           <p className="text-xs text-muted-foreground truncate">
             {workflow.workspaceName} · {workflow.integration || "manual"}
             {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
+            {workflow.projects?.length ? ` · projects: ${workflow.projects.join(", ")}` : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">

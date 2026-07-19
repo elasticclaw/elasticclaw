@@ -49,6 +49,39 @@ func TestLinearWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	}
 }
 
+func TestLinearWorkflowPollFiltersProjectsLikeWebhook(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	linear := factorytest.NewMockLinear(t)
+	s, db := hub.NewTestServerWithConfig(t, &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", linear.URL, "")
+	saveWorkflowPollWorkspaceFixture(t, "workspace-a", []*types.WorkflowConfig{{
+		SchemaVersion: "v1",
+		Name:          "linear-project-workflow",
+		Trigger: &types.WorkflowTrigger{Linear: &types.LinearWorkflowTrigger{
+			Event:    "status_changed",
+			Team:     "ELA",
+			Projects: []string{"Adversary Labs"},
+			States:   []string{"Todo"},
+		}},
+		Stages: workflowPollTestStages(),
+	}})
+	hub.SaveWorkspaceIssueTrackerForTest(t, "workspace-a", "linear", "default", "test-linear-token", "")
+
+	linear.SetIssueStateName("ELA-123", "Todo")
+	linear.PollingIssues["ELA-123"]["project"] = map[string]interface{}{"id": "project-adv", "name": "Adversary Labs"}
+	linear.PollingIssues["ELA-124"] = linearPollTestIssue("ELA-124", "Todo", map[string]interface{}{"id": "project-platform", "name": "Platform"})
+	linear.PollingIssues["ELA-125"] = linearPollTestIssue("ELA-125", "Todo", nil)
+
+	s.PollIntegrationsForTest()
+
+	assertLinearPollClawCount(t, db, "ELA-123", 1)
+	assertLinearPollClawCount(t, db, "ELA-124", 0)
+	assertLinearPollClawCount(t, db, "ELA-125", 0)
+}
+
 func TestShortcutWorkflowPollCreatesOnceForMissedWebhook(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -214,6 +247,33 @@ func assertPollClawTagsContain(t *testing.T, db *sql.DB, idColumn, idValue, want
 	}
 	if !strings.Contains(tags, want) {
 		t.Fatalf("tags for %s = %s, want %q", idValue, tags, want)
+	}
+}
+
+func linearPollTestIssue(identifier, state string, project interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"id":          "issue-uuid-" + identifier,
+		"identifier":  identifier,
+		"title":       "Project filter test",
+		"description": "Test description",
+		"url":         "https://linear.app/test/issue/" + identifier,
+		"updatedAt":   "2026-07-19T00:00:00Z",
+		"state":       map[string]interface{}{"name": state},
+		"team":        map[string]interface{}{"name": "Engineering", "key": "ELA"},
+		"project":     project,
+		"labels":      map[string]interface{}{"nodes": []map[string]interface{}{}},
+		"assignee":    nil,
+	}
+}
+
+func assertLinearPollClawCount(t *testing.T, db *sql.DB, issueID string, want int) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
+		t.Fatalf("count claws for %s: %v", issueID, err)
+	}
+	if count != want {
+		t.Fatalf("claws for %s = %d, want %d", issueID, count, want)
 	}
 }
 

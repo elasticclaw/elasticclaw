@@ -36,6 +36,7 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 			workflow.Integration = "linear"
 			workflow.Workspace = workflow.Trigger.Linear.Workspace
 			workflow.Team = workflow.Trigger.Linear.Team
+			workflow.TriggerRepos = append([]string(nil), workflow.Trigger.Linear.Projects...)
 			workflow.Labels = append([]string(nil), workflow.Trigger.Linear.Labels...)
 			workflow.ExcludeLabels = append([]string(nil), workflow.Trigger.Linear.ExcludeLabels...)
 			workflow.AssignedTo = workflow.Trigger.Linear.AssignedTo

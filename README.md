@@ -88,6 +88,23 @@ Watch the installation walkthrough: [YouTube quick start](https://www.youtube.co
 
 Full setup guide: [elasticclaw.ai/docs/installation](https://elasticclaw.ai/docs/installation)
 
+### Linear workflow triggers
+
+`trigger.linear` supports `event`, `workspace`, `team`, `projects`, `states`, `labels`, `exclude_labels`, `assigned_to`, and `agent_status_error`. When `projects` is omitted or empty, issues in any Linear project—including issues with no project—can match. Otherwise, an issue must belong to one of the listed project IDs or names.
+
+```yaml
+trigger:
+  linear:
+    event: status_changed
+    team: ADV
+    projects:
+      - Adversary Labs
+    states:
+      - Todo
+```
+
+See the [Linear issue workflow example](examples/workflows/linear-issue.yaml).
+
 ## Three ways to start work
 
 **From an issue tracker**

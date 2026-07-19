@@ -128,6 +128,66 @@ func TestLinearWorkflowExcludeLabelsRoutesGenericAndBugWorkflows(t *testing.T) {
 	assertLinearClawTagsContain(t, db, "ELA-125", "workflow:bug-workflow")
 }
 
+func TestLinearWorkflowWebhookFiltersProjects(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	linear := factorytest.NewMockLinear(t)
+	s, db := hub.NewTestServerWithConfig(t, &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", linear.URL, "")
+	saveWorkflowPollWorkspaceFixture(t, "workspace-a", []*types.WorkflowConfig{{
+		SchemaVersion: "v1",
+		Name:          "linear-project-workflow",
+		Trigger: &types.WorkflowTrigger{Linear: &types.LinearWorkflowTrigger{
+			Event:    "status_changed",
+			Team:     "ELA",
+			Projects: []string{"Adversary Labs", "project-id-allowed"},
+			States:   []string{"Todo"},
+		}},
+		Stages: workflowPollTestStages(),
+	}})
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithProject(t, linear, "ELA-201", "Backlog", "Todo", "project-adv", " adversary labs "))
+	waitForLinearClawCount(t, db, "ELA-201", 1)
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithProject(t, linear, "ELA-205", "Backlog", "Todo", "project-id-allowed", "Renamed Project"))
+	waitForLinearClawCount(t, db, "ELA-205", 1)
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithProject(t, linear, "ELA-202", "Backlog", "Todo", "project-platform", "Platform"))
+	assertNoLinearClawCreated(t, db, "ELA-202")
+
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithProject(t, linear, "ELA-203", "Backlog", "Todo", "", ""))
+	assertNoLinearClawCreated(t, db, "ELA-203")
+}
+
+func TestLinearWorkflowWebhookWithoutProjectsMatchesUnprojectedIssue(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	linear := factorytest.NewMockLinear(t)
+	s, db := hub.NewTestServerWithConfig(t, &types.HubConfig{
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", linear.URL, "")
+	saveWorkflowPollWorkspaceFixture(t, "workspace-a", []*types.WorkflowConfig{{
+		SchemaVersion: "v1",
+		Name:          "linear-unfiltered-workflow",
+		Trigger: &types.WorkflowTrigger{Linear: &types.LinearWorkflowTrigger{
+			Event:  "status_changed",
+			Team:   "ELA",
+			States: []string{"Todo"},
+		}},
+		Stages: workflowPollTestStages(),
+	}})
+
+	httpSrv := httptest.NewServer(s.Handler())
+	t.Cleanup(httpSrv.Close)
+	postLinearWebhook(t, httpSrv.URL, "workspace-a", linearWebhookPayloadWithProject(t, linear, "ELA-204", "Backlog", "Todo", "", ""))
+	waitForLinearClawCount(t, db, "ELA-204", 1)
+}
+
 func saveLinearRoutingWorkflowFixture(t *testing.T, workspace string) {
 	t.Helper()
 	hub.SaveWorkspaceForTest(t,
@@ -190,6 +250,23 @@ func linearWebhookPayloadWithLabels(t *testing.T, linear *factorytest.MockLinear
 	return out
 }
 
+func linearWebhookPayloadWithProject(t *testing.T, linear *factorytest.MockLinear, issueID, prevStatus, newStatus, projectID, projectName string) []byte {
+	t.Helper()
+	payload, _ := linear.BuildWebhookPayload(issueID, prevStatus, newStatus)
+	var data map[string]interface{}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	if projectID != "" || projectName != "" {
+		data["data"].(map[string]interface{})["project"] = map[string]string{"id": projectID, "name": projectName}
+	}
+	out, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return out
+}
+
 func waitForLinearClawCount(t *testing.T, db interface {
 	QueryRow(string, ...interface{}) *sql.Row
 }, issueID string, want int) {
@@ -205,6 +282,23 @@ func waitForLinearClawCount(t *testing.T, db interface {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("claws for %s = %d, want %d", issueID, count, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertNoLinearClawCreated(t *testing.T, db interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, issueID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
+			t.Fatalf("count claws: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("claws for %s = %d, want 0", issueID, count)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

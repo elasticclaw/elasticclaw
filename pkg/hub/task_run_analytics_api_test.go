@@ -246,7 +246,7 @@ func TestTaskRunAnalyticsAPIGeneralStatsIssueCreatedAtAtRunCreation(t *testing.T
 	var response taskRunGeneralStatsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
 	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.TicketToPr.Samples != 1 ||
-		response.TicketToPr.Authoritative == nil || !*response.TicketToPr.Authoritative {
+		response.TicketToPr.AuthoritativeSamples == nil || *response.TicketToPr.AuthoritativeSamples != 1 {
 		t.Fatalf("ticket stats: %#v", response.TicketToPr)
 	}
 }
