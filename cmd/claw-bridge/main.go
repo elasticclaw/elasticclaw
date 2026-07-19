@@ -2291,12 +2291,11 @@ func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
 	script := `
 set -euo pipefail
-node_major() {
-  if command -v node >/dev/null 2>&1; then
-    node --version | sed -E 's/^v([0-9]+).*/\1/'
-  fi
+node_compatible() {
+  command -v node >/dev/null 2>&1 &&
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)'
 }
-if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$(node_major)" = "24" ]; then
+if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
   echo "Git: $(git --version)"
   exit 0
@@ -2305,7 +2304,7 @@ fi
 # dpkg state corruption from multiple overlapping install calls.
 sudo apt-get update -qq
 sudo apt-get install -y --fix-broken curl ca-certificates git gnupg
-if ! command -v npm >/dev/null 2>&1 || [ "$(node_major)" != "24" ]; then
+if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   if [ ! -f /etc/apt/sources.list.d/nodesource.sources ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
     sudo mkdir -p /etc/apt/keyrings
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
@@ -2326,8 +2325,50 @@ const openClawVersion = cliversion.OpenClawVersion
 const codexCLIVersion = cliversion.CodexCLIVersion
 const grokCLIVersion = cliversion.GrokCLIVersion
 
+// ensureUserNPMBinOnPath configures a user-owned npm prefix and makes binaries
+// installed there visible to this process and every child process it starts.
+// Some provider images run the bridge as an unprivileged user without sudo.
+func ensureUserNPMBinOnPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	if strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("resolve user home: empty path")
+	}
+
+	prefix := filepath.Join(home, ".local")
+	binDir := filepath.Join(prefix, "bin")
+	pathEntries := filepath.SplitList(os.Getenv("PATH"))
+	for _, entry := range pathEntries {
+		if entry == binDir {
+			return prefix, nil
+		}
+	}
+	pathEntries = append([]string{binDir}, pathEntries...)
+	if err := os.Setenv("PATH", strings.Join(pathEntries, string(os.PathListSeparator))); err != nil {
+		return "", fmt.Errorf("prepend user npm bin to PATH: %w", err)
+	}
+	return prefix, nil
+}
+
+func installUserNPMPackage(spec string) error {
+	prefix, err := ensureUserNPMBinOnPath()
+	if err != nil {
+		return err
+	}
+	return runShell(fmt.Sprintf(
+		"npm install -g --prefix %s %s --ignore-scripts",
+		shellQuote(prefix),
+		shellQuote(spec),
+	))
+}
+
 // installOpenClaw installs the pinned OpenClaw CLI via npm.
 func installOpenClaw() error {
+	if _, err := ensureUserNPMBinOnPath(); err != nil {
+		return err
+	}
 	if out, err := exec.Command("openclaw", "--version").CombinedOutput(); err == nil {
 		version := strings.TrimSpace(string(out))
 		if strings.Contains(version, openClawVersion) {
@@ -2337,11 +2378,18 @@ func installOpenClaw() error {
 		log.Printf("[bootstrap] OpenClaw version %s found, installing pinned %s", version, openClawVersion)
 	}
 	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
-	if err := runShell(fmt.Sprintf("sudo npm install -g openclaw@%s --ignore-scripts", openClawVersion)); err != nil {
+	if err := installUserNPMPackage("openclaw@" + openClawVersion); err != nil {
 		return fmt.Errorf("npm install openclaw: %w", err)
 	}
-	out, _ := exec.Command("openclaw", "--version").Output()
-	log.Printf("[bootstrap] OpenClaw: %s", strings.TrimSpace(string(out)))
+	out, err := exec.Command("openclaw", "--version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify openclaw install: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	version := strings.TrimSpace(string(out))
+	if !strings.Contains(version, openClawVersion) {
+		return fmt.Errorf("verify openclaw install: got %q, want version %s", version, openClawVersion)
+	}
+	log.Printf("[bootstrap] OpenClaw: %s", version)
 	return nil
 }
 
@@ -2362,7 +2410,7 @@ func installNPMCLI(packageName, version, binaryName string) error {
 	}
 	spec := packageName + "@" + version
 	log.Printf("[bootstrap] installing %s...", spec)
-	if err := runShell(fmt.Sprintf("sudo npm install -g %s --ignore-scripts", shellQuote(spec))); err != nil {
+	if err := installUserNPMPackage(spec); err != nil {
 		return fmt.Errorf("npm install %s: %w", spec, err)
 	}
 	out, err := exec.Command(binaryName, "--version").CombinedOutput()

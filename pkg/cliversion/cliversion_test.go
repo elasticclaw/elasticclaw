@@ -2,6 +2,18 @@ package cliversion
 
 import "testing"
 
+func TestPinnedOpenClawVersions(t *testing.T) {
+	if got, want := OpenClawVersion, "2026.7.1-2"; got != want {
+		t.Fatalf("OpenClawVersion = %q, want %q", got, want)
+	}
+	if got, want := OpenClawImageVersion, "2026.7.1"; got != want {
+		t.Fatalf("OpenClawImageVersion = %q, want %q", got, want)
+	}
+	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.7.1"; got != want {
+		t.Fatalf("OpenClawImage = %q, want %q", got, want)
+	}
+}
+
 func TestPinnedCodexCLIVersion(t *testing.T) {
 	if CodexCLIVersion != "0.144.6" {
 		t.Fatalf("CodexCLIVersion = %q, want 0.144.6", CodexCLIVersion)

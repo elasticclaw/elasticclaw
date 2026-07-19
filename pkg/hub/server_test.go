@@ -13,6 +13,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -280,6 +281,9 @@ func TestGetSettingsTreatsBlankOllamaKeyAsConfigured(t *testing.T) {
 	var view SettingsView
 	if err := json.NewDecoder(rec.Body).Decode(&view); err != nil {
 		t.Fatal(err)
+	}
+	if view.DefaultOpenClawImage != cliversion.OpenClawImage {
+		t.Fatalf("default OpenClaw image = %q, want %q", view.DefaultOpenClawImage, cliversion.OpenClawImage)
 	}
 	byName := map[string]LLMKeyView{}
 	for _, key := range view.LLMKeys {

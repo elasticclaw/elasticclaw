@@ -197,7 +197,7 @@ PYEOF`, grokOAuthLiteral, anthropicPatch)
 }
 
 // buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists
-// direct API-key auth into OpenClaw's current auth store. OpenClaw 2026.6.9
+// direct API-key auth into OpenClaw's current auth store. OpenClaw 2026.7.1-2
 // resolves agent auth from openclaw-agent.sqlite, so writing only the legacy
 // auth-profiles.json file is not enough for embedded agents.
 func buildOpenClawAPIKeyAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyName string) string {

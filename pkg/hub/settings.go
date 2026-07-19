@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -62,17 +63,18 @@ type ConcurrencyGroupView struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
-	LLMKeys           []LLMKeyView                `json:"llmKeys"`
-	ModelOptions      map[string][]LLMModelOption `json:"modelOptions,omitempty"`
-	ModelAuthProfiles []ModelAuthProfileView      `json:"modelAuthProfiles,omitempty"`
-	Providers         map[string]ProviderView     `json:"providers"`
-	GitHub            []GitHubAppView             `json:"github"`
-	SSHPublicKeys     []string                    `json:"sshPublicKeys"`
-	Integrations      *IntegrationsView           `json:"integrations"`
-	Factories         []FactoryView               `json:"factories"`
-	Secrets           []string                    `json:"secrets"`
-	MCPServers        []MCPView                   `json:"mcpServers,omitempty"`
-	Auth              *AuthView                   `json:"auth,omitempty"`
+	DefaultOpenClawImage string                      `json:"defaultOpenClawImage"`
+	LLMKeys              []LLMKeyView                `json:"llmKeys"`
+	ModelOptions         map[string][]LLMModelOption `json:"modelOptions,omitempty"`
+	ModelAuthProfiles    []ModelAuthProfileView      `json:"modelAuthProfiles,omitempty"`
+	Providers            map[string]ProviderView     `json:"providers"`
+	GitHub               []GitHubAppView             `json:"github"`
+	SSHPublicKeys        []string                    `json:"sshPublicKeys"`
+	Integrations         *IntegrationsView           `json:"integrations"`
+	Factories            []FactoryView               `json:"factories"`
+	Secrets              []string                    `json:"secrets"`
+	MCPServers           []MCPView                   `json:"mcpServers,omitempty"`
+	Auth                 *AuthView                   `json:"auth,omitempty"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
@@ -442,8 +444,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view := SettingsView{
-		Providers: make(map[string]ProviderView),
-		GitHub:    []GitHubAppView{},
+		DefaultOpenClawImage: cliversion.OpenClawImage,
+		Providers:            make(map[string]ProviderView),
+		GitHub:               []GitHubAppView{},
 	}
 
 	s.mu.RLock()

@@ -90,6 +90,7 @@ interface WorkspaceGitHubAppView {
 }
 
 interface SettingsData {
+  defaultOpenClawImage: string
   llmKeys: LLMKeyView[]
   modelOptions?: Record<string, LLMModelOption[]>
   modelAuthProfiles?: ModelAuthProfileView[]
@@ -990,10 +991,10 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                     value={formDockerImage}
                     onChange={e => setFormDockerImage(e.target.value)}
                     className="h-8 text-sm font-mono"
-                    placeholder="ghcr.io/openclaw/openclaw:2026.6.9"
+                    placeholder={settings.defaultOpenClawImage}
                   />
                   <p className="text-[11px] text-muted-foreground mt-1">
-                    Leave blank to use the pinned OpenClaw image, ghcr.io/openclaw/openclaw:2026.6.9.
+                    Leave blank to use the pinned OpenClaw image, {settings.defaultOpenClawImage}.
                   </p>
                 </div>
                 <div>

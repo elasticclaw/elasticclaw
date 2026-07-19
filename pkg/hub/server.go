@@ -3110,10 +3110,11 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				time.Sleep(5 * time.Second)
 			}
 			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
-			// Also source nvm and pin Node 24 LTS — Daytona snapshots may ship with
+			// Also source nvm and pin a compatible Node 24 LTS — Daytona snapshots may ship with
 			// non-LTS Node (e.g. v25) and each exec is a fresh shell session.
-			// If nvm use 24 fails (not installed yet), we install it on the fly.
-			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
+			// OpenClaw requires Node 24.15.0 or newer on the Node 24 line. Reuse a
+			// compatible installed patch; otherwise install the latest Node 24.
+			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || true; node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)' >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
 			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + cmd}, timeout)
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", label, err)

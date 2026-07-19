@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -668,6 +669,72 @@ func TestCLICodingProviderForModel(t *testing.T) {
 		if got := cliCodingProviderForModel(model); got != want {
 			t.Fatalf("cliCodingProviderForModel(%q) = %q, want %q", model, got, want)
 		}
+	}
+}
+
+func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake npm executable uses POSIX shell")
+	}
+
+	home := t.TempDir()
+	fakeBin := t.TempDir()
+	npmLog := filepath.Join(t.TempDir(), "npm-args")
+	t.Setenv("HOME", home)
+	t.Setenv("FAKE_NPM_LOG", npmLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	writeExecutable := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+			t.Fatalf("write executable %s: %v", path, err)
+		}
+	}
+	writeExecutable(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\necho 'OpenClaw 0.0.0'\n")
+	writeExecutable(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" > "$FAKE_NPM_LOG"
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/openclaw" <<'EOF'
+#!/bin/sh
+echo 'OpenClaw %s'
+EOF
+chmod +x "$HOME/.local/bin/openclaw"
+`, openClawVersion))
+
+	if err := installOpenClaw(); err != nil {
+		t.Fatalf("installOpenClaw(): %v", err)
+	}
+
+	args, err := os.ReadFile(npmLog)
+	if err != nil {
+		t.Fatalf("read npm arguments: %v", err)
+	}
+	gotArgs := strings.TrimSpace(string(args))
+	if strings.Contains(gotArgs, "sudo") {
+		t.Fatalf("npm install unexpectedly requires sudo: %s", gotArgs)
+	}
+	if !strings.Contains(gotArgs, "--prefix "+filepath.Join(home, ".local")) {
+		t.Fatalf("npm install does not use the user prefix: %s", gotArgs)
+	}
+	if !strings.Contains(gotArgs, "openclaw@"+openClawVersion) {
+		t.Fatalf("npm install does not pin OpenClaw: %s", gotArgs)
+	}
+
+	path, err := exec.LookPath("openclaw")
+	if err != nil {
+		t.Fatalf("find installed openclaw: %v", err)
+	}
+	wantPath := filepath.Join(home, ".local", "bin", "openclaw")
+	if path != wantPath {
+		t.Fatalf("openclaw path = %q, want %q", path, wantPath)
+	}
+	out, err := exec.Command("openclaw", "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run installed openclaw: %v: %s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "OpenClaw "+openClawVersion; got != want {
+		t.Fatalf("openclaw --version = %q, want %q", got, want)
 	}
 }
 
