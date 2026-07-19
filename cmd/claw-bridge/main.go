@@ -2322,7 +2322,7 @@ echo "Git: $(git --version)"
 }
 
 const openClawVersion = cliversion.OpenClawVersion
-const codexCLIVersion = "0.141.0"
+const codexCLIVersion = cliversion.CodexCLIVersion
 const grokCLIVersion = cliversion.GrokCLIVersion
 
 // installOpenClaw installs the pinned OpenClaw CLI via npm.

@@ -9,6 +9,7 @@ const (
 	OpenClawVersion      = "2026.7.1-2"
 	OpenClawImageVersion = "2026.7.1"
 	OpenClawImage        = "ghcr.io/openclaw/openclaw:" + OpenClawImageVersion
+	CodexCLIVersion      = "0.144.6"
 	GrokCLIVersion       = "0.2.103"
 )
 

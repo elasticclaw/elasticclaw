@@ -14,6 +14,12 @@ func TestPinnedOpenClawVersions(t *testing.T) {
 	}
 }
 
+func TestPinnedCodexCLIVersion(t *testing.T) {
+	if CodexCLIVersion != "0.144.6" {
+		t.Fatalf("CodexCLIVersion = %q, want 0.144.6", CodexCLIVersion)
+	}
+}
+
 func TestPinnedGrokCLIVersion(t *testing.T) {
 	if GrokCLIVersion != "0.2.103" {
 		t.Fatalf("GrokCLIVersion = %q, want 0.2.103", GrokCLIVersion)
