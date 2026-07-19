@@ -92,3 +92,14 @@ func (s *Server) loadManualTriggerInputsFromContextMD(files map[string]string) m
 	}
 	return inputs
 }
+
+func formatManualTriggerInputs(inputs map[string]string) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	data, err := json.MarshalIndent(inputs, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return "Manual trigger inputs (use these exact values):\n\n```json\n" + string(data) + "\n```"
+}

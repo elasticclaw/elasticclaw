@@ -3280,13 +3280,13 @@ docker --version`); err != nil {
 	if onboardErr != nil {
 		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
-			return fmt.Errorf("onboard openclaw: %w", onboardErr)
+			return fmt.Errorf("onboard openclaw: %s", sanitizeBootstrapError(onboardErr))
 		}
 		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
 	} else if onboardResult.ExitCode != 0 {
 		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
-			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, onboardResult.Stdout)
+			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, sanitizeBootstrapOutput(onboardResult.Stdout))
 		}
 		log.Printf("[daytona] onboard returned non-zero, but config file exists; continuing")
 	} else {
@@ -3757,7 +3757,7 @@ func daytonaInstallCodingModelCLICommand(model string) string {
 		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", "0.141.0")
 		binary = "codex"
 	case strings.HasPrefix(model, "grok/"):
-		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", "0.1.0")
+		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", cliversion.GrokCLIVersion)
 		binary = "grok"
 	default:
 		return ""

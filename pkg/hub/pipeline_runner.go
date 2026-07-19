@@ -1048,6 +1048,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	if stage.OnEnter.Inject != "" {
 		injectMsg := stage.OnEnter.Inject
+		manualInputs := s.loadManualTriggerInputs(clawID)
 
 		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
 		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
@@ -1141,11 +1142,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err == nil {
 				var buf bytes.Buffer
-				// Load inputs from CONTEXT.md (stored during manual trigger)
-				inputs := s.loadManualTriggerInputs(clawID)
-				if inputs != nil {
+				if manualInputs != nil {
 					data := s.injectTemplateData(clawID, map[string]interface{}{
-						"Inputs": inputs,
+						"Inputs": manualInputs,
 					})
 					if err := tmpl.Execute(&buf, data); err == nil {
 						injectMsg = buf.String()
@@ -1155,6 +1154,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 
 	injectMessage:
+		if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
+			injectMsg = inputContext + "\n\n" + injectMsg
+		}
 		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
