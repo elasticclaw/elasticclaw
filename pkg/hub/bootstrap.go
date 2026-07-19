@@ -259,12 +259,15 @@ const store = existing ? JSON.parse(existing.store_json) : { version: 1, profile
 store.version = 1;
 if (!store.profiles || typeof store.profiles !== 'object') store.profiles = {};
 const parsedExpires = Date.parse(source.expires_at || '');
+if (!Number.isFinite(parsedExpires)) {
+  throw new Error('restored Grok OAuth credential is missing a valid expires_at timestamp');
+}
 store.profiles['xai:default'] = {
   type: 'oauth',
   provider: 'xai',
   access: source.key,
   refresh: source.refresh_token,
-  expires: Number.isFinite(parsedExpires) ? parsedExpires : 0,
+  expires: parsedExpires,
 };
 
 const now = Date.now();

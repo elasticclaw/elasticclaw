@@ -482,18 +482,35 @@ db.close();
 
 	fakeBin := t.TempDir()
 	fakeOpenClaw := filepath.Join(fakeBin, "openclaw")
-	if err := os.WriteFile(fakeOpenClaw, []byte("#!/bin/sh\nprintf '%s\\n' '{\"profiles\":[{\"id\":\"xai:default\",\"type\":\"oauth\"}]}'\n"), 0755); err != nil {
+	invocationsPath := filepath.Join(home, "openclaw-invocations")
+	fakeOpenClawScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
+if [ "$*" = "models auth list --provider xai --json" ]; then
+  printf '%s\n' '{"profiles":[{"id":"xai:default","type":"oauth"}]}'
+fi
+`
+	if err := os.WriteFile(fakeOpenClaw, []byte(fakeOpenClawScript), 0755); err != nil {
 		t.Fatalf("write fake openclaw: %v", err)
 	}
-	cmd := exec.Command("bash", "-c", shell)
-	cmd.Env = append(os.Environ(),
+	testEnv := append(os.Environ(),
 		"HOME="+home,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"NODE_NO_WARNINGS=1",
+		"OPENCLAW_INVOCATIONS="+invocationsPath,
 	)
+	cmd := exec.Command("bash", "-c", shell)
+	cmd.Env = testEnv
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run OAuth auth sync: %v\n%s", err, out)
 	}
+	invocations, err := os.ReadFile(invocationsPath)
+	if err != nil {
+		t.Fatalf("read fake OpenClaw invocations: %v", err)
+	}
+	invocationLog := string(invocations)
+	assertContains(t, invocationLog, "models auth paste-token --provider xai --profile-id xai:default --expires-in 1m", "initializes the xAI auth profile")
+	assertContains(t, invocationLog, `config set auth.profiles["xai:default"] {"provider":"xai","mode":"oauth"} --strict-json`, "configures xAI OAuth metadata")
+	assertContains(t, invocationLog, "models auth list --provider xai --json", "verifies the migrated xAI profile")
 
 	read := exec.Command("node", "-e", `
 const { DatabaseSync } = require('node:sqlite');
@@ -526,6 +543,18 @@ db.close();
 	if got := store.Profiles["anthropic:default"].Key; got != "keep-me" {
 		t.Fatalf("existing auth profile was not preserved: key=%q", got)
 	}
+
+	invalidGrokAuth := `{"https://auth.x.ai::client":{"key":"access-token","refresh_token":"refresh-token"}}`
+	if err := os.WriteFile(filepath.Join(grokDir, "auth.json"), []byte(invalidGrokAuth), 0600); err != nil {
+		t.Fatalf("write invalid Grok auth: %v", err)
+	}
+	invalidCmd := exec.Command("bash", "-c", shell)
+	invalidCmd.Env = testEnv
+	invalidOut, err := invalidCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("OAuth auth sync unexpectedly accepted a missing expiry:\n%s", invalidOut)
+	}
+	assertContains(t, string(invalidOut), "missing a valid expires_at timestamp", "fails closed on invalid OAuth expiry")
 }
 
 func TestBuildOpenClawOAuthAuthSyncShellSkipsNonOAuthGrok(t *testing.T) {
