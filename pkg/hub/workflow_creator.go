@@ -172,6 +172,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			resolvedSecrets[envName] = "workflow secret_ref"
 		}
 	}
+	// Workspace identity is hub-managed and must not be overridden by
+	// workspace or workflow environment configuration.
+	env["ELASTICCLAW_TEMPLATE"] = workspace.Name
 	templateFiles["SECRETS.md"] = buildSecretsFile(resolvedSecrets)
 	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 
