@@ -152,12 +152,13 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		// associateTaskRunPR treats it as a write-once fallback rather than an
 		// authoritative provider timestamp.
 		if err := s.associateTaskRunPR(TaskRunPR{
-			RunID:    runID,
-			Repo:     repo,
-			PRNumber: prNumber,
-			URL:      prURL,
-			HeadSHA:  headSHA,
-			State:    taskRunPRStateOpen,
+			RunID:        runID,
+			Repo:         repo,
+			PRNumber:     prNumber,
+			URL:          prURL,
+			HeadSHA:      headSHA,
+			AgentHeadSHA: true,
+			State:        taskRunPRStateOpen,
 		}); err != nil {
 			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
 		}
