@@ -1558,7 +1558,8 @@ func normalizeTaskRunWarningType(value string) string {
 		taskRunWarningHumanManualStopResume,
 		taskRunWarningHumanSettingsChange,
 		taskRunWarningUnknownHuman,
-		taskRunWarningPRReplaced:
+		taskRunWarningPRReplaced,
+		taskRunWarningPRClosedUnmerged:
 		return value
 	default:
 		return ""
