@@ -393,6 +393,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
 	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
 	mux.HandleFunc("/api/analytics/costs", s.withAuth(s.handleTaskRunAnalyticsCosts))
+	mux.HandleFunc("/api/analytics/effectiveness", s.withAuth(s.handleTaskRunAnalyticsEffectiveness))
+	mux.HandleFunc("/api/analytics/cost-drivers", s.withAuth(s.handleTaskRunAnalyticsCostDrivers))
 	mux.HandleFunc("/api/analytics/general-stats", s.withAuth(s.handleTaskRunAnalyticsGeneralStats))
 	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
 	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
