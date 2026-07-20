@@ -57,7 +57,7 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 }
 func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (taskRunAnalyticsEffectivenessResponse, error) {
 	w, a := taskRunAnalyticsSummaryWhere(f)
-	rows, err := s.db.Query(`SELECT DATE(started_at/1000,'unixepoch'), status, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN agent_started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN pr_opened_at>0 THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` GROUP BY 1,status`, a...)
+	rows, err := s.db.Query(`SELECT DATE(started_at/1000,'unixepoch'), status, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN merged_pr_count>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN agent_started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN pr_opened_at>0 THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` GROUP BY 1,status`, a...)
 	if err != nil {
 		return taskRunAnalyticsEffectivenessResponse{}, err
 	}
@@ -65,12 +65,12 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 	out := taskRunAnalyticsEffectivenessResponse{}
 	byDay := map[string]*taskRunAnalyticsOutcomesDay{}
 	weekly := map[string]*taskRunAnalyticsWeeklyCost{}
-	var finished, success, opened, merged int
+	var finished, success, opened, merged, mergedRuns int
 	for rows.Next() {
 		var d, status string
-		var n, mp, st, af, po int
+		var n, mp, mpr, st, af, po int
 		var cost float64
-		if err = rows.Scan(&d, &status, &n, &cost, &mp, &st, &af, &po); err != nil {
+		if err = rows.Scan(&d, &status, &n, &cost, &mp, &mpr, &st, &af, &po); err != nil {
 			return out, err
 		}
 		x := byDay[d]
@@ -95,9 +95,10 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 		out.Funnel.Started += st
 		out.Funnel.AgentFinished += af
 		out.Funnel.PROpened += po
-		out.Funnel.PRMerged += mp
+		out.Funnel.PRMerged += mpr
 		opened += po
 		merged += mp
+		mergedRuns += mpr
 		t, _ := time.Parse("2006-01-02", d)
 		ws := t.AddDate(0, 0, -(int(t.Weekday())+6)%7).Format("2006-01-02")
 		q := weekly[ws]
@@ -130,7 +131,9 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 			cost += x.CostUsd
 		}
 		out.CostPerMergedPr.Average = cost / float64(merged)
-		out.MergeRate = float64(merged) / float64(opened)
+	}
+	if opened > 0 {
+		out.MergeRate = float64(mergedRuns) / float64(opened)
 	}
 	if finished > 0 {
 		out.SuccessRate = float64(success) / float64(finished)
