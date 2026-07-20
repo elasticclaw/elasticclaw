@@ -88,6 +88,8 @@ type Server struct {
 	fireworksModelsCacheUntil time.Time
 	modelAuthJobsMu           sync.Mutex
 	modelAuthJobs             map[string]*modelAuthLoginJob
+	pollWarningMu             sync.Mutex
+	pollWarnings              map[string]struct{}
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -4950,15 +4952,43 @@ func (s *Server) petDaytonaSandboxes() {
 	}
 
 	for _, c := range claws {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, err := p.ExecWithTimeout(ctx, c.providerID, []string{"bash", "-lc", "true"}, 20*time.Second)
-		cancel()
+		err := petDaytonaSandboxWithRetry(context.Background(), p, c.providerID, daytonaKeepaliveRetryDelays)
 		if err != nil {
 			log.Printf("[daytona] keepalive failed for %s (%s): %v", c.name, c.id[:8], err)
 			continue
 		}
 		log.Printf("[daytona] keepalive ok for %s (%s)", c.name, c.id[:8])
 	}
+}
+
+type daytonaKeepaliveExecutor interface {
+	ExecWithTimeout(context.Context, string, []string, time.Duration) (*types.ExecResult, error)
+}
+
+var daytonaKeepaliveRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second}
+
+func petDaytonaSandboxWithRetry(ctx context.Context, executor daytonaKeepaliveExecutor, providerID string, retryDelays []time.Duration) error {
+	var lastErr error
+	for attempt := 0; attempt <= len(retryDelays); attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, lastErr = executor.ExecWithTimeout(attemptCtx, providerID, []string{"bash", "-lc", "true"}, 5*time.Second)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if !daytona.IsTransientExecError(lastErr) || attempt == len(retryDelays) {
+			return lastErr
+		}
+
+		timer := time.NewTimer(retryDelays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 // statusWatchdog runs every 2 minutes to check claw health and request status

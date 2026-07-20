@@ -1,8 +1,11 @@
 package hub
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +39,48 @@ func TestPollSinceHighWaterMarkAndFailedWindow(t *testing.T) {
 				t.Fatalf("pollSince = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPollGitHubIssueWorkflowsLogsMissingTokenOnce(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s := newFactoryTriggerTestServer(t)
+	workspace := &types.WorkspaceConfig{
+		Name: "autoci",
+		Workflows: []*types.WorkflowConfig{{
+			Name:        "github-issue",
+			Integration: "github-issues",
+		}},
+	}
+
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	s.pollGitHubIssueWorkflows([]*types.WorkspaceConfig{workspace}, time.Now().UTC().Format(time.RFC3339))
+	s.pollGitHubIssueWorkflows([]*types.WorkspaceConfig{workspace}, time.Now().UTC().Format(time.RFC3339))
+
+	const warning = "workflow autoci/github-issue: no GitHub Issues token configured"
+	if count := strings.Count(logs.String(), warning); count != 1 {
+		t.Fatalf("missing-token warning count = %d, want 1; logs:\n%s", count, logs.String())
+	}
+}
+
+func TestPollWarningCanBeRearmed(t *testing.T) {
+	s := &Server{}
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	s.logPollWarningOnce("key", "warning")
+	s.logPollWarningOnce("key", "warning")
+	s.clearPollWarning("key")
+	s.logPollWarningOnce("key", "warning")
+
+	if count := strings.Count(logs.String(), "warning"); count != 2 {
+		t.Fatalf("warning count after rearm = %d, want 2; logs:\n%s", count, logs.String())
 	}
 }
 

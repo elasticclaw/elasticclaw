@@ -1,8 +1,13 @@
 package daytona
 
 import (
+	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+
+	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
 )
 
 func TestBuildOpenClawEnvFileIncludesWorkflowSecrets(t *testing.T) {
@@ -59,5 +64,28 @@ func TestShellEnvNameValidation(t *testing.T) {
 		if shellEnvNameRE.MatchString(name) {
 			t.Fatalf("invalid env name %q accepted", name)
 		}
+	}
+}
+
+func TestIsTransientExecError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "request timeout", err: fmt.Errorf("execute: %w", daytonaerrors.NewDaytonaError("request timeout", http.StatusRequestTimeout, nil)), want: true},
+		{name: "rate limited", err: daytonaerrors.NewDaytonaError("slow down", http.StatusTooManyRequests, nil), want: true},
+		{name: "server error", err: daytonaerrors.NewDaytonaError("unavailable", http.StatusServiceUnavailable, nil), want: true},
+		{name: "deadline exceeded", err: context.DeadlineExceeded, want: true},
+		{name: "not found", err: daytonaerrors.NewDaytonaError("missing", http.StatusNotFound, nil), want: false},
+		{name: "ordinary error", err: fmt.Errorf("permission denied"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTransientExecError(tt.err); got != tt.want {
+				t.Fatalf("IsTransientExecError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
