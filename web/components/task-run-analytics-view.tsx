@@ -387,9 +387,9 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           )}
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
-            <Metric label="Clean" value={kpiSummary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
-            <Metric label="Warning" value={kpiSummary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
-            <Metric label="Failed" value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
+            <Metric label="Clean" title="Merged with no human interaction" value={kpiSummary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
+            <Metric label="Warning" title="Merged with human touch or PR closed without merge" value={kpiSummary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
+            <Metric label="Failed" title="No PR was ever opened" value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
             <Metric label="Human touches" value={kpiSummary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
             <Metric label="Merged PRs" value={kpiSummary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
           </div>
@@ -502,10 +502,11 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   )
 }
 
-function Metric({ label, value, tone, active, onClick }: { label: string; value: number; tone?: "success" | "warning" | "danger"; active?: boolean; onClick: () => void }) {
+function Metric({ label, title, value, tone, active, onClick }: { label: string; title?: string; value: number; tone?: "success" | "warning" | "danger"; active?: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
+      title={title}
       aria-pressed={active}
       onClick={onClick}
       className={cn(
@@ -725,6 +726,7 @@ function StatusBadge({ status }: { status: string }) {
   const icon = statusIcons[status] ?? <CircleDot className="size-3" />
   return (
     <Badge
+      title={status === "clean_success" ? "Merged with no human interaction" : status === "warning_success" ? "Merged with human touch or PR closed without merge" : status === "failed" ? "No PR was ever opened" : undefined}
       variant={status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline"}
       className={cn(status === "clean_success" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "warning_success" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
     >

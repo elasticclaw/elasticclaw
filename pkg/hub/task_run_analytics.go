@@ -45,6 +45,7 @@ const (
 	taskRunWarningHumanSettingsChange   = "human_settings_or_status_change"
 	taskRunWarningUnknownHuman          = "unknown_human_interaction"
 	taskRunWarningPRReplaced            = "pr_replaced"
+	taskRunWarningPRClosedUnmerged      = "pr_closed_unmerged"
 
 	taskRunFailureDoneWithoutPR      = "done_without_pr"
 	taskRunFailureNoPR               = "no_pr"
@@ -174,7 +175,10 @@ type TaskRunPR struct {
 	State         string
 	Merged        bool
 	MergedByLogin string
-	OccurredAt    time.Time
+	// AgentHeadSHA marks HeadSHA as written by the agent, rather than observed
+	// from a GitHub update made by somebody else.
+	AgentHeadSHA bool
+	OccurredAt   time.Time
 }
 
 func epochMillis(t time.Time) int64 {
@@ -409,14 +413,19 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		mergedAt = at
 		closedAt = at
 	}
+	agentHeadSHA := ""
+	if input.AgentHeadSHA {
+		agentHeadSHA = input.HeadSHA
+	}
 	if _, err := tx.Exec(`
 		INSERT INTO task_run_prs(
-			id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch, base_branch,
+			id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
 			state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tenant_id, run_id, repo, pr_number) DO UPDATE SET
 			pr_url=excluded.pr_url,
 			head_sha=excluded.head_sha,
+			last_agent_head_sha=CASE WHEN excluded.last_agent_head_sha != '' THEN excluded.last_agent_head_sha ELSE task_run_prs.last_agent_head_sha END,
 			head_branch=excluded.head_branch,
 			base_branch=excluded.base_branch,
 			state=CASE WHEN task_run_prs.merged = 1 OR task_run_prs.state = 'closed' THEN task_run_prs.state ELSE excluded.state END,
@@ -427,7 +436,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			merged_by_login=CASE WHEN excluded.merged_by_login != '' THEN excluded.merged_by_login ELSE task_run_prs.merged_by_login END,
 			updated_at=excluded.updated_at`,
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
-		input.HeadSHA, input.HeadBranch, input.BaseBranch, input.State, boolInt(input.Merged),
+		input.HeadSHA, input.HeadBranch, agentHeadSHA, input.BaseBranch, input.State, boolInt(input.Merged),
 		openedAt, closedAt, mergedAt, input.MergedByLogin, at, at,
 		boolInt(authoritativeOpen),
 	); err != nil {
@@ -877,7 +886,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		if warning := normalizeTaskRunWarningType(event.warningType); warning != "" {
 			warnings[warning] = true
 		}
-		if warning := warningTypeForEvent(event); warning != "" {
+		if warning := warningTypeForEvent(event); warning != "" && isHumanTaskRunEvent(event) {
 			humanInteractions++
 			warnings[warning] = true
 		}
@@ -900,9 +909,12 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	definitiveFailure, definitiveFailureAt := definitiveFailure(events)
 	completedAt := taskCompletedAt(events)
 	prePRFailure, prePRFailureAt := prePRFailure(events)
-	status, phase, failureType, finishedAt := computeTaskRunStatus(
-		meta, counts, warnings, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
+	status, phase, failureType, extraWarning, finishedAt := computeTaskRunStatus(
+		meta, counts, humanInteractions, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
 	)
+	if extraWarning != "" {
+		warnings[extraWarning] = true
+	}
 	if finishedAt == 0 && phase == taskRunPhaseTerminal {
 		finishedAt = epochMillis(now())
 	}
@@ -1013,25 +1025,36 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	return err
 }
 
+func isHumanTaskRunEvent(event taskRunEventProjection) bool {
+	if event.actorType == taskRunActorHuman {
+		return true
+	}
+	switch event.eventType {
+	case taskRunEventHumanPRComment, taskRunEventHumanReviewComment, taskRunEventHumanRequestedChanges,
+		taskRunWarningHumanManualCodePush, taskRunWarningHumanTrackerUpdate, taskRunEventHumanDashboardMessage,
+		taskRunEventManualStopBeforeDelivery, taskRunEventManualResume, taskRunEventSettingsChanged, taskRunWarningUnknownHuman:
+		return true
+	}
+	return false
+}
+
 func computeTaskRunStatus(
 	meta taskRunMeta,
 	counts prCountSummary,
-	warnings map[string]bool,
+	humanInteractions int,
 	phaseTimes taskRunPhaseTimeSummary,
 	definitiveFailure string,
 	definitiveFailureAt int64,
 	taskCompletedAt int64,
 	prePRFailure string,
 	prePRFailureAt int64,
-) (status, phase, failureType string, finishedAt int64) {
+) (status, phase, failureType, extraWarning string, finishedAt int64) {
 	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
 	if meta.analyticsEnabled == 0 {
 		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
-		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, meta.updatedAt
-	} else if definitiveFailure != "" {
-		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
+		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.updatedAt
 	} else if meta.requiresPR == 0 && taskCompletedAt != 0 {
-		if len(warnings) > 0 {
+		if humanInteractions > 0 {
 			status = taskRunStatusWarningSuccess
 		} else {
 			status = taskRunStatusCleanSuccess
@@ -1039,7 +1062,7 @@ func computeTaskRunStatus(
 		phase = taskRunPhaseTerminal
 		finishedAt = taskCompletedAt
 	} else if counts.merged > 0 && counts.open == 0 {
-		if len(warnings) > 0 {
+		if humanInteractions > 0 {
 			status = taskRunStatusWarningSuccess
 		} else {
 			status = taskRunStatusCleanSuccess
@@ -1048,17 +1071,17 @@ func computeTaskRunStatus(
 		finishedAt = counts.latestTerminalAt
 	} else if counts.merged > 0 && counts.open > 0 {
 		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
+	} else if counts.open > 0 {
+		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
+	} else if counts.total > 0 {
+		extraWarning = taskRunWarningPRClosedUnmerged
+		status, phase, finishedAt = taskRunStatusWarningSuccess, taskRunPhaseTerminal, counts.latestTerminalAt
+	} else if definitiveFailure != "" {
+		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
 	} else if prePRFailure != "" {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, prePRFailure, prePRFailureAt
-	} else if counts.total > 0 {
-		status = taskRunStatusRunning
-		if counts.open > 0 {
-			phase = taskRunPhaseWaitingForMerge
-		} else {
-			status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailurePRClosedUnmerged, counts.latestTerminalAt
-		}
 	}
-	return status, phase, failureType, finishedAt
+	return status, phase, failureType, extraWarning, finishedAt
 }
 
 func initialTaskRunPhase(meta taskRunMeta, phaseTimes taskRunPhaseTimeSummary) string {
@@ -1537,7 +1560,8 @@ func normalizeTaskRunWarningType(value string) string {
 		taskRunWarningHumanManualStopResume,
 		taskRunWarningHumanSettingsChange,
 		taskRunWarningUnknownHuman,
-		taskRunWarningPRReplaced:
+		taskRunWarningPRReplaced,
+		taskRunWarningPRClosedUnmerged:
 		return value
 	default:
 		return ""
