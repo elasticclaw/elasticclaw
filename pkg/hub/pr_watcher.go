@@ -713,24 +713,34 @@ func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, 
 }
 
 // checkHumanCodePush detects commits pushed to a tracked PR branch by a human.
-// The 'synchronize' webhook path only covers runs whose factory is triggered by
-// pull_request events, so the poller compares the PR's current head SHA against
-// the last agent-authored head SHA recorded in task_run_prs. A head commit
-// linked to a human GitHub account is recorded as a human_manual_code_push
-// event; agent (or unattributable) pushes advance the baseline instead, so the
-// agent's own work never counts as a human interaction.
+// The poller compares the PR's current head SHA (fetched from GitHub) against
+// the last agent-authored head SHA recorded in task_run_prs; the shared
+// detection logic lives in detectHumanCodePush so the 'synchronize' webhook
+// path applies identical rules.
 func (s *Server) checkHumanCodePush(pr clawPR, token string) {
 	_, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID)
 	if err != nil || !ok {
 		return
 	}
+	s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, "", token)
+}
+
+// detectHumanCodePush compares a tracked PR's head SHA against the last
+// agent-authored head SHA in task_run_prs. A head commit linked to a human
+// GitHub account is recorded as a human_manual_code_push event; agent (or
+// unattributable) pushes and base merges advance the baseline instead, so the
+// agent's own work never counts as a human interaction. headSHA may be empty
+// (poller path), in which case the PR's current head is fetched from GitHub.
+// The event key format is shared, so the poller and webhook paths dedupe
+// against each other.
+func (s *Server) detectHumanCodePush(clawID, runID, repo string, prNumber int, prURL, headSHA, token string) {
 	var lastAgentSHA string
 	if err := s.db.QueryRow(`SELECT last_agent_head_sha FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`,
-		runID, pr.repo, pr.prNumber).Scan(&lastAgentSHA); err != nil {
+		runID, repo, prNumber).Scan(&lastAgentSHA); err != nil {
 		return // PR not tracked for analytics
 	}
 
-	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
+	repoToken := s.resolveGitHubTokenForRepo(repo)
 	if repoToken == "" {
 		repoToken = token
 	}
@@ -738,39 +748,48 @@ func (s *Server) checkHumanCodePush(pr clawPR, token string) {
 	if ghBase == "" {
 		ghBase = "https://api.github.com"
 	}
-	prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
-	if err != nil {
-		return
+	if headSHA == "" {
+		prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", repo, prNumber), repoToken)
+		if err != nil {
+			return
+		}
+		headObj, _ := prData["head"].(map[string]interface{})
+		headSHA, _ = headObj["sha"].(string)
 	}
-	headObj, _ := prData["head"].(map[string]interface{})
-	headSHA, _ := headObj["sha"].(string)
 	if headSHA == "" || headSHA == lastAgentSHA {
 		return
 	}
 	if lastAgentSHA == "" {
 		// No agent baseline yet (rows that predate this feature): adopt the
 		// current head as the agent's SHA rather than risk a false positive.
-		s.setTaskRunAgentHeadSHA(runID, pr.repo, pr.prNumber, headSHA)
+		s.setTaskRunAgentHeadSHA(runID, repo, prNumber, headSHA)
 		return
 	}
-	eventKey := fmt.Sprintf("human_manual_code_push:%s#%d:%s", pr.repo, pr.prNumber, headSHA)
+	eventKey := fmt.Sprintf("human_manual_code_push:%s#%d:%s", repo, prNumber, headSHA)
 	var seen int
 	_ = s.db.QueryRow(`SELECT 1 FROM task_run_events WHERE run_id=? AND event_key=?`, runID, eventKey).Scan(&seen)
 	if seen == 1 {
 		return // this head SHA was already recorded (poller or webhook)
 	}
-	commitData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s", pr.repo, headSHA), repoToken)
+	commitData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s", repo, headSHA), repoToken)
 	if err != nil {
 		return
 	}
+	if parents := githubCommitParents(commitData); len(parents) >= 2 && parents[lastAgentSHA] {
+		// Merge commit whose parent is the agent's head: a base merge (e.g.
+		// GitHub's "Update branch" button) brings no human code even though the
+		// clicking human is the commit author. Advance the baseline instead.
+		s.setTaskRunAgentHeadSHA(runID, repo, prNumber, headSHA)
+		return
+	}
 	if login, userType := githubCommitActor(commitData); login != "" && s.isHumanGitHubActor(login, userType) {
-		s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunWarningHumanManualCodePush, eventKey,
-			login, pr.prURL, map[string]any{"repo": pr.repo, "pr_number": pr.prNumber, "head_sha": headSHA})
+		s.recordTaskRunHumanEventForClaw(clawID, taskRunWarningHumanManualCodePush, eventKey,
+			login, prURL, map[string]any{"repo": repo, "pr_number": prNumber, "head_sha": headSHA})
 		return
 	}
 	// Agent's own push (or a commit with no linked GitHub account): advance the
 	// baseline so the next human push is compared against the agent's latest work.
-	s.setTaskRunAgentHeadSHA(runID, pr.repo, pr.prNumber, headSHA)
+	s.setTaskRunAgentHeadSHA(runID, repo, prNumber, headSHA)
 }
 
 // setTaskRunAgentHeadSHA records the given SHA as the agent's latest head for a
@@ -780,6 +799,19 @@ func (s *Server) setTaskRunAgentHeadSHA(runID, repo string, prNumber int, sha st
 		sha, runID, repo, prNumber); err != nil {
 		log.Printf("[pr-watcher] failed to update agent head SHA for run %s %s#%d: %v", runID, repo, prNumber, err)
 	}
+}
+
+// githubCommitParents returns the parent SHAs of a commit as a set.
+func githubCommitParents(commitData map[string]interface{}) map[string]bool {
+	raw, _ := commitData["parents"].([]interface{})
+	parents := make(map[string]bool, len(raw))
+	for _, p := range raw {
+		parent, _ := p.(map[string]interface{})
+		if sha, _ := parent["sha"].(string); sha != "" {
+			parents[sha] = true
+		}
+	}
+	return parents
 }
 
 // githubCommitActor returns the GitHub account linked to a commit, preferring

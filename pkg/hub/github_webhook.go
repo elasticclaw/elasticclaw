@@ -235,10 +235,15 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		// Check if a claw already exists for this PR
 		existingClawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL)
 		if existingClawID != "" {
-			if payload.Action == "synchronize" && s.isHumanGitHubActor(payload.Sender.Login, payload.Sender.Type) {
-				s.recordTaskRunHumanEventForClaw(existingClawID, taskRunWarningHumanManualCodePush,
-					fmt.Sprintf("human_manual_code_push:%s#%d:%s", repoFullName, payload.Number, payload.PullRequest.Head.SHA),
-					payload.Sender.Login, payload.PullRequest.HTMLURL, map[string]any{"repo": repoFullName, "pr_number": payload.Number, "head_sha": payload.PullRequest.Head.SHA})
+			if payload.Action == "synchronize" {
+				// Run the same detection as the poller (SHA comparison against
+				// the agent baseline plus commit attribution) rather than
+				// trusting the webhook sender: "Update branch" base merges and
+				// agent pushes must advance the baseline, not count as human.
+				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
+					s.detectHumanCodePush(existingClawID, runID, repoFullName, payload.Number,
+						payload.PullRequest.HTMLURL, payload.PullRequest.Head.SHA, s.resolveGitHubIssuesTokenForFactory(factory))
+				}
 			}
 			if payload.Action == "closed" {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
@@ -977,6 +982,11 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 		occurredAt := parseRFC3339Timestamp(pr.PullRequest.CreatedAt)
+		// AgentHeadSHA: the triggering PR's head may be human-authored (a
+		// factory reacting to an external PR), but the run only measures human
+		// touch after the agent takes over — so the head at claw creation is
+		// the detection baseline, exactly what empty-baseline adoption in
+		// detectHumanCodePush would otherwise record on the first pass.
 		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: prNumber, URL: prURL, HeadSHA: pr.PullRequest.Head.SHA, HeadBranch: pr.PullRequest.Head.Ref, BaseBranch: pr.PullRequest.Base.Ref, AgentHeadSHA: true, State: taskRunPRStateOpen, OccurredAt: occurredAt}); err != nil {
 			log.Printf("[task-run-analytics] failed to record GitHub PR: %v", err)
 		}
