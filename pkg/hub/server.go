@@ -5479,12 +5479,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-	var filesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	var filesJSON, templateName string
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&filesJSON, &templateName)
 	var files map[string]string
 	_ = json.Unmarshal([]byte(filesJSON), &files)
-	var templateName string
-	_ = s.db.QueryRow(`SELECT COALESCE(template,'') FROM claws WHERE id=?`, clawID).Scan(&templateName)
 
 	// Load github repos config for this claw
 	var githubReposJSON string
