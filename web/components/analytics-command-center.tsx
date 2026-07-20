@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { ChevronRight } from "lucide-react"
 import {
@@ -142,6 +142,8 @@ export function AnalyticsCommandCenter() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [error, setError] = useState<string>()
+  const loadAbortController = useRef<AbortController | null>(null)
+  const loadRequestId = useRef(0)
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.runId === selectedRunId) ?? null,
@@ -163,6 +165,10 @@ export function AnalyticsCommandCenter() {
 
   const load = useCallback(
     async (cursor?: string, append = false) => {
+      loadAbortController.current?.abort()
+      const controller = new AbortController()
+      loadAbortController.current = controller
+      const requestId = ++loadRequestId.current
       try {
         setError(undefined)
         const runFilters = { ...filters, cursor }
@@ -176,17 +182,23 @@ export function AnalyticsCommandCenter() {
           runsData,
           optionsData,
         ] = await Promise.all([
-          fetchTaskRunAnalyticsSummary(filters),
-          fetchAnalyticsCosts(filters, 30, "model"),
+          fetchTaskRunAnalyticsSummary(filters, { signal: controller.signal }),
+          fetchAnalyticsCosts(filters, 30, "model", { signal: controller.signal }),
           // The year heatmap always shows the trailing year, regardless of the
           // selected period; every other widget follows the period in `filters`.
-          fetchAnalyticsCosts({ ...filters, from: undefined, to: undefined }, 366),
-          fetchAnalyticsEffectiveness(filters),
-          fetchGeneralStats(filters),
-          fetchAnalyticsCostDrivers(filters),
-          fetchTaskRuns(runFilters),
-          options ? Promise.resolve(options) : fetchTaskRunFilterOptions(),
+          fetchAnalyticsCosts(
+            { ...filters, from: undefined, to: undefined },
+            366,
+            undefined,
+            { signal: controller.signal }
+          ),
+          fetchAnalyticsEffectiveness(filters, { signal: controller.signal }),
+          fetchGeneralStats(filters, { signal: controller.signal }),
+          fetchAnalyticsCostDrivers(filters, "factory", { signal: controller.signal }),
+          fetchTaskRuns(runFilters, { signal: controller.signal }),
+          options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
+        if (controller.signal.aborted || requestId !== loadRequestId.current) return
 
         setSummary(summaryData)
         setCosts(costsData)
@@ -203,6 +215,8 @@ export function AnalyticsCommandCenter() {
           setDetailError(null)
         }
       } catch (loadError) {
+        if (controller.signal.aborted || (loadError instanceof Error && loadError.name === "AbortError")) return
+        if (requestId !== loadRequestId.current) return
         setError(loadError instanceof Error ? loadError.message : "Unable to load analytics")
       }
     },
@@ -211,6 +225,9 @@ export function AnalyticsCommandCenter() {
 
   useEffect(() => {
     queueMicrotask(() => void load())
+    return () => {
+      loadAbortController.current?.abort()
+    }
   }, [load])
 
   useEffect(() => {
