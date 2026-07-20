@@ -670,39 +670,64 @@ func migrate(db *sql.DB) error {
 }
 
 // backfillTaskRunAnalyticsStatusV2 re-materializes existing summaries once so
-// their status follows the PR-outcome and human-interaction rules.
+// their status follows the PR-outcome and human-interaction rules. Each run is
+// processed in its own transaction and failures are logged and skipped, so a
+// single bad run cannot keep blocking startup; the hub_migrations sentinel is
+// written at the end regardless (re-materialization is idempotent, and skipped
+// runs are corrected the next time an event touches them).
 func backfillTaskRunAnalyticsStatusV2(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
 		return fmt.Errorf("create hub migrations: %w", err)
 	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name='task_run_analytics_status_v2'`).Scan(&applied); err != nil {
+		return fmt.Errorf("check task run analytics status backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id FROM task_runs ORDER BY created_at, id`)
+	if err != nil {
+		return fmt.Errorf("list task runs for status backfill: %w", err)
+	}
+	var runIDs []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			rows.Close()
+			return err
+		}
+		runIDs = append(runIDs, runID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	skipped := 0
+	for _, runID := range runIDs {
+		if err := backfillTaskRunStatus(db, runID); err != nil {
+			skipped++
+			log.Printf("[task-run-analytics] status backfill skipped run %s: %v", runID, err)
+		}
+	}
+	if skipped > 0 {
+		log.Printf("[task-run-analytics] status backfill skipped %d of %d run(s)", skipped, len(runIDs))
+	}
+	if _, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES('task_run_analytics_status_v2', ?) ON CONFLICT(name) DO NOTHING`, now().UnixMilli()); err != nil {
+		return fmt.Errorf("mark task run analytics status backfill: %w", err)
+	}
+	return nil
+}
+
+// backfillTaskRunStatus re-materializes a single run in its own transaction.
+func backfillTaskRunStatus(db *sql.DB, runID string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES('task_run_analytics_status_v2', ?) ON CONFLICT(name) DO NOTHING`, now().UnixMilli())
-	if err != nil {
-		return fmt.Errorf("mark task run analytics status backfill: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected == 0 {
-		return err
-	}
-	rows, err := tx.Query(`SELECT id FROM task_runs ORDER BY created_at, id`)
-	if err != nil {
-		return fmt.Errorf("list task runs for status backfill: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var runID string
-		if err := rows.Scan(&runID); err != nil {
-			return err
-		}
-		if err := materializeTaskRunTx(tx, runID); err != nil {
-			return fmt.Errorf("backfill task run %s: %w", runID, err)
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := materializeTaskRunTx(tx, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
