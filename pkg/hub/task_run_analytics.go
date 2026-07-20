@@ -909,9 +909,12 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	definitiveFailure, definitiveFailureAt := definitiveFailure(events)
 	completedAt := taskCompletedAt(events)
 	prePRFailure, prePRFailureAt := prePRFailure(events)
-	status, phase, failureType, finishedAt := computeTaskRunStatus(
-		meta, counts, humanInteractions, warnings, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
+	status, phase, failureType, extraWarning, finishedAt := computeTaskRunStatus(
+		meta, counts, humanInteractions, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
 	)
+	if extraWarning != "" {
+		warnings[extraWarning] = true
+	}
 	if finishedAt == 0 && phase == taskRunPhaseTerminal {
 		finishedAt = epochMillis(now())
 	}
@@ -1039,18 +1042,17 @@ func computeTaskRunStatus(
 	meta taskRunMeta,
 	counts prCountSummary,
 	humanInteractions int,
-	warnings map[string]bool,
 	phaseTimes taskRunPhaseTimeSummary,
 	definitiveFailure string,
 	definitiveFailureAt int64,
 	taskCompletedAt int64,
 	prePRFailure string,
 	prePRFailureAt int64,
-) (status, phase, failureType string, finishedAt int64) {
+) (status, phase, failureType, extraWarning string, finishedAt int64) {
 	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
 	if meta.analyticsEnabled == 0 {
 		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
-		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, meta.updatedAt
+		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.updatedAt
 	} else if meta.requiresPR == 0 && taskCompletedAt != 0 {
 		if humanInteractions > 0 {
 			status = taskRunStatusWarningSuccess
@@ -1072,14 +1074,14 @@ func computeTaskRunStatus(
 	} else if counts.open > 0 {
 		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
 	} else if counts.total > 0 {
-		warnings[taskRunWarningPRClosedUnmerged] = true
+		extraWarning = taskRunWarningPRClosedUnmerged
 		status, phase, finishedAt = taskRunStatusWarningSuccess, taskRunPhaseTerminal, counts.latestTerminalAt
 	} else if definitiveFailure != "" {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
 	} else if prePRFailure != "" {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, prePRFailure, prePRFailureAt
 	}
-	return status, phase, failureType, finishedAt
+	return status, phase, failureType, extraWarning, finishedAt
 }
 
 func initialTaskRunPhase(meta taskRunMeta, phaseTimes taskRunPhaseTimeSummary) string {
