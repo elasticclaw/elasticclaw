@@ -267,6 +267,9 @@ func (s *Server) pollAllPRs() {
 		isPipelineDriven := hasPipelineCtx && parsePipelineForContext(pipelineCtx) != nil
 		log.Printf("[pr-watcher] claw=%s pipeline=%s pipelineDriven=%v", r.pr.clawID[:8], pipelineCtx.Name(), isPipelineDriven)
 
+		// Detect human pushes before the merge check so a human commit present
+		// at merge time is still recorded before the claw is terminated.
+		s.checkHumanCodePush(r.pr, token)
 		// Check if PR is merged/closed for any non-terminal claw status.
 		if s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
@@ -707,6 +710,90 @@ func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, 
 		"review_id": id,
 	})
 	s.injectHubMessageByID(pr.clawID, formatHumanRequestedChangesMessage(login, pr.prNumber, body, htmlURL))
+}
+
+// checkHumanCodePush detects commits pushed to a tracked PR branch by a human.
+// The 'synchronize' webhook path only covers runs whose factory is triggered by
+// pull_request events, so the poller compares the PR's current head SHA against
+// the last agent-authored head SHA recorded in task_run_prs. A head commit
+// linked to a human GitHub account is recorded as a human_manual_code_push
+// event; agent (or unattributable) pushes advance the baseline instead, so the
+// agent's own work never counts as a human interaction.
+func (s *Server) checkHumanCodePush(pr clawPR, token string) {
+	_, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID)
+	if err != nil || !ok {
+		return
+	}
+	var lastAgentSHA string
+	if err := s.db.QueryRow(`SELECT last_agent_head_sha FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`,
+		runID, pr.repo, pr.prNumber).Scan(&lastAgentSHA); err != nil {
+		return // PR not tracked for analytics
+	}
+
+	repoToken := s.resolveGitHubTokenForRepo(pr.repo)
+	if repoToken == "" {
+		repoToken = token
+	}
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+	prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), repoToken)
+	if err != nil {
+		return
+	}
+	headObj, _ := prData["head"].(map[string]interface{})
+	headSHA, _ := headObj["sha"].(string)
+	if headSHA == "" || headSHA == lastAgentSHA {
+		return
+	}
+	if lastAgentSHA == "" {
+		// No agent baseline yet (rows that predate this feature): adopt the
+		// current head as the agent's SHA rather than risk a false positive.
+		s.setTaskRunAgentHeadSHA(runID, pr.repo, pr.prNumber, headSHA)
+		return
+	}
+	eventKey := fmt.Sprintf("human_manual_code_push:%s#%d:%s", pr.repo, pr.prNumber, headSHA)
+	var seen int
+	_ = s.db.QueryRow(`SELECT 1 FROM task_run_events WHERE run_id=? AND event_key=?`, runID, eventKey).Scan(&seen)
+	if seen == 1 {
+		return // this head SHA was already recorded (poller or webhook)
+	}
+	commitData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s", pr.repo, headSHA), repoToken)
+	if err != nil {
+		return
+	}
+	if login, userType := githubCommitActor(commitData); login != "" && s.isHumanGitHubActor(login, userType) {
+		s.recordTaskRunHumanEventForClaw(pr.clawID, taskRunWarningHumanManualCodePush, eventKey,
+			login, pr.prURL, map[string]any{"repo": pr.repo, "pr_number": pr.prNumber, "head_sha": headSHA})
+		return
+	}
+	// Agent's own push (or a commit with no linked GitHub account): advance the
+	// baseline so the next human push is compared against the agent's latest work.
+	s.setTaskRunAgentHeadSHA(runID, pr.repo, pr.prNumber, headSHA)
+}
+
+// setTaskRunAgentHeadSHA records the given SHA as the agent's latest head for a
+// tracked PR, resetting the baseline used by human code push detection.
+func (s *Server) setTaskRunAgentHeadSHA(runID, repo string, prNumber int, sha string) {
+	if _, err := s.db.Exec(`UPDATE task_run_prs SET last_agent_head_sha=? WHERE run_id=? AND repo=? AND pr_number=?`,
+		sha, runID, repo, prNumber); err != nil {
+		log.Printf("[pr-watcher] failed to update agent head SHA for run %s %s#%d: %v", runID, repo, prNumber, err)
+	}
+}
+
+// githubCommitActor returns the GitHub account linked to a commit, preferring
+// the author over the committer (a web UI edit has the human as author and
+// GitHub's web-flow as committer). Empty when no account is linked.
+func githubCommitActor(commitData map[string]interface{}) (login, userType string) {
+	for _, key := range []string{"author", "committer"} {
+		user, _ := commitData[key].(map[string]interface{})
+		if l, _ := user["login"].(string); l != "" {
+			t, _ := user["type"].(string)
+			return l, t
+		}
+	}
+	return "", ""
 }
 
 func (s *Server) isHumanGitHubActor(login, userType string) bool {
