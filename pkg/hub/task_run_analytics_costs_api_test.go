@@ -106,6 +106,49 @@ func TestTaskRunAnalyticsCostsHandler(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsCostsRunFiltersUseUsageByRun(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	startedAt := now.AddDate(0, 0, -1).UnixMilli()
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "included", AttemptID: "included-attempt", ClawID: "included-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", Repo: "acme/included", Model: "gpt-5", StartedAt: startedAt, FailureType: taskRunFailureTimeout})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "excluded", AttemptID: "excluded-attempt", ClawID: "excluded-claw", TenantID: "test-tenant-id", Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", Repo: "acme/excluded", Model: "gpt-5", StartedAt: startedAt})
+	seedTaskRunAnalyticsRunUsage(t, db, "included", now, 12, 120)
+	seedTaskRunAnalyticsRunUsage(t, db, "excluded", now, 99, 990)
+
+	response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Status: []string{taskRunStatusFailed}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Today.CostUsd != 12 || response.Today.TotalTokens != 120 || response.DailySeries[len(response.DailySeries)-1].RunCount != 1 {
+		t.Fatalf("run-filtered costs and daily run count disagree: %#v", response)
+	}
+	if response.Prior.PeriodCostUsd != 0 {
+		t.Fatalf("prior cost included filtered-out usage: %#v", response.Prior)
+	}
+}
+
+func TestTaskRunAnalyticsCostsToOnlyRangeAndInvalidRange(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	to := now.AddDate(0, 0, -10).Truncate(24 * time.Hour)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", to.AddDate(0, 0, -2), "eng", "gpt-5", 7, 70)
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", ToStartedAt: to.UnixMilli()}, now, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.DailySeries) != 3 || response.DailySeries[0].Date != "2026-07-03" || response.DailySeries[2].Date != "2026-07-05" || response.DailySeries[0].CostUsd != 7 {
+		t.Fatalf("to-only range was not anchored to to: %#v", response.DailySeries)
+	}
+	_, err = s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: now.UnixMilli(), ToStartedAt: now.AddDate(0, 0, -1).UnixMilli()}, now, 30, "")
+	if err != errTaskRunAnalyticsInvalidCostRange {
+		t.Fatalf("invalid range error = %v, want %v", err, errTaskRunAnalyticsInvalidCostRange)
+	}
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs?from="+now.Format(time.RFC3339)+"&to="+now.AddDate(0, 0, -1).Format(time.RFC3339), "test-token")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid range status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, UsageUpdatedAt: 1, IssueTitle: "Fix the thing"})
@@ -130,6 +173,14 @@ func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 func seedTaskRunAnalyticsUsage(t *testing.T, db *sql.DB, tenant string, day time.Time, workspace, model string, cost float64, tokens int64) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO usage_daily(tenant_id, day, workspace_name, factory_name, workflow_name, model, total_tokens, cost_usd, updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, tenant, day.UTC().Format("2006-01-02"), workspace, "factory", "workflow", model, tokens, cost, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedTaskRunAnalyticsRunUsage(t *testing.T, db *sql.DB, runID string, day time.Time, cost float64, tokens int64) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO task_run_usage(id, tenant_id, run_id, session_key, model, committed_total_tokens, committed_cost_usd, usage_day, first_seen_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "usage-"+runID, "test-tenant-id", runID, "session-"+runID, "gpt-5", tokens, cost, day.Format("2006-01-02"), day.UnixMilli(), day.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
