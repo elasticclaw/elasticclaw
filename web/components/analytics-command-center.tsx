@@ -117,10 +117,20 @@ export function AnalyticsCommandCenter() {
       if (value) (nextFilters as Record<string, string>)[filterKey] = value
     }
 
+    // Default to the last 30 days so every widget reads the same period.
+    if (!nextFilters.from && !nextFilters.to) {
+      const to = new Date()
+      const from = new Date(to)
+      from.setDate(to.getDate() - 30)
+      nextFilters.from = from.toISOString()
+      nextFilters.to = to.toISOString()
+    }
+
     return nextFilters
   }, [params, paramsKey])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
+  const [yearCosts, setYearCosts] = useState<CostOverview>()
   const [effect, setEffect] = useState<AnalyticsEffectiveness>()
   const [stats, setStats] = useState<GeneralStats>()
   const [drivers, setDrivers] = useState<AnalyticsCostDriver[]>([])
@@ -156,19 +166,31 @@ export function AnalyticsCommandCenter() {
       try {
         setError(undefined)
         const runFilters = { ...filters, cursor }
-        const [summaryData, costsData, effectData, statsData, driversData, runsData, optionsData] =
-          await Promise.all([
-            fetchTaskRunAnalyticsSummary(filters),
-            fetchAnalyticsCosts(filters, 366, "model"),
-            fetchAnalyticsEffectiveness(filters),
-            fetchGeneralStats(filters),
-            fetchAnalyticsCostDrivers(filters),
-            fetchTaskRuns(runFilters),
-            options ? Promise.resolve(options) : fetchTaskRunFilterOptions(),
-          ])
+        const [
+          summaryData,
+          costsData,
+          yearCostsData,
+          effectData,
+          statsData,
+          driversData,
+          runsData,
+          optionsData,
+        ] = await Promise.all([
+          fetchTaskRunAnalyticsSummary(filters),
+          fetchAnalyticsCosts(filters, 30, "model"),
+          // The year heatmap always shows the trailing year, regardless of the
+          // selected period; every other widget follows the period in `filters`.
+          fetchAnalyticsCosts({ ...filters, from: undefined, to: undefined }, 366),
+          fetchAnalyticsEffectiveness(filters),
+          fetchGeneralStats(filters),
+          fetchAnalyticsCostDrivers(filters),
+          fetchTaskRuns(runFilters),
+          options ? Promise.resolve(options) : fetchTaskRunFilterOptions(),
+        ])
 
         setSummary(summaryData)
         setCosts(costsData)
+        setYearCosts(yearCostsData)
         setEffect(effectData)
         setStats(statsData)
         setDrivers(driversData)
@@ -228,7 +250,7 @@ export function AnalyticsCommandCenter() {
   const totalCost = costs?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0
   const priorCost = costs?.priorPeriodCostUsd ?? costs?.prior?.periodCostUsd
   const costDelta = calculateDelta(totalCost, priorCost)
-  const heatmap = useHeatmap(costs)
+  const heatmap = useHeatmap(yearCosts)
   const maxHeatCost = Math.max(...heatmap.days.map((day) => day.point?.costUsd ?? 0), 0)
   const modelData = useModelData(costs)
 
@@ -385,7 +407,7 @@ function Heatmap({ heatmap, maxCost, onSelectDay }: { heatmap: ReturnType<typeof
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
 function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend />{labels.map((label, index) => <Bar key={label} dataKey={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
 function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend /><Bar dataKey="clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
-function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) { return <div className="space-y-3 pt-3">{Object.entries(effect?.funnel ?? {}).map(([name, value], index) => <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{name.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(Number(value) / (effect?.funnel.started || 1))})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${(Number(value) / (effect?.funnel.started || 1)) * 100}%` }} /></div></div>)}</div> }
+function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) { const stages = Object.entries(effect?.funnel ?? {}); return <div className="space-y-3 pt-3">{stages.map(([name, value], index) => { const previous = index ? Number(stages[index - 1][1]) : 0; return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{name.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? Number(value) / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${(Number(value) / (effect?.funnel.started || 1)) * 100}%` }} /></div></div> })}</div> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers, onSelect }: { drivers: AnalyticsCostDriver[]; onSelect: (factory: string) => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Top cost drivers</h2><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead><TableHead /></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name} className="cursor-pointer" onClick={() => onSelect(driver.name)}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell><TableCell><ChevronRight className="size-4 text-muted-foreground" /></TableCell></TableRow>)}</TableBody></Table></section> }
 function RunsTable({ runs, nextCursor, onSelect, onLoadMore }: { runs: TaskRunSummary[]; nextCursor?: string; onSelect: (runId: string) => void; onLoadMore: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={label === "Status" ? "" : "text-right"}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="text-right">{run.issueId || "—"}</TableCell><TableCell className="text-right">{run.model || "—"}</TableCell><TableCell className="text-right">{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table>{nextCursor && <div className="mt-3 text-center"><Button variant="outline" size="sm" onClick={onLoadMore}>Load more</Button></div>}</section> }
