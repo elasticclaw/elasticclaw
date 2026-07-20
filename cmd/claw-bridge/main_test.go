@@ -738,6 +738,66 @@ chmod +x "$HOME/.local/bin/openclaw"
 	}
 }
 
+func TestInstallSelectedModelPluginInstallsPinnedCodexPluginOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake openclaw executable uses POSIX shell")
+	}
+
+	home := t.TempDir()
+	fakeBin := t.TempDir()
+	invocations := filepath.Join(t.TempDir(), "openclaw-args")
+	installedMarker := filepath.Join(t.TempDir(), "codex-installed")
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
+	t.Setenv("OPENCLAW_INVOCATIONS", invocations)
+	t.Setenv("CODEX_INSTALLED_MARKER", installedMarker)
+
+	fakeOpenClaw := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
+if [ "$*" = "plugins info codex --json" ]; then
+  test -f "$CODEX_INSTALLED_MARKER"
+  exit $?
+fi
+case "$*" in
+  "plugins install "*) touch "$CODEX_INSTALLED_MARKER" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(fakeOpenClaw), 0755); err != nil {
+		t.Fatalf("write fake openclaw: %v", err)
+	}
+
+	if err := installSelectedModelPlugin(); err != nil {
+		t.Fatalf("installSelectedModelPlugin(): %v", err)
+	}
+	if err := installSelectedModelPlugin(); err != nil {
+		t.Fatalf("second installSelectedModelPlugin(): %v", err)
+	}
+
+	logData, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatalf("read OpenClaw invocations: %v", err)
+	}
+	logText := string(logData)
+	wantInstall := "plugins install npm:@openclaw/codex@" + codexPluginVersion
+	if strings.Count(logText, wantInstall) != 1 {
+		t.Fatalf("Codex plugin install count = %d, want 1\n%s", strings.Count(logText, wantInstall), logText)
+	}
+	if strings.Count(logText, "plugins info codex --json") != 3 {
+		t.Fatalf("Codex plugin verification count = %d, want 3\n%s", strings.Count(logText, "plugins info codex --json"), logText)
+	}
+}
+
+func TestInstallSelectedModelPluginSkipsNonCodexProvider(t *testing.T) {
+	t.Setenv("ELASTICCLAW_LLM_PROVIDER", "openai")
+	t.Setenv("PATH", t.TempDir())
+
+	if err := installSelectedModelPlugin(); err != nil {
+		t.Fatalf("installSelectedModelPlugin(): %v", err)
+	}
+}
+
 func TestRestoreCLIModelAuthWritesBundleFiles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

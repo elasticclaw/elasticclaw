@@ -218,7 +218,29 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			key: &types.LLMKeyConfig{
 				Provider: "codex",
 			},
-			expectedModel: "codex/gpt-5.5",
+			expectedModel: defaultCodexModel,
+		},
+		{
+			name: "codex provider normalizes legacy namespaced model",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "anthropic/claude-sonnet-4-6",
+			},
+			key: &types.LLMKeyConfig{
+				Provider:     "codex",
+				DefaultModel: "codex/gpt-5.5",
+			},
+			expectedModel: "openai/gpt-5.5",
+		},
+		{
+			name: "codex provider normalizes bare model",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "anthropic/claude-sonnet-4-6",
+			},
+			key: &types.LLMKeyConfig{
+				Provider:     "codex",
+				DefaultModel: "gpt-5.6-terra",
+			},
+			expectedModel: "openai/gpt-5.6-terra",
 		},
 		{
 			name: "grok provider",

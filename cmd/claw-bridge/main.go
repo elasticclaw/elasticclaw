@@ -2322,6 +2322,7 @@ echo "Git: $(git --version)"
 }
 
 const openClawVersion = cliversion.OpenClawVersion
+const codexPluginVersion = cliversion.CodexPluginVersion
 const codexCLIVersion = cliversion.CodexCLIVersion
 const grokCLIVersion = cliversion.GrokCLIVersion
 
@@ -2570,6 +2571,31 @@ func installSelectedCodingModelCLI() error {
 	default:
 		return nil
 	}
+}
+
+func installSelectedModelPlugin() error {
+	if strings.TrimSpace(os.Getenv("ELASTICCLAW_LLM_PROVIDER")) != "codex" {
+		return nil
+	}
+	if err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Run(); err == nil {
+		log.Printf("[bootstrap] Codex plugin already installed")
+		return nil
+	}
+	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", codexPluginVersion)
+	if strings.TrimSpace(version) == "" {
+		return fmt.Errorf("empty version for @openclaw/codex")
+	}
+	spec := "npm:@openclaw/codex@" + version
+	log.Printf("[bootstrap] installing %s...", spec)
+	out, err := exec.Command("openclaw", "plugins", "install", spec).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").CombinedOutput(); err != nil {
+		return fmt.Errorf("verify Codex plugin install: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[bootstrap] Codex plugin: %s", version)
+	return nil
 }
 
 func syncOpenClawAPIKeyAuth() error {
@@ -3280,6 +3306,9 @@ func runBootstrap() error {
 		}
 	} else {
 		log.Printf("[bootstrap] openclaw.json already exists, skipping onboard")
+	}
+	if err := installSelectedModelPlugin(); err != nil {
+		return fmt.Errorf("installSelectedModelPlugin: %w", err)
 	}
 	if err := syncOpenClawOAuthAuth(); err != nil {
 		return err

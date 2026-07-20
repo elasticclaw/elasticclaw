@@ -1176,10 +1176,11 @@ const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
     { id: "__custom",             name: "Custom OpenAI model" },
   ],
   codex: [
-    { id: "codex/gpt-5.5",      name: "GPT-5.5" },
-    { id: "codex/gpt-5.5-high", name: "GPT-5.5 High" },
-    { id: "codex/gpt-5.4",      name: "GPT-5.4" },
-    { id: "__custom",           name: "Custom Codex model" },
+    { id: "openai/gpt-5.6-sol",   name: "GPT-5.6 Sol" },
+    { id: "openai/gpt-5.6-terra", name: "GPT-5.6 Terra" },
+    { id: "openai/gpt-5.6-luna",  name: "GPT-5.6 Luna" },
+    { id: "openai/gpt-5.5",       name: "GPT-5.5" },
+    { id: "__custom",             name: "Custom Codex model" },
   ],
   grok: [
     { id: "grok/grok-build-0.1", name: "Grok Build" },

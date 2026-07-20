@@ -781,16 +781,12 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 
 	// Use per-key default model if set; normalize to include provider prefix
 	if key.DefaultModel != "" {
-		prefix := key.Provider + "/"
-		if !strings.HasPrefix(key.DefaultModel, prefix) {
-			return prefix + key.DefaultModel
-		}
-		return key.DefaultModel
+		return normalizeModelForProvider(key.Provider, key.DefaultModel)
 	}
 
 	// Check if hub's DefaultModel matches this key's provider
-	if hubDefaultModel != "" && strings.HasPrefix(hubDefaultModel, key.Provider+"/") {
-		return hubDefaultModel
+	if hubDefaultModel != "" && modelMatchesProvider(key.Provider, hubDefaultModel) {
+		return normalizeModelForProvider(key.Provider, hubDefaultModel)
 	}
 
 	// Construct a provider-specific default model
@@ -802,7 +798,7 @@ func resolveDefaultModelForKeyLocal(hubDefaultModel string, key *types.LLMKeyCon
 	case "openai":
 		return "openai/gpt-5.5"
 	case "codex":
-		return "codex/gpt-5.5"
+		return defaultCodexModel
 	case "grok":
 		return "grok/grok-build-0.1"
 	case "groq":
