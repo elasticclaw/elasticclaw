@@ -1192,6 +1192,73 @@ func TestStreamingSegmentsPersistAroundActivityForRefreshTimeline(t *testing.T) 
 	}
 }
 
+func TestClawRegistrationPreservesTemplateWhenBridgeOmitsIt(t *testing.T) {
+	ready := true
+	clawID := "claw-empty-template-registration"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "AMB-6", "adversarylabs", "starting",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatalf("dial claw ws: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
+	if err := wsjson.Write(ctx, conn, types.WSMessage{
+		Type: "register",
+		Payload: types.RegisterPayload{
+			ClawID:       clawID,
+			Name:         "AMB-6",
+			Template:     "",
+			Token:        "claw-token",
+			GatewayReady: &ready,
+		},
+	}); err != nil {
+		t.Fatalf("register claw: %v", err)
+	}
+	var registered types.WSMessage
+	if err := wsjson.Read(ctx, conn, &registered); err != nil {
+		t.Fatalf("read registration ack: %v", err)
+	}
+
+	var templateName string
+	if err := db.QueryRow(`SELECT template FROM claws WHERE id=?`, clawID).Scan(&templateName); err != nil {
+		t.Fatal(err)
+	}
+	if templateName != "adversarylabs" {
+		t.Fatalf("template = %q, want adversarylabs", templateName)
+	}
+}
+
+func TestClawWorkspaceNameFallsBackToTags(t *testing.T) {
+	tests := []struct {
+		name         string
+		templateName string
+		tagsJSON     string
+		want         string
+	}{
+		{name: "database value", templateName: "stored-workspace", tagsJSON: `["workspace:tagged-workspace"]`, want: "stored-workspace"},
+		{name: "workflow workspace tags", tagsJSON: `["template:legacy-workspace","workspace:adversarylabs","workflow:linear-todo"]`, want: "adversarylabs"},
+		{name: "unpaired workspace tag", tagsJSON: `["workspace:adversarylabs","linear"]`, want: ""},
+		{name: "invalid tags", tagsJSON: `{`, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clawWorkspaceName(test.templateName, test.tagsJSON); got != test.want {
+				t.Fatalf("clawWorkspaceName(%q, %q) = %q, want %q", test.templateName, test.tagsJSON, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 	ready := true
 	clawID := "claw-ghost-final-message"

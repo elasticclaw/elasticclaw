@@ -1137,6 +1137,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	for k, v := range req.Env {
 		env[k] = v
 	}
+	// Workspace identity is hub-managed and must not be overridden by request env.
+	env["ELASTICCLAW_TEMPLATE"] = req.TemplateName
 	for envName, secretRef := range req.SecretRefs {
 		if val, ok := hubSecrets[secretRef]; ok {
 			env[envName] = val
@@ -2105,7 +2107,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		currentStatus = desiredStatus
 		_ = s.db.QueryRow(
 			`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET name=excluded.name, template=excluded.template,
+			 ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+			 template=COALESCE(NULLIF(excluded.template,''), claws.template),
 			 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
 			 last_seen=excluded.last_seen
 			 RETURNING status`,
@@ -3626,7 +3629,11 @@ gh auth status`
 	// workspace, template files, GitHub setup, and bootstrap_ok gate are ready.
 	// The bridge (and therefore the agent) must run inside the workspace
 	// directory so that repo-relative paths resolve correctly.
-	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, clawName); err != nil {
+	var templateName string
+	if err := s.db.QueryRow(`SELECT COALESCE(template,'') FROM claws WHERE id=?`, clawID).Scan(&templateName); err != nil {
+		return fmt.Errorf("load claw template: %w", err)
+	}
+	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, clawName, templateName); err != nil {
 		return err
 	}
 
@@ -3664,7 +3671,7 @@ func recordE2EProviderID(label, envName, id string) {
 	}
 }
 
-func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName string) error {
+func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName, templateName string) error {
 	prepCmd := daytonaPrepareBridgeCommand()
 	result, err := p.ExecWithTimeout(ctx, instanceID, []string{prepCmd}, 15*time.Second)
 	if err != nil {
@@ -3682,7 +3689,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	if err := p.EnsureSession(ctx, instanceID, sessionID); err != nil {
 		return fmt.Errorf("start claw-bridge session: %w", err)
 	}
-	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName))
+	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName, templateName))
 	if err != nil {
 		return fmt.Errorf("start claw-bridge async: %w", err)
 	}
@@ -3858,7 +3865,7 @@ test -x /usr/local/bin/claw-bridge || { echo "claw-bridge installed at /usr/loca
 rm -f "$PIDFILE"`
 }
 
-func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName string) string {
+func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName, templateName string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
 cd /home/daytona/.openclaw/workspace
@@ -3873,7 +3880,7 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
   exit 0
 fi
 rm -f "$PIDFILE"
-ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s \
+ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s ELASTICCLAW_TEMPLATE=%s \
 sh -c '
 PIDFILE="$1"
 LOG="$2"
@@ -3916,6 +3923,7 @@ done
 		shellQuote(clawID),
 		shellQuote(clawToken),
 		shellQuote(clawName),
+		shellQuote(templateName),
 	)
 }
 
@@ -4375,10 +4383,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -4416,6 +4424,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		ClawID:          clawID,
 		ClawName:        clawName,
 		ClawToken:       clawToken,
+		TemplateName:    templateName,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
@@ -4490,12 +4499,12 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	// Load claw configuration from DB
-	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
 	var nixEnabled, dockerEnabled int
 	if err := s.db.QueryRow(
-		`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
+		`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
+	).Scan(&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
 
@@ -4527,6 +4536,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
 		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_TEMPLATE":           templateName,
 		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
 		"ELASTICCLAW_BOOTSTRAP":          "1",
 		"ELASTICCLAW_WAIT_FOR_WORKSPACE": "1",
@@ -4732,12 +4742,12 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		return fmt.Errorf("lambda microvms init: %w", err)
 	}
 
-	var clawName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName string
 	var nixEnabled, dockerEnabled int
 	if err := s.db.QueryRow(
-		`SELECT COALESCE(name,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
+		`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&clawName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
+	).Scan(&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
 
@@ -4764,6 +4774,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
 		"ELASTICCLAW_CLAW_NAME":          clawName,
+		"ELASTICCLAW_TEMPLATE":           templateName,
 		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
 		"ELASTICCLAW_BOOTSTRAP":          "1",
 		"ELASTICCLAW_WAIT_FOR_WORKSPACE": "1",
@@ -5468,8 +5479,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-	var filesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	var filesJSON, templateName string
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
+		clawID,
+	).Scan(&filesJSON, &templateName)
 	var files map[string]string
 	_ = json.Unmarshal([]byte(filesJSON), &files)
 
@@ -5565,6 +5579,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		ClawID:          clawID,
 		ClawName:        clawName,
 		ClawToken:       clawToken,
+		TemplateName:    templateName,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
@@ -6711,14 +6726,16 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 
 	var workspaceName string
 	var reposJSON string
+	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT COALESCE(template,''), github_repos FROM claws WHERE id = ?`,
+		`SELECT COALESCE(template,''), github_repos, COALESCE(tags,'[]') FROM claws WHERE id = ?`,
 		clawID,
-	).Scan(&workspaceName, &reposJSON)
+	).Scan(&workspaceName, &reposJSON, &tagsJSON)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
 		return
 	}
+	workspaceName = clawWorkspaceName(workspaceName, tagsJSON)
 
 	var repos []RepoAccess
 	if reposJSON != "" && reposJSON != "[]" {
@@ -6802,6 +6819,20 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("no github app found with installation for repos %v (claw %s)", repos, clawID[:8])
 	http.Error(w, "no github installation found for the requested repos", http.StatusNotFound)
+}
+
+func clawWorkspaceName(templateName, tagsJSON string) string {
+	if templateName = strings.TrimSpace(templateName); templateName != "" {
+		return templateName
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+		return ""
+	}
+	if workspaceName, workflowName := workflowTags(tags); workspaceName != "" && workflowName != "" {
+		return workspaceName
+	}
+	return ""
 }
 
 func inaccessibleGitHubReposMessage(repos []string) string {
