@@ -38,7 +38,7 @@ const costChartConfig = {
   costUsd: { label: "Cost", color: "var(--chart-1)" },
 } satisfies ChartConfig
 
-type DetailState = {
+export type DetailState = {
   attempts: TaskRunAttempt[]
   events: TaskRunEvent[]
   prs: TaskRunPR[]
@@ -52,7 +52,7 @@ const anyValue = "__any__"
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_DISPLAYED_EVENTS = 12
 
-const urlFilterKeys = [
+export const urlFilterKeys = [
   "status",
   "factory",
   "workflow",
@@ -573,7 +573,7 @@ function ConfidenceBadge({ confidence }: { confidence: "high" | "medium" | "low"
   )
 }
 
-function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
+export function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
   const selectValues = value && !(values ?? []).includes(value)
     ? [value, ...(values ?? [])]
     : (values ?? [])
@@ -596,7 +596,7 @@ function FilterSelect({ label, value, values, onChange }: { label: string; value
   )
 }
 
-function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
+export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
   if (!run) return null
   return (
     <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[380px] shrink-0 flex-col border-l border-border bg-card shadow-xl xl:static xl:shadow-none">
@@ -718,7 +718,7 @@ function DetailItem({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string }) {
   const statusIcons: Record<string, ReactNode> = {
     clean_success: <CheckCircle2 className="size-3" />,
     failed: <XCircle className="size-3" />,
