@@ -21,6 +21,7 @@ type BootstrapParams struct {
 	// OpenClaw config
 	DefaultModel    string
 	GatewayPassword string
+	LLMProvider     string
 
 	// claw-bridge binary source (HTTPS URL or OCI ref)
 	BridgeURL string
@@ -68,6 +69,13 @@ func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types
 	return nil
 }
 
+func resolveActiveProvider(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+	if key := resolveActiveKey(keys, selectedKeyName); key != nil {
+		return key.Provider
+	}
+	return ""
+}
+
 // buildOpenClawProviderConfig returns a python snippet that patches
 // ~/.openclaw/openclaw.json with the agent default, gateway settings, and any
 // auth-profile compatibility writes needed after openclaw onboard.
@@ -76,9 +84,19 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
 	grokOAuth := activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" && activeKey.APIKey == ""
+	codexSelected := activeKey != nil && activeKey.Provider == "codex"
+	openAISelected := activeKey != nil && activeKey.Provider == "openai"
 	grokOAuthLiteral := "False"
 	if grokOAuth {
 		grokOAuthLiteral = "True"
+	}
+	codexSelectedLiteral := "False"
+	if codexSelected {
+		codexSelectedLiteral = "True"
+	}
+	openAISelectedLiteral := "False"
+	if openAISelected {
+		openAISelectedLiteral = "True"
 	}
 
 	anthropicEnvVar := ""
@@ -133,6 +151,8 @@ except Exception:
 model = os.environ.get('OPENCLAW_DEFAULT_MODEL', 'anthropic/claude-sonnet-4-6')
 if %s and model.startswith('grok/'):
     model = 'xai/' + model.split('/', 1)[1]
+if %s and model.startswith('codex/'):
+    model = 'openai/' + model.split('/', 1)[1]
 agent_defaults = config.setdefault('agents', {}).setdefault('defaults', {})
 agent_defaults['model'] = model
 agent_models = agent_defaults.get('models')
@@ -140,6 +160,26 @@ if isinstance(agent_models, dict):
     for key in list(agent_models.keys()):
         if 'kimi-k2p5' in key:
             agent_models.pop(key, None)
+if %s:
+    agent_defaults['thinkingDefault'] = 'medium'
+    if not isinstance(agent_models, dict):
+        agent_models = {}
+        agent_defaults['models'] = agent_models
+    model_config = agent_models.setdefault(model, {})
+    if not isinstance(model_config, dict):
+        model_config = {}
+        agent_models[model] = model_config
+    model_config['agentRuntime'] = {'id': 'codex'}
+    config.setdefault('plugins', {}).setdefault('entries', {}).setdefault('codex', {})['enabled'] = True
+if %s:
+    if not isinstance(agent_models, dict):
+        agent_models = {}
+        agent_defaults['models'] = agent_models
+    model_config = agent_models.setdefault(model, {})
+    if not isinstance(model_config, dict):
+        model_config = {}
+        agent_models[model] = model_config
+    model_config['agentRuntime'] = {'id': 'openclaw'}
 # OpenClaw rejects the legacy top-level models provider catalog shape we used
 # to write. Onboard handles provider auth; keep only agent default.
 models = config.get('models')
@@ -194,7 +234,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, grokOAuthLiteral, anthropicPatch)
+PYEOF`, grokOAuthLiteral, codexSelectedLiteral, codexSelectedLiteral, openAISelectedLiteral, anthropicPatch)
 }
 
 // buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists
@@ -218,7 +258,13 @@ fi`, envVar, envVar)
 // runtime, and its broad `doctor --fix` migration also changes unrelated config.
 func buildOpenClawOAuthAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	activeKey := resolveActiveKey(keys, selectedKeyName)
-	if activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "" || activeKey.APIKey != "" {
+	if activeKey == nil || activeKey.AuthProfile == "" || activeKey.APIKey != "" {
+		return ""
+	}
+	if activeKey.Provider == "codex" {
+		return buildOpenClawCodexOAuthAuthSyncShell()
+	}
+	if activeKey.Provider != "grok" {
 		return ""
 	}
 	return `set -euo pipefail
@@ -301,6 +347,41 @@ process.stdin.on("end", () => {
 '`
 }
 
+// buildOpenClawCodexOAuthAuthSyncShell verifies that OpenClaw discovers the
+// restored Codex CLI credential as its canonical OpenAI auth profile. The
+// current OpenClaw runtime reads openai:default from ~/.codex/auth.json, so this
+// deliberately uses the supported CLI path instead of writing the SQLite store
+// directly.
+func buildOpenClawCodexOAuthAuthSyncShell() string {
+	return `set -euo pipefail
+node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const authPath = path.join(process.env.HOME, '.codex', 'auth.json');
+const auth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+const tokens = auth && typeof auth === 'object' ? auth.tokens : null;
+if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token ||
+    typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) {
+  throw new Error('restored Codex OAuth credential is missing access or refresh token');
+}
+NODE
+openclaw models auth list --provider openai --json | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const result = JSON.parse(input);
+  if (!Array.isArray(result.profiles) || !result.profiles.some((profile) =>
+    profile.id === "openai:default" && profile.type === "oauth"
+  )) {
+    throw new Error("OpenClaw did not discover the restored Codex OAuth profile");
+  }
+});
+'
+openclaw config set 'auth.profiles["openai:default"]' '{"provider":"openai","mode":"oauth"}' --strict-json >/dev/null`
+}
+
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads
 // claw-bridge and execs it with --bootstrap. All VM setup logic now lives inside
 // claw-bridge itself (runBootstrap in cmd/claw-bridge/main.go).
@@ -355,6 +436,7 @@ export ELASTICCLAW_CLAW_NAME=%s
 export ELASTICCLAW_GATEWAY_PASSWORD=%s
 export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
 export OPENCLAW_DEFAULT_MODEL=%s
+export ELASTICCLAW_LLM_PROVIDER=%s
 export ELASTICCLAW_NIX=%s
 export ELASTICCLAW_DOCKER=%s
 %s
@@ -487,7 +569,7 @@ echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.GatewayPassword),
-		shellQuote(p.DefaultModel), shellQuote(nixFlag), shellQuote(dockerFlag),
+		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
 	)
@@ -520,7 +602,10 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 	case "deepseek":
 		return fmt.Sprintf(`--auth-choice deepseek-api-key --deepseek-api-key "${%s:-}"`, envVar)
 	case "codex":
-		return fmt.Sprintf(`--auth-choice codex-api-key --codex-api-key "${%s:-}"`, envVar)
+		if active.AuthProfile != "" && active.APIKey == "" {
+			return `--auth-choice skip`
+		}
+		return fmt.Sprintf(`--auth-choice openai-api-key --openai-api-key "${%s:-}"`, envVar)
 	case "grok":
 		if active.AuthProfile != "" && active.APIKey == "" {
 			return `--auth-choice skip`

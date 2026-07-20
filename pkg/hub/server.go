@@ -3293,6 +3293,11 @@ docker --version`); err != nil {
 	} else {
 		log.Printf("[daytona] onboard openclaw done")
 	}
+	if installCmd := daytonaInstallModelPluginCommand(activeKeyProviderDaytona); installCmd != "" {
+		if err := exec("install selected model plugin", 3*time.Minute, installCmd); err != nil {
+			return fmt.Errorf("install selected model plugin: %w", err)
+		}
+	}
 	if oauthAuthSyncDaytona != "" {
 		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
 		if err := exec("sync openclaw OAuth auth", 30*time.Second, syncCmd); err != nil {
@@ -3776,6 +3781,23 @@ export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g %s --prefix "$PREFIX" --ignore-scripts
 hash -r
 %s --version 2>&1 || true`, shellQuote(packageSpec), binary)
+}
+
+func daytonaInstallModelPluginCommand(provider string) string {
+	if provider != "codex" {
+		return ""
+	}
+	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion)
+	spec := "npm:@openclaw/codex@" + version
+	return fmt.Sprintf(`export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+if openclaw plugins info codex --json >/dev/null 2>&1; then
+  echo "Codex plugin already installed"
+else
+  openclaw plugins install %s
+fi
+openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
 }
 
 func daytonaOpenClawInstallStatusCommand(version string) string {
@@ -4394,6 +4416,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		ClawToken:       clawToken,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
+		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
@@ -4508,6 +4531,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
 		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
 		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
+		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
@@ -4744,6 +4768,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_GATEWAY_PASSWORD":   gatewayPassword,
 		"OPENCLAW_GATEWAY_PASSWORD":      gatewayPassword,
 		"OPENCLAW_DEFAULT_MODEL":         defaultModel,
+		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
 		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
@@ -5512,6 +5537,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		ClawToken:       clawToken,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
+		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
 		Nix:             nixEnabled != 0,
@@ -5819,16 +5845,12 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 
 	// Use per-key default model if set; normalize to include provider prefix
 	if key.DefaultModel != "" {
-		prefix := key.Provider + "/"
-		if !strings.HasPrefix(key.DefaultModel, prefix) {
-			return prefix + key.DefaultModel
-		}
-		return key.DefaultModel
+		return normalizeModelForProvider(key.Provider, key.DefaultModel)
 	}
 
 	// Check if hub's DefaultModel matches this key's provider
-	if hubCfg.DefaultModel != "" && strings.HasPrefix(hubCfg.DefaultModel, key.Provider+"/") {
-		return hubCfg.DefaultModel
+	if hubCfg.DefaultModel != "" && modelMatchesProvider(key.Provider, hubCfg.DefaultModel) {
+		return normalizeModelForProvider(key.Provider, hubCfg.DefaultModel)
 	}
 
 	// Construct a provider-specific default model
@@ -5838,7 +5860,7 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 	case "openai":
 		return "openai/gpt-5.5"
 	case "codex":
-		return "codex/gpt-5.5"
+		return defaultCodexModel
 	case "grok":
 		return "grok/grok-build-0.1"
 	case "fireworks":

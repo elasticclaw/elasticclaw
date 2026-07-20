@@ -408,13 +408,10 @@ func isFailureSummaryProvider(provider string) bool {
 
 func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string {
 	if key.DefaultModel != "" {
-		if strings.HasPrefix(key.DefaultModel, key.Provider+"/") {
-			return key.DefaultModel
-		}
-		return key.Provider + "/" + key.DefaultModel
+		return normalizeModelForProvider(key.Provider, key.DefaultModel)
 	}
-	if defaultModel != "" && strings.HasPrefix(defaultModel, key.Provider+"/") {
-		return defaultModel
+	if defaultModel != "" && modelMatchesProvider(key.Provider, defaultModel) {
+		return normalizeModelForProvider(key.Provider, defaultModel)
 	}
 	switch key.Provider {
 	case "anthropic":
@@ -422,7 +419,7 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 	case "openai":
 		return "openai/gpt-5.4-mini"
 	case "codex":
-		return "codex/gpt-5.5"
+		return defaultCodexModel
 	case "grok":
 		return "grok/grok-build-0.1"
 	case "fireworks":

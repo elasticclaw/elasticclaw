@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -118,6 +119,26 @@ func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
 	assertContains(t, status, "openclaw-install-status=failed", "status reports failed install")
 	assertContains(t, status, "tail -n 120", "status includes install diagnostics")
 	assertContains(t, status, "openclaw@2026.7.1-2", "status checks the pinned install process")
+}
+
+func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
+	cmd := daytonaInstallModelPluginCommand("codex")
+
+	assertContains(t, cmd, "plugins info codex --json", "checks for an existing Codex plugin")
+	assertContains(t, cmd, "npm:@openclaw/codex@"+cliversion.CodexPluginVersion, "pins the Codex plugin version")
+	assertContains(t, cmd, "plugins install", "installs the missing Codex plugin")
+	if got := daytonaInstallModelPluginCommand("openai"); got != "" {
+		t.Fatalf("OpenAI plugin install command = %q, want empty", got)
+	}
+}
+
+func TestBootstrapScriptExportsSelectedLLMProvider(t *testing.T) {
+	p := baseParams()
+	p.LLMProvider = "codex"
+
+	script := GenerateReplicatedBootstrapScript(p)
+
+	assertContains(t, script, "export ELASTICCLAW_LLM_PROVIDER='codex'", "exports the selected provider for model plugin setup")
 }
 
 func TestBootstrapScript_ConnectorDownloadRetriesWithUserFacingLabel(t *testing.T) {
@@ -345,8 +366,8 @@ func TestBuildOnboardFlags_OpenAICompatibleProviders(t *testing.T) {
 			name:       "codex",
 			provider:   "codex",
 			envVar:     "CODEX_API_KEY",
-			authChoice: "codex-api-key",
-			flagName:   "--codex-api-key",
+			authChoice: "openai-api-key",
+			flagName:   "--openai-api-key",
 		},
 		{
 			name:       "grok",
@@ -388,6 +409,18 @@ func TestBuildOnboardFlagsGrokOAuthSkipsAPIKeyOnboarding(t *testing.T) {
 	}
 
 	flags := buildOnboardFlags(keys, "grok-main", "grok/grok-build-0.1")
+
+	if flags != "--auth-choice skip" {
+		t.Fatalf("flags = %q, want OAuth bootstrap to skip API-key onboarding", flags)
+	}
+}
+
+func TestBuildOnboardFlagsCodexOAuthSkipsAPIKeyOnboarding(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "codex-main", Provider: "codex", AuthProfile: "codex-oauth", Default: true},
+	}
+
+	flags := buildOnboardFlags(keys, "codex-main", defaultCodexModel)
 
 	if flags != "--auth-choice skip" {
 		t.Fatalf("flags = %q, want OAuth bootstrap to skip API-key onboarding", flags)
@@ -557,9 +590,94 @@ db.close();
 	assertContains(t, string(invalidOut), "missing a valid expires_at timestamp", "fails closed on invalid OAuth expiry")
 }
 
-func TestBuildOpenClawOAuthAuthSyncShellSkipsNonOAuthGrok(t *testing.T) {
+func TestBuildOpenClawOAuthAuthSyncShellDiscoversCodexOAuth(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+
+	shell := buildOpenClawOAuthAuthSyncShell(types.LLMKeysList{
+		{Name: "codex-main", Provider: "codex", AuthProfile: "codex-oauth", Default: true},
+	}, "codex-main")
+	assertContains(t, shell, "models auth list --provider openai --json", "discovers Codex OAuth through OpenClaw")
+	assertContains(t, shell, `auth.profiles["openai:default"]`, "sets canonical OpenAI profile metadata")
+	assertNotContains(t, shell, "auth_profile_store", "does not manipulate the OpenClaw auth database directly")
+
+	home := t.TempDir()
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0700); err != nil {
+		t.Fatalf("create Codex auth dir: %v", err)
+	}
+	codexAuth := `{"auth_mode":"chatgpt","tokens":{"access_token":"access-token","refresh_token":"refresh-token"}}`
+	if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(codexAuth), 0600); err != nil {
+		t.Fatalf("write Codex auth: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	fakeOpenClaw := filepath.Join(fakeBin, "openclaw")
+	invocationsPath := filepath.Join(home, "openclaw-invocations")
+	fakeOpenClawScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
+if [ "$*" = "models auth list --provider openai --json" ]; then
+  printf '%s\n' '{"profiles":[{"id":"openai:default","type":"oauth"}]}'
+fi
+`
+	if err := os.WriteFile(fakeOpenClaw, []byte(fakeOpenClawScript), 0755); err != nil {
+		t.Fatalf("write fake openclaw: %v", err)
+	}
+	cmd := exec.Command("bash", "-c", shell)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"OPENCLAW_INVOCATIONS="+invocationsPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run Codex OAuth auth sync: %v\n%s", err, out)
+	}
+	invocations, err := os.ReadFile(invocationsPath)
+	if err != nil {
+		t.Fatalf("read fake OpenClaw invocations: %v", err)
+	}
+	invocationLog := string(invocations)
+	assertContains(t, invocationLog, "models auth list --provider openai --json", "verifies the discovered profile")
+	assertContains(t, invocationLog, `config set auth.profiles["openai:default"] {"provider":"openai","mode":"oauth"} --strict-json`, "configures profile metadata")
+}
+
+func TestBuildOpenClawOAuthAuthSyncShellRejectsIncompleteCodexOAuth(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+
+	home := t.TempDir()
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0700); err != nil {
+		t.Fatalf("create Codex auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(`{"tokens":{"access_token":"access-token"}}`), 0600); err != nil {
+		t.Fatalf("write Codex auth: %v", err)
+	}
+
+	shell := buildOpenClawOAuthAuthSyncShell(types.LLMKeysList{
+		{Name: "codex-main", Provider: "codex", AuthProfile: "codex-oauth", Default: true},
+	}, "codex-main")
+	cmd := exec.Command("bash", "-c", shell)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected incomplete Codex OAuth credential to fail, output: %s", out)
+	}
+	assertContains(t, string(out), "missing access or refresh token", "reports incomplete restored credential")
+}
+
+func TestBuildOpenClawOAuthAuthSyncShellSkipsNonOAuthKeys(t *testing.T) {
 	tests := []types.LLMKeysList{
 		{{Name: "grok-api", Provider: "grok", APIKey: "xai-test", Default: true}},
+		{{Name: "codex-api", Provider: "codex", APIKey: "sk-test", Default: true}},
 		{{Name: "anthropic", Provider: "anthropic", APIKey: "sk-ant-test", Default: true}},
 	}
 	for _, keys := range tests {
@@ -787,6 +905,98 @@ func TestBuildOpenClawProviderConfig_UsesNativeXAIForGrokOAuth(t *testing.T) {
 				t.Fatalf("OAuth config retained legacy Grok API-key provider: %#v", providers)
 			}
 		}
+	}
+}
+
+func TestBuildOpenClawProviderConfig_UsesCodexRuntimeAndMediumThinking(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	keys := []*types.LLMKeyConfig{
+		{Name: "codex-main", Provider: "codex", AuthProfile: "codex-oauth", Default: true},
+	}
+	snippet := buildOpenClawProviderConfig(keys, "codex-main")
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OPENCLAW_DEFAULT_MODEL=codex/gpt-5.6-sol",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, out)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	agents := config["agents"].(map[string]any)
+	defaults := agents["defaults"].(map[string]any)
+	if defaults["model"] != defaultCodexModel {
+		t.Fatalf("default model = %#v, want %q", defaults["model"], defaultCodexModel)
+	}
+	if defaults["thinkingDefault"] != "medium" {
+		t.Fatalf("thinking default = %#v, want medium", defaults["thinkingDefault"])
+	}
+	models := defaults["models"].(map[string]any)
+	modelConfig := models[defaultCodexModel].(map[string]any)
+	runtime := modelConfig["agentRuntime"].(map[string]any)
+	if runtime["id"] != "codex" {
+		t.Fatalf("Codex runtime = %#v, want codex", runtime["id"])
+	}
+	plugins := config["plugins"].(map[string]any)
+	entries := plugins["entries"].(map[string]any)
+	codexPlugin := entries["codex"].(map[string]any)
+	if codexPlugin["enabled"] != true {
+		t.Fatalf("Codex plugin enabled = %#v, want true", codexPlugin["enabled"])
+	}
+}
+
+func TestBuildOpenClawProviderConfig_KeepsOpenAIAPIKeysOnOpenClawRuntime(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	keys := []*types.LLMKeyConfig{
+		{Name: "openai-main", Provider: "openai", APIKey: "sk-test", Default: true},
+	}
+	snippet := buildOpenClawProviderConfig(keys, "openai-main")
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OPENCLAW_DEFAULT_MODEL=openai/gpt-5.5",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, out)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	agents := config["agents"].(map[string]any)
+	defaults := agents["defaults"].(map[string]any)
+	models := defaults["models"].(map[string]any)
+	modelConfig := models["openai/gpt-5.5"].(map[string]any)
+	runtime := modelConfig["agentRuntime"].(map[string]any)
+	if runtime["id"] != "openclaw" {
+		t.Fatalf("OpenAI runtime = %#v, want openclaw", runtime["id"])
 	}
 }
 
