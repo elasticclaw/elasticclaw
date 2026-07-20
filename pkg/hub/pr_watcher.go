@@ -267,10 +267,9 @@ func (s *Server) pollAllPRs() {
 		isPipelineDriven := hasPipelineCtx && parsePipelineForContext(pipelineCtx) != nil
 		log.Printf("[pr-watcher] claw=%s pipeline=%s pipelineDriven=%v", r.pr.clawID[:8], pipelineCtx.Name(), isPipelineDriven)
 
-		// Detect human pushes before the merge check so a human commit present
-		// at merge time is still recorded before the claw is terminated.
-		s.checkHumanCodePush(r.pr, token)
 		// Check if PR is merged/closed for any non-terminal claw status.
+		// checkPRMerged also runs human code push detection off the same PR
+		// fetch, before any termination handling.
 		if s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
@@ -712,27 +711,13 @@ func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, 
 	s.injectHubMessageByID(pr.clawID, formatHumanRequestedChangesMessage(login, pr.prNumber, body, htmlURL))
 }
 
-// checkHumanCodePush detects commits pushed to a tracked PR branch by a human.
-// The poller compares the PR's current head SHA (fetched from GitHub) against
-// the last agent-authored head SHA recorded in task_run_prs; the shared
-// detection logic lives in detectHumanCodePush so the 'synchronize' webhook
-// path applies identical rules.
-func (s *Server) checkHumanCodePush(pr clawPR, token string) {
-	_, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID)
-	if err != nil || !ok {
-		return
-	}
-	s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, "", token)
-}
-
 // detectHumanCodePush compares a tracked PR's head SHA against the last
 // agent-authored head SHA in task_run_prs. A head commit linked to a human
 // GitHub account is recorded as a human_manual_code_push event; agent (or
 // unattributable) pushes and base merges advance the baseline instead, so the
-// agent's own work never counts as a human interaction. headSHA may be empty
-// (poller path), in which case the PR's current head is fetched from GitHub.
-// The event key format is shared, so the poller and webhook paths dedupe
-// against each other.
+// agent's own work never counts as a human interaction. headSHA may be empty,
+// in which case the PR's current head is fetched from GitHub. The event key
+// format is shared, so the poller and webhook paths dedupe against each other.
 func (s *Server) detectHumanCodePush(clawID, runID, repo string, prNumber int, prURL, headSHA, token string) {
 	var lastAgentSHA string
 	if err := s.db.QueryRow(`SELECT last_agent_head_sha FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`,
@@ -1223,6 +1208,14 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		return false
 	}
 	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
+	// Detect human pushes off this same PR fetch, before any merge handling,
+	// so a human commit present at merge time is still recorded before the
+	// claw is terminated.
+	headObj, _ := data["head"].(map[string]interface{})
+	headSHA, _ := headObj["sha"].(string)
+	if _, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID); err == nil && ok {
+		s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, headSHA, token)
+	}
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)

@@ -173,7 +173,7 @@ func TestGitHubWebhookAndPollerDedupHumanPush(t *testing.T) {
 
 	s.processGitHubPREvent(synchronizePayload("human-sha-2", "alice", "User"))
 	// The poller sees the same head SHA afterwards and must not double-count.
-	s.checkHumanCodePush(clawPR{
+	s.checkPRMerged(clawPR{
 		clawID:   "claw-wh-dedup",
 		repo:     "elastic/claw",
 		prNumber: 21,

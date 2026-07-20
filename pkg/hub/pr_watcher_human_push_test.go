@@ -91,7 +91,7 @@ func TestCheckHumanCodePushRecordsHumanCommit(t *testing.T) {
 	srv := mockGitHubHeadServer(t, "human-sha-2", map[string]string{"login": "alice", "type": "User"})
 	s, db, runID, pr := newHumanPushTestRun(t, srv.URL, "claw-push-human", "agent-sha-1")
 
-	s.checkHumanCodePush(pr, "test-token")
+	s.checkPRMerged(pr, "test-token")
 
 	if got := humanPushEventCount(t, db, runID); got != 1 {
 		t.Fatalf("expected 1 human_manual_code_push event, got %d", got)
@@ -110,7 +110,7 @@ func TestCheckHumanCodePushRecordsHumanCommit(t *testing.T) {
 	}
 
 	// A second poll of the same head SHA must not duplicate the event.
-	s.checkHumanCodePush(pr, "test-token")
+	s.checkPRMerged(pr, "test-token")
 	if got := humanPushEventCount(t, db, runID); got != 1 {
 		t.Fatalf("expected dedup to keep 1 event, got %d", got)
 	}
@@ -120,7 +120,7 @@ func TestCheckHumanCodePushIgnoresAgentPushAndAdvancesBaseline(t *testing.T) {
 	srv := mockGitHubHeadServer(t, "agent-sha-2", map[string]string{"login": "myclaw[bot]", "type": "Bot"})
 	s, db, runID, pr := newHumanPushTestRun(t, srv.URL, "claw-push-agent", "agent-sha-1")
 
-	s.checkHumanCodePush(pr, "test-token")
+	s.checkPRMerged(pr, "test-token")
 
 	if got := humanPushEventCount(t, db, runID); got != 0 {
 		t.Fatalf("expected no human_manual_code_push event, got %d", got)
@@ -134,7 +134,7 @@ func TestCheckHumanCodePushAdoptsHeadWhenBaselineMissing(t *testing.T) {
 	srv := mockGitHubHeadServer(t, "some-sha", map[string]string{"login": "alice", "type": "User"})
 	s, db, runID, pr := newHumanPushTestRun(t, srv.URL, "claw-push-nobaseline", "")
 
-	s.checkHumanCodePush(pr, "test-token")
+	s.checkPRMerged(pr, "test-token")
 
 	// Without a baseline the head is adopted as the agent's SHA — no event,
 	// even though the head commit is human-authored (pre-feature rows).
@@ -150,7 +150,7 @@ func TestCheckHumanCodePushTreatsUnlinkedCommitAsAgent(t *testing.T) {
 	srv := mockGitHubHeadServer(t, "unlinked-sha", nil)
 	s, db, runID, pr := newHumanPushTestRun(t, srv.URL, "claw-push-unlinked", "agent-sha-1")
 
-	s.checkHumanCodePush(pr, "test-token")
+	s.checkPRMerged(pr, "test-token")
 
 	if got := humanPushEventCount(t, db, runID); got != 0 {
 		t.Fatalf("expected no human_manual_code_push event, got %d", got)
