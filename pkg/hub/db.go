@@ -645,6 +645,9 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
 		return fmt.Errorf("backfill task_run_usage.usage_day: %w", err)
 	}
+	if err := backfillTaskRunAnalyticsStatusV2(db); err != nil {
+		return err
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -663,6 +666,45 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// backfillTaskRunAnalyticsStatusV2 re-materializes existing summaries once so
+// their status follows the PR-outcome and human-interaction rules.
+func backfillTaskRunAnalyticsStatusV2(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES('task_run_analytics_status_v2', ?) ON CONFLICT(name) DO NOTHING`, now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("mark task run analytics status backfill: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id FROM task_runs ORDER BY created_at, id`)
+	if err != nil {
+		return fmt.Errorf("list task runs for status backfill: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return err
+		}
+		if err := materializeTaskRunTx(tx, runID); err != nil {
+			return fmt.Errorf("backfill task run %s: %w", runID, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // pruneFactoryAnalytics deletes factory_analytics rows older than 1 year.
