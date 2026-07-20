@@ -93,6 +93,13 @@ function isoDate(date: Date) {
   return date.toISOString().slice(0, 10)
 }
 
+function isoDayRange(day: string) {
+  return {
+    from: new Date(`${day}T00:00:00.000Z`).toISOString(),
+    to: new Date(`${day}T23:59:59.999Z`).toISOString(),
+  }
+}
+
 export function AnalyticsCommandCenter() {
   const router = useRouter()
   const pathname = usePathname()
@@ -273,7 +280,7 @@ export function AnalyticsCommandCenter() {
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
-          onSelectDay={(day) => setFilters({ from: day, to: day })}
+          onSelectDay={(day) => setFilters(isoDayRange(day))}
         />
 
         <div className="grid gap-5 lg:grid-cols-2">
@@ -340,7 +347,7 @@ function FilterBar({
               const from = new Date()
               if (days) from.setDate(to.getDate() - Number(days))
               else from.setDate(1)
-              onChange({ from: isoDate(from), to: isoDate(to) })
+              onChange({ from: from.toISOString(), to: to.toISOString() })
             }}
           >
             {label}
@@ -372,7 +379,7 @@ function useHeatmap(costs?: CostOverview) {
 }
 
 function Heatmap({ heatmap, maxCost, onSelectDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; onSelectDay: (day: string) => void }) {
-  return <section className="rounded-lg border bg-card p-4"><h2 className="mb-4 text-sm font-semibold">Cost by day</h2><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-[10px] text-muted-foreground"><div className="grid grid-rows-7"><span /><span>Mon</span><span /><span>Wed</span><span /><span>Fri</span><span /></div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <button key={iso} title={`${iso}: ${usd.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`} onClick={() => onSelectDay(iso)} className="aspect-square rounded-sm border border-black/5" style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div><div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+  return <section className="rounded-lg border bg-card p-4"><h2 className="mb-4 text-sm font-semibold">Cost by day</h2><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-[10px] text-muted-foreground"><div className="grid grid-rows-7"><span /><span>Mon</span><span /><span>Wed</span><span /><span>Fri</span><span /></div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <button key={iso} title={`${iso}: ${usd.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`} onClick={() => onSelectDay(iso)} className="aspect-square rounded-sm border border-black/5" style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div><div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
