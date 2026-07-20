@@ -1,6 +1,8 @@
 import type {
   ApiClaw,
   ApiMessage,
+  AnalyticsCostDriver,
+  AnalyticsEffectiveness,
   CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
@@ -398,6 +400,23 @@ export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFil
 
 export async function fetchCostOverview(filters?: TaskRunAnalyticsFilters): Promise<CostOverview> {
   return apiFetch<CostOverview>(`/api/analytics/costs${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchAnalyticsCosts(filters?: TaskRunAnalyticsFilters, days = 30, groupBy?: "model"): Promise<CostOverview> {
+  const query = taskRunAnalyticsQuery(filters)
+  const params = new URLSearchParams(query.slice(1))
+  params.set("days", String(days))
+  if (groupBy) params.set("groupBy", groupBy)
+  return apiFetch<CostOverview>(`/api/analytics/costs?${params}`)
+}
+
+export async function fetchAnalyticsEffectiveness(filters?: TaskRunAnalyticsFilters): Promise<AnalyticsEffectiveness> {
+  return apiFetch<AnalyticsEffectiveness>(`/api/analytics/effectiveness${taskRunAnalyticsQuery(filters)}`)
+}
+
+export async function fetchAnalyticsCostDrivers(filters?: TaskRunAnalyticsFilters, groupBy: "factory" | "workflow" = "factory"): Promise<AnalyticsCostDriver[]> {
+  const query = taskRunAnalyticsQuery(filters)
+  return apiFetch<AnalyticsCostDriver[]>(`/api/analytics/cost-drivers${query}${query ? "&" : "?"}groupBy=${groupBy}`)
 }
 
 export async function fetchGeneralStats(filters?: TaskRunAnalyticsFilters): Promise<GeneralStats> {

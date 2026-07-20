@@ -130,6 +130,7 @@ export interface TaskRunAnalyticsSummary {
     merged: number
     closed: number
   }
+  prior?: TaskRunAnalyticsSummary
 }
 
 export interface CostBucket {
@@ -152,7 +153,10 @@ export interface CostDailyPoint {
   date: string
   costUsd: number
   totalTokens: number
+  runCount: number
 }
+
+export interface CostModelSeries { model: string; dailySeries: CostDailyPoint[] }
 
 export interface CostOverview {
   today: CostToday
@@ -160,6 +164,9 @@ export interface CostOverview {
   month: CostBucket
   projectedMonth: CostProjection | null
   dailySeries: CostDailyPoint[]
+  prior: { periodCostUsd: number }
+  priorPeriodCostUsd?: number
+  seriesByModel?: CostModelSeries[]
 }
 
 export interface GeneralStatMetric {
@@ -172,6 +179,25 @@ export interface GeneralStats {
   ticketToPrMs: GeneralStatMetric
   prOpenToMergeMs: GeneralStatMetric
   aiImplMs: GeneralStatMetric
+  prior?: GeneralStats
+}
+
+export interface AnalyticsEffectiveness {
+  outcomesByDay: { date: string; clean: number; warning: number; failed: number }[]
+  funnel: { started: number; agentFinished: number; prOpened: number; prMerged: number }
+  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
+  mergeRate: number
+  successRate: number
+}
+
+export interface AnalyticsCostDriver {
+  name: string
+  runs: number
+  successRate: number
+  costUsd: number
+  mergedPrs: number
+  costPerMergedPr: number
+  dailyCost: CostDailyPoint[]
 }
 
 export interface TaskRunSummary {
