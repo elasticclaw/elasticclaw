@@ -87,6 +87,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_output_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN usage_day TEXT NOT NULL DEFAULT ''`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -332,6 +333,7 @@ func migrate(db *sql.DB) error {
 		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
 		committed_input_tokens INTEGER NOT NULL DEFAULT 0, committed_output_tokens INTEGER NOT NULL DEFAULT 0, committed_total_tokens INTEGER NOT NULL DEFAULT 0, committed_cost_usd REAL NOT NULL DEFAULT 0,
 		cache_read_tokens INTEGER, cache_write_tokens INTEGER, estimated_cost_usd REAL, cost_source TEXT NOT NULL DEFAULT 'gateway' CHECK(cost_source IN ('gateway','hub_pricing')),
+		usage_day TEXT NOT NULL DEFAULT '',
 		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
 	);
 	CREATE TABLE IF NOT EXISTS usage_daily (
@@ -638,17 +640,24 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	// Backfill rows that predate the usage_day column so cost corrections land
+	// on the day the run's usage was last applied, not on the correction's day.
+	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
+		return fmt.Errorf("backfill task_run_usage.usage_day: %w", err)
+	}
 	for _, p := range []struct {
-		model   string
-		in, out float64
+		model                          string
+		in, out, cacheRead, cacheWrite float64
 	}{
-		{"claude-fable-5", 10, 50}, {"claude-opus-4-8", 5, 25}, {"claude-opus-4-7", 5, 25}, {"claude-opus-4-6", 5, 25},
-		{"claude-sonnet-5", 3, 15}, {"claude-sonnet-4-6", 3, 15}, {"claude-haiku-4-5", 1, 5},
+		{"claude-fable-5", 10, 50, 1, 12.5}, {"claude-opus-4-8", 5, 25, .5, 6.25}, {"claude-opus-4-7", 5, 25, .5, 6.25}, {"claude-opus-4-6", 5, 25, .5, 6.25},
+		{"claude-sonnet-5", 3, 15, .3, 3.75}, {"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
+		{"gpt-5", 1.25, 10, .125, 0}, {"gpt-5-mini", .25, 2, .025, 0}, {"gpt-5-nano", .05, .40, .005, 0},
+		{"gpt-5.1", 1.25, 10, .125, 0}, {"gpt-5.6", 1.25, 10, .125, 0},
 	} {
 		// Upsert so price corrections in the static seed reach existing
 		// databases; rows from other sources are left untouched.
 		_, err = db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
-			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.in/1e7, p.in*1.25/1e6, "static", now().UnixMilli())
+			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.cacheRead/1e6, p.cacheWrite/1e6, "static", now().UnixMilli())
 		if err != nil {
 			return err
 		}

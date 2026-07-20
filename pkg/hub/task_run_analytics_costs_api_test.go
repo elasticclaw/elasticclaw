@@ -54,8 +54,8 @@ func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
 		want  string
 	}{
 		{"low", time.Date(2026, time.July, 3, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "low"},
-		{"medium", time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
-		{"high", time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "high"},
+		{"medium at 7 complete days", time.Date(2026, time.July, 8, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
+		{"high at 14 complete days", time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC), []float64{10, 10, 10, 10, 10, 10, 10}, "high"},
 		{"medium downgrade from high variance", time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC), []float64{1, 100, 1, 100, 1, 100, 1}, "medium"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -68,6 +68,30 @@ func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
 				t.Fatalf("response = %#v, err = %v", response, err)
 			}
 		})
+	}
+}
+
+func TestTaskRunAnalyticsCostsProjectionTreatsTodayAsFullDay(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	for day := now.AddDate(0, 0, -7); day.Before(now); day = day.AddDate(0, 0, 1) {
+		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", day, "eng", "gpt-5", 10, 1)
+	}
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eng", "gpt-5", 2, 1)
+
+	response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+	if err != nil || response.ProjectedMonth == nil {
+		t.Fatalf("response = %#v, err = %v", response, err)
+	}
+	if response.Month.CostUsd != 72 || response.ProjectedMonth.CostUsd != 240 {
+		t.Fatalf("month = %v, projected month = %v", response.Month.CostUsd, response.ProjectedMonth.CostUsd)
+	}
+}
+
+func TestTaskRunAnalyticsProjectionConfidenceUsesSampleStandardDeviation(t *testing.T) {
+	costs := []float64{36.5, 100, 100, 100, 100, 100, 163.5}
+	if got := taskRunAnalyticsProjectionConfidence(14, costs, averageTaskRunAnalyticsCosts(costs)); got != "medium" {
+		t.Fatalf("confidence = %q, want medium", got)
 	}
 }
 
@@ -84,12 +108,12 @@ func TestTaskRunAnalyticsCostsHandler(t *testing.T) {
 
 func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, IssueTitle: "Fix the thing"})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "usage", AttemptID: "usage-attempt", ClawID: "usage-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 1, InputTokens: 10, OutputTokens: 20, TotalTokens: 30, EstimatedCostUsd: 1.25, UsageUpdatedAt: 1, IssueTitle: "Fix the thing"})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "zero", AttemptID: "zero-attempt", ClawID: "zero-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", StartedAt: 2})
 	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
 	var response taskRunAnalyticsRunsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	if len(response.Runs) != 2 || response.Runs[0].RunID != "zero" || response.Runs[1].InputTokens != 10 || response.Runs[1].OutputTokens != 20 || response.Runs[1].TotalTokens != 30 || response.Runs[1].EstimatedCostUsd != 1.25 || response.Runs[1].IssueTitle != "Fix the thing" {
+	if len(response.Runs) != 2 || response.Runs[0].RunID != "zero" || response.Runs[1].InputTokens == nil || *response.Runs[1].InputTokens != 10 || response.Runs[1].OutputTokens == nil || *response.Runs[1].OutputTokens != 20 || response.Runs[1].TotalTokens == nil || *response.Runs[1].TotalTokens != 30 || response.Runs[1].EstimatedCostUsd == nil || *response.Runs[1].EstimatedCostUsd != 1.25 || response.Runs[1].IssueTitle != "Fix the thing" {
 		t.Fatalf("unexpected usage fields: %#v", response.Runs)
 	}
 	if strings.Contains(rr.Body.String(), `"inputTokens":0`) || strings.Contains(rr.Body.String(), `"issueTitle":""`) {
@@ -98,7 +122,7 @@ func TestTaskRunAnalyticsRunUsageFields(t *testing.T) {
 	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/usage", "test-token")
 	var detail taskRunAnalyticsRunDetailResponse
 	decodeTaskRunAnalyticsAPI(t, detailRR, &detail)
-	if detail.Run.TotalTokens != 30 || detail.Run.IssueTitle != "Fix the thing" {
+	if detail.Run.TotalTokens == nil || *detail.Run.TotalTokens != 30 || detail.Run.IssueTitle != "Fix the thing" {
 		t.Fatalf("unexpected detail usage fields: %#v", detail.Run)
 	}
 }

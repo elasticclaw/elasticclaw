@@ -116,7 +116,7 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	}
 }
 
-func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
+func TestTaskRunUsageGatewayCostSurvivesCostlessHeartbeat(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
 	const model = "anthropic/claude-sonnet-5-20260203"
@@ -128,7 +128,7 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	if err := s.recordTaskRunUsage(claw, snap); err != nil {
 		t.Fatal(err)
 	}
-	var cost float64
+	var cost, committedCost float64
 	var source string
 	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
 		t.Fatal(err)
@@ -150,6 +150,12 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	if cost != 3 || source != "gateway" {
 		t.Fatalf("omitted-cost heartbeat changed stored cost to %v/%q, want 3/gateway", cost, source)
 	}
+	if err := db.QueryRow(`SELECT committed_cost_usd FROM task_run_usage WHERE session_key='a'`).Scan(&committedCost); err != nil {
+		t.Fatal(err)
+	}
+	if committedCost != 3 {
+		t.Fatalf("omitted-cost heartbeat changed committed cost to %v, want 3", committedCost)
+	}
 	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&cost); err != nil {
 		t.Fatal(err)
 	}
@@ -162,27 +168,133 @@ func TestTaskRunUsageGatewayCostCorrectsSameRunEstimate(t *testing.T) {
 	}
 }
 
-func TestTaskRunUsageCrossDayCostCorrectionClampsAtZero(t *testing.T) {
+func TestTaskRunUsageCrossDayCostCorrectionUsesOriginalDay(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
-	// HB1: hub_pricing estimates $18.
+	day1 := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	day2 := day1.AddDate(0, 0, 1)
+	s.nowFunc = func() time.Time { return day1 }
+	// Session A's hub estimate is recorded on day 1.
 	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a day rollover: the estimate sits in yesterday's bucket.
-	if _, err := db.Exec(`DELETE FROM usage_daily`); err != nil {
+	// Session B records unrelated real spend in the same dimensions on day 2.
+	s.nowFunc = func() time.Time { return day2 }
+	b := usageSnapshot("b", 100, 50, 150, "claude-sonnet-5")
+	b.EstimatedCostUSD = ptr(7.0)
+	if err := s.recordTaskRunUsage(claw, b); err != nil {
 		t.Fatal(err)
 	}
-	// HB2: gateway reports a lower real cost; the negative correction lands on
-	// a fresh bucket and must clamp at zero instead of seeding a negative cost.
+	// A's lower gateway cost must correct its original bucket in full.
 	snap := usageSnapshot("a", 1_000_000, 1_000_000, 2_000_000, "claude-sonnet-5")
 	snap.EstimatedCostUSD = ptr(3.0)
 	if err := s.recordTaskRunUsage(claw, snap); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, dailyCost := queryUsageDaily(t, db)
-	if dailyCost != 0 {
-		t.Fatalf("usage_daily cost = %v, want 0 (never negative)", dailyCost)
+	var day1Cost, day2Cost, total float64
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_daily WHERE tenant_id='tenant' AND day=?`, day1.Format("2006-01-02")).Scan(&day1Cost); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_daily WHERE tenant_id='tenant' AND day=?`, day2.Format("2006-01-02")).Scan(&day2Cost); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT SUM(cost_usd) FROM usage_daily WHERE tenant_id='tenant'`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if day1Cost != 3 || day2Cost != 7 || total != 10 {
+		t.Fatalf("daily costs day1/day2/total = %v/%v/%v, want 3/7/10", day1Cost, day2Cost, total)
+	}
+}
+
+func TestTaskRunUsageKeepsLastNonEmptyModel(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 10, 5, 15, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 10, 5, 15, "")); err != nil {
+		t.Fatal(err)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT model FROM task_run_usage WHERE session_key='a'`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-sonnet-5" {
+		t.Fatalf("model = %q, want claude-sonnet-5", model)
+	}
+}
+
+func TestTaskRunUsageAttributesChangedRunToNewModel(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 10, 5, 15, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 20, 8, 28, "gpt-5-mini")); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT model,input_tokens,output_tokens FROM usage_daily WHERE tenant_id='tenant' ORDER BY model`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string][2]int{}
+	for rows.Next() {
+		var model string
+		var in, out int
+		if err := rows.Scan(&model, &in, &out); err != nil {
+			t.Fatal(err)
+		}
+		got[model] = [2]int{in, out}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got["claude-sonnet-5"] != [2]int{10, 5} || got["gpt-5-mini"] != [2]int{20, 8} {
+		t.Fatalf("usage_daily attribution = %#v, want separate old and new model rows", got)
+	}
+}
+
+func TestTaskRunUsageCostCorrectionTargetsOriginalModelBucket(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// Run recorded under sonnet with a hub_pricing estimate (no gateway cost).
+	if err := s.recordTaskRunUsage(claw, usageSnapshot("a", 100, 40, 140, "claude-sonnet-5")); err != nil {
+		t.Fatal(err)
+	}
+	// Same-token correction arrives with a gateway cost under a different
+	// model name: the delta must hit the sonnet bucket, not open an opus one.
+	correction := usageSnapshot("a", 100, 40, 140, "claude-opus-4-8")
+	correction.EstimatedCostUSD = ptr(0.0001)
+	if err := s.recordTaskRunUsage(claw, correction); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT model,cost_usd FROM usage_daily WHERE tenant_id='tenant'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]float64{}
+	for rows.Next() {
+		var model string
+		var cost float64
+		if err := rows.Scan(&model, &cost); err != nil {
+			t.Fatal(err)
+		}
+		got[model] = cost
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || math.Abs(got["claude-sonnet-5"]-0.0001) > 1e-9 {
+		t.Fatalf("usage_daily buckets = %#v, want only claude-sonnet-5 holding the corrected cost", got)
+	}
+	var model string
+	if err := db.QueryRow(`SELECT model FROM task_run_usage WHERE session_key='a'`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "claude-sonnet-5" {
+		t.Fatalf("stored model = %q, want claude-sonnet-5 until the next run", model)
 	}
 }
 
@@ -237,4 +349,26 @@ func TestHeartbeatIngestsTaskRunUsage(t *testing.T) {
 		_ = db.QueryRow(`SELECT total_tokens FROM task_run_summaries WHERE run_id=?`, runID).Scan(&sumTotal)
 		return sumTotal == 140
 	}, "summary usage columns updated")
+}
+
+func TestMigrateBackfillsUsageDayFromUpdatedAt(t *testing.T) {
+	s, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	_ = s
+	// Simulate a pre-migration row: usage_day was introduced with DEFAULT ''.
+	updatedAt := time.Date(2026, 7, 10, 15, 30, 0, 0, time.UTC).UnixMilli()
+	if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		uuid.NewString(), "tenant", "run-usage", "sess-legacy", "claude-sonnet-5", "anthropic", 10, 5, 15, 10, 5, 15, 0.01, 0.01, "hub_pricing", "", updatedAt, updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var day string
+	if err := db.QueryRow(`SELECT usage_day FROM task_run_usage WHERE session_key='sess-legacy'`).Scan(&day); err != nil {
+		t.Fatal(err)
+	}
+	if day != "2026-07-10" {
+		t.Fatalf("usage_day = %q, want 2026-07-10", day)
+	}
 }

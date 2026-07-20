@@ -136,10 +136,10 @@ type taskRunAnalyticsRunView struct {
 	AnalyticsEnabled      bool     `json:"analyticsEnabled"`
 	RequiresPR            bool     `json:"requiresPr"`
 	ExcludedReason        string   `json:"excludedReason"`
-	InputTokens           int64    `json:"inputTokens,omitempty"`
-	OutputTokens          int64    `json:"outputTokens,omitempty"`
-	TotalTokens           int64    `json:"totalTokens,omitempty"`
-	EstimatedCostUsd      float64  `json:"estimatedCostUsd,omitempty"`
+	InputTokens           *int64   `json:"inputTokens,omitempty"`
+	OutputTokens          *int64   `json:"outputTokens,omitempty"`
+	TotalTokens           *int64   `json:"totalTokens,omitempty"`
+	EstimatedCostUsd      *float64 `json:"estimatedCostUsd,omitempty"`
 	IssueTitle            string   `json:"issueTitle,omitempty"`
 }
 
@@ -1186,7 +1186,7 @@ func taskRunAnalyticsRunColumns() string {
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
 		agent_started_at, pr_opened_at, merged_at, finished_at, timeout_at, last_event_at,
 		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason,
-		input_tokens, output_tokens, total_tokens, estimated_cost_usd, issue_title`
+		input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, issue_title`
 }
 
 func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error) {
@@ -1195,6 +1195,8 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 		var run taskRunAnalyticsRunView
 		var warningsJSON string
 		var analyticsEnabled, requiresPR int
+		var inputTokens, outputTokens, totalTokens, usageUpdatedAt int64
+		var estimatedCostUSD float64
 		if err := rows.Scan(
 			&run.RunID, &run.InitialAttemptID, &run.CurrentAttemptID, &run.Status, &run.Phase, &run.AttemptCount,
 			&run.OwnerType, &run.WorkspaceName, &run.WorkflowName, &run.FactoryName, &run.OwnerID, &run.OwnerDisplayName,
@@ -1203,12 +1205,18 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.MergedAt, &run.FinishedAt,
 			&run.TimeoutAt, &run.LastEventAt, &run.MaterializedAt, &run.UpdatedAt, &analyticsEnabled, &requiresPR,
-			&run.ExcludedReason, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.EstimatedCostUsd, &run.IssueTitle,
+			&run.ExcludedReason, &inputTokens, &outputTokens, &totalTokens, &estimatedCostUSD, &usageUpdatedAt, &run.IssueTitle,
 		); err != nil {
 			return nil, err
 		}
 		run.AnalyticsEnabled = analyticsEnabled == 1
 		run.RequiresPR = requiresPR == 1
+		if usageUpdatedAt != 0 {
+			run.InputTokens = &inputTokens
+			run.OutputTokens = &outputTokens
+			run.TotalTokens = &totalTokens
+			run.EstimatedCostUsd = &estimatedCostUSD
+		}
 		run.WarningTypes = []string{}
 		if warningsJSON != "" {
 			if err := json.Unmarshal([]byte(warningsJSON), &run.WarningTypes); err != nil {
