@@ -177,6 +177,11 @@ func (s *Server) handleTaskRunAnalyticsCostDrivers(w http.ResponseWriter, r *htt
 	jsonOK(w, out)
 }
 func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, group string) ([]taskRunAnalyticsCostDriver, error) {
+	if f.FromStartedAt == 0 && f.ToStartedAt == 0 {
+		end := time.Now().UTC().Truncate(24 * time.Hour)
+		f.FromStartedAt = end.AddDate(0, 0, -30).UnixMilli()
+		f.ToStartedAt = end.Add(24*time.Hour - time.Millisecond).UnixMilli()
+	}
 	col := "factory_name"
 	if group == "workflow" {
 		col = "workflow_name"
