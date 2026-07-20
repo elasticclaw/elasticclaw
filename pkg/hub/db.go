@@ -88,6 +88,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN usage_day TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
