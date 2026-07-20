@@ -133,6 +133,25 @@ func (s *Server) setPollHighWaterMark(integration string, t time.Time) {
 	_, _ = s.db.Exec(`INSERT INTO integration_poll_state(integration,last_success_at) VALUES(?,?) ON CONFLICT(integration) DO UPDATE SET last_success_at=excluded.last_success_at`, integration, t)
 }
 
+func (s *Server) logPollWarningOnce(key, format string, args ...interface{}) {
+	s.pollWarningMu.Lock()
+	defer s.pollWarningMu.Unlock()
+	if s.pollWarnings == nil {
+		s.pollWarnings = make(map[string]struct{})
+	}
+	if _, exists := s.pollWarnings[key]; exists {
+		return
+	}
+	s.pollWarnings[key] = struct{}{}
+	log.Printf(format, args...)
+}
+
+func (s *Server) clearPollWarning(key string) {
+	s.pollWarningMu.Lock()
+	defer s.pollWarningMu.Unlock()
+	delete(s.pollWarnings, key)
+}
+
 func (s *Server) pollSince(integration string, n time.Time) time.Time {
 	since := n.Add(-2 * time.Minute)
 	if hwm, ok := s.getPollHighWaterMark(integration); ok && hwm.Before(since) {
@@ -878,10 +897,12 @@ func (s *Server) pollGitHubIssueWorkflows(workspaces []*types.WorkspaceConfig, s
 				continue
 			}
 			token := s.resolveGitHubIssuesTokenForWorkflow(workspace.Name, workflow)
+			warningKey := "github-issues-token:" + workspace.Name + "/" + workflow.Name
 			if token == "" {
-				log.Printf("[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
+				s.logPollWarningOnce(warningKey, "[poll-github-issues] workflow %s/%s: no GitHub Issues token configured — skipping", workspace.Name, workflow.Name)
 				continue
 			}
+			s.clearPollWarning(warningKey)
 			for _, repo := range githubIssuesWorkflowTriggerRepos(workflow) {
 				if repo == "" {
 					continue

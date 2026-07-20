@@ -2,7 +2,9 @@ package daytona
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"sort"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
 	daytonaopts "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	daytonatypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -217,6 +220,32 @@ func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdAr
 		ExitCode: response.ExitCode,
 		Stdout:   response.Result,
 	}, nil
+}
+
+// IsTransientExecError reports whether a failed Daytona command is safe to
+// retry. Keepalive commands are idempotent, but permanent failures such as a
+// missing sandbox should still fail immediately.
+func IsTransientExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var timeoutErr *daytonaerrors.DaytonaTimeoutError
+	if errors.As(err, &timeoutErr) {
+		return true
+	}
+	var daytonaErr *daytonaerrors.DaytonaError
+	if errors.As(err, &daytonaErr) {
+		return daytonaErr.StatusCode == http.StatusRequestTimeout ||
+			daytonaErr.StatusCode == http.StatusTooManyRequests ||
+			daytonaErr.StatusCode >= http.StatusInternalServerError
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timeout") || strings.Contains(message, "timed out")
 }
 
 func (p *Provider) EnsureSession(ctx context.Context, instanceID, sessionID string) error {
