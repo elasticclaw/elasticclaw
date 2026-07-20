@@ -224,6 +224,8 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 	uw := []string{"tenant_id=?", "day>=?", "day<=?"}
 	ua := []any{f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02")}
 	addTaskRunAnalyticsInFilter(&uw, &ua, "workspace_name", f.Workspace)
+	addTaskRunAnalyticsInFilter(&uw, &ua, "factory_name", f.Factory)
+	addTaskRunAnalyticsInFilter(&uw, &ua, "workflow_name", f.Workflow)
 	addTaskRunAnalyticsInFilter(&uw, &ua, "model", f.Model)
 	for i := range out {
 		cw, ca := append([]string{}, uw...), append([]any{}, ua...)
