@@ -87,17 +87,24 @@ func TestDockerWorkflowE2E(t *testing.T) {
 	// Verify that the Docker provider executed the deterministic run action,
 	// captured output, and the gate passed (per #530). The injected message
 	// references the captured {{ .Outputs.docker_smoke.status }}.
-	time.Sleep(3 * time.Second)
-	msgs := hub.listMessages(ctx, t, agentID)
+	deadline := time.Now().Add(30 * time.Second)
 	foundRun := false
-	for _, m := range msgs {
-		if strings.Contains(m.Content, "Docker provider run action executed") || strings.Contains(m.Content, "status\":\"passed\"") {
-			foundRun = true
+	var lastMsgs []types.HubMessage
+	for time.Now().Before(deadline) {
+		lastMsgs = hub.listMessages(ctx, t, agentID)
+		for _, m := range lastMsgs {
+			if strings.Contains(m.Content, "Docker provider run action executed") || strings.Contains(m.Content, "status\":\"passed\"") {
+				foundRun = true
+				break
+			}
+		}
+		if foundRun {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 	if !foundRun {
-		t.Logf("messages seen for docker claw %s: %+v", agentID, msgs)
+		t.Logf("messages seen for docker claw %s: %+v", agentID, lastMsgs)
 		t.Fatalf("docker run action + output capture + gate did not produce expected evidence (see #530)")
 	}
 }
