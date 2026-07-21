@@ -17,13 +17,13 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	ts := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-clean", AttemptID: "attempt-clean", ClawID: "claw-clean", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "eng", Factory: "bugfix", Integration: "github", Repo: "elastic/claw", Model: "gpt-5",
 		StartedAt: ts + 3000, MergedAt: ts + 5000, FinishedAt: ts + 5000, PRCount: 1, MergedPRCount: 1,
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-warning", AttemptID: "attempt-warning", ClawID: "claw-warning", TenantID: "test-tenant-id",
-		Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Status: taskRunStatusHumanInTheLoop, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "platform", Workflow: "review", Integration: "linear", Repo: "elastic/api", Model: "gpt-4.1",
 		WarningTypes: []string{taskRunWarningHumanPRComment}, StartedAt: ts + 2000, MergedAt: ts + 4000,
 		FinishedAt: ts + 4000, HumanInteractions: 2, PRCount: 2, ClosedPRCount: 1, MergedPRCount: 1,
@@ -42,7 +42,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-non-pr", AttemptID: "attempt-non-pr", ClawID: "claw-non-pr", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "internal", Workflow: "note", Integration: "external", Repo: "elastic/internal", Model: "gpt-5",
 		StartedAt: ts + 8000, RequiresPR: boolPtr(false), ExcludedReason: "not_pr_task",
 	})
@@ -72,7 +72,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	allSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
 	var allSummary taskRunAnalyticsSummaryResponse
 	decodeTaskRunAnalyticsAPI(t, allSummaryRR, &allSummary)
-	if allSummary.TotalRuns != 4 || allSummary.ByStatus[taskRunStatusCleanSuccess] != 1 || allSummary.ByStatus[taskRunStatusWarningSuccess] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
+	if allSummary.TotalRuns != 4 || allSummary.ByStatus[taskRunStatusClean] != 1 || allSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
 		t.Fatalf("summary should include only authenticated tenant runs, got %#v", allSummary)
 	}
 	if allSummary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 || allSummary.HumanInteractions != 3 {
@@ -139,7 +139,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	mergedPRsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary?mergedPrs=true", "test-token")
 	var mergedPRsSummary taskRunAnalyticsSummaryResponse
 	decodeTaskRunAnalyticsAPI(t, mergedPRsRR, &mergedPRsSummary)
-	if mergedPRsSummary.TotalRuns != 2 || mergedPRsSummary.PRCounts.Merged != 2 || mergedPRsSummary.ByStatus[taskRunStatusCleanSuccess] != 1 || mergedPRsSummary.ByStatus[taskRunStatusWarningSuccess] != 1 {
+	if mergedPRsSummary.TotalRuns != 2 || mergedPRsSummary.PRCounts.Merged != 2 || mergedPRsSummary.ByStatus[taskRunStatusClean] != 1 || mergedPRsSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 {
 		t.Fatalf("mergedPrs summary mismatch: %#v", mergedPRsSummary)
 	}
 	mergedPRsRunsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?mergedPrs=true", "test-token")
@@ -256,14 +256,14 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	ts := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-detail", AttemptID: "attempt-detail", ClawID: "claw-detail", TenantID: "test-tenant-id",
-		Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusHumanInTheLoop, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "eng", Factory: "bugfix", Integration: "github", Repo: "elastic/claw", Model: "gpt-5",
 		WarningTypes: []string{taskRunWarningHumanReviewComment}, StartedAt: ts, FinishedAt: ts + 1000,
 		HumanInteractions: 1, PRCount: 1, MergedPRCount: 1,
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-other-tenant", AttemptID: "attempt-other", ClawID: "claw-other", TenantID: "other-tenant-id",
-		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "secret", Factory: "hidden", Integration: "github", Repo: "secret/repo", Model: "hidden",
 		StartedAt: ts,
 	})
@@ -352,7 +352,7 @@ func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
 	ts := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-outputs", AttemptID: "attempt-one", ClawID: "claw-one", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Factory: "bugfix", StartedAt: ts,
 	})
 	if _, err := db.Exec(`
@@ -414,11 +414,11 @@ func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
 	ts := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-alice", AttemptID: "attempt-alice", ClawID: "claw-alice", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts + 100,
+		Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts + 100,
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-bob", AttemptID: "attempt-bob", ClawID: "claw-bob", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts,
+		Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: ts,
 	})
 	for _, claw := range []struct{ id, tags string }{
 		{id: "claw-alice", tags: `["owner=alice"]`},
@@ -498,7 +498,7 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-bob", AttemptID: "attempt-bob", ClawID: "claw-bob", TenantID: "test-tenant-id",
-		Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusHumanInTheLoop, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "bob-space", Factory: "bob-factory", Integration: "github", Repo: "bob/repo", Model: "bob-model",
 		WarningTypes: []string{taskRunWarningHumanPRComment}, StartedAt: ts, HumanInteractions: 1,
 		PRCount: 1, MergedPRCount: 1, MergedAt: ts + 500, FinishedAt: ts + 500,
@@ -522,7 +522,7 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 	if summary.TotalRuns != 1 || summary.HumanInteractions != 1 {
 		t.Fatalf("OAuth summary was not ACL-filtered: %#v", summary)
 	}
-	if summary.ByStatus[taskRunStatusWarningSuccess] != 1 || summary.ByStatus[taskRunStatusFailed] != 0 || len(summary.FailureBreakdown) != 0 {
+	if summary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || summary.ByStatus[taskRunStatusFailed] != 0 || len(summary.FailureBreakdown) != 0 {
 		t.Fatalf("OAuth summary leaked hidden run breakdowns: %#v", summary)
 	}
 	if summary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 {
@@ -540,7 +540,7 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 	assertStringSliceEqual(t, options.Integrations, []string{"github"})
 	assertStringSliceEqual(t, options.Repos, []string{"bob/repo"})
 	assertStringSliceEqual(t, options.Models, []string{"bob-model"})
-	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusWarningSuccess})
+	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusHumanInTheLoop})
 	assertStringSliceEqual(t, options.WarningTypes, []string{taskRunWarningHumanPRComment})
 	assertStringSliceEqual(t, options.FailureTypes, []string{})
 	if strings.Contains(optionsRR.Body.String(), "alice") {
@@ -581,7 +581,7 @@ func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing
 	}, "", "", "")
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-deleted-claw", AttemptID: "attempt-deleted-claw", ClawID: "claw-deleted", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: 1760000000000,
+		Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: 1760000000000,
 	})
 	session, err := signGitHubSession("analytics-session-secret", "alice", "", "")
 	if err != nil {
@@ -617,7 +617,7 @@ func TestTaskRunAnalyticsAPIFilterOptionsAreTenantScoped(t *testing.T) {
 	ts := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-options-a", AttemptID: "attempt-options-a", ClawID: "claw-options-a", TenantID: "test-tenant-id",
-		Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
+		Status: taskRunStatusHumanInTheLoop, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "eng", Factory: "bugfix", Integration: "github", Repo: "elastic/claw", Model: "gpt-5",
 		WarningTypes: []string{taskRunWarningHumanDashboardMessage}, StartedAt: ts,
 	})
@@ -635,7 +635,7 @@ func TestTaskRunAnalyticsAPIFilterOptionsAreTenantScoped(t *testing.T) {
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-options-non-pr", AttemptID: "attempt-options-non-pr", ClawID: "claw-options-non-pr", TenantID: "test-tenant-id",
-		Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "ignored", Workflow: "ignored", Integration: "external", Repo: "ignored/repo", Model: "ignored-model",
 		StartedAt: ts + 2, AnalyticsEnabled: boolPtr(false), RequiresPR: boolPtr(false), ExcludedReason: "not_pr_task",
 	})
@@ -649,7 +649,7 @@ func TestTaskRunAnalyticsAPIFilterOptionsAreTenantScoped(t *testing.T) {
 	assertStringSliceEqual(t, options.Integrations, []string{"github", "linear"})
 	assertStringSliceEqual(t, options.Repos, []string{"elastic/api", "elastic/claw"})
 	assertStringSliceEqual(t, options.Models, []string{"gpt-4.1", "gpt-5"})
-	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusFailed, taskRunStatusWarningSuccess})
+	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusFailed, taskRunStatusHumanInTheLoop})
 	assertStringSliceEqual(t, options.WarningTypes, []string{taskRunWarningHumanDashboardMessage})
 	assertStringSliceEqual(t, options.FailureTypes, []string{taskRunFailureManualStopDelivery})
 }
@@ -744,7 +744,7 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 	attemptStatus := "running"
 	if fixture.Status == taskRunStatusFailed {
 		attemptStatus = "failed"
-	} else if fixture.Status == taskRunStatusCleanSuccess || fixture.Status == taskRunStatusWarningSuccess {
+	} else if fixture.Status == taskRunStatusClean || fixture.Status == taskRunStatusHumanInTheLoop {
 		attemptStatus = "succeeded"
 	}
 	_, err = db.Exec(`

@@ -33,6 +33,7 @@ type githubPRPayload struct {
 		Title     string `json:"title"`
 		CreatedAt string `json:"created_at"`
 		MergedAt  string `json:"merged_at"`
+		ClosedAt  string `json:"closed_at"`
 		Merged    bool   `json:"merged"`
 		User      struct {
 			Login string `json:"login"`
@@ -249,7 +250,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
 					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 					if !payload.PullRequest.Merged {
-						at = time.Time{}
+						at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
 					}
 					_ = s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at})
 				}
@@ -289,6 +290,24 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			continue
 		}
 
+		// A closed PR may belong to a claw that has already been deleted,
+		// errored, or gone offline. Such claws are intentionally excluded by
+		// findClawForGitHubPR, but its task-run PR outcome still needs recording.
+		if payload.Action == "closed" {
+			if runID, ok := s.findOpenTaskRunPR(repoFullName, payload.Number); ok {
+				at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
+				if !payload.PullRequest.Merged {
+					at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
+				}
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at}); err != nil {
+					log.Printf("[github-webhook] failed to record dead-claw PR outcome for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)
+				} else {
+					log.Printf("[github-webhook] recorded closed PR outcome for dead-claw run %s, %s#%d (merged=%v)", runID, repoFullName, payload.Number, payload.PullRequest.Merged)
+				}
+				continue
+			}
+		}
+
 		// No existing claw — create one (regardless of action, first event wins)
 		log.Printf("[factory:%s] github PR #%d in %s (action=%s) — creating claw", factory.Name, payload.Number, repoFullName, payload.Action)
 		if err := s.createClawForGitHubPR(factory, payload, "github-pr webhook"); err != nil {
@@ -300,6 +319,20 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				payload.PullRequest.Title, "", payload.Action, "error", "", err.Error())
 		}
 	}
+}
+
+// findOpenTaskRunPR returns the run ID of an open task-run PR regardless of
+// whether its backing claw is still alive. This lets closed PR webhooks update
+// task runs after the claw has been deleted, errored, or gone offline.
+func (s *Server) findOpenTaskRunPR(repo string, prNumber int) (runID string, ok bool) {
+	err := s.db.QueryRow(
+		`SELECT run_id FROM task_run_prs WHERE repo = ? AND pr_number = ? AND state = 'open' ORDER BY opened_at DESC LIMIT 1`,
+		repo, prNumber,
+	).Scan(&runID)
+	if err != nil {
+		return "", false
+	}
+	return runID, runID != ""
 }
 
 // githubPRReviewCommentPayload holds fields from a pull_request_review_comment webhook event.
