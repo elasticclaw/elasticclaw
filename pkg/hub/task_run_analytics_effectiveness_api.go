@@ -240,76 +240,41 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 			out[i].DailyCost = append(out[i].DailyCost, taskRunAnalyticsDailyCost{Date: d.Format("2006-01-02")})
 		}
 	}
-	if taskRunAnalyticsCostsUseRunFilters(f) {
-		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		q := `SELECT s.` + col + `, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0) FROM task_run_usage u JOIN (SELECT run_id, ` + col + ` FROM task_run_summaries ` + w + `) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
-		if len(usageWhere) > 0 {
-			q += ` AND ` + strings.Join(usageWhere, " AND ")
-		}
-		q += ` GROUP BY s.` + col + `, u.usage_day`
-		rs, e := s.db.Query(q, append(append(a, f.TenantID), usageArgs...)...)
-		if e != nil {
-			return nil, e
-		}
-		values := map[string]map[string]float64{}
-		for rs.Next() {
-			var name, day string
-			var cost float64
-			if e = rs.Scan(&name, &day, &cost); e != nil {
-				rs.Close()
-				return nil, e
-			}
-			if values[name] == nil {
-				values[name] = map[string]float64{}
-			}
-			day = clampTaskRunAnalyticsUsageDay(day, start, end)
-			values[name][day] += cost
-		}
-		if e = rs.Err(); e != nil {
+	// Cost drivers has no ledger mode: the sparkline always uses per-run
+	// attribution against the same eligibility-filtered run set as the row
+	// totals above, so totals and sparkline never disagree.
+	usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
+	q = `SELECT s.` + col + `, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0) FROM task_run_usage u JOIN (SELECT run_id, ` + col + ` FROM task_run_summaries ` + w + `) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
+	if len(usageWhere) > 0 {
+		q += ` AND ` + strings.Join(usageWhere, " AND ")
+	}
+	q += ` GROUP BY s.` + col + `, u.usage_day`
+	rs, e := s.db.Query(q, append(append(a, f.TenantID), usageArgs...)...)
+	if e != nil {
+		return nil, e
+	}
+	values := map[string]map[string]float64{}
+	for rs.Next() {
+		var name, day string
+		var cost float64
+		if e = rs.Scan(&name, &day, &cost); e != nil {
 			rs.Close()
 			return nil, e
 		}
+		if values[name] == nil {
+			values[name] = map[string]float64{}
+		}
+		day = clampTaskRunAnalyticsUsageDay(day, start, end)
+		values[name][day] += cost
+	}
+	if e = rs.Err(); e != nil {
 		rs.Close()
-		for i := range out {
-			for j := range out[i].DailyCost {
-				out[i].DailyCost[j].CostUsd = values[out[i].Name][out[i].DailyCost[j].Date]
-			}
-		}
-	} else {
-		// usage_daily is the authoritative cost ledger. Keep the summary totals
-		// above for attribution by run, but populate sparkline values from the ledger.
-		uw := []string{"tenant_id=?", "day>=?", "day<=?"}
-		ua := []any{f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02")}
-		addTaskRunAnalyticsInFilter(&uw, &ua, "workspace_name", f.Workspace)
-		addTaskRunAnalyticsInFilter(&uw, &ua, "factory_name", f.Factory)
-		addTaskRunAnalyticsInFilter(&uw, &ua, "workflow_name", f.Workflow)
-		addTaskRunAnalyticsInFilter(&uw, &ua, "model", f.Model)
-		for i := range out {
-			cw, ca := append([]string{}, uw...), append([]any{}, ua...)
-			cw = append(cw, col+"=?")
-			ca = append(ca, out[i].Name)
-			rs, e := s.db.Query(`SELECT day, COALESCE(SUM(cost_usd),0) FROM usage_daily WHERE `+strings.Join(cw, " AND ")+` GROUP BY day`, ca...)
-			if e != nil {
-				return nil, e
-			}
-			values := map[string]float64{}
-			for rs.Next() {
-				var day string
-				var cost float64
-				if e = rs.Scan(&day, &cost); e != nil {
-					rs.Close()
-					return nil, e
-				}
-				values[day] = cost
-			}
-			if e = rs.Err(); e != nil {
-				rs.Close()
-				return nil, e
-			}
-			rs.Close()
-			for j := range out[i].DailyCost {
-				out[i].DailyCost[j].CostUsd = values[out[i].DailyCost[j].Date]
-			}
+		return nil, e
+	}
+	rs.Close()
+	for i := range out {
+		for j := range out[i].DailyCost {
+			out[i].DailyCost[j].CostUsd = values[out[i].Name][out[i].DailyCost[j].Date]
 		}
 	}
 	return out, nil

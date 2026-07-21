@@ -47,11 +47,12 @@ func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 		}
 	})
 
-	t.Run("no run filters use usage daily", func(t *testing.T) {
+	t.Run("no run filters still use per-run usage", func(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)
 		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
-		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "factory", AttemptID: "factory-attempt", ClawID: "factory-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", StartedAt: day.UnixMilli()})
-		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", day, "eng", "gpt-5", 7, 70)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "factory", AttemptID: "factory-attempt", ClawID: "factory-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 7})
+		seedTaskRunAnalyticsRunUsage(t, db, "factory", day, 7, 70)
+		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", day, "eng", "gpt-5", 999, 9990)
 
 		out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: day.UnixMilli(), ToStartedAt: day.UnixMilli()}, "factory")
 		if err != nil {
@@ -59,6 +60,32 @@ func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 		}
 		if len(out) != 1 || out[0].Name != "factory" || len(out[0].DailyCost) != 1 || out[0].DailyCost[0].CostUsd != 7 {
 			t.Fatalf("unexpected cost drivers: %#v", out)
+		}
+	})
+
+	t.Run("default eligibility excludes ineligible run from totals and sparkline", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsAPITestServer(t)
+		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+		ineligible := false
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "eligible", AttemptID: "eligible-attempt", ClawID: "eligible-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Workflow: "workflow-a", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 10})
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "ineligible", AttemptID: "ineligible-attempt", ClawID: "ineligible-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Workflow: "workflow-a", Model: "gpt-5", AnalyticsEnabled: &ineligible, StartedAt: day.UnixMilli(), EstimatedCostUsd: 50})
+		seedTaskRunAnalyticsRunUsage(t, db, "eligible", day, 10, 100)
+		seedTaskRunAnalyticsRunUsage(t, db, "ineligible", day, 50, 500)
+
+		// No explicit requires_pr / analytics_enabled filter: defaults kick in.
+		out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: day.UnixMilli(), ToStartedAt: day.UnixMilli()}, "workflow")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || out[0].Name != "workflow-a" || out[0].CostUsd != 10 {
+			t.Fatalf("unexpected cost drivers: %#v", out)
+		}
+		var sparklineCost float64
+		for _, cost := range out[0].DailyCost {
+			sparklineCost += cost.CostUsd
+		}
+		if sparklineCost != 10 {
+			t.Fatalf("sparkline cost = %v, want 10 (must agree with row total %v)", sparklineCost, out[0].CostUsd)
 		}
 	})
 }
@@ -69,8 +96,9 @@ func TestTaskRunAnalyticsCostDriversToOnlyRangeAnchorsSparkline(t *testing.T) {
 	to := now.AddDate(0, 0, -60)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "old-run", AttemptID: "old-attempt", ClawID: "old-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: to.UnixMilli(), EstimatedCostUsd: 12, MergedPRCount: 1})
 	seedTaskRunAnalyticsRunUsage(t, db, "old-run", to, 12, 120)
-	// Cost drivers retain their existing no-run-filter ledger sparkline behavior.
-	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", to, "eng", "gpt-5", 12, 120)
+	// Cost drivers always attribute the sparkline by run, never by the ledger;
+	// this ledger row exists only to prove it is ignored.
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", to, "eng", "gpt-5", 999, 9990)
 
 	out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", ToStartedAt: to.UnixMilli()}, "factory")
 	if err != nil {
