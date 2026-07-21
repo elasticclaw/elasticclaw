@@ -6,6 +6,42 @@ import (
 	"time"
 )
 
+func TestTaskRunAnalyticsEffectivenessIncludesPriorWindow(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	currentStart := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	currentEnd := currentStart.AddDate(0, 0, 1).Add(-time.Millisecond)
+	priorStart := currentStart.AddDate(0, 0, -1)
+
+	insert := func(runID, status string, startedAt time.Time) {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: runID, AttemptID: runID + "-attempt", ClawID: runID + "-claw",
+			TenantID: "test-tenant-id", Status: status, Phase: taskRunPhaseTerminal,
+			OwnerType: taskRunOwnerFactory, Factory: "factory", StartedAt: startedAt.UnixMilli(),
+			FinishedAt: startedAt.Add(time.Minute).UnixMilli(),
+		})
+	}
+
+	insert("current-success", taskRunStatusClean, currentStart.Add(time.Hour))
+	insert("current-failure", taskRunStatusFailed, currentStart.Add(2*time.Hour))
+	insert("prior-success-one", taskRunStatusClean, priorStart.Add(time.Hour))
+	insert("prior-success-two", taskRunStatusClean, priorStart.Add(2*time.Hour))
+	insert("prior-failure", taskRunStatusFailed, priorStart.Add(3*time.Hour))
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/effectiveness?from="+currentStart.Format(time.RFC3339)+"&to="+currentEnd.Format(time.RFC3339Nano), "test-token")
+	var response taskRunAnalyticsEffectivenessResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+
+	if response.SuccessRate != .5 || response.TicketSuccessRate != .5 || response.UniqueTickets != 2 {
+		t.Fatalf("current effectiveness = %#v", response)
+	}
+	if response.Prior == nil {
+		t.Fatal("prior effectiveness is missing")
+	}
+	if response.Prior.SuccessRate != 2.0/3.0 || response.Prior.TicketSuccessRate != 2.0/3.0 || response.Prior.UniqueTickets != 3 {
+		t.Fatalf("prior effectiveness = %#v", response.Prior)
+	}
+}
+
 func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 	t.Run("run filters use per-run usage", func(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)

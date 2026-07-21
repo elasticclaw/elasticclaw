@@ -9,13 +9,20 @@ import (
 )
 
 type taskRunAnalyticsEffectivenessResponse struct {
-	OutcomesByDay     []taskRunAnalyticsOutcomesDay `json:"outcomesByDay"`
-	Funnel            taskRunAnalyticsFunnel        `json:"funnel"`
-	CostPerMergedPr   taskRunAnalyticsCostPerMerged `json:"costPerMergedPr"`
-	MergeRate         float64                       `json:"mergeRate"`
-	SuccessRate       float64                       `json:"successRate"`
-	UniqueTickets     int                           `json:"uniqueTickets"`
-	TicketSuccessRate float64                       `json:"ticketSuccessRate"`
+	OutcomesByDay     []taskRunAnalyticsOutcomesDay       `json:"outcomesByDay"`
+	Funnel            taskRunAnalyticsFunnel              `json:"funnel"`
+	CostPerMergedPr   taskRunAnalyticsCostPerMerged       `json:"costPerMergedPr"`
+	MergeRate         float64                             `json:"mergeRate"`
+	SuccessRate       float64                             `json:"successRate"`
+	UniqueTickets     int                                 `json:"uniqueTickets"`
+	TicketSuccessRate float64                             `json:"ticketSuccessRate"`
+	Prior             *taskRunAnalyticsEffectivenessPrior `json:"prior,omitempty"`
+}
+type taskRunAnalyticsEffectivenessPrior struct {
+	SuccessRate       float64 `json:"successRate"`
+	TicketSuccessRate float64 `json:"ticketSuccessRate"`
+	UniqueTickets     int     `json:"uniqueTickets"`
+	MergeRate         float64 `json:"mergeRate"`
 }
 type taskRunAnalyticsOutcomesDay struct {
 	Date           string `json:"date"`
@@ -55,6 +62,17 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
+	}
+	prior, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsPriorFilters(f, time.Now().UTC()))
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	out.Prior = &taskRunAnalyticsEffectivenessPrior{
+		SuccessRate:       prior.SuccessRate,
+		TicketSuccessRate: prior.TicketSuccessRate,
+		UniqueTickets:     prior.UniqueTickets,
+		MergeRate:         prior.MergeRate,
 	}
 	jsonOK(w, out)
 }
