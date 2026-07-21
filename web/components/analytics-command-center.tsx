@@ -527,15 +527,30 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
   const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0
   const disabled = !onClick
   const button = (
-    <button type="button" disabled={disabled} onClick={onClick} className="min-w-0 w-full rounded-lg border bg-card p-3 text-left enabled:hover:bg-accent">
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="flex h-full w-full min-w-0 flex-col rounded-lg border bg-card p-3 text-left enabled:hover:bg-accent"
+    >
       <p className="min-h-8 text-xs text-muted-foreground">{label}</p>
       <p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>
-      {change != null && (
-        <p className={`text-xs font-medium ${bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>
-          {change > 0 ? "+" : ""}
-          {(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span>
-        </p>
-      )}
+      {/* Always render the delta row, even when there's no change, so every
+          tile reserves the same space and labels/values align across the grid. */}
+      <p
+        className={`text-xs font-medium ${
+          change == null ? "invisible" : bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+        }`}
+      >
+        {change != null ? (
+          <>
+            {change > 0 ? "+" : ""}
+            {(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span>
+          </>
+        ) : (
+          " "
+        )}
+      </p>
     </button>
   )
   if (!title) return button
@@ -543,7 +558,7 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
     <Tooltip delayDuration={200}>
       <TooltipTrigger asChild>
         {disabled ? (
-          <span className="block w-full" tabIndex={0}>
+          <span className="block h-full w-full" tabIndex={0}>
             {button}
           </span>
         ) : (
