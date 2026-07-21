@@ -3290,18 +3290,22 @@ docker --version`); err != nil {
 				// before bridge starts. (syncStaged... later copies it into ~/.openclaw/workspace)
 				targetPath := "/home/daytona/workspace/" + safeName
 				targetDir := path.Dir(targetPath)
-				// Use a unique heredoc delimiter per write to avoid injection if the
-				// user-controlled flake content happens to contain the delimiter.
+				// Base64-encode the user-controlled flake content, then use heredoc *only* for the
+				// encoded payload with a random delimiter. This prevents the raw flake.nix/lock
+				// (which is workspace-controlled) from being interpreted as shell if a delimiter
+				// line appears inside it. Matches the safe pattern in remoteWriteFileCommand.
+				encoded := base64.StdEncoding.EncodeToString([]byte(content))
 				raw := make([]byte, 8)
 				if _, err := rand.Read(raw); err != nil {
-					return fmt.Errorf("flake write rand: %w", err)
+					// Extremely rare; timestamp fallback still gives unique delim for this write.
+					raw = []byte(fmt.Sprintf("%x", time.Now().UnixNano()))
 				}
-				delim := "ELASTICCLAW_FLAKE_" + hex.EncodeToString(raw)
+				delim := "ELASTICCLAW_B64_" + hex.EncodeToString(raw)
 				writeCmd := fmt.Sprintf(
-					`export HOME=/home/daytona; mkdir -p %s && cat > %s << '%s'
+					`export HOME=/home/daytona; mkdir -p %s && base64 -d > %s << '%s'
 %s
 %s`,
-					shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
+					shellQuote(targetDir), shellQuote(targetPath), delim, encoded, delim)
 				// Fail-closed: required by the workspace flake contract (#526).
 				// The bridge creates ~/.elasticclaw/flake-run from these files; workflow
 				// run commands also route through it. Continuing on failure would leave
