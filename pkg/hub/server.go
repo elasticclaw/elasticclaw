@@ -6475,10 +6475,20 @@ func remoteWriteFileCommand(dir, name, content string) string {
 	remotePath := strings.TrimRight(dir, "/") + "/" + name
 	remoteDir := path.Dir(remotePath)
 	encoded := base64.StdEncoding.EncodeToString([]byte(content))
-	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << 'ELASTICCLAW_B64'\n%s\nELASTICCLAW_B64",
+
+	// Use collision-resistant random delimiter (same strategy as Daytona early/later writes)
+	// to prevent heredoc injection if the (base64) payload happens to contain the marker.
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		// Fallback to fixed (very low risk for base64 content); the caller will error on write failure anyway.
+		raw = []byte("fallback")
+	}
+	delim := "ELASTICCLAW_B64_" + hex.EncodeToString(raw)
+
+	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << '%s'\n%s\n%s",
 		shellDoubleQuote(remoteDir),
 		shellDoubleQuote(remotePath),
-		encoded,
+		delim, encoded, delim,
 	)
 }
 
