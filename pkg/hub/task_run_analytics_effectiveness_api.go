@@ -9,11 +9,13 @@ import (
 )
 
 type taskRunAnalyticsEffectivenessResponse struct {
-	OutcomesByDay   []taskRunAnalyticsOutcomesDay `json:"outcomesByDay"`
-	Funnel          taskRunAnalyticsFunnel        `json:"funnel"`
-	CostPerMergedPr taskRunAnalyticsCostPerMerged `json:"costPerMergedPr"`
-	MergeRate       float64                       `json:"mergeRate"`
-	SuccessRate     float64                       `json:"successRate"`
+	OutcomesByDay     []taskRunAnalyticsOutcomesDay `json:"outcomesByDay"`
+	Funnel            taskRunAnalyticsFunnel        `json:"funnel"`
+	CostPerMergedPr   taskRunAnalyticsCostPerMerged `json:"costPerMergedPr"`
+	MergeRate         float64                       `json:"mergeRate"`
+	SuccessRate       float64                       `json:"successRate"`
+	UniqueTickets     int                           `json:"uniqueTickets"`
+	TicketSuccessRate float64                       `json:"ticketSuccessRate"`
 }
 type taskRunAnalyticsOutcomesDay struct {
 	Date           string `json:"date"`
@@ -115,6 +117,31 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 	if err = rows.Err(); err != nil {
 		return out, err
 	}
+	if err = s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+w+` AND issue_id != ''`, a...).Scan(&out.UniqueTickets); err != nil {
+		return out, err
+	}
+	ticketRows, err := s.db.Query(`SELECT issue_id, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
+	if err != nil {
+		return out, err
+	}
+	defer ticketRows.Close()
+	var finishedTickets, successfulTickets int
+	for ticketRows.Next() {
+		var issueID string
+		var ticketFinished, ticketSuccess int
+		if err = ticketRows.Scan(&issueID, &ticketFinished, &ticketSuccess); err != nil {
+			return out, err
+		}
+		if ticketFinished > 0 {
+			finishedTickets++
+			if ticketSuccess > 0 {
+				successfulTickets++
+			}
+		}
+	}
+	if err = ticketRows.Err(); err != nil {
+		return out, err
+	}
 	for _, x := range byDay {
 		out.OutcomesByDay = append(out.OutcomesByDay, *x)
 	}
@@ -140,6 +167,9 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 	}
 	if finished > 0 {
 		out.SuccessRate = float64(success) / float64(finished)
+	}
+	if finishedTickets > 0 {
+		out.TicketSuccessRate = float64(successfulTickets) / float64(finishedTickets)
 	}
 	return out, nil
 }

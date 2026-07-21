@@ -180,6 +180,37 @@ func TestTaskRunAnalyticsEffectivenessCountsClosedUnmergedAsSuccessNotMerge(t *t
 	}
 }
 
+func TestTaskRunAnalyticsEffectivenessUniqueTicketsAndTicketSuccessRate(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	fixtures := []apiRunFixture{
+		{RunID: "ticket-a-failed", AttemptID: "attempt-ticket-a-failed", ClawID: "claw-ticket-a-failed", TenantID: "test-tenant-id", Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base, FinishedAt: base + 1000},
+		{RunID: "ticket-a-clean", AttemptID: "attempt-ticket-a-clean", ClawID: "claw-ticket-a-clean", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 2000, FinishedAt: base + 3000},
+		{RunID: "ticket-b-failed", AttemptID: "attempt-ticket-b-failed", ClawID: "claw-ticket-b-failed", TenantID: "test-tenant-id", Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 4000, FinishedAt: base + 5000},
+		{RunID: "ticket-c-running", AttemptID: "attempt-ticket-c-running", ClawID: "claw-ticket-c-running", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 6000},
+		{RunID: "no-ticket", AttemptID: "attempt-no-ticket", ClawID: "claw-no-ticket", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 8000, FinishedAt: base + 9000},
+	}
+	for _, fixture := range fixtures {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "ISSUE-ticket-a", "ticket-a-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "ISSUE-ticket-a", "ticket-a-clean"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "", "no-ticket"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UniqueTickets != 3 || got.TicketSuccessRate != .5 {
+		t.Fatalf("effectiveness = %#v", got)
+	}
+}
+
 func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	base := int64(1760000000000)
