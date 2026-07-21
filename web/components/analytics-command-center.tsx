@@ -185,6 +185,24 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           effectiveFilters.to = to.toISOString()
         }
         const runFilters = { ...effectiveFilters, cursor }
+        // The year heatmap always shows the trailing year, regardless of the
+        // selected period. taskRunAnalyticsCostsUseRunFilters in
+        // pkg/hub/task_run_analytics_costs_api.go must be used whenever a
+        // run-level filter is active: scope=ledger reads usage_daily through
+        // taskRunAnalyticsUsageDimensionsWhere, which intentionally omits
+        // those filters.
+        const yearFilters = { ...effectiveFilters, from: undefined, to: undefined }
+        const hasYearRunLevelFilter = Boolean(
+          yearFilters.repo ||
+          yearFilters.status ||
+          yearFilters.warningType ||
+          yearFilters.failureType ||
+          yearFilters.humanTouched != null ||
+          yearFilters.mergedPrs != null
+        )
+        const yearCostFilters = hasYearRunLevelFilter
+          ? yearFilters
+          : { ...yearFilters, analyticsEnabled: undefined, requiresPr: undefined }
         const [
           summaryData,
           costsData,
@@ -197,16 +215,11 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
           fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }),
-          // The year heatmap always shows the trailing year, regardless of the
-          // selected period. It also drops the run-level flags so the backend
-          // serves the full usage ledger (usage_daily) instead of restricting
-          // cost to days that still have task runs. scope=ledger makes that
-          // whole-ledger behavior explicit.
           fetchAnalyticsCosts(
-            { ...effectiveFilters, from: undefined, to: undefined, analyticsEnabled: undefined, requiresPr: undefined },
+            yearCostFilters,
             366,
             undefined,
-            "ledger",
+            hasYearRunLevelFilter ? undefined : "ledger",
             { signal: controller.signal }
           ),
           fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
