@@ -114,7 +114,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     const nextFilters: TaskRunAnalyticsFilters = {
       analyticsEnabled: true,
       requiresPr: true,
-      limit: 50,
+      limit: 25,
     }
 
     for (const filterKey of commandCenterUrlFilterKeys) {
@@ -137,6 +137,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
   const [options, setOptions] = useState<TaskRunFilterOptions>()
   const [nextCursor, setNextCursor] = useState<string>()
+  const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [details, setDetails] = useState<DetailState | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -237,11 +238,25 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   )
 
   useEffect(() => {
+    setCursorStack([undefined])
     queueMicrotask(() => void load())
     return () => {
       loadAbortController.current?.abort()
     }
   }, [load])
+
+  const handleNextPage = useCallback(() => {
+    if (!nextCursor) return
+    setCursorStack((currentStack) => [...currentStack, nextCursor])
+    void load(nextCursor)
+  }, [load, nextCursor])
+
+  const handlePreviousPage = useCallback(() => {
+    if (cursorStack.length <= 1) return
+    const nextStack = cursorStack.slice(0, -1)
+    setCursorStack(nextStack)
+    void load(nextStack[nextStack.length - 1])
+  }, [cursorStack, load])
 
   useEffect(() => {
     if (!selectedRunId) return
@@ -354,9 +369,12 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         <CostDrivers drivers={drivers} onSelect={(factory) => setFilters({ factory })} />
         <RunsTable
           runs={runs}
-          nextCursor={nextCursor}
+          page={cursorStack.length}
+          canGoPrevious={cursorStack.length > 1}
+          canGoNext={Boolean(nextCursor)}
           onSelect={setSelectedRunId}
-          onLoadMore={() => void load(nextCursor, true)}
+          onPrevious={handlePreviousPage}
+          onNext={handleNextPage}
         />
       </div>
       <RunDetailPanel
@@ -448,7 +466,7 @@ function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) { const stages = Object.entries(effect?.funnel ?? {}); return <div className="space-y-3 pt-3">{stages.map(([name, value], index) => { const previous = index ? Number(stages[index - 1][1]) : 0; return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{name.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? Number(value) / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${(Number(value) / (effect?.funnel.started || 1)) * 100}%` }} /></div></div> })}</div> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers, onSelect }: { drivers: AnalyticsCostDriver[]; onSelect: (factory: string) => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Top cost drivers</h2><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead><TableHead /></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name} className="cursor-pointer" onClick={() => onSelect(driver.name)}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell><TableCell><ChevronRight className="size-4 text-muted-foreground" /></TableCell></TableRow>)}</TableBody></Table></section> }
-function RunsTable({ runs, nextCursor, onSelect, onLoadMore }: { runs: TaskRunSummary[]; nextCursor?: string; onSelect: (runId: string) => void; onLoadMore: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={label === "Status" ? "" : "text-right"}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="text-right">{run.issueId || "—"}</TableCell><TableCell className="text-right">{run.model || "—"}</TableCell><TableCell className="text-right">{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table>{nextCursor && <div className="mt-3 text-center"><Button variant="outline" size="sm" onClick={onLoadMore}>Load more</Button></div>}</section> }
+function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={label === "Status" ? "" : "text-right"}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="text-right">{run.issueId || "—"}</TableCell><TableCell className="text-right">{run.model || "—"}</TableCell><TableCell className="text-right">{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
 function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
 function Kpi({ label, value, change, good, cost, onClick }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void }) { const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0; return <button type="button" disabled={!onClick} onClick={onClick} className="min-w-0 rounded-lg border bg-card p-3 text-left enabled:hover:bg-accent"><p className="min-h-8 text-xs text-muted-foreground">{label}</p><p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>{change != null && <p className={`text-xs font-medium ${bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>{change > 0 ? "+" : ""}{(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span></p>}</button> }
