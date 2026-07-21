@@ -313,6 +313,11 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   const costDelta = calculateDelta(totalCost, priorCost)
   const heatmap = useHeatmap(yearCosts)
   const maxHeatCost = Math.max(...heatmap.days.map((day) => day.point?.costUsd ?? 0), 0)
+  const selectedDay = filters.from && filters.to && (() => {
+    const day = filters.from.slice(0, 10)
+    const range = isoDayRange(day)
+    return range.from === filters.from && range.to === filters.to ? day : undefined
+  })()
   const modelData = useModelData(costs)
 
   return (
@@ -388,7 +393,9 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
-          onSelectDay={(day) => setFilters(isoDayRange(day))}
+          selectedDay={selectedDay}
+          onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
+          onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
         />
 
         <div className="grid gap-5 lg:grid-cols-2">
@@ -481,8 +488,16 @@ function useHeatmap(costs?: CostOverview) {
   }, [costs])
 }
 
-function Heatmap({ heatmap, maxCost, onSelectDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; onSelectDay: (day: string) => void }) {
-  return <section className="rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><span title="Each square is a day; darker means more spend. Click a day to focus the whole page on it."><Info className="size-3.5 text-muted-foreground" /></span></div><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-[10px] text-muted-foreground"><div className="grid grid-rows-7"><span /><span>Mon</span><span /><span>Wed</span><span /><span>Fri</span><span /></div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <button key={iso} title={`${iso}: ${usd.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`} onClick={() => onSelectDay(iso)} className="aspect-square rounded-sm border border-black/5" style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div><div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
+  const containerRef = useRef<HTMLElement>(null)
+  const [tooltip, setTooltip] = useState<{ iso: string; point: (typeof heatmap.days)[number]["point"]; x: number; y: number } | null>(null)
+  const showTooltip = (iso: string, point: (typeof heatmap.days)[number]["point"], clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (rect) setTooltip({ iso, point, x: clientX - rect.left + 12, y: clientY - rect.top + 12 })
+  }
+  const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
+
+  return <section ref={containerRef} className="relative rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><span title="Each square is a day; darker means more spend. Click a day to focus the whole page on it."><Info className="size-3.5 text-muted-foreground" /></span>{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-center text-[10px] text-muted-foreground"><div className="grid grid-rows-7">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
